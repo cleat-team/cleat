@@ -197,10 +197,18 @@ jobs:
       # On a PUSH TO MAIN the floor is fatal: that is the ratchet, and it is why
       # this target exits non-zero at all.
       #
-      # On the SCHEDULE it is a REPORT, and the step is non-fatal. Ten packages
-      # sit below their floors (cleat#2487) and no merge can be expected to
-      # clear them, so failing here would make this red 4x a day forever and
-      # train readers past it -- the "trains people to ignore red" problem.
+      # On the SCHEDULE it is a REPORT, and the step is non-fatal. Packages sit
+      # below their floors (cleat#2487's thresholds) and no merge can be
+      # expected to clear them, so failing here would make this red 4x a day
+      # forever and train readers past it -- the "trains people to ignore red"
+      # problem.
+      #
+      # FIVE, AS MEASURED, not the ten this comment used to claim: run
+      # 43995074100 (2026-11-17T01:22:26Z, the first scheduled run) failed
+      # internal/analyzer 63.39%/65%, auth 78.42%/90%, cmd/cleat-ts-meta
+      # 0.00%/40%, internal/tenantdrop 25.00%/65% and cmd/cleat-ts-check
+      # 0.00%/40%. The count moves, so it carries its run id rather than being
+      # a fact about the tree.
       #
       # STEP-level, and conditional, because the job-level `continue-on-error`
       # above is not enough on its own: it stops the RUN failing but the job
@@ -213,7 +221,54 @@ jobs:
       # required context, so nothing blocks either way.
       - name: Run Go coverage check
         continue-on-error: ${{ github.ref != 'refs/heads/main' }}
-        run: make coverage-check
+        run: |
+          set +e
+          make coverage-check 2>&1 | tee "$RUNNER_TEMP/coverage-check.log"
+          rc=${PIPESTATUS[0]}
+
+          # A floor failure is non-fatal off main, which until now also meant it
+          # was INVISIBLE. Measured on run 43995074100: the run, the job and
+          # this step all concluded `success`, while the log said "Coverage
+          # check FAILED" and the shell had exited 2. The result was a report
+          # nobody could see.
+          #
+          # These annotations and the step summary cost no runner time -- the
+          # check has already run, and this reads its output. `|| true` is
+          # deliberate: a bug in the reporting half must never change the
+          # step's outcome, which is `$rc` and nothing else.
+          python3 - "$RUNNER_TEMP/coverage-check.log" <<'PY' || true
+          import os, re, sys
+
+          # Every row is wrapped in \x1b[31m ... \x1b[0m, so strip ANSI first or
+          # the anchor never matches. Match the TABLE shape -- a package name,
+          # two percentages and FAIL -- rather than the word "FAIL", which also
+          # appears in go test output for an unrelated failing test.
+          ANSI = re.compile(r"\x1b\[[0-9;]*m")
+          ROW = re.compile(r"^(\S+)\s+([0-9]+(?:\.[0-9]+)?)%\s+([0-9]+)%\s+FAIL$")
+
+          rows = []
+          with open(sys.argv[1], errors="replace") as fh:
+              for line in fh:
+                  m = ROW.match(ANSI.sub("", line).rstrip())
+                  if m:
+                      rows.append((m.group(1), m.group(2), m.group(3)))
+
+          if not rows:
+              sys.exit(0)
+
+          for pkg, actual, floor in rows:
+              print(f"::warning title=Coverage below floor::{pkg} {actual}% < {floor}%")
+
+          summary = os.environ.get("GITHUB_STEP_SUMMARY")
+          if summary:
+              with open(summary, "a", encoding="utf-8") as out:
+                  out.write("\n### Coverage below floor\n\n")
+                  out.write("| package | actual | floor |\n|---|---:|---:|\n")
+                  for pkg, actual, floor in rows:
+                      out.write(f"| `{pkg}` | {actual}% | {floor}% |\n")
+          PY
+
+          exit "$rc"
 
       - name: Run Python coverage
         run: make coverage-python
