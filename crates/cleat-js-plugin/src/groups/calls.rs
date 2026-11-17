@@ -3,15 +3,14 @@
 //! FOUR CALLS, TWO SHAPES. `cleat_send` and `cleat_schedule_invoke` are fire-and-forget and answer a status. `call_heartbeat` and
 //! `call_retry` answer a response or an error. All four write, so all four go through `guarded`.
 //!
-//! THE RETRY CALL USES THE HOST-ONLY ENTRY POINT, and a policy the host refuses is REPORTED rather than retried here.
+//! THE RETRY CALL FALLS BACK LIKE THE OTHER SDKS DO, because cleat#4032 fixed the thing that made that unsafe.
 //!
-//! The SDKs fall back to a loop of their own when the host declines a policy as too long for one segment, and this binding
-//! deliberately does not: that fallback is broken on replay, for every guest language, because the host's retry entry point
-//! answers a replay with the recorded first attempt (`engine/durablecalls.go`, `replayRetryAttempts` matches only
-//! `call_attempt_failed` records, so an ordinary `call` event falls through to `replayCall`, which returns that attempt's
-//! error). Measured here, not inferred: the fallback path failed its second segment with the first attempt's message. The engine
-//! fix is to answer a refused policy before consulting history; until then a guest that cannot fall back safely must say so,
-//! which is what the refusal below does.
+//! When the host declines a policy as too long for one segment, `cleat_call_with_retry` runs the policy itself: one attempt per
+//! segment, sleeping between them. That fallback used to be broken on replay for EVERY guest language -- the host's retry entry
+//! answered a replay with the recorded first attempt, because `replayRetryAttempts` matches only `call_attempt_failed` records
+//! and an ordinary `call` event fell through to `replayCall`. #4032 now records the refusal and answers a replay with it, so the
+//! guest's loop replays its own attempts. This binding uses the same entry point Go's `DurableCallWithOptions` and Rust's
+//! `cleat_call_with_retry` use, and that is what the PR that removed the workaround changed.
 //!
 //! Conventions: `packages/cleat-ts/groups/README.md`.
 
@@ -76,9 +75,6 @@ fn parse_policy(text: &str) -> Result<PolicyJSON, String> {
     })
 }
 
-/// The message a refused policy carries. Named here rather than inline so the test and the doc quote the same sentence.
-const POLICY_TOO_LONG: &str = "cleat: this retry policy's worst-case backoff exceeds the host-retry budget, so the host declined to run it in one segment. TypeScript does not fall back to an SDK-level loop (see cleat#4032); use a shorter policy.";
-
 pub(crate) fn install(g: &Object<'_>) {
     // (service, operation, request, policyJSON). The policy crosses as one JSON OBJECT rather than five positional numbers
     // because rquickjs binds at most seven arguments to a closure, and because a JSON object is the one form whose field
@@ -106,7 +102,12 @@ pub(crate) fn install(g: &Object<'_>) {
                         Ok(v) => v,
                         Err(e) => return json!({ "err": format!("the request was not JSON: {e}") }),
                     };
-                    match HostCalls.cleat_call_with_host_retry::<Value, Value>(
+                    // `cleat_call_with_retry`, NOT the host-only entry: it asks the host first and, when the host declines
+                    // the policy as too long for one segment, runs it itself -- one attempt per segment, sleeping between
+                    // them. That fallback was broken until cleat#4032 recorded the refusal; on a replay the host now refuses
+                    // the same policy again instead of answering from history, so the SDK's loop replays its own recorded
+                    // attempts. This is the same shape Go's `DurableCallWithOptions` and Rust's `cleat_call_with_retry` have.
+                    match HostCalls.cleat_call_with_retry::<Value, Value>(
                         &service, &operation, &req, &policy,
                     ) {
                         // JSON text, as `__cleat_call` answers, so the TS layer has one decoding rule for every call.
@@ -114,10 +115,9 @@ pub(crate) fn install(g: &Object<'_>) {
                         // A suspension is reported by the flag `guarded` reads on the way out, so the envelope is replaced before
                         // it can reach the guest; this arm exists only so the match is total.
                         Err(CallError::Suspended) => json!({ "err": "suspended" }),
-                        // Nothing was called and no attempt was consumed: the host declined the policy itself. Named as its own
-                        // refusal rather than as a call failure, because the caller's fix is a smaller policy and not a service
-                        // that failed.
-                        Err(CallError::RetryPolicyTooLong) => json!({ "err": POLICY_TOO_LONG }),
+                        // Unreachable through `cleat_call_with_retry`, which handles this by falling back. Kept so the match
+                        // stays total, and worded as the refusal it is rather than as a service failure.
+                        Err(CallError::RetryPolicyTooLong) => json!({ "err": "cleat: the host declined this retry policy as too long for one segment, and the fallback did not run it" }),
                         Err(CallError::Failed(msg)) => json!({ "err": msg }),
                         Err(e) => json!({ "err": format!("{e}") }),
                     }
