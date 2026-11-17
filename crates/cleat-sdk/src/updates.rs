@@ -56,6 +56,22 @@ thread_local! {
     /// received/completed pair would no longer bracket the handler that
     /// produced it.
     static DISPATCHING: Cell<bool> = const { Cell::new(false) };
+
+    /// Set by a guest whose update handlers are not Rust closures (cleat-js-plugin: they are JavaScript functions, and
+    /// asynchronous). The SDK's own dispatch points still run inside `sleep`, `await_signals`, `await_child`,
+    /// `await_promise` and `wait_for_event`, and with no Rust handler registered they would POLL the host, find the
+    /// update, and answer it "no update handler registered" before the guest's own dispatch ever saw it.
+    static EXTERNAL_DISPATCH: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Make the SDK's own dispatch points do nothing, because the guest dispatches updates itself.
+///
+/// For a language bridge only. A Rust workflow must never call this: its handlers are registered here, and with this set
+/// they are never run. Nothing else changes: `poll_update`, `complete_update` and `register_update_handler` still work
+/// and still record what they record.
+#[doc(hidden)]
+pub fn set_external_dispatch(on: bool) {
+    EXTERNAL_DISPATCH.with(|e| e.set(on));
 }
 
 /// The envelope `cleat_poll_update` writes. Mirrors `engine/updater.go`'s
@@ -146,55 +162,66 @@ impl HostCalls {
     /// workflow needs no update-specific code. See the module docs for why the
     /// position matters more than the timing.
     pub fn dispatch_updates(&self) {
-        if DISPATCHING.with(|d| d.get()) {
+        dispatch_with(
+            || self.poll_update(),
+            |request_id, result, err| {
+                let _ = self.complete_update(request_id, result, err);
+            },
+        );
+    }
+}
+
+/// The dispatch loop with the two host calls passed in, so that it can be driven natively: `poll_update` and
+/// `complete_update` exist only in a WASM guest. `HostCalls::dispatch_updates` is this function with the real calls, and
+/// nothing else.
+fn dispatch_with(
+    mut poll: impl FnMut() -> (String, bool, Option<String>),
+    mut complete: impl FnMut(&str, &str, &str),
+) {
+    if EXTERNAL_DISPATCH.with(|e| e.get()) || DISPATCHING.with(|d| d.get()) {
+        return;
+    }
+    DISPATCHING.with(|d| d.set(true));
+    let _guard = DispatchGuard;
+
+    loop {
+        let (envelope, found, err) = poll();
+        if err.is_some() || !found {
             return;
         }
-        DISPATCHING.with(|d| d.set(true));
-        let _guard = DispatchGuard;
-
-        loop {
-            let (envelope, found, err) = self.poll_update();
-            if err.is_some() || !found {
-                return;
-            }
-            let delivery = match parse_delivery(&envelope) {
-                Some(d) => d,
-                // The envelope is written by the host, so this is not a caller
-                // error. Returning rather than continuing avoids spinning on a
-                // delivery that will decode the same way next time.
-                None => return,
-            };
-            self.run_update(&delivery);
-        }
+        let delivery = match parse_delivery(&envelope) {
+            Some(d) => d,
+            // The envelope is written by the host, so this is not a caller
+            // error. Returning rather than continuing avoids spinning on a
+            // delivery that will decode the same way next time.
+            None => return,
+        };
+        run_update_with(&delivery, &mut complete);
     }
+}
 
-    /// Apply one delivered update and report the outcome.
-    ///
-    /// Every path completes the request. A handler that is not registered, a
-    /// validator that refuses and a handler that errors are all answers the
-    /// caller is entitled to -- leaving any of them uncompleted would leave the
-    /// caller holding a promise nothing settles, which is the defect this
-    /// feature exists to end.
-    fn run_update(&self, d: &UpdateDelivery) {
-        let outcome = HANDLERS.with(|h| {
-            let handlers = h.borrow();
-            let Some(entry) = handlers.get(&d.name) else {
-                return Err(format!("cleat: no update handler registered for \"{}\"", d.name));
-            };
-            if let Some(validator) = &entry.validator {
-                validator(&d.payload)?;
-            }
-            (entry.handler)(&d.payload)
-        });
-
-        match outcome {
-            Ok(result) => {
-                let _ = self.complete_update(&d.request_id, &result, "");
-            }
-            Err(msg) => {
-                let _ = self.complete_update(&d.request_id, "", &msg);
-            }
+/// Apply one delivered update and report the outcome.
+///
+/// Every path completes the request. A handler that is not registered, a
+/// validator that refuses and a handler that errors are all answers the
+/// caller is entitled to -- leaving any of them uncompleted would leave the
+/// caller holding a promise nothing settles, which is the defect this
+/// feature exists to end.
+fn run_update_with(d: &UpdateDelivery, complete: &mut impl FnMut(&str, &str, &str)) {
+    let outcome = HANDLERS.with(|h| {
+        let handlers = h.borrow();
+        let Some(entry) = handlers.get(&d.name) else {
+            return Err(format!("cleat: no update handler registered for \"{}\"", d.name));
+        };
+        if let Some(validator) = &entry.validator {
+            validator(&d.payload)?;
         }
+        (entry.handler)(&d.payload)
+    });
+
+    match outcome {
+        Ok(result) => complete(&d.request_id, &result, ""),
+        Err(msg) => complete(&d.request_id, "", &msg),
     }
 }
 
@@ -218,6 +245,7 @@ impl Drop for DispatchGuard {
 pub fn reset_handlers_for_test() {
     HANDLERS.with(|h| h.borrow_mut().clear());
     DISPATCHING.with(|d| d.set(false));
+    EXTERNAL_DISPATCH.with(|e| e.set(false));
 }
 
 #[cfg(test)]
@@ -276,6 +304,137 @@ mod tests {
         let d = parse_delivery(r#"{"name":"ping","payload":"","request_id":"ping\u0000"}"#)
             .expect("should decode");
         assert_eq!(d.payload, "");
+    }
+
+    // What can be pinned natively is the switch's lifecycle: dispatch itself needs cleat_poll_update, which exists only
+    // in a WASM guest. That `dispatch_updates` returns early when it is set is held by the TypeScript end-to-end test, which
+    // fails with "no update handler registered" when this line in the plugin is removed.
+    #[test]
+    fn the_external_dispatch_switch_round_trips_and_is_reset_by_the_test_reset() {
+        set_external_dispatch(true);
+        assert!(EXTERNAL_DISPATCH.with(|e| e.get()));
+        reset_handlers_for_test();
+        assert!(!EXTERNAL_DISPATCH.with(|e| e.get()), "the test reset must clear the switch, or one test's setting leaks into the next");
+        set_external_dispatch(true);
+        set_external_dispatch(false);
+        assert!(!EXTERNAL_DISPATCH.with(|e| e.get()));
+    }
+
+    // ---- the dispatch loop, driven natively through the seam -------------------------------------------------------------
+    //
+    // `dispatch_with` is what `HostCalls::dispatch_updates` runs with the real host calls, so these show a RUST handler
+    // behaving as it always has, and that the external-dispatch switch (cleat#3827) changes nothing while it is unset.
+
+    use std::cell::{Cell, RefCell};
+    use std::rc::Rc;
+
+    fn delivery(name: &str, payload: &str, id: &str) -> (String, bool, Option<String>) {
+        (format!(r#"{{"name":"{name}","payload":{payload:?},"request_id":"{id}"}}"#), true, None)
+    }
+
+    /// Run the loop over `pending` deliveries (oldest first), and return what was completed as (id, result, error).
+    fn run(pending: Vec<(String, bool, Option<String>)>) -> (Vec<(String, String, String)>, usize) {
+        let queue = RefCell::new(pending.into_iter());
+        let polls = Cell::new(0usize);
+        let done = RefCell::new(Vec::new());
+        dispatch_with(
+            || {
+                polls.set(polls.get() + 1);
+                queue.borrow_mut().next().unwrap_or((String::new(), false, None))
+            },
+            |id, result, err| done.borrow_mut().push((id.to_string(), result.to_string(), err.to_string())),
+        );
+        (done.into_inner(), polls.get())
+    }
+
+    fn register(name: &str, handler: impl Fn(&str) -> Result<String, String> + 'static, validator: Option<Box<dyn Fn(&str) -> Result<(), String>>>) {
+        HANDLERS.with(|h| {
+            h.borrow_mut().insert(name.to_string(), UpdateEntry { handler: Box::new(handler), validator });
+        });
+    }
+
+    #[test]
+    fn a_rust_handler_runs_and_completes_with_its_result_when_the_switch_is_unset() {
+        reset_handlers_for_test();
+        register("add", |p| Ok(format!("<{p}>")), None);
+        let (done, polls) = run(vec![delivery("add", "5", "r1"), delivery("add", "7", "r2")]);
+        assert_eq!(done, vec![("r1".into(), "<5>".into(), "".into()), ("r2".into(), "<7>".into(), "".into())]);
+        assert_eq!(polls, 3, "the loop polls until the host reports nothing pending: two deliveries and the empty one");
+    }
+
+    #[test]
+    fn a_refusing_validator_and_an_unregistered_name_both_complete_with_an_error() {
+        reset_handlers_for_test();
+        let ran = Rc::new(Cell::new(0));
+        let r = ran.clone();
+        register(
+            "guarded",
+            move |_| {
+                r.set(r.get() + 1);
+                Ok("ran".into())
+            },
+            Some(Box::new(|_| Err("refused".to_string()))),
+        );
+        let (done, _) = run(vec![delivery("guarded", "1", "a"), delivery("missing", "1", "b")]);
+        assert_eq!(ran.get(), 0, "a handler whose validator refused must not run");
+        assert_eq!(done[0], ("a".into(), "".into(), "refused".into()));
+        assert_eq!(done[1].2, r#"cleat: no update handler registered for "missing""#);
+    }
+
+    #[test]
+    fn a_host_error_or_a_malformed_envelope_ends_the_loop_without_completing_anything() {
+        reset_handlers_for_test();
+        register("add", |_| Ok("x".into()), None);
+        assert!(run(vec![(String::new(), false, Some("host refused".into()))]).0.is_empty());
+        assert!(run(vec![(r#"{"name":"add","payload":"{}"}"#.to_string(), true, None)]).0.is_empty());
+    }
+
+    #[test]
+    fn dispatch_is_not_reentrant() {
+        reset_handlers_for_test();
+        let inner_polls = Rc::new(Cell::new(0));
+        let ip = inner_polls.clone();
+        register(
+            "outer",
+            move |_| {
+                // A handler that itself reaches a dispatch point: the inner dispatch must do nothing.
+                dispatch_with(
+                    || {
+                        ip.set(ip.get() + 1);
+                        (String::new(), false, None)
+                    },
+                    |_, _, _| {},
+                );
+                Ok("outer done".into())
+            },
+            None,
+        );
+        let (done, _) = run(vec![delivery("outer", "1", "o1")]);
+        assert_eq!(done, vec![("o1".into(), "outer done".into(), "".into())]);
+        assert_eq!(inner_polls.get(), 0, "the nested dispatch polled the host; the re-entrancy guard is gone");
+    }
+
+    #[test]
+    fn with_the_switch_set_the_loop_neither_polls_nor_runs_a_rust_handler() {
+        reset_handlers_for_test();
+        let ran = Rc::new(Cell::new(0));
+        let r = ran.clone();
+        register(
+            "add",
+            move |_| {
+                r.set(r.get() + 1);
+                Ok("x".into())
+            },
+            None,
+        );
+        set_external_dispatch(true);
+        let (done, polls) = run(vec![delivery("add", "1", "r1")]);
+        assert_eq!((done.len(), polls, ran.get()), (0, 0, 0), "the switch must stop the loop before it asks the host");
+        // And unsetting it restores the ordinary behaviour, on the same registered handler.
+        set_external_dispatch(false);
+        let (done, _) = run(vec![delivery("add", "1", "r1")]);
+        assert_eq!(done.len(), 1);
+        assert_eq!(ran.get(), 1);
     }
 
     #[test]

@@ -8,7 +8,6 @@ cleat/embedded	func (*execution).getScope
 cleat/embedded	func (*execution).setScope
 cleat/embedded	func (*execution).uuid
 cleat/embedded	type signalWaiter
-cmd/cleat-ts-run	func registerStore
 cmd/cleat-worker	field backoffUntil
 cmd/cleat-worker	field circuitOpen
 cmd/cleat-worker	func (*Worker).waitForDB

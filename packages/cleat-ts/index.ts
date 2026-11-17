@@ -9,7 +9,7 @@
 // Build-time switch for the red control: `SUSPEND_MODE === "throw"` makes a suspended call THROW instead, the
 // "throw Suspend" design the plan rejects. It exists only so a test can show a `finally` running under it.
 
-import { type UpdatesCtx, makeUpdates } from "./groups/updates";
+import { type UpdatesCtx, dispatchThen, makeUpdates } from "./groups/updates";
 import { type SignalsCtx, makeSignals } from "./groups/signals";
 import { type ChildrenCtx, makeChildren } from "./groups/children";
 import { type DetachedCtx, makeDetached } from "./groups/detached";
@@ -201,15 +201,16 @@ const helpers: Helpers = { settle, encode, parseJSON };
 const ctx: Ctx = {
   workflowId: () => __cleat_workflow_id(),
   call: (service, operation, request) => settle(__cleat_call(service, operation, encode(request ?? null))).then(parseJSON) as Promise<never>,
-  sleep: (ms) => settle<null>(__cleat_sleep(ms)).then(() => undefined),
+  // `dispatchThen` delivers any pending update before the call (groups/updates.ts); with none pending it is the call, unchanged.
+  sleep: (ms) => dispatchThen(() => settle<null>(__cleat_sleep(ms))).then(() => undefined),
   waitForSignal: (name, timeoutMs = 24 * 60 * 60 * 1000) =>
-    settle<{ name: string; payload: string; timedOut: boolean }>(__cleat_await_signals(JSON.stringify(Array.isArray(name) ? name : [name]), timeoutMs)).then((s) => ({
+    dispatchThen(() => settle<{ name: string; payload: string; timedOut: boolean }>(__cleat_await_signals(JSON.stringify(Array.isArray(name) ? name : [name]), timeoutMs))).then((s) => ({
       name: s.name,
       payload: parseJSON(s.payload),
       timedOut: s.timedOut,
     })),
   child: <T>(name: string, input?: unknown) =>
-    settle<string>(__cleat_child_workflow(name, encode(input ?? null))).then((runId) => settle<string>(__cleat_await_child(runId)).then((r) => parseJSON(r) as T)),
+    settle<string>(__cleat_child_workflow(name, encode(input ?? null))).then((runId) => dispatchThen(() => settle<string>(__cleat_await_child(runId))).then((r) => parseJSON(r) as T)),
   now: () => __cleat_now(),
   random: () => __cleat_random(),
   uuid: (seed = "") => __cleat_uuid(seed),
@@ -230,7 +231,7 @@ const ctx: Ctx = {
   cancellation: () => JSON.parse(__cleat_poll_cancellation()) as Cancellation,
   createPromise: (name) => settle<string>(__cleat_create_promise(name)),
   awaitPromise: <T>(id: string, timeoutMs = 24 * 60 * 60 * 1000) =>
-    settle<{ value: string; timedOut: boolean }>(__cleat_await_promise(id, timeoutMs)).then((r) => ({
+    dispatchThen(() => settle<{ value: string; timedOut: boolean }>(__cleat_await_promise(id, timeoutMs))).then((r) => ({
       value: parseJSON(r.value) as T,
       timedOut: r.timedOut,
     })),
