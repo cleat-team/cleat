@@ -32,7 +32,8 @@ fn document(r: Result<String, cleat_sdk::CallError>) -> Value {
 /// `runIDsJSON` is a JSON array of run-id strings, in the caller's order. The ABI takes a JSON array rather than a
 /// delimited string so a run id containing any character at all is unambiguous.
 fn run_ids(json_text: &str) -> Result<Vec<String>, Value> {
-    serde_json::from_str::<Vec<String>>(json_text).map_err(|e| json!({ "err": format!("run ids were not a JSON array of strings: {e}") }))
+    serde_json::from_str::<Vec<String>>(json_text)
+        .map_err(|e| json!({ "err": format!("run ids were not a JSON array of strings: {e}") }))
 }
 
 fn refs(ids: &[String]) -> Vec<&str> {
@@ -43,7 +44,12 @@ pub(crate) fn install(g: &Object<'_>) {
     g.set(
         "__cleat_child_workflow_with_options",
         Func::from(
-            |name: String, input: String, version: f64, priority: f64, parent_close_policy: String| -> String {
+            |name: String,
+             input: String,
+             version: f64,
+             priority: f64,
+             parent_close_policy: String|
+             -> String {
                 guarded(|| {
                     let opts = ChildWorkflowOptions {
                         version: version as i64,
