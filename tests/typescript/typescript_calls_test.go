@@ -313,9 +313,19 @@ func replayUntilDone(t *testing.T, e *engine.Engine, wasm []byte, entry string, 
 	return ""
 }
 
-// TestTypeScriptACallVariantAfterASuspensionRecordsNothing is the group's late-call guard (groups/README.md convention 3). The
-// falsification is removing `guarded` from `__cleat_send` or `__cleat_call_retry`: the store is then asked, and a durable_send
-// or call event is recorded, for a segment nobody will resume.
+// TestTypeScriptACallVariantAfterASuspensionRecordsNothing is the group's late-call guard (groups/README.md convention 3).
+//
+// WHICH OF THE FOUR IT CAN FALSIFY, and why the other three are in the fixture but cannot turn it red. Removing `guarded` from
+// `__cleat_call_retry` makes this fail: that call reaches the host and `freshCallWithRetry` records an ordinary `call` event. The
+// other three are refused by the ENGINE before they record anything once the segment has suspended -- `DurableSend`,
+// `DurableScheduleInvoke` and `DurableCallWithHeartbeat` all begin with `stopBeforeNewWork()` (`engine/durablecalls.go`,
+// `engine/heartbeats.go`), which answers with bit 31 and records no event. Measured, not assumed: with `guarded` removed from
+// `__cleat_schedule_invoke` alone, and separately from `__cleat_call_heartbeat` alone, every test in this file stays green and
+// the recorded history after the suspension is EMPTY.
+//
+// So the three unobservable calls keep their guards as defence in depth and are exercised here as documentation, while the
+// assertion that can fail is the one over the events and services a call actually reaches. The same limit is recorded on the
+// signals group's late-send test: a call the engine refuses records nothing a test can see.
 func TestTypeScriptACallVariantAfterASuspensionRecordsNothing(t *testing.T) {
 	root := needToolchain(t)
 	src := "tests/typescript/testdata/workflows/late_calls.ts"
@@ -342,12 +352,20 @@ func TestTypeScriptACallVariantAfterASuspensionRecordsNothing(t *testing.T) {
 	if !strings.Contains(susp.Reason, "cleat_sleep(60000ms)") {
 		t.Fatalf("suspended for %q, not at the sleep; the ordering below is then unmeasured", susp.Reason)
 	}
-	for _, want := range []engine.EventType{engine.EventTypeCall, engine.EventTypeDurableSend} {
+	// Every event type this group can record, so a binding that is guarded everywhere except one call site is caught: each of
+	// the four has its own `guarded`, and three were invisible to the first version of this test.
+	for _, want := range []engine.EventType{
+		engine.EventTypeCall,
+		engine.EventTypeDurableSend,
+		engine.EventTypeDurableScheduleInvoke,
+	} {
 		if events := eventsOfType(history, want); len(events) != 0 {
 			t.Fatalf("the segment recorded a %s event (%+v) after the call that suspended it", want, events[0])
 		}
 	}
-	if n := caller.count("payments/charge"); n != 0 {
-		t.Errorf("the service was called %d time(s) after the segment suspended; callRetry must be guarded", n)
+	for _, key := range []string{"payments/charge", "payments/slow", "email/notify", "email/digest"} {
+		if n := caller.count(key); n != 0 {
+			t.Errorf("the service %q was called %d time(s) after the segment suspended; that binding must be guarded", key, n)
+		}
 	}
 }
