@@ -27,6 +27,11 @@ type storeSpec struct {
 	// Extra, when set, contributes one entry to the envelope's `extras` map -- the generic place a store
 	// reports what IT saw, so a test can assert on the store rather than only on the workflow's output.
 	// Optional: a store with nothing to report leaves it nil.
+	//
+	// CALLED AFTER THE RUN, by extrasFrom, and that is not a detail. Calling it while the fixture is being
+	// loaded reads PRE-RUN state -- a store whose Extra returns a copy of its call list reported `[]` for a
+	// run that had seen `[update/approve]`. Anything a group wants to assert on must be whatever it is after
+	// Execute returns.
 	Extra func() (key string, value any)
 }
 
@@ -71,15 +76,21 @@ func registeredNames() []string {
 	return out
 }
 
-// resolveScripts turns the `-script` pairs into engine options and extras.
+// resolveScripts turns the `-script` pairs into engine options and the specs whose Extra is to be called
+// once the run is over. See extrasFrom for why the call is deferred.
 //
 // AN UNKNOWN NAME IS FATAL, not ignored. A typo in a store name would otherwise configure nothing and the
 // run would proceed with that store absent -- which for the update store means the engine reports no
 // pending update and an update test passes having delivered nothing (engine/updater.go:98). The error
 // lists the known names, so the fix is visible without reading this file.
-func resolveScripts(pairs []string) ([]engine.EngineOption, map[string]any, error) {
+//
+// A REGISTERED STORE OF A LEGACY KIND OVERRIDES THE ALWAYS-INSTALLED ONE. `-signals f.json` installs the
+// legacy signal store; `-script signals=other.json` installs a second one, and the later option wins. The
+// envelope's legacy `signals` field then reports the OVERRIDDEN store -- which saw nothing -- so a group
+// that registers a store of the same kind should report through Extra and not lean on the legacy field.
+func resolveScripts(pairs []string) ([]engine.EngineOption, []storeSpec, error) {
 	var opts []engine.EngineOption
-	extras := map[string]any{}
+	specs := make([]storeSpec, 0, len(pairs))
 	seen := map[string]string{}
 	for _, p := range pairs {
 		name, path, _ := strings.Cut(p, "=")
@@ -100,13 +111,28 @@ func resolveScripts(pairs []string) ([]engine.EngineOption, map[string]any, erro
 		}
 		seen[name] = path
 		opts = append(opts, spec.Option)
-		if spec.Extra != nil {
-			k, v := spec.Extra()
-			extras[k] = v
+		specs = append(specs, spec)
+	}
+	return opts, specs, nil
+}
+
+// extrasFrom calls each store's Extra and collects what it reports. Called AFTER e.Execute.
+//
+// The deferral was measured, not assumed. Collected during fixture loading, this returned a store's state
+// as the RUN BEGAN, so a store whose Extra copies its call list reported `[]` beside a run that had made
+// `[update/approve]`. Every assertion a group writes against `extras` is about what the run did, so the
+// collection has to happen on the other side of it.
+func extrasFrom(specs []storeSpec) map[string]any {
+	var extras map[string]any
+	for _, spec := range specs {
+		if spec.Extra == nil {
+			continue
 		}
+		k, v := spec.Extra()
+		if extras == nil {
+			extras = map[string]any{}
+		}
+		extras[k] = v
 	}
-	if len(extras) == 0 {
-		extras = nil
-	}
-	return opts, extras, nil
+	return extras
 }

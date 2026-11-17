@@ -234,7 +234,7 @@ func main() {
 	// Resolved BEFORE the engine is built, and appended to its options rather than applied to it after:
 	// an EngineOption applied to a live engine is a mutation with an ordering question, and this change is
 	// not the place to introduce one.
-	scriptOpts, extras, err := resolveScripts(scripts.pairs)
+	scriptOpts, scriptSpecs, err := resolveScripts(scripts.pairs)
 	if err != nil {
 		unmeasured("%v", err)
 	}
@@ -247,7 +247,9 @@ func main() {
 		Promises:     promises.nameList(),
 		Signals:      signals.consumedList(),
 		Children:     children.startedList(),
-		Extras:       extras,
+		// AFTER Execute, deliberately: a store's Extra reads its own state, and before the run that state is
+		// the empty one it was loaded with. See extrasFrom.
+		Extras: extrasFrom(scriptSpecs),
 	}
 	for _, ev := range history {
 		out.Events = append(out.Events, eventOut{
