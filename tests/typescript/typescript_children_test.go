@@ -160,7 +160,7 @@ func runChildren(t *testing.T, wasm []byte, entry string, extra ...engine.Engine
 	if susp != nil {
 		t.Fatalf("%s: the workflow suspended (%s)", entry, susp.Reason)
 	}
-	return string(raw)
+	return raw
 }
 
 // TestTypeScriptAwaitAllKeepsEveryOutcomeInTheCallersOrder is the case a sort-by-run-id or a fail-fast implementation gets
@@ -374,8 +374,15 @@ func TestTypeScriptAwaitAnswersAnUpdateWithNoHandler(t *testing.T) {
 
 // TestTypeScriptAChildCallAfterASuspensionRecordsNothing is the group's late-call guard (groups/README.md convention 3). A
 // segment that has suspended records nothing further, so a child call made after the sleep must not reach the host. The
-// falsification is removing `guarded` from either plugin binding: the store then starts a child, and the history carries a
-// child_workflow event, for a segment nobody will resume.
+// falsification is removing `guarded` from `__cleat_child_workflow_with_options`: the store then starts a child, and the
+// history carries a child_workflow event, for a segment nobody will resume.
+//
+// THE OTHER THREE ARE GUARDED TOO, AND THIS TEST CANNOT PROVE IT -- measured by review, one binding at a time, each still
+// green. `awaitAll` and `awaitAny` sit behind `dispatchThen`, whose poll is itself guarded, so a suspended segment never
+// reaches the binding; and `pollChild` records no event even when it runs, which is the property `engine/children.go` states
+// and relies on (pollChildIsDeterministic). Their `guarded` wrappers stay as defence in depth, and this comment is here so the
+// next reader does not take the green as evidence they are unnecessary. The same limit is recorded on group H's late-call
+// test, where three of four bindings are observable and one is not.
 func TestTypeScriptAChildCallAfterASuspensionRecordsNothing(t *testing.T) {
 	root := needToolchain(t)
 	src := "tests/typescript/testdata/workflows/late_children.ts"

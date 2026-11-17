@@ -158,14 +158,22 @@ export interface ChildrenCtx {
 export function makeChildren(h: Helpers): ChildrenCtx {
   return {
     startChildWithOptions: <T>(name: string, input?: unknown, options: ChildOptions = {}): Promise<string> => {
+      // A refused argument REJECTS rather than throwing synchronously: every method here returns a promise, and a caller that
+      // handles failures with `.catch` would not see a synchronous throw. NaN is refused too -- it would cross the boundary and
+      // arrive at the host as 0 (`f64 as i64`), which is a version or a priority nobody asked for.
       for (const key of Object.keys(options)) {
         if (!["version", "priority", "parentClosePolicy"].includes(key)) {
-          throw new TypeError(`startChildWithOptions: the host does not read the option "${key}"`);
+          return Promise.reject(new TypeError(`startChildWithOptions: the host does not read the option "${key}"`));
+        }
+      }
+      for (const [key, value] of [["version", options.version], ["priority", options.priority]] as const) {
+        if (value !== undefined && !Number.isFinite(value)) {
+          return Promise.reject(new TypeError(`startChildWithOptions: ${key} must be a finite number, got ${String(value)}`));
         }
       }
       const policy = options.parentClosePolicy ?? "";
       if (policy !== "" && !(POLICIES as readonly string[]).includes(policy)) {
-        throw new TypeError(`startChildWithOptions: parentClosePolicy must be one of ${POLICIES.join(", ")}, got "${policy}"`);
+        return Promise.reject(new TypeError(`startChildWithOptions: parentClosePolicy must be one of ${POLICIES.join(", ")}, got "${policy}"`));
       }
       return h.settle<string>(__cleat_child_workflow_with_options(name, h.encode(input ?? null), options.version ?? 0, options.priority ?? 0, policy));
     },
@@ -187,7 +195,9 @@ export function makeChildren(h: Helpers): ChildrenCtx {
       ),
 
     awaitAny: <T>(runIds: string[]): Promise<ChildWinner<T>> => {
-      if (runIds.length === 0) throw new TypeError("awaitAny: the run id list is empty, so no child could ever finish");
+      if (runIds.length === 0) {
+        return Promise.reject(new TypeError("awaitAny: the run id list is empty, so no child could ever finish"));
+      }
       return dispatchThen(() =>
         h.settle<HostOutcome>(__cleat_await_any_child(h.encode(runIds))).then((row) =>
           rejectionOrValue(h, row).then(
