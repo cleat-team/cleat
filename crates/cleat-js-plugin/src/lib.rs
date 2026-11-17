@@ -120,16 +120,12 @@ fn json_string(message: &str) -> String {
 /// every binding refused, so a workflow BODY cannot make a call after the stop.
 /// The drain is the only window in which `in_defer_phase()` is true, and the
 /// bodies are the only code running in it.
-fn refused_while_suspended() -> bool {
-    cleat_sdk::is_suspended() && !cleat_sdk::defer::in_defer_phase()
-}
-
 fn guarded(f: impl FnOnce() -> Value) -> String {
-    if refused_while_suspended() {
+    if cleat_sdk::is_suspended() {
         return SUSPENDED.to_string();
     }
     let v = f();
-    if refused_while_suspended() {
+    if cleat_sdk::is_suspended() {
         return SUSPENDED.to_string();
     }
     v.to_string()
