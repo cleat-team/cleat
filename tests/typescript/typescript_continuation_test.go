@@ -15,7 +15,7 @@ import (
 	"github.com/cleat-team/cleat/engine"
 )
 
-const continuationEntries = "continuation,continuation_versioned,continuation_bad_version,continuation_late,continuation_versioned_once"
+const continuationEntries = "continuation,continuation_versioned,continuation_bad_version,continuation_late,continuation_versioned_once,continuation_then_another_call,continuation_versioned_then_another_call"
 
 func buildContinuation(t *testing.T) []byte {
 	t.Helper()
@@ -143,5 +143,28 @@ func TestTypeScriptAContinueAsNewAfterASuspensionNeitherRecordsNorReplacesTheSus
 	}
 	if len(history) != 0 {
 		t.Fatalf("the segment recorded %v AFTER the call that suspended it; cleat_continue_as_new must be guarded", continuationTypes(history))
+	}
+}
+
+// cleat-review's probe on cleat#4043. The host accepts a continuation and returns success WITHOUT marking the SDK's segment suspended, so
+// the binding has to: otherwise a guarded call made after an accepted continuation reaches the host and records an event for a run that has
+// been replaced. Asserted on the history, and on the suspension still being the continuation's.
+func TestTypeScriptACallAfterAnAcceptedContinueAsNewNeverReachesTheHost(t *testing.T) {
+	wasm := buildContinuation(t)
+	for _, entry := range []string{"continuation_then_another_call", "continuation_versioned_then_another_call"} {
+		t.Run(entry, func(t *testing.T) {
+			e, closeRT := newEngineWith(t)
+			defer closeRT()
+			_, history, susp, _, _, err := e.Execute(context.Background(), wasm, entry, json.RawMessage(`{}`))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if susp == nil || susp.Reason != "continue_as_new" {
+				t.Fatalf("suspension = %+v, want continue_as_new", susp)
+			}
+			if got := strings.Join(continuationTypes(history), ","); got != "continue_as_new" {
+				t.Fatalf("history = %s, want exactly continue_as_new: a call after an accepted continuation reached the host", got)
+			}
+		})
 	}
 }
