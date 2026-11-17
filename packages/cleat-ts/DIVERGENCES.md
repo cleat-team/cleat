@@ -14,7 +14,7 @@ lodash-es 4.18.1, uuid 14.0.3) unmodified; there may be more.
 | # | Divergence | Kind | Status | Held by |
 |---|---|---|---|---|
 | 1 | `Date` setters given a non-finite argument returned `NaN` but left the date unchanged (spec: an Invalid Date). `date-fns` `isValid(parseISO("nope"))` was `true`. | **silent** | **fixed** (the `datesetters` shim in `crates/cleat-js-plugin/src/shims.js`) | `TestTypeScriptDateSettersAgreeWithNode`: 631 cases against Node |
-| 2 | No `URL` or `URLSearchParams`. zod's `z.url()` calls `new URL(...)` inside a `try`/`catch`, so the `ReferenceError` was swallowed and a valid URL reported invalid. | **silent** | **fixed** for what can be answered exactly (the `url` shim); for the rest it throws, which a catch-all such as zod's still reads as "invalid" (see below) | `TestTypeScriptURLAgreesWithNode` (867 cases), `TestTypeScriptURLSearchParamsAgreeWithNode` (135), `TestTypeScriptURLRefusesWhatItCannotAnswer` |
+| 2 | No `URL` or `URLSearchParams`. zod's `z.url()` calls `new URL(...)` inside a `try`/`catch`, so the `ReferenceError` was swallowed and a valid URL reported invalid. | **silent** | **fixed** for what can be answered exactly (the `url` shim); for the rest it throws, which a catch-all such as zod's still reads as "invalid" (see below) | `TestTypeScriptURLAgreesWithNode` (the whole `urls.ts` corpus), `TestTypeScriptURLSearchParamsAgreeWithNode`, `TestTypeScriptURLRefusesWhatItCannotAnswer` |
 | 3 | No `TextEncoder` / `TextDecoder`. | loud (`ReferenceError`) | open | none yet |
 | 4 | No timers: `setTimeout`, `setInterval`, `setImmediate` are not defined, by design (a timer is not a durable operation). lodash-es `debounce` fails with `setTimeout is not defined`. The static check refuses a source that names one. | loud | by design | `TestTypeScriptStaticCheckRefusesATimerAndNamesTheLine` |
 | 5 | No `crypto`. uuid `v4()`/`v7()` with no arguments fails with `crypto is not defined`. With the `random` option supplied they equal Node: pass the SDK's replay-safe random in. | loud | by design | none yet |
@@ -22,19 +22,22 @@ lodash-es 4.18.1, uuid 14.0.3) unmodified; there may be more.
 
 ## What the URL shim does and does not do
 
-It is the WHATWG URL algorithm for the part that can be done exactly: the special schemes (`http`, `https`, `ws`, `wss`, `ftp`)
-and generic ones, relative resolution against a base, percent-encoding, IPv4 hosts (including the hex, octal and short forms),
-`URLSearchParams` in full, `URL.canParse` and `URL.parse`, and the `search` and `hash` setters (which update `searchParams`).
+It is the WHATWG URL algorithm for the part that can be done exactly: the special schemes (`http`, `https`, `ws`, `wss`, `ftp`,
+`file`) and generic ones, relative resolution against a base, percent-encoding, IPv4 hosts (including the hex, octal and short
+forms), IPv6 hosts in brackets (including the embedded-IPv4 form, written back as hex pairs as the specification does),
+`file:` URLs (the empty host, `localhost` folded to it, and a Windows drive letter kept in the path), `URLSearchParams` in full,
+`URL.canParse` and `URL.parse`, and the `search` and `hash` setters (which update `searchParams`).
 
-It **throws** `cleat: URL: <what> is not supported in the guest`, and never returns a guess, for: a `file:` URL, an IPv6 host, a
-host that is not ASCII or that contains an `xn--` label (both need IDNA processing), and setting `href`, `protocol`,
-`username`, `password`, `host`, `hostname`, `port` or `pathname`. `TestTypeScriptURLRefusesWhatItCannotAnswer` holds each one.
+It **throws** `cleat: URL: <what> is not supported in the guest`, and never returns a guess, for: a host that is not ASCII or
+that contains an `xn--` label (both need IDNA processing), and setting `href`, `protocol`, `username`, `password`, `host`,
+`hostname`, `port` or `pathname`. `TestTypeScriptURLRefusesWhatItCannotAnswer` holds each one, and Node accepts or silently
+no-ops all eight setters, so each is loud in the guest and quiet in Node.
 
 **That is loud to code that lets the error out, and not to code that catches everything.** zod's `z.url()` wraps `new URL` in a
 `try`/`catch`, which is how the `ReferenceError` was swallowed in the first place: for an input in the list above `z.url()` still
-reports "invalid" where Node says valid. So row 2 is fixed for every input the shim answers and **remains silent through a
-catch-all for the ones it refuses** (an IPv6 host, an internationalised host, a `file:` URL). It is not a support claim for those.
-The remaining inputs are cleat#3898.
+reports "invalid" where Node says valid, and for a setter the error escapes `z.url()` entirely. So row 2 is fixed for every input
+the shim answers and **remains silent through a catch-all for the ones it refuses** (an internationalised host, and the eight
+setters). It is not a support claim for those. The remaining inputs are cleat#3898; the setters are cleat#4016.
 
 **Where Node itself departs from the specification** (measured on Node 26.4.0, not in the guest): a relative input that carries a
 fragment is accepted against a base with an opaque path (`new URL("x#y", "foo:bar")` is `foo:bar/x#y`, while `new URL("x",
@@ -61,8 +64,15 @@ esbuild. The oracle is Node itself, not a belief about Node. Every fix is also r
 The oracle is **Node 24 or newer** for the URL rows, and the tests fail, not skip, on an older one. Node 20 (which the tier-2 job used until
 this row) leaves `^` unencoded in a path and drops the root slash of a non-special URL whose path `..` climbs above the root (`foo:`
 where the current specification gives `foo:/`): against it the corpus reports 9 differences that are the oracle's age and not the
-shim's. Measured 2026-11-14 on Node 20.20.2, 24.21.0 and 26.4.0; the last two agree with the shim on every case. Two answers that vary
-by Node version, `new URLSearchParams(null)` and the key order of an iterator's result object, are left out of the corpus.
+shim's. Measured 2026-11-14 on Node 20.20.2, 24.21.0 and 26.4.0; the last two agree with the shim on every case except the one
+documented in the next paragraph. Two answers that vary by Node version, `new URLSearchParams(null)` and the key order of an
+iterator's result object, are left out of the corpus.
+
+**Where Node's own versions disagree, the shim follows the specification and names the version it is tested against.** One
+place is known: shortening a `file:` path whose only segment starts with a drive letter but is longer than two code points.
+The specification pops `C:x` (`file:///C:x/..` is `file:///`), Node 24 does the same, and Node 26 keeps it. The URL corpus is
+compared against the Node CI pins (24), so that shape is excluded from the comparison and pinned guest-side by
+`TestTypeScriptURLFileSpecShortening` -- neither version can quietly change the answer.
 
 A control build leaves the shim-less plugin in `packages/cleat-ts/.work/`, and the next ordinary build reuses it (cleat#3897): run the next build with `REBUILD_PLUGIN=1` to put the shipped plugin back.
 

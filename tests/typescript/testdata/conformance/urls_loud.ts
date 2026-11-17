@@ -14,12 +14,10 @@ const loud = (label: string, f: () => unknown): string => {
 
 export function urlsLoud(): void {
   const out: string[] = [];
-  for (const s of ["file:///a/b", "FILE://host/x", "file:x", "http://[::1]/", "http://[::1]:80/", "http://u@[::1]/", "foo://[::1]/", "http://ü.com", "http://a.ü",
-                   "http://xn--mnchen-3ya.de", "http://%C3%BC.com", "http://a.XN--b", "http://a%E2%82%AC.com"]) {
+  for (const s of ["http://ü.com", "http://a.ü", "http://xn--mnchen-3ya.de", "http://%C3%BC.com", "http://a.XN--b", "http://a%E2%82%AC.com"]) {
     out.push(loud(`new URL(${JSON.stringify(s)})`, () => new URL(s).href));
     out.push(loud(`canParse(${JSON.stringify(s)})`, () => URL.canParse(s)));
   }
-  out.push(loud("a file: base", () => new URL("x", "file:///a/").href));
   const u = new URL("http://a/b?c#d");
   for (const name of ["href", "protocol", "username", "password", "host", "hostname", "port", "pathname"]) {
     out.push(loud(`set ${name}`, () => { (u as any)[name] = "x"; return u.href; }));

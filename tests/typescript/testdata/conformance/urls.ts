@@ -30,6 +30,16 @@ const absolute: string[] = [
   "http://127.0.0.1", "http://127.0.0.1:8080/x", "http://0x7f.1", "http://0177.0.0.1", "http://1.2.3", "http://1.2.3.4.5", "http://256.1.1.1",
   "http://1.256", "http://4294967295", "http://4294967296", "http://1.08", "http://a.1", "http://1.a", "http://0x", "http://a.0x", "http://0X7F.0.0.1",
   "http://1.2.3.4.", "http://1..2", "http://0", "http://00", "http://999999999999999999999.1", "http://1.2.3.04", "http://1.2.3.4a",
+  // IPv6 hosts: the bracketed literal, its port, and the embedded-IPv4 form the serialiser writes back as hex pairs
+  "http://[::1]/", "http://[::1]:3000/x", "http://[::ffff:1.2.3.4]/", "http://[::]/", "http://[1::]", "http://[1:2:3:4:5:6:7:8]",
+  "http://[1:2:3:4:5:6:7:8:9]", "http://[::g]/", "http://[::1/", "http://[::1]x/", "http://[::1]:80/", "http://[::1]:/", "foo://[::1]/",
+  "http://[::ffff:0:1.2.3.4]/", "http://[0:0:0:0:0:ffff:102:304]/", "http://[::1.2.3.4]/", "http://[1:2:3:4:5:6:1.2.3.4]/",
+  "http://[1:2:3:4:5:6:7:1.2.3.4]/", "http://[fe80::1%25eth0]/", "http://[]/", "http://[::1]:99999/", "http://u@[::1]:81/",
+  "HTTP://[::FFFF:1.2.3.4]:8080/X?q#f", "http://[::1]:00080/",
+  // file: URLs: no authority, localhost folded to the empty host, a drive letter kept in the path
+  "file:///tmp/a.txt", "file://localhost/tmp/a", "file:///C:/x", "file:/tmp/a", "file:x", "file:a/b", "file://", "file://localhost",
+  "file://host/x", "file://EXAMPLE.COM/x", "file://C:/x", "file:///a\\b", "file:////a", "file:?q", "file:#f", "file:///tmp/a b",
+  "file:///tmp/a?q#f", "file:///", "FILE:///x", "file://host",
   // paths
   "http://a/b/c/../d", "http://a/b/./c", "http://a/../b", "http://a/b/..", "http://a/b/.", "http://a/%2e/%2E%2e/x", "http://a/b/%2e%2E/c",
   "http://a//b///c", "http://a\\b\\c", "http:\\\\a\\b", "http:/a/b", "http:a/b", "http:///a/b", "http:////a", "http://a/.", "http://a/..", "http://a/a/..%2f",
@@ -76,6 +86,12 @@ export function urls(): void {
       out.push(`new URL(${JSON.stringify(r)}, ${JSON.stringify(b)}) -> ${show(() => describe(new URL(r, b)))}`);
     }
     out.push(`canParse(x, ${JSON.stringify(b)}) -> ${show(() => URL.canParse("x", b))}`);
+  }
+  // file: URLs resolved against a file base: the host is inherited, the path climbs, and an empty input keeps the base path.
+  for (const b of ["file:///a/b/c", "file://host/a/b/"]) {
+    for (const r of ["", "x", "/x", "//h/p", "?q", "#f", "../x", ".", "a/b", "\\x"]) {
+      out.push(`new URL(${JSON.stringify(r)}, ${JSON.stringify(b)}) -> ${show(() => describe(new URL(r, b)))}`);
+    }
   }
   // A base that is itself invalid, and an absolute input that ignores its base.
   out.push(`bad base -> ${show(() => describe(new URL("x", "nope")))}`);
