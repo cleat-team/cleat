@@ -2,9 +2,9 @@
   "doc": [
     "The 'signals' group of host calls (cleat#3827). Each call is listed here as unbound ('pending: ...') until its binding lands; the PR that binds a call moves its entry from 'unbound' to 'bound' in THIS file and touches no other inventory file. See packages/cleat-ts/groups/README.md."
   ],
-  "bound": {},
-  "unbound": {
-    "cleat_poll_signal": "pending: a non-blocking read of a pending signal.",
-    "cleat_signal_workflow": "pending: send a signal to another run."
-  }
+  "bound": {
+    "__cleat_poll_signal": "cleat_poll_signal",
+    "__cleat_signal_workflow": "cleat_signal_workflow"
+  },
+  "unbound": {}
 }

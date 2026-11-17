@@ -222,6 +222,7 @@ func main() {
 	if err != nil {
 		unmeasured("%v", err)
 	}
+	signals.self = *workflowID
 	baseOpts := []engine.EngineOption{
 		engine.WithWorkflowID(*workflowID),
 		engine.WithDefName(*entry),
@@ -249,7 +250,7 @@ func main() {
 		Children:     children.startedList(),
 		// AFTER Execute, deliberately: a store's Extra reads its own state, and before the run that state is
 		// the empty one it was loaded with. See extrasFrom.
-		Extras: extrasFrom(scriptSpecs),
+		Extras: signals.reportInto(extrasFrom(scriptSpecs)),
 	}
 	for _, ev := range history {
 		out.Events = append(out.Events, eventOut{

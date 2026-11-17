@@ -138,6 +138,37 @@ test("with no queued signal the same workflow PARKS", () => {
   assert.equal(run.suspended, true, "a signal appeared from nowhere; the store invented a delivery");
 });
 
+// cleat#3827, group B. What the workflow SENT is in `extras.signalsSent`, read from the store after the run. A send to another
+// run is recorded and is NOT readable back by this run (the harness has no other run), while a send to the run's own id is;
+// the second half is what a store that queued every send would get wrong without anything failing.
+const SIGNAL_ENTRIES = ["signals_poll", "signals_poll_then_wait", "signals_send", "signals_late"];
+
+test("signalWorkflow is recorded in extras.signalsSent, and only a send to the run's own id comes back to it", () => {
+  const module = buildEntries("tests/typescript/testdata/workflows/signals.ts", SIGNAL_ENTRIES);
+  const run = runWorkflow(module, "signals_send", { target: "run-elsewhere" });
+  assert.equal(run.ok, true, `the workflow failed: ${run.error}`);
+  const sent = run.extras?.signalsSent as { target: string; name: string; payload: string }[] | undefined;
+  assert.ok(sent, `the envelope carries no extras.signalsSent: ${JSON.stringify(run.extras)}`);
+  assert.deepEqual(
+    sent.map((s) => [s.target, s.name, s.payload]),
+    [
+      ["run-elsewhere", "hello", '{"n":1}'],
+      ["run-elsewhere", "bare", "null"],
+      ["00000000-0000-0000-0000-0000000c1ea7", "to-me", '"text"'],
+    ],
+  );
+  assert.deepEqual(run.result, { me: "text" }, "the run's own send did not come back through pollSignal");
+});
+
+test("a poll sees a signal the test queued and nothing for a name nobody sent", () => {
+  const module = buildEntries("tests/typescript/testdata/workflows/signals.ts", SIGNAL_ENTRIES);
+  const run = runWorkflow(module, "signals_poll", {}, { signals: { go: [{ n: 7 }] } });
+  assert.equal(run.ok, true, `the workflow failed: ${run.error}`);
+  assert.deepEqual(run.result, { first: { n: 7 }, again: { n: 7 } }, "first and again are the same signal; none is absent");
+  assert.deepEqual(run.signalsConsumed ?? [], [], "a poll consumed the signal");
+  assert.equal(run.extras?.signalsSent, undefined, "a run that sent nothing reported sends");
+});
+
 // Child workflows. Both outcomes are scripted, because a harness that could only say "the child succeeded" would
 // leave the parent's error path untested by construction -- and the parent's handling of a rejection is the thing a
 // test author actually wants to pin.

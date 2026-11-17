@@ -140,6 +140,18 @@ type memorySignals struct {
 	consumed  []string
 	cancelled bool
 	reason    string
+	// self is the run's own id, set by main. A signal the workflow SENDS is recorded in sent; it joins this store's queue (and
+	// so becomes visible to this run's own polls) only when it was addressed to this run. Left empty, as in a unit test of
+	// the store, every delivery joins the queue, which is what this store did before it recorded sends.
+	self string
+	sent []sentSignal
+}
+
+// sentSignal is one signal the workflow sent with signalWorkflow, as the store saw it.
+type sentSignal struct {
+	Target  string `json:"target"`
+	Name    string `json:"name"`
+	Payload string `json:"payload"`
 }
 
 func newMemorySignals(payloads map[string][]string) *memorySignals {
@@ -160,9 +172,13 @@ func newMemorySignals(payloads map[string][]string) *memorySignals {
 	return m
 }
 
-func (m *memorySignals) DeliverSignal(_ context.Context, _, signalName, payload string) error {
+func (m *memorySignals) DeliverSignal(_ context.Context, target, signalName, payload string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.sent = append(m.sent, sentSignal{Target: target, Name: signalName, Payload: payload})
+	if m.self != "" && target != m.self {
+		return nil // addressed to another run: recorded, and nobody here to receive it
+	}
 	m.nextID++
 	m.queue[signalName] = append(m.queue[signalName], engine.SignalDelivery{ID: m.nextID, Payload: payload})
 	return nil
@@ -197,6 +213,21 @@ func (m *memorySignals) ConsumeSignal(_ context.Context, _ string, id int64) err
 
 func (m *memorySignals) PollCancellation(context.Context, string) (bool, string, error) {
 	return m.cancelled, m.reason, nil
+}
+
+// reportInto adds `signalsSent` to the envelope's extras: what the workflow SENT, in order, as the store saw it. Omitted when
+// nothing was sent, so a run that sends nothing is unchanged.
+func (m *memorySignals) reportInto(extras map[string]any) map[string]any {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if len(m.sent) == 0 {
+		return extras
+	}
+	if extras == nil {
+		extras = map[string]any{}
+	}
+	extras["signalsSent"] = append([]sentSignal(nil), m.sent...)
+	return extras
 }
 
 func (m *memorySignals) consumedList() []string {
