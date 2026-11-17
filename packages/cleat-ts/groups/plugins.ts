@@ -5,6 +5,7 @@
 // through the same registry. Conventions: groups/README.md.
 
 import type { Helpers } from "./helpers";
+import { dispatchThen } from "./updates";
 
 declare function __cleat_plugin_call(plugin: string, func: string, input: string): string;
 declare function __cleat_plugin_call_streaming(plugin: string, func: string, input: string): string;
@@ -77,17 +78,23 @@ export function makePlugins(h: Helpers): PluginsCtx {
     pluginCallStreaming: (plugin, func, input) =>
       h.settle(__cleat_plugin_call_streaming(plugin, func, h.encode(input ?? null))).then(h.parseJSON) as Promise<never>,
 
+    // WRAPPED IN dispatchThen, as `sleep`, `waitForSignal`, the wait inside `child` and `awaitPromise` all are. A wait is
+    // one of the fixed program positions an update can be delivered at (groups/updates.ts): without the wrapper a workflow
+    // blocked here answers "no update handler registered" for an update that was waiting the whole time. It is also the
+    // position with the most to lose from missing it -- nothing else is going to ask while the workflow sits in a wait.
     waitForEvent: (plugin, func, signalNames, opts) =>
-      h
-        .settle(
-          __cleat_wait_for_event(
-            plugin,
-            func,
-            h.encode(opts?.input ?? null),
-            JSON.stringify(Array.isArray(signalNames) ? signalNames : [signalNames]),
-            opts?.timeoutMs ?? DEFAULT_EVENT_TIMEOUT_MS,
-          ),
-        )
-        .then(h.parseJSON) as Promise<never>,
+      dispatchThen(() =>
+        h
+          .settle(
+            __cleat_wait_for_event(
+              plugin,
+              func,
+              h.encode(opts?.input ?? null),
+              JSON.stringify(Array.isArray(signalNames) ? signalNames : [signalNames]),
+              opts?.timeoutMs ?? DEFAULT_EVENT_TIMEOUT_MS,
+            ),
+          )
+          .then(h.parseJSON),
+      ) as Promise<never>,
   };
 }

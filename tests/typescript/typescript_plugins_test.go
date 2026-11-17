@@ -165,3 +165,51 @@ func TestTypeScriptAPluginCallAfterASuspensionRecordsNothing(t *testing.T) {
 		}
 	}
 }
+
+// An update that arrives while the workflow is blocked in `waitForEvent` must reach the guest's handler.
+//
+// This is the test that would fail without `dispatchThen` around the wait, and it is the one no scripted registry can
+// substitute for: the update is delivered at a fixed program position, so what is under test is WHERE the dispatch
+// happens, not whether a registry answers. The precondition is stated first -- the workflow really did suspend inside the
+// wait -- because a run that never reached the wait would leave the store untouched for a reason that has nothing to do
+// with the dispatch.
+func TestTypeScriptAnUpdateIsDeliveredWhileBlockedInWaitForEvent(t *testing.T) {
+	root := needToolchain(t)
+	src := "tests/typescript/testdata/workflows/plugins.ts"
+	res := build(t, root, src, "plugin_wait_update")
+	if res.exit != 0 {
+		t.Fatalf("building %s for plugin_wait_update failed (exit %d):\n%s", src, res.exit, res.output)
+	}
+	wasm, err := os.ReadFile(res.module)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	updates := newMemUpdates([2]string{"add", `{"n":5}`})
+	// claimFound=false: the scripted claim reports no event, so the wait registers and the segment suspends inside it.
+	scripts := &pluginScripts{claimFound: false}
+	e, closeRT := newEngineWith(t, scripts.options(t), engine.WithUpdateStore(updates))
+	defer closeRT()
+
+	_, _, susp, _, _, err := e.Execute(context.Background(), wasm, "plugin_wait_update", json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatalf("running plugin_wait_update: %v", err)
+	}
+	if susp == nil {
+		t.Fatal("the workflow did not suspend; the wait was supposed to register and suspend, so the dispatch below is unmeasured")
+	}
+
+	// The delimiter, and the whole point: the update was pending when the workflow entered the wait, and it must have been
+	// HANDLED -- completed, with its handler's result -- before the wait began.
+	r := updates.row(0)
+	if !r.completed {
+		t.Fatalf("the update pending as the workflow entered waitForEvent was never completed: it must run through "+
+			"dispatchThen as sleep and waitForSignal do, or the handler is asked for it and never gets it (store: %v)", updates.complete)
+	}
+	if r.result != `{"total":5}` || r.errMsg != "" {
+		t.Fatalf("the update completed with result %q, error %q, want its handler's answer and no error", r.result, r.errMsg)
+	}
+	if n := updates.pending(); n != 0 {
+		t.Fatalf("%d update(s) still pending: the dispatch point in front of waitForEvent did not run", n)
+	}
+}

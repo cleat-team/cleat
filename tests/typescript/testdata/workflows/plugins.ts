@@ -48,3 +48,18 @@ export const pluginLate = workflow(async (ctx) => {
   await p;
   return { reached: true };
 });
+
+// An update delivered while the workflow is BLOCKED IN A WAIT (cleat#3827 group I, with group A's dispatch). `waitForEvent`
+// is one of the fixed program positions an update can be delivered at; without `dispatchThen` around it, the update was
+// pending the whole time and the workflow answers "no update handler registered" for it.
+export const pluginWaitUpdate = workflow(async (ctx) => {
+  let total = 0;
+  await ctx.registerUpdateHandler<{ n: number }, { total: number }>("add", (input) => {
+    total += input.n;
+    return { total };
+  });
+  // Unclaimable (`found: false`) with a long budget, so the workflow suspends inside the wait and the delivery has to
+  // happen at the dispatch point in front of it.
+  await ctx.waitForEvent("demo", "claim", ["evt"], { timeoutMs: 60_000 });
+  return { total };
+});
