@@ -155,7 +155,7 @@ func TestTypeScriptURLRefusesWhatItCannotAnswer(t *testing.T) {
 		t.Fatal("no cases ran, so nothing was checked")
 	}
 	for _, l := range lines {
-		if l != "loud" {
+		if !strings.HasPrefix(l, "loud: ") {
 			t.Errorf("%s", l)
 		}
 	}
