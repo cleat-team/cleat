@@ -171,7 +171,17 @@ func TestTypeScriptRunDetachedStartsAndDoesNotWait(t *testing.T) {
 func TestTypeScriptStartDetachedReturnsTheRecordedRunId(t *testing.T) {
 	wasm := buildDetached(t)
 	store := newMemDetached()
-	raw, history := runDetachedEntry(t, wasm, "detached_start", store)
+	// Built here rather than through runDetachedEntry because the replay pass below needs the engine, and the replay is half of
+	// the claim: the id the workflow sees is the RECORDED one, so a second segment must produce it without starting a second run.
+	e, closeRT := newEngineWith(t, engine.WithChildWorkflowStore(store))
+	defer closeRT()
+	raw, history, susp, _, _, err := e.Execute(context.Background(), wasm, "detached_start", json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatalf("detached_start: running the workflow: %v", err)
+	}
+	if susp != nil {
+		t.Fatalf("detached_start: the workflow suspended (%s)", susp.Reason)
+	}
 
 	var got struct {
 		RunID   string `json:"runId"`
@@ -196,6 +206,31 @@ func TestTypeScriptStartDetachedReturnsTheRecordedRunId(t *testing.T) {
 	if events[0].DetachedRunID != got.RunID {
 		t.Errorf("the recorded run id %q and the id handed to the workflow %q differ; a replay would hand back the record's",
 			events[0].DetachedRunID, got.RunID)
+	}
+
+	// The replay: same id, and NO second run. Without this the test asserts only that the first execution recorded the id, which
+	// a binding that started a fresh run on every segment would also satisfy -- and a detached start is exactly the call a
+	// duplicate would be worst for.
+	replayed, _, susp2, _, _, err := e.Replay(context.Background(), wasm, "detached_start", json.RawMessage(`{}`), history)
+	if err != nil {
+		t.Fatalf("replaying detached_start: %v", err)
+	}
+	if susp2 != nil {
+		t.Fatalf("the replay suspended (%s); nothing in this workflow waits", susp2.Reason)
+	}
+	var again struct {
+		RunID string `json:"runId"`
+	}
+	if err := json.Unmarshal([]byte(replayed), &again); err != nil {
+		t.Fatalf("the replay's result is not the object this test expects: %v\n%.400s", err, replayed)
+	}
+	if again.RunID != got.RunID {
+		t.Errorf("the replay resolved with %q, want the recorded %q: the id must come from history, not from a new start",
+			again.RunID, got.RunID)
+	}
+	if started := store.startedList(); len(started) != 1 {
+		t.Errorf("the store started %d run(s) across both segments, want 1: a replayed detached start must not start another: %v",
+			len(started), started)
 	}
 }
 
