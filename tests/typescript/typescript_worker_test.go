@@ -327,6 +327,7 @@ func resultObject(t *testing.T, r map[string]any) map[string]any {
 // running worker.
 type workerEnv struct {
 	root, workerBin, ownerDSN, appDSN, key string
+	ctl                                    string // the deploy tool for this dialect, so a test can deploy a second version
 }
 
 func newWorkerEnv(t *testing.T, modules map[string]string) *workerEnv {
@@ -343,6 +344,7 @@ func newWorkerEnv(t *testing.T, modules map[string]string) *workerEnv {
 		ctlName, ctlPkg = "deploy-workflow", "./cmd/deploy-workflow"
 	}
 	ctl := filepath.Join(bin, ctlName)
+	e.ctl = ctl
 	goBuild(t, root, ctl, ctlPkg)
 
 	e.ownerDSN = scratchDB(t, admin)

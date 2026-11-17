@@ -296,7 +296,7 @@ test("a -script name that no store registered is refused, not ignored", () => {
 // the next run starting, is the three-dialect worker test, TestTypeScriptContinueAsNewOnARealWorker.
 test("continueAsNew ends the run as a continue_as_new suspension, and nothing after it runs", () => {
   const module = buildEntries("tests/typescript/testdata/workflows/continuation.ts", [
-    "continuation", "continuation_versioned", "continuation_bad_version", "continuation_late", "continuation_versioned_once", "continuation_then_another_call", "continuation_versioned_then_another_call",
+    "continuation", "continuation_versioned", "continuation_bad_version", "continuation_late", "continuation_then_another_call", "continuation_versioned_then_another_call",
   ]);
   const run = runWorkflow(module, "continuation", { n: 1, limit: 5 });
   assert.equal(run.ok, true, `the workflow failed: ${run.error}`);

@@ -22,10 +22,9 @@ export interface ContinuationCtx {
    * would otherwise run on and record events for a run that has already been replaced. Rejects with a `CleatError` (and so does continue
    * running) only when the host refuses: a malformed input, an invalid `options.version`, or a defer phase.
    *
-   * **`options.version` IS NOT HONOURED BY A WORKER.** The engine records the requested version on the event, but `cleat-worker`'s
-   * continue-as-new path starts the new run on the SAME version it was on (`cmd/cleat-worker/setup.go` passes `wf.DefVersion` and never
-   * reads the suspension's `NewVersion`), so on a worker the versioned form behaves as the plain one. This is cleat#4041, the
-   * engine's and shared by every SDK, and `TestTypeScriptContinueAsNewOnARealWorker` pins it on all three dialects.
+   * **`options.version`: the next run starts on that version.** If it is not deployed, or is deprecated, the run FAILS with an error naming
+   * the version; it never continues on the current one instead (cleat#4041, owner-approved 2026-11-17). A plain `continueAsNew(input)`
+   * stays on the current version. `TestTypeScriptContinueAsNewStartsTheNextRunOnTheRequestedVersion` holds all three on every dialect.
    *
    * On replay the recorded continuation is returned to the same suspension, and no second event is recorded. An update that arrives after
    * the run's last dispatch point is not delivered before it is replaced.
