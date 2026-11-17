@@ -166,6 +166,18 @@ test("with no script the same child call PARKS", () => {
   assert.equal(run.suspended, true, "an unscripted child was reported finished; the store invented an outcome");
 });
 
+// cleat#3827 F1: the generic script path. No store group has registered yet, so the only assertion that
+// means anything today is the REFUSAL -- and it is the one that matters, because a typo in a store name
+// that was silently ignored would configure nothing and leave the run looking fine.
+test("a -script name that no store registered is refused, not ignored", () => {
+  const module = build("tests/typescript/testdata/workflows/hello.ts", "hello");
+  assert.throws(
+    () => runWorkflow(module, "hello", {}, { scripts: { nosuchstore: { any: "value" } } }),
+    /not a registered store/,
+    "an unregistered -script name was accepted; the run would proceed with that store absent",
+  );
+});
+
 test("a deliberately broken workflow FAILS through the harness", () => {
   const module = build("tests/typescript/testdata/workflows/broken.ts", "broken");
   const run = runWorkflow(module, "broken");

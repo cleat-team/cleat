@@ -56,6 +56,12 @@ export interface WorkflowRun {
   signalsConsumed?: string[];
   /** The child workflow names the run STARTED, in order, as the store saw them. */
   childrenStarted?: string[];
+  /**
+   * Whatever a REGISTERED store reported, keyed by that store. The generic counterpart of `promises`,
+   * `signalsConsumed` and `childrenStarted`: a new store puts its observation here and needs no change to
+   * this interface (cleat#3827 F1).
+   */
+  extras?: Record<string, unknown>;
 }
 
 /** What a durable call returns, keyed by `"<service>/<operation>"`. A value is the JSON text the guest receives. */
@@ -101,6 +107,29 @@ export interface RunOptions {
    * path untested by construction. A name that is absent leaves the child RUNNING, so the parent suspends.
    */
   children?: Record<string, { result?: unknown; error?: string }>;
+
+  /**
+   * Fixtures for stores registered in `cleat-ts-run`, keyed by the store's `-script` name. Each is written
+   * to its own temp file and passed as `-script <name>=<file>`, so adding a store is one entry here and no
+   * new field on this interface.
+   *
+   * A NAME THAT IS NOT REGISTERED FAILS THE RUN rather than being ignored: a typo would otherwise configure
+   * nothing, and for the update store that means the engine reports no pending update and a test passes
+   * having delivered nothing (cleat#3827 F1).
+   *
+   * ONE LINE PER GROUP, so ten groups can add their name in parallel without touching the same line:
+   *   updates    group A   in-memory UpdateStore, pending requests
+   *   signals    group B
+   *   children   group C   child handles, waits
+   *   detached   group D
+   *   locks      group E   ConcurrencyKeyStore
+   *   schedules  group F   cron
+   *   continuation group G   (NOT `continue`: it is a Rust keyword, so `mod continue;` does not compile)
+   *   calls      group H   retry, heartbeat, send, schedule-invoke
+   *   plugins    group I
+   *   utilities  group J   fetch, json_parse
+   */
+  scripts?: Record<string, unknown>;
 }
 
 /** A failure of the HARNESS, not of the workflow under test. Never assert on this as if it were a result. */
@@ -156,6 +185,16 @@ export function runWorkflow(modulePath: string, entry: string, input: unknown = 
   }
   if (options.children) {
     writeScript("children", options.children, "-children");
+  }
+  // The generic path. Each store's fixture is its own file, and the flag repeats: `-script name=file`.
+  if (options.scripts) {
+    for (const [name, value] of Object.entries(options.scripts)) {
+      const dir = mkdtempSync(join(tmpdir(), `cleat-ts-script-${name}-`));
+      scripts.push(dir);
+      const file = join(dir, `${name}.json`);
+      writeFileSync(file, JSON.stringify(value), "utf8");
+      args.push("-script", `${name}=${file}`);
+    }
   }
   let stdout: string;
   try {
