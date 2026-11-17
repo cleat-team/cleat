@@ -109,6 +109,11 @@ type envelope struct {
 	// the envelope so a test (and a reader) can tell "the workflow used a call and nobody scripted it" from "the
 	// workflow was actually exercised against answers" (cleat#3828).
 	StubbedCalls bool `json:"stubbedCalls,omitempty"`
+	// Promises and Signals are what the STORES saw, not what the workflow returned: the promise names it created, in
+	// order, and the signal names it consumed. A test that asserted only on the workflow's result could pass without
+	// the store ever being touched -- the same reason StubbedCalls exists (cleat#3828).
+	Promises []string `json:"promises,omitempty"`
+	Signals  []string `json:"signalsConsumed,omitempty"`
 }
 
 func unmeasured(format string, args ...any) {
@@ -126,10 +131,14 @@ func main() {
 	input := flag.String("input", "{}", "the workflow input, as JSON")
 	workflowID := flag.String("workflow-id", "00000000-0000-0000-0000-0000000c1ea7", "workflow id (the engine derives its random stream from it)")
 	answersPath := flag.String("answers", "", "optional JSON file: {\"<service>/<operation>\": <JSON text the call returns>}; without it every durable call returns {} unread")
+	promisesPath := flag.String("promises", "", "optional JSON file: {\"<promise name>\": <JSON text it resolves with>}; a promise created under another name stays pending and the workflow suspends")
+	promiseRejectsPath := flag.String("promise-rejects", "", "optional JSON file: {\"<promise name>\": <rejection message>}")
+	signalsPath := flag.String("signals", "", "optional JSON file: {\"<signal name>\": [<payload JSON>, ...]}, delivered before the run starts")
 	flag.Parse()
 
 	if *module == "" || *entry == "" {
-		unmeasured("usage: cleat-ts-run -module <file.wasm> -entry <name> [-input <json>] [-workflow-id <id>] [-answers <file.json>]")
+		unmeasured("usage: cleat-ts-run -module <file.wasm> -entry <name> [-input <json>] [-workflow-id <id>] " +
+			"[-answers <file.json>] [-promises <file.json>] [-promise-rejects <file.json>] [-signals <file.json>]")
 	}
 	if !json.Valid([]byte(*input)) {
 		unmeasured("-input is not valid JSON: %s", *input)
@@ -159,15 +168,53 @@ func main() {
 	} else {
 		caller = stubbedCaller{}
 	}
+	// The stores are ALWAYS configured, even when the test scripted nothing. Leaving them nil would make a workflow
+	// that touches a promise fail with errNoPromiseStore rather than suspend, so a test that supplied no script could
+	// not tell "this workflow uses no store" from "I forgot to script it" -- and the second is the mistake a harness
+	// should make loud.
+	promises := newMemoryPromises(nil, nil)
+	signals := newMemorySignals(nil)
+	if *promisesPath != "" {
+		resolves, err := loadStringMap(*promisesPath, "promises")
+		if err != nil {
+			unmeasured("%v", err)
+		}
+		promises = newMemoryPromises(resolves, nil)
+	}
+	if *promiseRejectsPath != "" {
+		rejects, err := loadMessageMap(*promiseRejectsPath, "promise-rejects")
+		if err != nil {
+			unmeasured("%v", err)
+		}
+		if promises.resolves == nil {
+			promises = newMemoryPromises(nil, rejects)
+		} else {
+			promises.rejects = rejects
+		}
+	}
+	if *signalsPath != "" {
+		payloads, err := loadSignalScript(*signalsPath)
+		if err != nil {
+			unmeasured("%v", err)
+		}
+		signals = newMemorySignals(payloads)
+	}
 	e := engine.NewEngine(rt, caller,
 		engine.WithWorkflowID(*workflowID),
 		engine.WithDefName(*entry),
 		engine.WithDefVersion(1),
 		engine.WithBackends(engine.WasmtimeLanguages, wt),
+		engine.WithPromiseStore(promises),
+		engine.WithSignalStore(signals),
 	)
 
 	result, history, susp, _, queryState, err := e.Execute(ctx, wasm, *entry, json.RawMessage(*input))
-	out := envelope{Entry: *entry, QueryState: queryState, Events: make([]eventOut, 0, len(history)), StubbedCalls: *answersPath == ""}
+	out := envelope{
+		Entry: *entry, QueryState: queryState, Events: make([]eventOut, 0, len(history)),
+		StubbedCalls: *answersPath == "",
+		Promises:     promises.nameList(),
+		Signals:      signals.consumedList(),
+	}
 	for _, ev := range history {
 		out.Events = append(out.Events, eventOut{
 			Step: ev.Step, Type: string(ev.EventType),
