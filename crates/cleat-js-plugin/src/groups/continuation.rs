@@ -10,6 +10,13 @@
 //! NEITHER IS A DISPATCH POINT. Neither the Go nor the Rust SDK dispatches updates before continuing as new, so this does not
 //! either; an update that arrives after the last dispatch point is not delivered to the run that is being replaced.
 //!
+//! BOTH MARK THE SEGMENT SUSPENDED when the host accepts the call. The host does not: its ContinueAsNew sets the suspension
+//! reason and returns 0, which is not the sentinel the SDK's other suspending wrappers see, and `HostCalls::continue_as_new` never
+//! calls `mark_suspended`. So without this an accepted continuation left the segment looking live, and a guarded call made after
+//! it (an unawaited `continueAsNew` followed by `await ctx.listCrons()`) reached the host and recorded an event for a run that had
+//! been replaced; a `scheduleCron` or a `send` there would be a real side effect (found by cleat-review on cleat#4043, measured as
+//! history `[continue_as_new, list_crons]`). `guarded` then reports `suspended` for this call itself and for everything after it.
+//!
 //! BOTH ARE GUARDED: each records an event, and a segment must record nothing past the call that suspended it. This one matters more
 //! than most: a continue_as_new made after the segment had suspended would OVERWRITE that suspension's reason, so the run would
 //! restart instead of waiting for its sleep. The defer-phase refusal is the SDK's (`HostCalls::continue_as_new` checks it before the
@@ -31,7 +38,10 @@ pub(crate) fn install(g: &Object<'_>) {
         "__cleat_continue_as_new",
         Func::from(|input_json: String| -> String {
             guarded(|| match HostCalls.continue_as_new(&input_json) {
-                Ok(()) => json!({ "ok": null }),
+                Ok(()) => {
+                    cleat_sdk::mark_suspended();
+                    json!({ "ok": null })
+                }
                 Err(e) => json!({ "err": e }),
             })
         }),
@@ -46,7 +56,10 @@ pub(crate) fn install(g: &Object<'_>) {
                     return json!({ "err": "continueAsNew: options.version must be a whole number from 1 to 2147483647 (omit it to stay on the current version)" });
                 }
                 match HostCalls.continue_as_new_versioned(&input_json, version as i32) {
-                    Ok(()) => json!({ "ok": null }),
+                    Ok(()) => {
+                        cleat_sdk::mark_suspended();
+                        json!({ "ok": null })
+                    }
                     Err(e) => json!({ "err": e }),
                 }
             })

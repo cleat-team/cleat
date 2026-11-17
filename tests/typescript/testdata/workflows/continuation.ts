@@ -48,3 +48,19 @@ export const continuationVersionedOnce = workflow<{ n: number }, { n: number }>(
   }
   return { n: input.n };
 });
+
+// cleat-review's probe on cleat#4043: a continueAsNew the host ACCEPTED, not awaited, followed by another guarded call. The host does not
+// mark the segment suspended on a continuation, so unless the binding does, listCrons reaches the host and records an event for a run
+// that has been replaced. (listCrons is read-only; a scheduleCron or a send in its place would be a real side effect.)
+export const continuationThenAnotherCall = workflow(async (ctx) => {
+  ctx.continueAsNew({ n: 1 });
+  await ctx.listCrons();
+  return null;
+});
+
+// The same probe through the versioned form, which has its own binding and its own mark.
+export const continuationVersionedThenAnotherCall = workflow(async (ctx) => {
+  ctx.continueAsNew({ n: 1 }, { version: 2 });
+  await ctx.listCrons();
+  return null;
+});
