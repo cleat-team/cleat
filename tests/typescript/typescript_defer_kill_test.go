@@ -22,9 +22,20 @@ import (
 //   - the call TRAPS (`unreachable`), so no defer body runs and the ServiceCaller records nothing;
 //   - the kill is still reported as the kill: the drain's failure does not replace or mask the instruction-limit error.
 //
-// The cause of the trap is NOT established. The working hypothesis is QuickJS's interpreter state after a fuel trap in the
-// middle of execution, which a second entry cannot recover from; the clean-suspension drain beside it works, which says
-// the drain is sound and the instance is what is damaged. Do not cite the hypothesis as a finding.
+// THE CAUSE IS MEASURED (2026-11-16, local run with the bootstrapped javy 9.1.0 toolchain), and the trap is a Rust panic,
+// not a silent refusal. The guest prints, immediately before the warning below:
+//
+//	thread '<unnamed>' (1) panicked at rquickjs-core-0.12.2/src/safe_ref.rs:35:20:
+//	RefCell already borrowed
+//
+// So rquickjs's own borrow bookkeeping is still outstanding when the drain enters. That is what a fuel trap leaves: it
+// aborts the guest wherever it happens to be, so a RefCell guard live at that instant never runs its Drop. It is not
+// budget starvation -- runGuestDefersAfterKill refunds the fuel (store.SetFuel) before calling -- and it is not a broken
+// drain, because the defer segment's drain works on this same toolchain: there the guest returned normally through the
+// suspend sentinel and nothing is left borrowed. The damage is to the killed instance, and a second entry cannot repair it.
+//
+// What that means for a reader: "no defers run after a kill" is a limit of the instance, not of the export, and it is
+// documented as such in packages/cleat-ts/DIVERGENCES.md.
 //
 // WHEN THIS FAILS because the defers now run, the limit has been fixed: change the assertion to the cleanup call, delete
 // the limit from packages/cleat-ts/DIVERGENCES.md, and say so in the PR.
@@ -46,21 +57,28 @@ func TestTypeScriptKilledWorkflowDoesNotRunItsDefersYet(t *testing.T) {
 		t.Fatalf("engine.NewRuntime: %v", err)
 	}
 	t.Cleanup(func() { _ = rt.Close(ctx) })
-	wt, err := engine.NewWasmtimeBackend(ctx, engine.WithWasmtimeInstructionLimit(200_000_000))
+	// The log line is the only place the trap is visible: the workflow's own error is the kill, by design, so nothing
+	// else distinguishes "the drain trapped" from "the drain found nothing to call". Asserted rather than quoted in
+	// the comment above, because a comment cannot fail when the behaviour changes (cleat#3826).
+	//
+	// The backend needs its OWN logger. Engine.WithLogger does not reach these records -- the warning is emitted by
+	// runGuestDefersAfterKill's b.log(), which falls back to slog.Default() when WithWasmtimeLogger is absent, and that
+	// is how the first version of this test failed while the warning was printing to stderr beside it.
+	var logs strings.Builder
+	backendLogs := slog.New(slog.NewJSONHandler(&logs, &slog.HandlerOptions{Level: slog.LevelWarn}))
+	wt, err := engine.NewWasmtimeBackend(ctx,
+		engine.WithWasmtimeInstructionLimit(200_000_000),
+		engine.WithWasmtimeLogger(backendLogs))
 	if err != nil {
 		t.Fatalf("engine.NewWasmtimeBackend: %v", err)
 	}
 	caller := &recordingCaller{}
-	// The log line is the only place the trap is visible: the workflow's own error is the kill, by design, so nothing
-	// else distinguishes "the drain trapped" from "the drain found nothing to call". Asserted rather than quoted in
-	// the comment above, because a comment cannot fail when the behaviour changes (cleat#3826).
-	var logs strings.Builder
 	e := engine.NewEngine(rt, caller,
 		engine.WithWorkflowID("wf-ts-defer-kill"),
 		engine.WithDefName("defer_then_spin"),
 		engine.WithDefVersion(1),
 		engine.WithBackends(engine.WasmtimeLanguages, wt),
-		engine.WithLogger(slog.New(slog.NewJSONHandler(&logs, &slog.HandlerOptions{Level: slog.LevelWarn}))),
+		engine.WithLogger(backendLogs),
 	)
 
 	_, _, _, _, _, err = e.Execute(ctx, wasmBytes, "defer_then_spin", []byte(`{}`))
