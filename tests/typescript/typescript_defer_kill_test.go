@@ -2,6 +2,7 @@ package typescript
 
 import (
 	"context"
+	"log/slog"
 	"os"
 	"strings"
 	"testing"
@@ -50,11 +51,16 @@ func TestTypeScriptKilledWorkflowDoesNotRunItsDefersYet(t *testing.T) {
 		t.Fatalf("engine.NewWasmtimeBackend: %v", err)
 	}
 	caller := &recordingCaller{}
+	// The log line is the only place the trap is visible: the workflow's own error is the kill, by design, so nothing
+	// else distinguishes "the drain trapped" from "the drain found nothing to call". Asserted rather than quoted in
+	// the comment above, because a comment cannot fail when the behaviour changes (cleat#3826).
+	var logs strings.Builder
 	e := engine.NewEngine(rt, caller,
 		engine.WithWorkflowID("wf-ts-defer-kill"),
 		engine.WithDefName("defer_then_spin"),
 		engine.WithDefVersion(1),
 		engine.WithBackends(engine.WasmtimeLanguages, wt),
+		engine.WithLogger(slog.New(slog.NewJSONHandler(&logs, &slog.HandlerOptions{Level: slog.LevelWarn}))),
 	)
 
 	_, _, _, _, _, err = e.Execute(ctx, wasmBytes, "defer_then_spin", []byte(`{}`))
@@ -63,6 +69,14 @@ func TestTypeScriptKilledWorkflowDoesNotRunItsDefersYet(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "instruction limit") {
 		t.Fatalf("the workflow was stopped, but not reported as an instruction-limit kill: %v\n\nThe post-kill drain must not replace the error it follows.", err)
+	}
+	// The drain ran and could not complete. This is what the export's arrival CHANGED for the kill path: before it, the
+	// host found nothing to call and said nothing at all. If this assertion starts failing because the message is gone,
+	// the drain is no longer being attempted on a killed guest -- which is a silent regression in the direction this test
+	// exists to catch.
+	if !strings.Contains(logs.String(), "a killed workflow's defers could not be run") {
+		t.Fatalf("the post-kill drain did not report a failure, so either it was not attempted or it succeeded.\n\n"+
+			"Want the warning \"a killed workflow's defers could not be run\". Logs:\n%s", logs.String())
 	}
 	if got := caller.snapshot(); len(got) != 0 {
 		t.Fatalf("a killed workflow recorded %v. The defers ran after a kill, which this test says does not happen yet.\n\n"+
