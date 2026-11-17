@@ -116,6 +116,9 @@ type envelope struct {
 	Signals  []string `json:"signalsConsumed,omitempty"`
 	// Children is the child workflow names this run started, in order, from the store.
 	Children []string `json:"childrenStarted,omitempty"`
+	// Extras is the generic place a REGISTERED store reports what it saw, keyed by the store. It exists so a
+	// new store needs no change to this struct: stores_<group>.go names its own key (cleat#3827 F1).
+	Extras map[string]any `json:"extras,omitempty"`
 }
 
 func unmeasured(format string, args ...any) {
@@ -176,6 +179,10 @@ func main() {
 	promiseRejectsPath := flag.String("promise-rejects", "", "optional JSON file: {\"<promise name>\": <rejection message>}")
 	signalsPath := flag.String("signals", "", "optional JSON file: {\"<signal name>\": [<payload JSON>, ...]}, delivered before the run starts")
 	childrenPath := flag.String("children", "", "optional JSON file: {\"<child name>\": {\"result\": <any>}} or {\"<child name>\": {\"error\": \"...\"}}; an unscripted child stays running and the parent suspends")
+	// Repeatable: -script updates=a.json -script locks=b.json. Each name comes from a store registered by
+	// an init() in stores_<group>.go, so a new store adds a file and does not touch this one (cleat#3827 F1).
+	var scripts scriptFlag
+	flag.Var(&scripts, "script", "repeatable <name>=<file>: configure a registered store from a fixture")
 	flag.Parse()
 
 	if *module == "" || *entry == "" {
@@ -215,7 +222,7 @@ func main() {
 	if err != nil {
 		unmeasured("%v", err)
 	}
-	e := engine.NewEngine(rt, caller,
+	baseOpts := []engine.EngineOption{
 		engine.WithWorkflowID(*workflowID),
 		engine.WithDefName(*entry),
 		engine.WithDefVersion(1),
@@ -223,7 +230,15 @@ func main() {
 		engine.WithPromiseStore(promises),
 		engine.WithSignalStore(signals),
 		engine.WithChildWorkflowStore(children),
-	)
+	}
+	// Resolved BEFORE the engine is built, and appended to its options rather than applied to it after:
+	// an EngineOption applied to a live engine is a mutation with an ordering question, and this change is
+	// not the place to introduce one.
+	scriptOpts, extras, err := resolveScripts(scripts.pairs)
+	if err != nil {
+		unmeasured("%v", err)
+	}
+	e := engine.NewEngine(rt, caller, append(baseOpts, scriptOpts...)...)
 
 	result, history, susp, _, queryState, err := e.Execute(ctx, wasm, *entry, json.RawMessage(*input))
 	out := envelope{
@@ -232,6 +247,7 @@ func main() {
 		Promises:     promises.nameList(),
 		Signals:      signals.consumedList(),
 		Children:     children.startedList(),
+		Extras:       extras,
 	}
 	for _, ev := range history {
 		out.Events = append(out.Events, eventOut{
