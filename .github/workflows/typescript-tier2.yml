@@ -219,13 +219,29 @@ jobs:
           [ "$fail" = 0 ] && [ "$pkgfail" = 0 ] || { echo "a failure or a package that did not build" >&2; exit 1; }
           # TestTypeScriptLabelIsRoutedToWasmtime and the binding-inventory tests need no toolchain; the build tests,
           # the `cleat build --target ts` test, the conformance tests, the host-call binding tests and the worker smoke
-          # tests do (the last also need PostgreSQL), and the numbers test needs componentize-py where declared. The floor
-          # is the number of top-level tests in this package and must be raised when one is added: it was 14 while 15
-          # tests existed, which is the drift this line exists to catch, and 30 while 36 existed after cleat#3898 added
-          # four (cleat-review caught that one before it shipped a floor two tests short of the evidence), and 36 while 39 existed
-          # after the bindings layout (cleat#3827) added three, which cleat-review caught the same way.
-          # Re-derive: go test ./tests/typescript/ -list '^Test' | grep -c '^Test'  (NOT grep for '^func Test': the dialect guard's fixtures contain such lines in raw strings, so it over-counts)
-          [ "$top" -ge 39 ] || { echo "only $top top-level tests passed; the thirty-nine in tests/typescript must all run" >&2; exit 1; }
+          # tests do (the last also need PostgreSQL), and the numbers test needs componentize-py where declared.
+          #
+          # THE EXPECTED COUNT IS DERIVED, NOT WRITTEN DOWN (cleat#3827). This line used to be a hand-pinned floor that had
+          # to be raised by whoever added a test: it was 14 while 15 tests existed, 30 while 36 existed, and 36 while 39
+          # existed, each caught by review and not by the job, and with ten groups adding tests in parallel it was one
+          # line in ten PRs, so every merge left the others conflicting. What the floor is FOR is "every test that exists
+          # ran and passed", and `go test -list` says what exists, so the step asks it.
+          #
+          # SAME PACKAGE PATTERN, SAME ENVIRONMENT as the test step above: `./tests/typescript/...`, no -tags, the
+          # workflow-level env, CGO as the runner has it. Otherwise `listed` and `top` would measure different packages.
+          # Re-derive by hand with: go test -list '^Test' ./tests/typescript/... | grep -c '^Test'  (NOT grep for
+          # '^func Test': the dialect guard's fixtures contain such lines in raw strings, so it over-counts).
+          #
+          # WHAT THIS CATCHES: a test that stopped running. `top` counts passes, so a test that skips, does not build or is
+          # filtered out leaves `top` below `listed`.
+          # WHAT IT GIVES UP: a test file compiled out by a build tag, or deleted, disappears from BOTH counts, which the
+          # hand-pinned number would have flagged. A deletion is visible in the diff; a build tag added to a file is not
+          # caught here, so a reviewer of such a change has to ask.
+          # THE SECOND LINE IS NOT DECORATION: if `-list` printed nothing (a build failure, a bad pattern), `top >= listed`
+          # would read 0 >= 0 and pass. The sanity constant is set once and is not raised when tests are added.
+          listed=$(go test -list '^Test' ./tests/typescript/... | grep -c '^Test' || true)
+          [ "$listed" -ge 30 ] || { echo "go test -list found only $listed top-level tests (at least 30 exist); the listing is broken, so the count below would be 0 >= 0" >&2; exit 1; }
+          [ "$top" -ge "$listed" ] || { echo "only $top of the $listed top-level tests in tests/typescript passed; every one that exists must run" >&2; exit 1; }
           [ -s "$TS_NUMBERS_OUT" ] || { echo "the numbers test passed but wrote no $TS_NUMBERS_OUT" >&2; exit 1; }
 
       - name: "Skip budget (zero, because the toolchain was declared)"
