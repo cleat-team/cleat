@@ -245,7 +245,8 @@ jobs:
   # ------------------------------------------------------------------------------------------------------------------
   # MySQL: the two worker tests that need a database, on mysql (cleat#3988, part b).
   #
-  # NOT A REQUIRED CHECK: TypeScript Tier 2 (Linux x86_64, MySQL) -- same reason as the job above.
+  # NOT A REQUIRED CHECK: TypeScript Tier 2 (Linux x86_64, MySQL)
+  # (the same reason as the job above: tier 2 must run and may fail, so it gates no merge)
   #
   # ONE JOB PER DIALECT, not a matrix, deliberately: scripts/check-workflow-guards.py inspects literal `services:` blocks
   # (floating image tags, MSSQL_MEMORY_LIMIT_MB, the MySQL health start period of cleat#3936), and a matrix that templated
@@ -341,7 +342,8 @@ jobs:
   # ------------------------------------------------------------------------------------------------------------------
   # SQL Server: the two worker tests that need a database, on mssql (cleat#3988, part b).
   #
-  # NOT A REQUIRED CHECK: TypeScript Tier 2 (Linux x86_64, SQL Server) -- same reason as the job above.
+  # NOT A REQUIRED CHECK: TypeScript Tier 2 (Linux x86_64, SQL Server)
+  # (the same reason as the job above: tier 2 must run and may fail, so it gates no merge)
   #
   # ONE JOB PER DIALECT, not a matrix, deliberately: scripts/check-workflow-guards.py inspects literal `services:` blocks
   # (floating image tags, MSSQL_MEMORY_LIMIT_MB, the MySQL health start period of cleat#3936), and a matrix that templated
