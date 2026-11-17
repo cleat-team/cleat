@@ -313,19 +313,22 @@ func replayUntilDone(t *testing.T, e *engine.Engine, wasm []byte, entry string, 
 	return ""
 }
 
-// TestTypeScriptACallVariantAfterASuspensionRecordsNothing is the group's late-call guard (groups/README.md convention 3).
+// TestTypeScriptACallVariantAfterASuspensionRecordsNothing is the group's late-call guard (groups/README.md convention 3),
+// and it pins ALL FOUR bindings: unguarding any one of them records an event after the suspension and turns this red.
 //
-// WHICH OF THE FOUR IT CAN FALSIFY, and why the other three are in the fixture but cannot turn it red. Removing `guarded` from
-// `__cleat_call_retry` makes this fail: that call reaches the host and `freshCallWithRetry` records an ordinary `call` event. The
-// other three are refused by the ENGINE before they record anything once the segment has suspended -- `DurableSend`,
-// `DurableScheduleInvoke` and `DurableCallWithHeartbeat` all begin with `stopBeforeNewWork()` (`engine/durablecalls.go`,
-// `engine/heartbeats.go`), which answers with bit 31 and records no event. Measured, not assumed: with `guarded` removed from
-// `__cleat_schedule_invoke` alone, and separately from `__cleat_call_heartbeat` alone, every test in this file stays green and
-// the recorded history after the suspension is EMPTY.
+// Measured one binding at a time, with REBUILD_PLUGIN=1:
 //
-// So the three unobservable calls keep their guards as defence in depth and are exercised here as documentation, while the
-// assertion that can fail is the one over the events and services a call actually reaches. The same limit is recorded on the
-// signals group's late-send test: a call the engine refuses records nothing a test can see.
+//   __cleat_call_retry        -> call event, payments/charge
+//   __cleat_call_heartbeat    -> call event, payments/slow
+//   __cleat_send              -> durable_send event
+//   __cleat_schedule_invoke   -> durable_schedule_invoke event, email/digest
+//
+// THE FIRST VERSION OF THIS COMMENT SAID THE OPPOSITE -- that the engine refused `send`, `callHeartbeat` and `scheduleInvoke`
+// after a suspension and their guards were unobservable -- and it was wrong twice over. `stopBeforeNewWork` is a DEFER-PHASE
+// and shutdown condition (`engine/durablecalls.go`), not "this segment suspended", so those three record normally after a
+// suspension. And the "measured" empty history behind the claim came from a mutation that never applied: it was a string
+// replacement against text `cargo fmt` had since reflowed, so the binding stayed guarded, the probe printed nothing, and the
+// green run was the baseline wearing the mutation's clothes. A mutation that does not apply is not a measurement.
 func TestTypeScriptACallVariantAfterASuspensionRecordsNothing(t *testing.T) {
 	root := needToolchain(t)
 	src := "tests/typescript/testdata/workflows/late_calls.ts"

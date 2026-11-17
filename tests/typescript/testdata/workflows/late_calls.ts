@@ -5,9 +5,9 @@ import { workflow } from "@cleat/ts";
 // durable_schedule_invoke or a call event -- and, for send, dispatches a real request -- for a segment the host is about to
 // abandon.
 //
-// ALL FOUR, because a guard is per binding and three of them record nothing a test can see unless the test makes them. Review
-// measured exactly that on the first version: this file made only `send` and `callRetry`, and unguarding
-// `__cleat_schedule_invoke` or `__cleat_call_heartbeat` left all seven tests green.
+// ALL FOUR, because a guard is per binding and each of the four leaves a different record behind: `callRetry` and
+// `callHeartbeat` write a call event, `send` a durable_send event and `scheduleInvoke` a durable_schedule_invoke event.
+// Unguarding any one of them individually fails the test -- measured one at a time, with REBUILD_PLUGIN=1.
 export const lateCalls = workflow(async (ctx) => {
   const p = ctx.sleep(60000);
   ctx.send("email", "notify", {});
