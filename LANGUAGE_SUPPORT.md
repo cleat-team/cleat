@@ -297,7 +297,9 @@ crates/cleat-macro/src/*.rs`) — grown substantially from the original
 
 ### TypeScript (real): in development, not supported
 
-`tiers.yaml` grants TypeScript no tier, and the row above says so; nothing in this section is a support claim. It can be built,
+`tiers.yaml` lists TypeScript under tier 2, marked IN DEVELOPMENT -- NOT SUPPORTED, so that the work has a tier from its first commit
+without being read as a support claim. This table's Tier column means a *supported* tier, so the cell above is a dash for that reason, and
+`scripts/check-typescript-tier.py` refuses any other value while the status is not "supported". Nothing in this section is a support claim. It can be built,
 tested and run, and [the getting-started page](docs/tutorials/typescript-quick-start.md) is where to start. What it cannot do or
 has not been shown to do, each with its issue:
 
@@ -312,7 +314,7 @@ has not been shown to do, each with its issue:
 
 The binary-size cell is one measurement: the example module in `examples/ts-workflow` is 1,446,426 bytes and the Javy plugin it
 embeds is 1,296,266 bytes (2026-11-17, macOS arm64; `cleat build --target ts -o <dir> examples/ts-workflow/workflow.ts:greet`).
-The condition for a tier, and the open items behind it, are in `tiers.yaml` under `sdk-typescript`.
+The condition for a support claim, and the open items behind it, are in `tiers.yaml` under `sdk-typescript`.
 
 ---
 
