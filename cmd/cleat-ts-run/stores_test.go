@@ -285,8 +285,12 @@ func TestBuildStoresWiresEachFlagToTheLoaderThatCanReadIt(t *testing.T) {
 	// wiring regresses to it.
 	rejects := write("promise-rejects.json", `{"refused":"nope"}`)
 	signals := write("signals.json", `{"approve":[{"ok":true}]}`)
+	// A real -children fixture, not "". Passing "" here left the children flag unwired by any Go test, which
+	// cleat-review measured on cleat#3991: the flag could have been dropped from buildStores entirely and the suite
+	// stayed green.
+	children := write("children.json", `{"charge":{"result":{"id":"ch_1"}},"refund":{"error":"not allowed"}}`)
 
-	ps, ss, _, err := buildStores(promises, rejects, signals, "")
+	ps, ss, cs, err := buildStores(promises, rejects, signals, children)
 	if err != nil {
 		t.Fatalf("buildStores refused fixtures the runner must accept: %v", err)
 	}
@@ -305,6 +309,27 @@ func TestBuildStoresWiresEachFlagToTheLoaderThatCanReadIt(t *testing.T) {
 	}
 	if d, found, _ := ss.PollSignal(context.Background(), "wf", "approve"); !found || d.Payload != `{"ok":true}` {
 		t.Errorf("scripted signal did not survive the wiring: found=%v payload=%q", found, d.Payload)
+	}
+
+	// The children fixture, through the same wiring. Both spellings, because a store that wired only `result` would
+	// leave the parent's error path untested -- the same reason the fixture carries both.
+	runID, err := cs.StartChildWorkflowAtomic(context.Background(), "", "parent", "charge", `{}`, 0, "", engine.EventRecord{}, 0)
+	if err != nil {
+		t.Fatalf("StartChildWorkflowAtomic(charge): %v", err)
+	}
+	out, err := cs.GetChildResult(context.Background(), runID)
+	if err != nil {
+		t.Fatalf("the child id from the wiring test is not usable: %v", err)
+	}
+	if !out.Completed || out.Failed || out.Result != `{"id":"ch_1"}` {
+		t.Errorf("scripted child result did not survive the wiring: %+v", out)
+	}
+	refundID, err := cs.StartChildWorkflowAtomic(context.Background(), "", "parent", "refund", `{}`, 0, "", engine.EventRecord{}, 0)
+	if err != nil {
+		t.Fatalf("StartChildWorkflowAtomic(refund): %v", err)
+	}
+	if out, err := cs.GetChildResult(context.Background(), refundID); err != nil || !out.Failed || out.Error != "not allowed" {
+		t.Errorf("scripted child failure did not survive the wiring: %+v err=%v", out, err)
 	}
 }
 
@@ -430,5 +455,65 @@ func TestLoadChildScriptAcceptsBothSpellingsAndRefusesAmbiguity(t *testing.T) {
 	// omission rather than by an empty object.
 	if _, err := loadChildScript(write("neither.json", `{"x":{}}`)); err == nil {
 		t.Error("a child with neither a result nor an error was accepted")
+	}
+}
+
+// THE CALLER'S PATH, which no test reached until cleat#3999. `StartChildWorkflowAtomic` is the method the engine
+// actually calls (engine/children.go), and it calls it with childID "" -- meaning "generate one". The store used to
+// echo the argument back, so the guest received an empty run id and `await_child` failed with "Check that the run ID is
+// valid", while every Go test here stayed green because none of them called this method at all.
+//
+// The assertion is not "the returned string is non-empty" alone. A store could return a plausible id it never recorded,
+// and the parent's next call would fail exactly as before, so the id must also be one the store can answer for.
+func TestStartChildWorkflowAtomicGeneratesAUsableIDWhenGivenNone(t *testing.T) {
+	c := newMemoryChildren(map[string]engine.ChildOutcome{
+		"charge": {Completed: true, Result: `{"id":"ch_1"}`},
+	})
+	const empty = ""
+	runID, err := c.StartChildWorkflowAtomic(context.Background(), empty, "parent", "charge", `{}`, 0, "", engine.EventRecord{}, 0)
+	if err != nil {
+		t.Fatalf("StartChildWorkflowAtomic: %v", err)
+	}
+	if runID == "" {
+		t.Fatal("StartChildWorkflowAtomic returned an empty run id; the guest's await_child would fail with " +
+			`"Check that the run ID is valid"`)
+	}
+	// Usable: the store must know the id it just issued.
+	out, err := c.GetChildResult(context.Background(), runID)
+	if err != nil {
+		t.Fatalf("the generated id %q is not one the store can answer for: %v", runID, err)
+	}
+	if !out.Completed || out.Result != `{"id":"ch_1"}` {
+		t.Errorf("GetChildResult on the generated id = %+v, want the scripted outcome", out)
+	}
+	if _, ok, err := c.GetChildCompletedAtMs(context.Background(), runID); err != nil || !ok {
+		t.Errorf("GetChildCompletedAtMs on the generated id = (_, %v, %v), want ok", ok, err)
+	}
+
+	// Two calls must not collide: an id that is regenerated as a constant would pass everything above.
+	second, err := c.StartChildWorkflowAtomic(context.Background(), "", "parent", "charge", `{}`, 0, "", engine.EventRecord{}, 0)
+	if err != nil {
+		t.Fatalf("second StartChildWorkflowAtomic: %v", err)
+	}
+	if second == runID {
+		t.Errorf("two children were given the same run id %q", runID)
+	}
+}
+
+func TestStartChildWorkflowAtomicUsesACallerSuppliedIDAsGiven(t *testing.T) {
+	// The other direction: when the caller DOES choose the id, the store must not substitute one of its own. Without
+	// this, "generate when empty" could be implemented as "always generate", which would silently break any caller that
+	// relies on the id it passed.
+	c := newMemoryChildren(nil)
+	const mine = "chosen-by-the-caller"
+	runID, err := c.StartChildWorkflowAtomic(context.Background(), mine, "parent", "anything", `{}`, 0, "", engine.EventRecord{}, 0)
+	if err != nil {
+		t.Fatalf("StartChildWorkflowAtomic: %v", err)
+	}
+	if runID != mine {
+		t.Fatalf("runID = %q, want the caller's %q", runID, mine)
+	}
+	if _, err := c.GetChildResult(context.Background(), mine); err != nil {
+		t.Errorf("the caller's id is not one the store can answer for: %v", err)
 	}
 }
