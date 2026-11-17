@@ -256,11 +256,18 @@
     // turns on the two rules a file: path has and no other does: a Windows drive letter is written with ":" (never "|") when
     // it is the first segment, and ".." never removes it.
     const isDriveLetter = (str) => str.length === 2 && /[A-Za-z]/.test(str[0]) && (str[1] === ":" || str[1] === "|");
+    // The specification distinguishes "is a Windows drive letter" (a two-code-point buffer) from "starts with a Windows
+    // drive letter", which also requires the third code point to be end, a separator, "?" or "#". So `C:x` does NOT start
+    // with one, and a base's drive letter is inherited in front of it.
+    const startsWithDrive = (str) => isDriveLetter(str.slice(0, 2)) && (str.length === 2 || /[\/\\?#]/.test(str[2]));
     const pathState = (path, str, special, file) => {
       const segs = str.split(special ? /[\/\\]/ : "/");
       for (let i = 0; i < segs.length; i++) {
         const last = i === segs.length - 1, lc = segs[i].toLowerCase();
         if (lc === ".." || lc === ".%2e" || lc === "%2e." || lc === "%2e%2e") {
+          // Only a two-code-point normalized drive letter survives shortening; `C:x` is popped. Node 24 does the same, and
+          // Node 26 does not -- the corpus is compared against the version CI pins (24) and that shape is excluded from it,
+          // with the specification's answer pinned guest-side (DIVERGENCES.md row 2).
           if (!(file && path.length === 1 && isDriveLetter(path[0])) && path.length) path.pop();
           if (last) path.push("");
         } else if (lc === "." || lc === "%2e") { if (last) path.push(""); }
@@ -347,12 +354,12 @@
         const done = (host, path) => ({ scheme: "file", user: "", pass: "", host, port: null, path, query: encQuery(true), frag });
         // The file path-start state: one leading separator is consumed, and only when there is none does a base's drive
         // letter become the first segment.
-        const startPath = (path, str) => {
+        const startPath = (path, str, inherit) => {
           if (str[0] === "/" || str[0] === "\\") return pathState(path, str.slice(1), true, true);
-          if (drive) path.push(drive);
+          if (inherit && drive) path.push(drive);
           return pathState(path, str, true, true);
         };
-        if (rest.slice(0, 2) === "//" || rest.slice(0, 2) === "\\\\") {
+        if (rest.length >= 2 && /[\/\\]/.test(rest[0]) && /[\/\\]/.test(rest[1])) {
           const after = rest.slice(2);
           if (after[0] === "/" || after[0] === "\\") return done("", pathState([], after.slice(1), true, true));
           let i = 0;
@@ -373,14 +380,14 @@
               if (host === null) return null;
             }
           }
-          return done(host, startPath([], tail));
+          return done(host, startPath([], tail, false));
         }
         if (rest[0] === "/" || rest[0] === "\\") {
           // A single leading separator keeps the base's authority -- and, for a drive-letter base, its drive, unless the
           // input names one itself. `file:/x` against `file:///C:/a/b` is `file:///C:/x`, as a bare `/x` is.
           const body = rest.slice(1);
           return done(baseFile ? baseFile.host : "",
-            pathState([], drive && !isDriveLetter(body.slice(0, 2)) ? drive + "/" + body : body, true, true));
+            pathState([], drive && !startsWithDrive(body) ? drive + "/" + body : body, true, true));
         }
         if (rest === "" && baseFile) {
           return { scheme: "file", user: "", pass: "", host: baseFile.host, port: null, path: baseFile.path.slice(), query: query !== null ? encQuery(true) : baseFile.query, frag };
@@ -388,10 +395,7 @@
         if (baseFile) {
           // A relative path that names a drive letter replaces the base's path outright (`D|/y` against `C:/a/b` is
           // `D:/y`, not `C:/a/D|/y`); anything else is appended below the base's directory.
-          if (rest.length >= 2 && rest[2] !== "/" && rest[2] !== "\\" && rest.length > 2) { /* fall through */ }
-          if (isDriveLetter(rest.slice(0, 2)) && (rest.length === 2 || rest[2] === "/" || rest[2] === "\\")) {
-            return done(baseFile.host, pathState([], rest, true, true));
-          }
+          if (startsWithDrive(rest)) return done(baseFile.host, pathState([], rest, true, true));
           const path = baseFile.path.slice();
           if (path.length > 1 || (path.length === 1 && !isDriveLetter(path[0]))) path.pop();
           return done(baseFile.host, pathState(path, rest, true, true));
@@ -423,7 +427,7 @@
           const sep = (c) => c === "/" || c === "\\";
           if (rel.length && sep(rel[0]) && !sep(rel[1])) {
             const drive = base.path.length && isDriveLetter(base.path[0]) ? base.path[0] : null;
-            if (drive && !isDriveLetter(rel.slice(1, 3))) return fileURL("/" + drive + rel, base);
+            if (drive && !startsWithDrive(rel.slice(1))) return fileURL("/" + drive + rel, base);
           }
           return fileURL(rel, base);
         }

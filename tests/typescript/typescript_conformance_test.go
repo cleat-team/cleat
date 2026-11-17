@@ -171,3 +171,29 @@ func TestTypeScriptURLFileURLsAgreeWithNode(t *testing.T) {
 	src := "tests/typescript/testdata/conformance/urls_file.ts"
 	compareLines(t, "file: URLs", guestResult(t, root, src, "urls_file"), nodeOracle(t, root, src, "urlsFile"))
 }
+
+// TestTypeScriptURLFileSpecShortening pins the one file: rule where Node's own versions disagree, so the corpus cannot be
+// its arbiter: shortening a path whose only segment starts with a drive letter but is longer than two code points. The
+// specification pops `C:x`; Node 24 (which CI pins) agrees, Node 26 keeps it. The expected strings are literals, not
+// Node's answers, and DIVERGENCES.md row 2 records why (cleat#3898).
+func TestTypeScriptURLFileSpecShortening(t *testing.T) {
+	root := needToolchain(t)
+	src := "tests/typescript/testdata/conformance/urls_file.ts"
+	got := guestResult(t, root, src, "urls_file_spec")
+	want := []string{
+		"file:///C:x/.. -> file:///",
+		"file:///C:x/../y -> file:///y",
+		"file:///h:1/.. -> file:///",
+		"file:///a:/.. -> file:///a:/",
+		"file:///C:/.. -> file:///C:/",
+		"file:///C:/a/.. -> file:///C:/",
+	}
+	if len(got) != len(want) {
+		t.Fatalf("the guest answered %d cases, want %d: %v", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("case %d: guest %q, want %q", i, got[i], want[i])
+		}
+	}
+}

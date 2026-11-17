@@ -22,6 +22,9 @@ const absolute: string[] = [
   "file:/x", "file:?q", "file:#f", "file:", "file:///a%2fb", "file:///a%2eb", "file://[::1]/x", "file://[::1]:80/x",
   "file://user@host/x", "file://host:80/x", "FILE:///C:/X", "file:///C:/x?q#f", "file:///C:/x#f", "file:///C:/x?q",
   "file:///C:/a/b/../../..", "file:///C:/../a", "file:///C:/|", "file:///|:/x",
+  // Mixed separators after the scheme: either separator opens the file-slash state, so a mixed pair is an authority.
+  "file:/\\C:/x", "file:\\/C:/x", "file:/\\h/x", "file:\\/h/x", "file:/\\h\\x", "file://localhost", "file:/\\localhost",
+  "file:///C:x/./y", "file:///C:x",
 ];
 
 const bases: string[] = ["file:///C:/a/b", "file:///C:/a/", "file:///a/b/", "file://host/a/b", "file:///", "file:/C:/", "file://localhost/C:/a/b",
@@ -33,6 +36,7 @@ const rels: string[] = [
   "", "x", "/x", "//h/p", "//localhost/p", "//C:/x", "//C|/x", "D|/y", "D:/y", "D:", "x/../y", "../x", "..", ".",
   "?q", "#f", "\\x", "\\\\srv\\s\\x", "C:/x", "C|/x", "/C:/x", "/C|/x", "%2e%2e/x", "./x/./y", "x y", "x?q", "x#f",
   "//", "/", "\\\\", "./D:/y", "..\\D:\\y", "..\\x", "../..", "x", "D", "D|x", "C:x", "/x/y",
+  "//h", "/\\h\\x", "\\/h/x", "/C:x", "/C|:x", "./C:x", "//localhost", "\\/localhost", "//LOCALHOST",
 ];
 
 export function urlsFile(): void {
@@ -48,6 +52,18 @@ export function urlsFile(): void {
     for (const r of withBase) {
       out.push(`new URL(${JSON.stringify(r)}, ${JSON.stringify(b)}) -> ${show(() => describe(new URL(r, b)))}`);
     }
+  }
+  __cleat_result(JSON.stringify(out));
+}
+
+// The one shape where Node's versions disagree with each other: shortening a file: path whose only segment starts with a
+// drive letter but is longer than two code points. The specification pops it, Node 24 (which CI pins) does the same, and
+// Node 26 keeps it -- so it is compared against neither and pinned here. `urls_file.ts` excludes it for that reason and
+// DIVERGENCES.md row 2 records it.
+export function urlsFileSpec(): void {
+  const out: string[] = [];
+  for (const s of ["file:///C:x/..", "file:///C:x/../y", "file:///h:1/..", "file:///a:/..", "file:///C:/..", "file:///C:/a/.."]) {
+    out.push(`${s} -> ${show(() => new URL(s).href)}`);
   }
   __cleat_result(JSON.stringify(out));
 }
