@@ -417,7 +417,9 @@
       const cp = Array.from(label, (c) => c.codePointAt(0));
       let rtl = false, hasEn = false, hasAn = false;
       for (const c of cp) {
-        if (c > 0x7f && !inTable(ALLOWED_RS, c)) return false;
+        // The allow-table was measured with a Latin neighbour, so it says nothing about a right-to-left code point; those are
+        // governed by the bidi rule below instead, and a right-to-left label is checked against the RTL class.
+        if (c > 0x7f && !inTable(ALLOWED_RS, c) && !isRtlCp(c)) return false;
         if (isRtlCp(c)) rtl = true;
         if (c >= 0x30 && c <= 0x39) hasEn = true;
         if ((c >= 0x660 && c <= 0x669) || (c >= 0x6f0 && c <= 0x6f9)) hasAn = true;
@@ -449,7 +451,7 @@
       for (let i = 0; i < labels.length; i++) {
         let l = labels[i];
         for (const c of Array.from(l, (x) => x.codePointAt(0))) {
-          if (c > 0x7f && !inTable(ALLOWED_RS || (ALLOWED_RS = rangeTable(URL_ALLOWED)), c)) return null;
+          if (c > 0x7f && !isRtlCp(c) && !inTable(ALLOWED_RS || (ALLOWED_RS = rangeTable(URL_ALLOWED)), c)) return null;
         }
         l = l.normalize("NFKC").toLowerCase();
         if (l.indexOf(".") >= 0) return null;

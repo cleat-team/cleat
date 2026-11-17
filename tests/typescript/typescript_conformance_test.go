@@ -197,6 +197,7 @@ func TestTypeScriptURLFileSpecShortening(t *testing.T) {
 		}
 	}
 }
+
 // parseRanges reads the sweep's compact range list ("9-a,d,21-24") into pairs.
 func parseRanges(t *testing.T, s string) [][2]int {
 	t.Helper()
@@ -299,4 +300,34 @@ func TestTypeScriptURLHostCodePointSweep(t *testing.T) {
 		}
 		t.Logf("%s: %d silent, %d loud (ceiling %d): %v", form, len(silent), len(loud), loudCeiling, loud)
 	}
+}
+
+// TestTypeScriptURLContextualRules covers what a single-code-point sweep cannot see: UTS46's CheckJoiners and CheckBidi.
+// Each case is a whole host, answered by both sides, so the comparison is about the rule. The guest refusing a host Node
+// accepts is loud and is reported; the guest ACCEPTING one Node refuses is a silent divergence and fails.
+func TestTypeScriptURLContextualRules(t *testing.T) {
+	root := needToolchain(t)
+	needNodeAtLeast(t, 24)
+	src := "tests/typescript/testdata/conformance/urls_context.ts"
+	guest := guestResult(t, root, src, "urls_context")
+	node := nodeOracle(t, root, src, "urlsContext")
+	if len(guest) != len(node) {
+		t.Fatalf("the guest answered %d cases and Node %d", len(guest), len(node))
+	}
+	if len(guest) == 0 {
+		t.Fatal("no cases ran, so nothing was compared")
+	}
+	var silent, loud []string
+	for i := range guest {
+		g, n := strings.HasSuffix(guest[i], "accept"), strings.HasSuffix(node[i], "accept")
+		if g && !n {
+			silent = append(silent, guest[i])
+		} else if n && !g {
+			loud = append(loud, guest[i])
+		}
+	}
+	if len(silent) > 0 {
+		t.Errorf("the guest accepts %d host(s) Node refuses: %v -- a silent divergence", len(silent), silent)
+	}
+	t.Logf("%d contextual probes: %d silent, %d loud: %v", len(guest), len(silent), len(loud), loud)
 }
