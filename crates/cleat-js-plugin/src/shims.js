@@ -1126,7 +1126,9 @@
         };
         const error = () => {
           if (this.#fatal) throw new TypeError("The encoded data was not valid for encoding utf-8");
-          out.push("\ufffd");
+          // Through emit(), not a bare push: WHATWG marks the BOM seen for ANY emitted item, a replacement character included,
+          // so a first stream chunk of just 0xFF closes the decision and a later EF BB BF is data (cleat#4049 review).
+          emit(0xfffd);
           need = 0; seen = 0; cp = 0; lower = 0x80; upper = 0xbf;
         };
         while (i < bytes.length) {
@@ -1164,7 +1166,7 @@
             this.#pending = bytes.slice(bytes.length - (seen + 1));
           } else {
             if (this.#fatal) throw new TypeError("The encoded data was not valid for encoding utf-8");
-            out.push("\ufffd");
+            emit(0xfffd);
             this.#pending = new Uint8Array(0);
           }
         } else {

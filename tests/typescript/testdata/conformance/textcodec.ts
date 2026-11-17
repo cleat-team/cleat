@@ -132,6 +132,15 @@ export function textcodec(): void {
     out.push(`stream(bom-after-output) = ${shown(a)} | ${shown(b)} | ${shown(c)}`);
   }
   {
+    // A REPLACEMENT CHARACTER is an emitted item too: WHATWG marks the BOM seen on anything the decoder emits, U+FFFD included.
+    // A first chunk of an invalid byte therefore closes the decision, and a later EF BB BF is data.
+    const d = new TextDecoder();
+    const a = d.decode(bytes(0xff), { stream: true });
+    const b = d.decode(bytes(0xef, 0xbb, 0xbf, 0x42), { stream: true });
+    const c = d.decode();
+    out.push(`stream(bom-after-replacement) = ${shown(a)} | ${shown(b)} | ${shown(c)}`);
+  }
+  {
     // Not streamed: a truncated sequence is an error (or one U+FFFD), and the decoder is non-fatal by default.
     const d = new TextDecoder();
     const a = d.decode(bytes(0xe2, 0x82));
