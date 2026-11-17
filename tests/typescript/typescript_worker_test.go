@@ -216,9 +216,11 @@ func generateAPIKey(t *testing.T, bin, appDSN string) string {
 }
 
 // deployWorkflow puts a built module where the worker will find it. PostgreSQL is `cleatctl deploy`, exactly as it always was.
-// MySQL and SQL Server cannot use it: `cleatctl deploy` is Postgres-only by design and REFUSES elsewhere ("has not been ported",
-// cmd/cleatctl/ported.go) rather than fail partway. cmd/deploy-workflow supports all three through the engine's own store, with
-// the same version and plugin checks, so that is what they use; ctl is whichever binary newWorkerEnv built for the dialect.
+// MySQL and SQL Server use cmd/deploy-workflow, which supports all three through the engine's own store with the same version and
+// plugin checks; ctl is whichever binary newWorkerEnv built for the dialect. That is a choice made when `cleatctl deploy` was
+// PostgreSQL-only (cleat#3994), and it is no longer a necessity: `cleatctl deploy workflow` works on all three since cleat#4004, so
+// this could use one command everywhere. It was left alone because changing which binary a CI job builds and runs is a different
+// change from documenting the guest, and would need the MySQL and SQL Server jobs run to prove it.
 func deployWorkflow(t *testing.T, ctl, ownerDSN, name, wasmPath string) {
 	t.Helper()
 	args := []string{"-db", ownerDSN, "deploy", "workflow", name, wasmPath}
