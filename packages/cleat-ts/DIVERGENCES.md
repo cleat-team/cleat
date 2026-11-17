@@ -28,13 +28,24 @@ forms), IPv6 hosts in brackets (including the embedded-IPv4 form, written back a
 `file:` URLs (the empty host, `localhost` folded to it, and a Windows drive letter kept in the path), internationalised hosts,
 `URLSearchParams` in full, `URL.canParse` and `URL.parse`, and the `search` and `hash` setters (which update `searchParams`).
 
-IDNA is the part of UTS46 that needs no tables: NFKC folds fullwidth and compatibility forms, the three non-ASCII dot characters
-become `.`, labels are lowercased, and a non-ASCII label becomes `xn--` plus RFC 3492 Punycode (percent-encoded UTF-8 is decoded
-first, so `m%C3%BCnchen.de` is `münchen.de`). A label already in `xn--` form is **checked, not trusted**: it must decode, its
-re-encoding must be the same payload, and the decoded label must be non-empty, lowercase, NFC, carry no control, format or space
-code point, and neither start nor end with a hyphen. Those are the classes Node was measured to refuse (`xn--a-`, `xn--a-xbb`,
-`xn--kkg`, `xn--1ug`, `xn--ib9b`, `xn----`, … are all failures on both sides). Beyond them there is no UTS46 disallowed-character
-table, so a class not in that list may be accepted where Node refuses it; the corpus is the list of what was measured.
+IDNA is NFKC folding (fullwidth and compatibility forms), the three non-ASCII dot characters becoming `.`, lowercasing,
+percent-encoded UTF-8 decoded first (so `m%C3%BCnchen.de` is `münchen.de`), and RFC 3492 Punycode. Validity is **measured, not
+tabulated by hand**: a table of the code points Node 26.4.0 accepts in a label, plus RFC 5893's bidi rule approximated with the
+measured right-to-left class. A label already in `xn--` form is **checked, not trusted**: it must decode, its decoded form must
+be what UTS46 would have emitted (NFKC, case-folded — with the two measured exceptions, SHARP S and Cherokee — and free of
+default-ignorable code points), it must contain a non-ASCII code point and satisfy the same validity and bidi rules, and its
+re-encoding must be the same payload.
+
+**The exhaustive check, measured 2026-11-17:** every code point U+0000-U+10FFFF (1,112,064, surrogates excluded), in a raw
+label and in an already-Punycode-encoded one, compared with Node 26.4.0 — **zero code points that the guest accepts and Node
+refuses**, in either form. The guest refuses 23 code points that Node accepts, all Punycode labels decoding to a lowercase
+letter whose case mapping this engine's Unicode tables apply differently from ICU's (U+0131, U+01F0, U+0390, U+03B0, U+03C2,
+U+1E96-U+1E99, U+1F50-U+1F56, U+1FB6, U+1FC6, U+1FD2-U+1FD7, U+1FE2-U+1FE7, U+1FF6). That direction is **loud**: the shim
+throws where Node answers. `TestTypeScriptURLHostCodePointSweep` re-runs the sweep over the BMP and a strided sample of the
+supplementary planes (the whole range is longer than one guest execution is allowed), fails on any silently accepted code point,
+and fails if the loud set grows past its ceiling. Multi-code-point rules are approximated: an all-right-to-left label is
+accepted and one mixing a right-to-left letter with a Latin one is refused, which is what the sweep measured; deeper contextual
+rules (CONTEXTJ, CONTEXTO) are not modelled, and a class they govern is the remaining exposure.
 
 It **throws** `cleat: URL: <what> is not supported in the guest`, and never returns a guess, for setting `href`, `protocol`,
 `username`, `password`, `host`, `hostname`, `port` or `pathname`. `TestTypeScriptURLRefusesWhatItCannotAnswer` holds each one, and
