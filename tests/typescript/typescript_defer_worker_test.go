@@ -1,11 +1,9 @@
 package typescript
 
 import (
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"os/exec"
 	"strings"
 	"sync"
 	"testing"
@@ -52,48 +50,6 @@ func (c *callRecorder) has(s string) bool {
 	return false
 }
 
-// startWorkerWith is startWorker plus extra flags.
-//
-// It duplicates startWorker rather than changing it because this file must not touch typescript_worker_test.go while
-// WS-cleat2's dialect work is open on it (cleat#3992 renames needPostgres there). When that lands, the two can fold
-// into one function taking variadic flags; until then a duplicate is the smaller cost, and it is confined to this file.
-func startWorkerWith(t *testing.T, bin, appDSN, ownerDSN string, extra ...string) *worker {
-	t.Helper()
-	args := append([]string{"--driver=postgres", "--db=" + appDSN, "--migrate-db=" + ownerDSN,
-		"--api-addr=127.0.0.1:0", "--poll=100ms", "--heartbeat=500ms"}, extra...)
-	cmd := exec.Command(bin, args...)
-	w := &worker{cmd: cmd, out: &syncBuffer{}, exited: make(chan struct{})}
-	cmd.Stdout, cmd.Stderr = w.out, w.out
-	if err := cmd.Start(); err != nil {
-		t.Fatal(err)
-	}
-	go func() { _ = cmd.Wait(); close(w.exited) }()
-	t.Cleanup(w.kill)
-
-	deadline := time.Now().Add(90 * time.Second)
-	for time.Now().Before(deadline) {
-		select {
-		case <-w.exited:
-			t.Fatalf("cleat-worker exited before reporting a bound API address:\n%s", w.out.String())
-		default:
-		}
-		for _, line := range strings.Split(w.out.String(), "\n") {
-			var rec struct {
-				Msg  string `json:"msg"`
-				Addr string `json:"addr"`
-			}
-			if json.Unmarshal([]byte(line), &rec) == nil && rec.Msg == "HTTP API listening" {
-				w.addr = rec.Addr
-				return w
-			}
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
-	w.kill()
-	t.Fatalf("no \"HTTP API listening\" line within 90s:\n%s", w.out.String())
-	return nil
-}
-
 func TestTypeScriptDeferSegmentRunsOnARealWorker(t *testing.T) {
 	rec := &callRecorder{}
 	svc := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -109,7 +65,7 @@ func TestTypeScriptDeferSegmentRunsOnARealWorker(t *testing.T) {
 	// --bench-svc-url forwards the fixture's calls here; without a server the call returns "service not configured", and
 	// a defer that was refused looks the same from outside as one that ran. The egress guard exempts exactly the endpoint
 	// it is about to dial (cmd/cleat-worker/service_egress.go), which is why a loopback httptest server is reachable.
-	w := startWorkerWith(t, e.workerBin, e.appDSN, e.ownerDSN, "--bench-svc-url="+svc.URL)
+	w := startWorker(t, e.workerBin, e.appDSN, e.ownerDSN, "--bench-svc-url="+svc.URL)
 
 	id := startRun(t, w, e.key, "defer_terminal", map[string]any{})
 
