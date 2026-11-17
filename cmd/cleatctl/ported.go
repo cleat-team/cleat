@@ -272,7 +272,7 @@ func requireDeployPluginPorted(d engine.Dialect) {
 			"(`ON CONFLICT (name, version)`), so failing partway through would leave the database\n"+
 			"in a state no one asked for.\n\n"+
 			"`cleatctl deploy workflow` and `cleatctl versions` DO work on %s -- deploy the module\n"+
-			"with those, or run this command against PostgreSQL.\n",
+			"Use those, or run this command against PostgreSQL.\n",
 		name, strings.Join(deployPluginOn, ", "), name, name)
 	osExit(1)
 }
