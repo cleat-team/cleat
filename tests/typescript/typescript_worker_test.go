@@ -152,10 +152,14 @@ type worker struct {
 // floor is dominated by a fixed 30s tolerable-stall allowance, so no heartbeat makes a dead worker's run reclaimable in
 // seconds; the kill test below therefore waits about 41s for the takeover, and that wait is the worker's own invariant, not
 // slack in the test.
-func startWorker(t *testing.T, bin, appDSN, ownerDSN string) *worker {
+// startWorker starts the worker against the active dialect. Extra flags are appended after the ones every test needs, so a
+// test that has to configure the worker (a service endpoint, a recorder) does not grow a second copy of this startup --
+// a copy would pick its own --driver and silently stop following activeDialect (cleat#3988, cleat#3826).
+func startWorker(t *testing.T, bin, appDSN, ownerDSN string, extra ...string) *worker {
 	t.Helper()
-	cmd := exec.Command(bin, "--driver="+activeDialect(t).name, "--db="+appDSN, "--migrate-db="+ownerDSN, "--api-addr=127.0.0.1:0",
-		"--poll=100ms", "--heartbeat=500ms")
+	args := append([]string{"--driver=" + activeDialect(t).name, "--db=" + appDSN, "--migrate-db=" + ownerDSN, "--api-addr=127.0.0.1:0",
+		"--poll=100ms", "--heartbeat=500ms"}, extra...)
+	cmd := exec.Command(bin, args...)
 	w := &worker{cmd: cmd, out: &syncBuffer{}, exited: make(chan struct{})}
 	cmd.Stdout, cmd.Stderr = w.out, w.out
 	if err := cmd.Start(); err != nil {
