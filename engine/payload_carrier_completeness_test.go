@@ -122,6 +122,7 @@ var allEventTypesForCarrierAudit = []EventType{
 	EventTypeScopeAcquired, EventTypeDurableSend, EventTypeDurableScheduleInvoke,
 	EventTypeFetch, EventTypePollChild, EventTypeAwaitAnyChild, EventTypeAdminAction,
 	EventTypeScheduleCron, EventTypeDeleteCron, EventTypeListCrons,
+	EventTypeCallRetryRefused,
 }
 
 // setProbeValue sets v to a distinguishable non-zero value, reporting false

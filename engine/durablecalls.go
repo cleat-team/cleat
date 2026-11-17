@@ -499,12 +499,14 @@ func (s *execSession) DurableCallWithRetry(ctx context.Context, m api.Module,
 			}
 		} else if budget := s.engine.hostRetryBudget(ctx); !retryPolicyFitsBudget(
 			requestedAttempts, initialIntervalMs, backoffCoefficient100x, maxIntervalMs, budget) {
+			// The REQUEST is deliberately not recorded: nothing reads it back, and a request body is exactly the
+			// kind of value the sealed-payload machinery exists for. Service and Op are enough for a divergence
+			// report to name the call.
 			s.recordEvent(EventRecord{
 				Step:      s.stepCount,
 				EventType: EventTypeCallRetryRefused,
 				Service:   service,
 				Op:        operation,
-				Request:   requestJSON,
 			})
 			return s.refuseRetryPolicy(ctx, m, responsePtr, responseMaxLen,
 				fmt.Sprintf("retry policy rejected: worst-case backoff exceeds the %s host-retry budget; "+
