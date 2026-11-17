@@ -147,7 +147,10 @@ export function urls(): void {
   op.hash = "f"; op.hash = ""; out.push(`opaque after hash: ${describe(op)}`);
   // The downstream symptom: how zod's z.url() decides. It calls new URL(input) inside a try/catch and then looks at the hostname.
   for (const input of ["https://example.com", "http://localhost:3000/x", "nope", "ftp://a.b/c", "javascript:alert(1)", "mailto:a@b.c", "http://", "https://", "//a.b",
-                       "https://example.com/a b", "HTTP://EXAMPLE.COM", "https://user:pw@a.b/", "http://1.2.3.4/", "https://-bad-.com"]) {
+                       "https://example.com/a b", "HTTP://EXAMPLE.COM", "https://user:pw@a.b/", "http://1.2.3.4/", "https://-bad-.com",
+                       // The three inputs the shim used to refuse, which a catch-all read as "invalid" (cleat#3898).
+                       "http://[::1]/", "http://[::1]:3000/x", "http://[::ffff:1.2.3.4]/", "http://münchen.de/", "http://xn--mnchen-3ya.de/",
+                       "file:///tmp/a.ts", "file://localhost/tmp/a.ts", "file:///C:/x", "http://[::1"]) {
     let verdict: string;
     try { const x = new URL(input); verdict = "valid " + x.protocol + "//" + x.hostname; } catch (e) { verdict = "invalid"; }
     out.push(`zod-like ${JSON.stringify(input)} -> ${verdict}`);

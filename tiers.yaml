@@ -778,11 +778,28 @@ tier2:
            kill-path cleanup reaches AssemblyScript guests"
 
     - id: sdk-typescript
-      status: IN DEVELOPMENT -- NOT SUPPORTED    # cleat#3825; no support claim until the last PR of that issue
+      decision: DECIDED 2026-11-17    # owner: tier 2 in the PR after the cleat#3898 fix, once no SILENT divergence remains
       why: |
-        TypeScript guests on Javy (QuickJS), static mode, as a tier-2 language. Listed here
-        so that the work has a tier from its first commit, and marked NOT SUPPORTED so that
-        having a tier is not read as having support. Nothing in this entry grants a claim.
+        TypeScript guests on Javy (QuickJS), static mode, tier 2. It carried
+        "IN DEVELOPMENT -- NOT SUPPORTED" from its first commit (cleat#3825) so that having a
+        tier would not be read as having support; that was removed in the PR fixing
+        cleat#3898, on the owner's condition that no silent divergence from Node remains.
+
+        What the claim rests on, measured 2026-11-17 against Node 26.4.0 and Node 24 (the
+        version CI pins) and held by tests (packages/cleat-ts/DIVERGENCES.md row 2 carries
+        the commands and the numbers): the URL shim answers IPv6 hosts, file: URLs and
+        internationalised hosts; every code point U+0000-U+10FFFF was swept in a raw and an
+        already-Punycode-encoded host label, by accept/refuse AND by resulting host VALUE,
+        with ZERO code points the guest accepts and Node refuses and ZERO value differences
+        where both accept; 48 contextual probes cover UTS46's CheckJoiners and CheckBidi
+        (zero silent); and the IDNA answers where Node's own versions disagree are pinned as
+        literals rather than compared. The loud direction -- the guest refusing what Node
+        accepts -- is named in that row: single code points whose case mapping needs the
+        UTS46 table, the joiner labels whose CheckJoiners rule is not implemented, and the
+        bidi-AN digit labels. TestTypeScriptURLHostCodePointSweep,
+        TestTypeScriptURLContextualRules, TestTypeScriptURLIDNAContextRules,
+        TestTypeScriptURLIDNASpecRefusesMalformedLabels and
+        TestTypeScriptURLFileSpecShortening hold them.
         scripts/check-typescript-tier.py fails if LANGUAGE_SUPPORT.md's language table or
         README.md says more than this file. The table is parsed; the README check is a LINE
         HEURISTIC (TypeScript or JavaScript beside a support word or a check mark, one line
@@ -808,15 +825,16 @@ tier2:
         TestTypeScript* function anywhere else, and refuses to pass if tests/typescript/
         holds none.
       open_items:
+        - "CheckJoiners (cleat#4020): a ZWNJ or ZWJ in a label is refused whatever its context, so a Devanagari, Malayalam
+           or Arabic host that Node accepts is refused here -- 12 of the 48 contextual probes, all loud"
         - "silent divergences from Node (the dangerous kind: a plausible wrong answer, no
            error). Date setters given a non-finite argument: FIXED, held by
            TestTypeScriptDateSettersAgreeWithNode (631 cases against Node, recorded
-           2026-11-17 in DIVERGENCES.md row 1). URL: only PARTLY fixed (row 2). Valid URLs
-           the shim can answer are accepted, held by TestTypeScriptURLAgreesWithNode; an
-           IPv6 host, an internationalised host or a file: URL makes the shim throw, and a
-           catch-all such as zod's z.url() reads that throw as 'invalid' where Node says
-           valid. That residue is still silent through a catch-all, and is cleat#3898. The
-           list covers what was looked at (four npm packages, 27 cases); it is not closed"
+           2026-11-17 in DIVERGENCES.md row 1). URL: FIXED and measured, row 2 (cleat#3898).
+           The shim answers IPv6 hosts, file: URLs and internationalised hosts, and the IDNA
+           claim is the code-point sweep by accept/refuse AND by host value (zero silent on
+           both) plus the pairs probes and the pinned version-split answers. The list covers
+           what was looked at (four npm packages, 27 cases); it is not closed"
         - "dialects, as of 2026-11-17 (re-derive from .github/workflows/typescript-tier2.yml):
            the database-backed worker tests run on PostgreSQL, MySQL and SQL Server, one
            tier-2 job each (cleat#3997, #4006). ONLY those tests run on MySQL and SQL
@@ -833,8 +851,8 @@ tier2:
            killed workflow's defers, which still do not run (cleat#3922). Delivered since the
            previous revision of this list: harness stores for promises, signals and children
            (cleat#3828) and defer segments, so javascript is in engine.deferSegmentLanguages
-           (cleat#3826). The getting-started page and the LANGUAGE_SUPPORT.md row are
-           cleat#3831"
+           (cleat#3826). The getting-started page and the LANGUAGE_SUPPORT.md row landed with
+           the flip (cleat#3831)"
         - "module size, measured 2026-11-17 on macOS arm64: the example module is 1,446,426
            bytes and the Javy plugin it embeds is 1,296,266 (re-derive: cleat build --target
            ts -o <dir> examples/ts-workflow/workflow.ts:greet, then packages/cleat-ts/.work/
