@@ -146,7 +146,13 @@ var bindingReasonPrefix = regexp.MustCompile(`^(pending|permanent): \S.{15,}$`)
 // `__cleat_uuid` -> `cleat_random` with `cleat_uuid` moved to unbound satisfied every other rule while uuid() returned a
 // random float. A naming rule is a proxy for the call site inside the closure; a full check would parse what each
 // `g.set` actually calls, and the Rust SDK's #[link_name] renames are why that parse is not one line.
-var bindingNameExceptions = map[string]string{"__cleat_set_query_state": "set_query_state"}
+var bindingNameExceptions = map[string]string{
+	"__cleat_set_query_state": "set_query_state",
+	// The other two unprefixed exports (cleat#3827 group I). Both are workflow-callable and both are bound through
+	// group `plugins`, so neither global's export can be derived from its name.
+	"__cleat_plugin_call":           "plugin_call",
+	"__cleat_plugin_call_streaming": "plugin_call_streaming",
+}
 
 // reconcileBindings returns one message per violation, in a stable order. Empty means the inventory and the three
 // sources agree.
