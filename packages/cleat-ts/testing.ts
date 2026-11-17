@@ -123,7 +123,7 @@ export interface RunOptions {
    *   signals    group B   the existing -signals queue; `extras.signalsSent` is what the run sent (`signalWorkflow`)
    *   children   group C   child handles, waits
    *   detached   group D
-   *   locks      group E   ConcurrencyKeyStore
+   *   locks      group E   ConcurrencyKeyStore; WITHOUT a locks script every acquire answers false (no store at all)
    *   schedules  group F   cron
    *   continuation group G   (NOT `continue`: it is a Rust keyword, so `mod continue;` does not compile)
    *   calls      group H   retry, heartbeat, send, schedule-invoke
