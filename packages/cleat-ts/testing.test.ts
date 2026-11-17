@@ -21,6 +21,16 @@ function build(relSrc: string, entry: string): string {
   return join(WORK, `${entry}.wasm`);
 }
 
+// build.sh names its OUTPUT after the SOURCE file, not the entry -- `out=${OUT_NAME:-$name}` where $name is the source
+// basename -- so `build()` above only agrees with it when the entry happens to equal the source name. A file that
+// exports two entries needs one build with both, and the module is then the source-named one. Getting this wrong reads
+// as "the module does not exist", which is what it looked like the first time.
+function buildEntries(relSrc: string, entries: string[]): string {
+  execFileSync(join(HERE, "build.sh"), [relSrc, entries.join(",")], { cwd: ROOT, stdio: "pipe" });
+  const base = relSrc.slice(relSrc.lastIndexOf("/") + 1).replace(/\.ts$/, "");
+  return join(WORK, `${base}.wasm`);
+}
+
 // Built once for the whole file; `go build` and build.sh are both cached after the first call.
 process.env.CLEAT_TS_RUN ??= (() => {
   const bin = join(WORK, "cleat-ts-run");
@@ -126,6 +136,34 @@ test("with no queued signal the same workflow PARKS", () => {
   const run = runWorkflow(module, "signal_store", {});
   assert.equal(run.ok, true, `an unqueued signal made the run fail rather than park: ${run.error}`);
   assert.equal(run.suspended, true, "a signal appeared from nowhere; the store invented a delivery");
+});
+
+// Child workflows. Both outcomes are scripted, because a harness that could only say "the child succeeded" would
+// leave the parent's error path untested by construction -- and the parent's handling of a rejection is the thing a
+// test author actually wants to pin.
+test("a child the test scripts returns its result to the parent", () => {
+  const module = buildEntries("tests/typescript/testdata/workflows/child_store.ts", ["child_store", "child_store_fails"]);
+  const run = runWorkflow(module, "child_store", {}, { children: { charge: { result: { id: "ch_1" } } } });
+  assert.equal(run.ok, true, `the workflow failed despite a scripted child: ${run.error}`);
+  assert.equal(run.suspended, false, "the workflow parked although its child was scripted as finished");
+  assert.deepEqual((run.result as Record<string, unknown>).charged, { id: "ch_1" });
+  // From the store, not the workflow's own output: the result alone cannot show that a child was started.
+  assert.deepEqual(run.childrenStarted, ["charge"]);
+});
+
+test("a child the test scripts as FAILED reaches the parent's error path", () => {
+  const module = buildEntries("tests/typescript/testdata/workflows/child_store.ts", ["child_store", "child_store_fails"]);
+  const run = runWorkflow(module, "child_store_fails", {}, { children: { charge: { error: "card declined" } } });
+  assert.equal(run.ok, true, `the workflow failed instead of catching the child's error: ${run.error}`);
+  assert.equal(run.suspended, false);
+  assert.match(String((run.result as Record<string, unknown>).failure), /card declined/);
+});
+
+test("with no script the same child call PARKS", () => {
+  const module = buildEntries("tests/typescript/testdata/workflows/child_store.ts", ["child_store", "child_store_fails"]);
+  const run = runWorkflow(module, "child_store", {});
+  assert.equal(run.ok, true, `an unscripted child made the run fail rather than park: ${run.error}`);
+  assert.equal(run.suspended, true, "an unscripted child was reported finished; the store invented an outcome");
 });
 
 test("a deliberately broken workflow FAILS through the harness", () => {

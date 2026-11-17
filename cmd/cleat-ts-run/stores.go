@@ -262,3 +262,147 @@ func loadSignalScript(path string) (map[string][]string, error) {
 	}
 	return out, nil
 }
+
+// memoryChildren is an engine.ChildWorkflowStore driven by the test's script (cleat#3828).
+//
+// WHAT IT IS FOR. A TypeScript workflow reaches a child through `Ctx.child(name, input)`, which is bound
+// (`__cleat_child_workflow` / `__cleat_await_child`); without a store the engine answers "no child workflow store" and
+// the call fails. With this, a test says what a child NAMED <name> returns, and the workflow runs against it.
+//
+// THE CHILD IS ALREADY FINISHED, and that is the divergence worth stating loudly. A real child is a workflow: it
+// starts, runs, and completes at some instant the parent may have to wait for. This store scripts the OUTCOME and
+// reports the child as having completed long ago, so the parent never waits. It therefore tests "the parent handles
+// what the child returned", not "the parent survives waiting for a child" -- the same limit memoryPromises has, for
+// the same reason: one process, one segment, no resume.
+//
+// GetChildCompletedAtMs returns a small non-zero instant for exactly this reason. The engine compares it against the
+// parent's durable clock to answer "was this child terminal as of the parent's recorded time" (issue #847), and a zero
+// would mean "the store did not populate it" / "not complete". A near-zero value says "completed before this run
+// began", which is true of a scripted child and is the only honest answer this process can give.
+type memoryChildren struct {
+	mu      sync.Mutex
+	byID    map[string]*memoryChildRun
+	next    int64
+	script  map[string]engine.ChildOutcome // def name -> outcome
+	started []string                       // def names, in start order
+}
+
+type memoryChildRun struct {
+	defName string
+	outcome engine.ChildOutcome
+}
+
+func newMemoryChildren(script map[string]engine.ChildOutcome) *memoryChildren {
+	if script == nil {
+		script = map[string]engine.ChildOutcome{}
+	}
+	return &memoryChildren{byID: map[string]*memoryChildRun{}, script: script}
+}
+
+// start records a child and hands back its id. Shared by both Start methods so the two cannot drift: the Atomic variant
+// differs only in taking the id and the event from the caller.
+func (c *memoryChildren) start(childID, defName string) engine.ChildOutcome {
+	outcome, scripted := c.script[defName]
+	if !scripted {
+		// An unscripted child stays RUNNING, so the parent suspends rather than being handed an invented result. The
+		// same rule as an unscripted promise and an unqueued signal.
+		outcome = engine.ChildOutcome{Completed: false}
+	}
+	c.byID[childID] = &memoryChildRun{defName: defName, outcome: outcome}
+	c.started = append(c.started, defName)
+	return outcome
+}
+
+func (c *memoryChildren) StartChildWorkflow(_ context.Context, _, defName, _ string, _ int, _ string, _ int) (string, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.next++
+	childID := fmt.Sprintf("child-%d", c.next)
+	c.start(childID, defName)
+	return childID, nil
+}
+
+func (c *memoryChildren) StartChildWorkflowAtomic(_ context.Context, childID, _, defName, _ string, _ int, _ string, _ engine.EventRecord, _ int) (string, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	// AN EMPTY ID MEANS "GENERATE ONE", and that is the case the engine actually uses: it calls this with childID ""
+	// (engine/children.go), so echoing the argument produced a run id of "" and the guest's await_child failed with
+	// "Check that the run ID is valid". Found by running the module, not by reading -- the store returned a string and
+	// no unit test asked whether it was a USABLE one.
+	if childID == "" {
+		c.next++
+		childID = fmt.Sprintf("child-%d", c.next)
+	}
+	c.start(childID, defName)
+	return childID, nil
+}
+
+func (c *memoryChildren) GetChildResult(_ context.Context, runID string) (engine.ChildOutcome, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	row, ok := c.byID[runID]
+	if !ok {
+		// A store error, NOT a failed child: the interface distinguishes them because a parent told "your child failed"
+		// when the store merely blinked branches wrongly (cleat#1115's neighbour).
+		return engine.ChildOutcome{}, fmt.Errorf("unknown child run id %q", runID)
+	}
+	return row.outcome, nil
+}
+
+func (c *memoryChildren) GetChildCompletedAtMs(_ context.Context, runID string) (int64, bool, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	row, ok := c.byID[runID]
+	if !ok {
+		return 0, false, fmt.Errorf("unknown child run id %q", runID)
+	}
+	// Not terminal at all: ok=false is the interface's "still running".
+	if !row.outcome.Completed && !row.outcome.Failed {
+		return 0, false, nil
+	}
+	// Terminal: finished before this run began. See the type's comment.
+	return 1, true, nil
+}
+
+func (c *memoryChildren) ResolveVersionByTag(_ context.Context, workflowName, tag string) (int, error) {
+	return 0, fmt.Errorf("no version tags exist in this harness (asked %q for tag %q)", workflowName, tag)
+}
+
+func (c *memoryChildren) startedList() []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]string(nil), c.started...)
+}
+
+// loadChildScript reads the child fixture: {"<child name>": {"result": <any>}} or {"<child name>": {"error": "..."}}.
+//
+// Both spellings are one file because a test that only ever scripts a SUCCESS cannot exercise the parent's error path,
+// and a harness that could not express a failing child would leave that path untested by construction.
+func loadChildScript(path string) (map[string]engine.ChildOutcome, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("reading the children file: %w", err)
+	}
+	var raw map[string]struct {
+		Result json.RawMessage `json:"result"`
+		Error  string          `json:"error"`
+	}
+	if err := json.Unmarshal(b, &raw); err != nil {
+		return nil, fmt.Errorf("the children file is not a JSON object of {result|error}: %w", err)
+	}
+	out := make(map[string]engine.ChildOutcome, len(raw))
+	for name, entry := range raw {
+		switch {
+		case entry.Error != "":
+			if entry.Result != nil {
+				return nil, fmt.Errorf("the child %q is scripted as both a result and an error", name)
+			}
+			out[name] = engine.ChildOutcome{Completed: true, Failed: true, Error: entry.Error}
+		case entry.Result != nil:
+			out[name] = engine.ChildOutcome{Completed: true, Result: string(entry.Result)}
+		default:
+			return nil, fmt.Errorf("the child %q has neither a result nor an error", name)
+		}
+	}
+	return out, nil
+}
