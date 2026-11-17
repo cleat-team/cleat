@@ -205,7 +205,7 @@ jobs:
               #   - '(.*)' is greedy, so it captured to the LAST quote on the line and every output line ended with
               #     '","OutputType":"frame'.
               grep -F "\"Test\":\"$t\"" "$f" | grep '"Action":"output"' \
-                | sed -E 's/^.*"Output":"/  | /; s/","OutputType":"[^"]*"\}$//' | head -30 >&2
+                | sed -E 's/^.*"Output":"/  | /; s/(","OutputType":"[^"]*)?"\}$//' | head -30 >&2
             done
           fi
           if [ "$pkgfail" != 0 ]; then
@@ -330,8 +330,10 @@ jobs:
             failed_tests=$(grep '"Action":"fail"' "$f" | grep -oE '"Test":"[^"]+"' | sed 's/"Test":"//; s/"$//' | sort -u)
             for t in $failed_tests; do
               echo "--- output for $t ---" >&2
-              grep "\"Test\":\"$t\"" "$f" | grep '"Action":"output"' \
-                | sed -E 's/.*"Output":"(.*)"\}$/  | \1/' | head -30 >&2
+              # -F and a non-greedy-equivalent substitution: see the PostgreSQL step's comment above for the two
+              # defects (cleat#3995) -- a subtest name is not a pattern, and a greedy capture swallows OutputType.
+              grep -F "\"Test\":\"$t\"" "$f" | grep '"Action":"output"' \
+                | sed -E 's/^.*"Output":"/  | /; s/(","OutputType":"[^"]*)?"\}$//' | head -30 >&2
             done
           fi
           if [ "$pkgfail" != 0 ]; then
@@ -438,8 +440,10 @@ jobs:
             failed_tests=$(grep '"Action":"fail"' "$f" | grep -oE '"Test":"[^"]+"' | sed 's/"Test":"//; s/"$//' | sort -u)
             for t in $failed_tests; do
               echo "--- output for $t ---" >&2
-              grep "\"Test\":\"$t\"" "$f" | grep '"Action":"output"' \
-                | sed -E 's/.*"Output":"(.*)"\}$/  | \1/' | head -30 >&2
+              # -F and a non-greedy-equivalent substitution: see the PostgreSQL step's comment above for the two
+              # defects (cleat#3995) -- a subtest name is not a pattern, and a greedy capture swallows OutputType.
+              grep -F "\"Test\":\"$t\"" "$f" | grep '"Action":"output"' \
+                | sed -E 's/^.*"Output":"/  | /; s/(","OutputType":"[^"]*)?"\}$//' | head -30 >&2
             done
           fi
           if [ "$pkgfail" != 0 ]; then
