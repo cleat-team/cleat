@@ -171,3 +171,106 @@ func TestTypeScriptURLFileURLsAgreeWithNode(t *testing.T) {
 	src := "tests/typescript/testdata/conformance/urls_file.ts"
 	compareLines(t, "file: URLs", guestResult(t, root, src, "urls_file"), nodeOracle(t, root, src, "urlsFile"))
 }
+// parseRanges reads the sweep's compact range list ("9-a,d,21-24") into pairs.
+func parseRanges(t *testing.T, s string) [][2]int {
+	t.Helper()
+	if s == "" {
+		return nil
+	}
+	var out [][2]int
+	for _, r := range strings.Split(s, ",") {
+		a, b, ok := strings.Cut(r, "-")
+		if !ok {
+			b = a
+		}
+		lo, err := strconv.ParseInt(a, 16, 32)
+		if err != nil {
+			t.Fatalf("range %q: %v", r, err)
+		}
+		hi, err := strconv.ParseInt(b, 16, 32)
+		if err != nil {
+			t.Fatalf("range %q: %v", r, err)
+		}
+		out = append(out, [2]int{int(lo), int(hi)})
+	}
+	return out
+}
+
+func inRanges(rs [][2]int, c int) bool {
+	lo, hi := 0, len(rs)-1
+	for lo <= hi {
+		m := (lo + hi) / 2
+		if c < rs[m][0] {
+			hi = m - 1
+		} else if c > rs[m][1] {
+			lo = m + 1
+		} else {
+			return true
+		}
+	}
+	return false
+}
+
+// sweepSamples is the code-point set urls_sweep.ts measures: the BMP, then every 61st code point above it. Above the BMP
+// only a sample is measured, because the whole range takes longer than one guest execution is allowed.
+func sweepSamples() []int {
+	var cp []int
+	for c := 0; c <= 0xffff; c++ {
+		cp = append(cp, c)
+	}
+	for c := 0x10000; c < 0x110000; c += 61 {
+		cp = append(cp, c)
+	}
+	return cp
+}
+
+// TestTypeScriptURLHostCodePointSweep holds the IDNA claim of DIVERGENCES.md row 2 at code-point level. It asks, for every
+// sampled code point placed in a host label (raw and already Punycode-encoded), whether the guest and Node accept it. A
+// code point the guest ACCEPTS where Node refuses is a silent divergence and fails, because a catch-all such as zod's
+// z.url() would report an invalid URL as valid. A code point the guest REFUSES where Node accepts is loud: it is reported,
+// with a ceiling, but it does not fail.
+func TestTypeScriptURLHostCodePointSweep(t *testing.T) {
+	root := needToolchain(t)
+	needNodeAtLeast(t, 24)
+	src := "tests/typescript/testdata/conformance/urls_sweep.ts"
+	guest := guestResult(t, root, src, "urls_sweep")
+	node := nodeOracle(t, root, src, "urlsSweep")
+	if len(guest) != 3 || len(node) != 3 {
+		t.Fatalf("expected three strings (raw, xn--, count), got %d and %d", len(guest), len(node))
+	}
+	samples := sweepSamples()
+	if guest[2] != node[2] {
+		t.Fatalf("the two runs swept different sets: guest %s code points, Node %s", guest[2], node[2])
+	}
+	if guest[2] != strconv.Itoa(len(samples)) {
+		t.Fatalf("the fixture swept %s code points and this test expects %d", guest[2], len(samples))
+	}
+	// A ceiling, not an expectation: these are the classes measured on 2026-11-17 (Node 26.4.0), where the guest refuses a
+	// Punycode label Node accepts because the engine's case tables are older than ICU's. More than the ceiling is a new
+	// class and wants a look; fewer is an improvement and should lower it.
+	const loudCeiling = 300
+	for i, form := range []string{"raw", "xn--"} {
+		gr, nr := parseRanges(t, guest[i]), parseRanges(t, node[i])
+		var silent, loud []int
+		for _, cp := range samples {
+			if cp >= 0xd800 && cp <= 0xdfff {
+				continue
+			}
+			a, b := inRanges(gr, cp), inRanges(nr, cp)
+			if a && !b {
+				if len(silent) < 20 {
+					silent = append(silent, cp)
+				}
+			} else if b && !a {
+				loud = append(loud, cp)
+			}
+		}
+		if len(silent) > 0 {
+			t.Errorf("%s: the guest accepts %d code point(s) Node refuses (showing up to 20): %v -- a silent divergence", form, len(silent), silent)
+		}
+		if len(loud) > loudCeiling {
+			t.Errorf("%s: the guest refuses %d code points Node accepts, over the ceiling of %d: %v", form, len(loud), loudCeiling, loud[:20])
+		}
+		t.Logf("%s: %d silent, %d loud (ceiling %d): %v", form, len(silent), len(loud), loudCeiling, loud)
+	}
+}
