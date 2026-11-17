@@ -792,11 +792,13 @@ tier2:
         other products, so a rule over it would be noise. A support claim in another doc is
         therefore caught by review, not by CI.
 
-        What exists: a prototype on branch feature/proto-ts-javy, measured on one macOS
-        arm64 machine, PostgreSQL for every number except two dialect smoke runs. What does
-        not exist on develop: a build chain, an SDK, host-call bindings, a Linux CI job, or
-        a published list of divergences from Node. The status changes in the PR that adds
-        the LANGUAGE_SUPPORT.md row, which is the last of the series.
+        What exists on develop (as of 2026-11-17; re-derive from the tree, do not trust this
+        sentence): a build chain (packages/cleat-ts/build.sh and `cleat build --target ts`),
+        an SDK, a subset of the host-call bindings, a test harness, a Linux tier-2 CI job
+        (.github/workflows/typescript-tier2.yml, ubuntu-latest), and a recorded list of
+        divergences from Node (packages/cleat-ts/DIVERGENCES.md). What does not: see
+        open_items. The status changes in the PR that adds the LANGUAGE_SUPPORT.md row,
+        which is the last of the series.
 
         Where its tests live, and why it matters (the exclusion is structural, not a list):
         every toolchain-dependent TypeScript test is named TestTypeScript* and lives in
@@ -806,14 +808,32 @@ tier2:
         TestTypeScript* function anywhere else, and refuses to pass if tests/typescript/
         holds none.
       open_items:
-        - "two SILENT divergences from Node block any support claim (cleat#3829): zod's z.url()
-           reports a valid URL as invalid because the guest has no URL, and QuickJS Date
-           setters leave the date unchanged on a non-finite argument, so date-fns reports
-           isValid(parseISO(\"nope\")) as true. Both deterministic, neither fixable by the
-           workflow author"
-        - "macOS arm64 only: no Linux Javy build has been run (cleat#3832)"
-        - "no build chain, SDK, host-call bindings, cleattest equivalent or docs on develop
-           (cleat#3827, cleat#3828, cleat#3831)"
+        - "silent divergences from Node (the dangerous kind: a plausible wrong answer, no
+           error). Date setters given a non-finite argument: FIXED, held by
+           TestTypeScriptDateSettersAgreeWithNode (631 cases against Node, recorded
+           2026-11-17 in DIVERGENCES.md row 1). URL: only PARTLY fixed (row 2). Valid URLs
+           the shim can answer are accepted, held by TestTypeScriptURLAgreesWithNode; an
+           IPv6 host, an internationalised host or a file: URL makes the shim throw, and a
+           catch-all such as zod's z.url() reads that throw as 'invalid' where Node says
+           valid. That residue is still silent through a catch-all, and is cleat#3898. The
+           list covers what was looked at (four npm packages, 27 cases); it is not closed"
+        - "dialects, as of 2026-11-17 (re-derive from .github/workflows/typescript-tier2.yml):
+           the database-backed worker tests run on PostgreSQL, MySQL and SQL Server, one
+           tier-2 job each (cleat#3997, #4006). ONLY those tests run on MySQL and SQL
+           Server, not the whole package, and no job gates a merge; tier 2 must run and may
+           fail. A guard test fails if a database-backed test is added and a dialect job
+           does not run it. The wrong-password control (a set DSN that does not connect
+           FAILS, never skips) was run locally in cleat#3992; CI's own control is each
+           job's CLEAT_REQUIRE_TOOLCHAINS declaration, under which an unset DSN fails.
+           Open: cleatctl deploy workflow is still PostgreSQL-only as of this date, so those jobs
+           deploy through deploy-workflow (cleat#3994; the fix is cleat#4004, not merged)"
+        - "not delivered as of 2026-11-17: the remaining host-call bindings, which include
+           workflow updates, so no TypeScript workflow can issue one (cleat#3827), and a
+           killed workflow's defers, which still do not run (cleat#3922). Delivered since the
+           previous revision of this list: harness stores for promises, signals and children
+           (cleat#3828) and defer segments, so javascript is in engine.deferSegmentLanguages
+           (cleat#3826). The getting-started page and the LANGUAGE_SUPPORT.md row are
+           cleat#3831"
         - "a deployed module is about 1.1 MB (the Javy plugin is about 1.07 MB); the 100 KB
            line applies to dynamic mode only, which is out of scope"
 

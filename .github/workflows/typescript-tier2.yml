@@ -35,6 +35,7 @@ on:
       - "cmd/cleat-ts-run/**"
       - "cmd/cleat/**"
       - "tests/typescript/**"
+      - "examples/ts-workflow/**"
       - "wasm/**"
       - "python-sdk/**"
       - "go.mod"
@@ -53,6 +54,7 @@ on:
       - "cmd/cleat-ts-run/**"
       - "cmd/cleat/**"
       - "tests/typescript/**"
+      - "examples/ts-workflow/**"
       - "wasm/**"
       - "python-sdk/**"
       - "go.mod"
@@ -161,12 +163,15 @@ jobs:
       - name: The test harness runs a built module and fails a broken one
         run: |
           set -o pipefail
-          node --test packages/cleat-ts/testing.test.ts | tee node-harness-report.txt
+          # examples/ts-workflow/workflow.test.ts is the one place the commands in docs/tutorials/typescript-quick-start.md run:
+          # it builds the example with `cleat build --target ts` and runs it through the harness. build-documented-examples.sh
+          # cannot, because that job has no TypeScript toolchain (its KNOWN_BROKEN entry for the example says so).
+          node --test packages/cleat-ts/testing.test.ts examples/ts-workflow/workflow.test.ts | tee node-harness-report.txt
           # The COUNT, not the exit status. `node --test` exits 0 when nothing ran: measured, a file with no tests
           # exits 0 and so does one whose tests all skip. Without this the step would pass on a harness whose tests had
           # been deleted or disabled -- the same class as this job's Go floor below, and the same reason for it.
           passed=$(grep -E '^.{0,3}pass [0-9]+$' node-harness-report.txt | grep -oE '[0-9]+$')
-          [ -n "$passed" ] && [ "$passed" -ge 3 ] || { echo "only ${passed:-no} test(s) passed; the three in testing.test.ts must all run" >&2; exit 1; }
+          [ -n "$passed" ] && [ "$passed" -ge 15 ] || { echo "only ${passed:-no} test(s) passed; the thirteen in testing.test.ts and the two in examples/ts-workflow/workflow.test.ts must all run" >&2; exit 1; }
 
       # The three numbers, not the exit status: a package that did not build contributes nothing to a count keyed
       # on "Test", and `go test` exits 0 for a pattern that matches nothing.
@@ -217,7 +222,7 @@ jobs:
           # tests do (the last also need PostgreSQL), and the numbers test needs componentize-py where declared. The floor
           # is the number of top-level tests in this package and must be raised when one is added: it was 14 while 15
           # tests existed, which is the drift this line exists to catch.
-          # Re-derive: grep -h '^func Test' tests/typescript/*_test.go | grep -c .
+          # Re-derive: go test ./tests/typescript/ -list '^Test' | grep -c '^Test'  (NOT grep for '^func Test': the dialect guard's fixtures contain such lines in raw strings, so it over-counts)
           [ "$top" -ge 30 ] || { echo "only $top top-level tests passed; the thirty in tests/typescript must all run" >&2; exit 1; }
           [ -s "$TS_NUMBERS_OUT" ] || { echo "the numbers test passed but wrote no $TS_NUMBERS_OUT" >&2; exit 1; }
 
@@ -316,7 +321,7 @@ jobs:
       # green can hide a test that never ran. Both tests must have PASSED, on this dialect.
       # `if: always()`, for the reason the job above gives (cleat#3980): the step before sends stdout to /dev/null, so this
       # step is the only thing that ever prints WHICH test failed, and it must not be skipped exactly when that matters.
-      - name: Read the result (failures, package failures, both tests passed)
+      - name: Read the result (failures, package failures, every database-backed test passed)
         if: always()
         run: |
           f=typescript-tier2-mysql-report.json
@@ -426,7 +431,7 @@ jobs:
       # green can hide a test that never ran. Both tests must have PASSED, on this dialect.
       # `if: always()`, for the reason the job above gives (cleat#3980): the step before sends stdout to /dev/null, so this
       # step is the only thing that ever prints WHICH test failed, and it must not be skipped exactly when that matters.
-      - name: Read the result (failures, package failures, both tests passed)
+      - name: Read the result (failures, package failures, every database-backed test passed)
         if: always()
         run: |
           f=typescript-tier2-mssql-report.json

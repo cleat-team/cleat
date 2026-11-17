@@ -56,7 +56,12 @@ cd "$(git rev-parse --show-toplevel)" || exit 2
 # NOT an associative array: macOS ships bash 3.2, which has none, and a script
 # the author cannot run locally is how this job would come to be trusted without
 # being exercised -- which is the failure this whole file exists to prevent.
-KNOWN_BROKEN=""
+# KNOWN_BROKEN is the only exclusion this script has, and examples/ts-workflow is NOT broken: it is built elsewhere. The entry's
+# text says so first, so the SKIP line is not read as a defect. It is here because THIS JOB cannot run its documented command: `cleat
+# build --target ts` needs Node, a pinned Javy and a wasm32-wasip1 Rust toolchain, and this job installs none of them. The
+# command IS run, on every pull request that touches the example, by examples/ts-workflow/workflow.test.ts in the
+# TypeScript tier-2 job (typescript-tier2.yml), which has the toolchain. Delete this entry if this job ever gains it.
+KNOWN_BROKEN="examples/ts-workflow\tBUILT ELSEWHERE, NOT BROKEN: the command works, and typescript-tier2.yml runs it via examples/ts-workflow/workflow.test.ts on every PR that touches the example. THIS JOB has no Node, Javy or wasm32-wasip1 toolchain and is deliberately not given one (it runs on many PRs)"
 
 known_broken_reason() {
   printf '%b\n' "$KNOWN_BROKEN" | while IFS="$(printf '\t')" read -r d reason; do
