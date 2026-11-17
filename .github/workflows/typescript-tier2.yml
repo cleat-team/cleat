@@ -198,8 +198,14 @@ jobs:
             failed_tests=$(grep '"Action":"fail"' "$f" | grep -oE '"Test":"[^"]+"' | sed 's/"Test":"//; s/"$//' | sort -u)
             for t in $failed_tests; do
               echo "--- output for $t ---" >&2
-              grep "\"Test\":\"$t\"" "$f" | grep '"Action":"output"' \
-                | sed -E 's/.*"Output":"(.*)"\}$/  | \1/' | head -30 >&2
+              # -F, AND A TWO-STEP SUBSTITUTION RATHER THAN ONE GREEDY ONE. Both fix defects this printer shipped with
+              # (cleat#3995), and both were measured on a fixture rather than reasoned about:
+              #   - without -F a Go subtest named TestX/case[1] matches nothing, because [1] is a character class, so a
+              #     correct heading printed over an empty body -- which reads as "the test said nothing";
+              #   - '(.*)' is greedy, so it captured to the LAST quote on the line and every output line ended with
+              #     '","OutputType":"frame'.
+              grep -F "\"Test\":\"$t\"" "$f" | grep '"Action":"output"' \
+                | sed -E 's/^.*"Output":"/  | /; s/","OutputType":"[^"]*"\}$//' | head -30 >&2
             done
           fi
           if [ "$pkgfail" != 0 ]; then
