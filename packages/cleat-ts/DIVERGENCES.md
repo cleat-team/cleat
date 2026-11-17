@@ -43,9 +43,17 @@ letter whose case mapping this engine's Unicode tables apply differently from IC
 U+1E96-U+1E99, U+1F50-U+1F56, U+1FB6, U+1FC6, U+1FD2-U+1FD7, U+1FE2-U+1FE7, U+1FF6). That direction is **loud**: the shim
 throws where Node answers. `TestTypeScriptURLHostCodePointSweep` re-runs the sweep over the BMP and a strided sample of the
 supplementary planes (the whole range is longer than one guest execution is allowed), fails on any silently accepted code point,
-and fails if the loud set grows past its ceiling. Multi-code-point rules are approximated: an all-right-to-left label is
-accepted and one mixing a right-to-left letter with a Latin one is refused, which is what the sweep measured; deeper contextual
-rules (CONTEXTJ, CONTEXTO) are not modelled, and a class they govern is the remaining exposure.
+and fails if the loud set grows past its ceiling.
+
+**The contextual rules a single-code-point sweep cannot see** are covered by 48 probes in
+`tests/typescript/testdata/conformance/urls_context.ts`, each in raw and `xn--` form, answered by both sides and held by
+`TestTypeScriptURLContextualRules`: ZWNJ/ZWJ after a Devanagari and a Malayalam virama, ZWNJ between Arabic dual-joining
+letters, the same joiners with no joining context, an all-RTL label, an RTL label ending in a European digit, an Arabic digit
+and a combining mark, EN and AN in one RTL label, an RTL label starting with a digit, RTL beside a Latin label, an RTL letter
+with a Latin one, and three Hebrew/Catalan context checks. Result, measured 2026-11-17: **0 silent, 12 loud** — the 12 are the
+six valid joiner labels in their raw and `xn--` forms, which the guest refuses because `CheckJoiners` is not implemented. That
+direction is loud. `CONTEXTO` is not applied by Node either, which the probe records: `l·x`, a middle dot with no Catalan
+context, is accepted by both.
 
 It **throws** `cleat: URL: <what> is not supported in the guest`, and never returns a guess, for setting `href`, `protocol`,
 `username`, `password`, `host`, `hostname`, `port` or `pathname`. `TestTypeScriptURLRefusesWhatItCannotAnswer` holds each one, and
