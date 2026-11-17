@@ -24,14 +24,20 @@ pub(crate) fn install(g: &Object<'_>) {
     g.set(
         "__cleat_acquire_lock",
         Func::from(|key: String, ttl_ms: f64| -> String {
-            if !ttl_ms.is_finite() || ttl_ms < 1.0 {
-                // No `{ttl_ms}` in the message: formatting an f64 pulls the float Display code into the plugin (measured: about 20 KB),
-                // and the caller knows the number it passed.
-                return json!({ "err": format!("acquireLock(key=\"{key}\"): ttlMs must be at least 1 millisecond; a lock with no time to live is born expired and the next caller takes it") }).to_string();
-            }
-            guarded(|| match HostCalls.acquire_lock_ms(&key, ttl_ms as i64) {
-                (acquired, None) => json!({ "ok": acquired }),
-                (_, Some(e)) => json!({ "err": e }),
+            // The TTL check is INSIDE `guarded`, so a call made after the segment suspended is answered the way every other late call is
+            // (as a suspension) and not with an error. This is for consistency and is NOT observable from the guest: a test that raced a
+            // late acquire with a bad TTL against the sleep that suspended the segment passed with the check outside as well, because
+            // the segment ends at the suspension and nothing after it is run to see the difference.
+            guarded(|| {
+                if !ttl_ms.is_finite() || ttl_ms < 1.0 {
+                    // No `{ttl_ms}` in the message: formatting an f64 pulls the float Display code into the plugin (measured: about
+                    // 20 KB), and the caller knows the number it passed.
+                    return json!({ "err": format!("acquireLock(key=\"{key}\"): ttlMs must be at least 1 millisecond; a lock with no time to live is born expired and the next caller takes it") });
+                }
+                match HostCalls.acquire_lock_ms(&key, ttl_ms as i64) {
+                    (acquired, None) => json!({ "ok": acquired }),
+                    (_, Some(e)) => json!({ "err": e }),
+                }
             })
         }),
     )
