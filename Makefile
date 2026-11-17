@@ -255,6 +255,12 @@ coverage-check: coverage-go
 	    cnt[path]++; \
 	} \
 	END { \
+	    if (length(cov) == 0) { \
+	        printf "\033[31mCoverage check FAILED: no package coverage was measured at all\033[0m\n"; \
+	        printf "  coverage.out parsed to zero packages. A run that measured NOTHING must not report PASSED --\n"; \
+	        printf "  this said \"Coverage check PASSED\" and exited 0 on a header-only profile (cleat#4009).\n"; \
+	        exit 1; \
+	    } \
 	    for (p in cov) { \
 	        avg = cov[p] / cnt[p]; \
 	        printf "%-40s %7.2f%%\n", p, avg; \

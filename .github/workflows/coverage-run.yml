@@ -236,7 +236,19 @@ jobs:
           # check has already run, and this reads its output. `|| true` is
           # deliberate: a bug in the reporting half must never change the
           # step's outcome, which is `$rc` and nothing else.
-          python3 - "$RUNNER_TEMP/coverage-check.log" "$rc" <<'PY' || true
+          # THE BANNER IS READ FROM THE MAKEFILE'S STRUCTURE, not its text. Anchored on the recipe: the last
+          # `printf "\n=== ... ===\n"` line BEFORE the `"Threshold"` header row is the banner that introduces the
+          # result table. Matching the banner's own text would be a copy with extra steps -- the first version of
+          # this was exactly that, and a rename then inverted the diagnosis (cleat#4009).
+          #
+          # Measured to return the banner and follow a rename under BSD awk (macOS) and mawk 1.3.4 (ubuntu:24.04,
+          # which is what the runner uses).
+          BANNER=$(awk '/printf "\\n=== .* ===\\n"/ { line = $0 } /"Threshold"/ { sub(/.*printf "\\n/, "", line); sub(/\\n".*/, "", line); print line; exit }' Makefile)
+          if [ -z "$BANNER" ]; then
+            echo "::warning title=Coverage parser::could not read the threshold banner from the Makefile -- the diagnosis below may be inverted (cleat#4009)"
+            BANNER='=== Threshold Check ==='
+          fi
+          python3 - "$RUNNER_TEMP/coverage-check.log" "$rc" "$BANNER" <<'PY' || true
           import os, re, sys
 
           # Every row is wrapped in \x1b[31m ... \x1b[0m, so strip ANSI first or
@@ -246,8 +258,8 @@ jobs:
           ANSI = re.compile(r"\x1b\[[0-9;]*m")
           ROW = re.compile(r"^(\S+)\s+([0-9]+(?:\.[0-9]+)?)%\s+([0-9]+)%\s+FAIL$")
 
-          # The Makefile's own banner, which is what says the table was reached at all.
-          BANNER = "=== Threshold Check ==="
+          # The Makefile's own banner, READ FROM THE MAKEFILE by the shell above rather than copied here.
+          BANNER = sys.argv[3]
 
           rows, banner_seen = [], False
           with open(sys.argv[1], errors="replace") as fh:
