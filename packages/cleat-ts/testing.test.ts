@@ -198,6 +198,31 @@ test("with no script the same child call PARKS", () => {
   assert.equal(run.suspended, true, "an unscripted child was reported finished; the store invented an outcome");
 });
 
+// cleat#3827, group F: there is NO schedules store, on purpose. The engine's schedules need a WorkflowStore (a large interface that
+// is the whole of a deployment's persistence) and the harness does not stand one up, so a VALID call is refused by name; what the
+// harness CAN show is the argument checks the engine makes before it consults a store. The real behaviour is the three-dialect
+// worker test, TestTypeScriptCronSchedulesOnARealWorker. This test pins the divergence so that gaining a store is noticed.
+const SCHEDULE_ENTRIES = ["schedules_bad_args", "schedules_no_store", "schedules_round_trip", "schedules_late"];
+
+test("without a workflow store a valid cron call is refused by name, and a bad argument is refused for its own reason", () => {
+  const module = buildEntries("tests/typescript/testdata/workflows/schedules.ts", SCHEDULE_ENTRIES);
+  const bad = runWorkflow(module, "schedules_bad_args");
+  assert.equal(bad.ok, true, `the workflow failed: ${bad.error}`);
+  const b = bad.result as Record<string, string>;
+  assert.match(b.badExpr, /has 3 field\(s\), want 5/);
+  assert.match(b.badZone, /Mars\/Olympus_Mons/);
+  assert.match(b.noName, /refused a parameter and gave no reason/);
+  assert.doesNotMatch(b.noName, /\u0000/, "the empty-name rejection carries NUL bytes");
+  assert.match(b.badInput, /unsupported value: NaN/);
+
+  const none = runWorkflow(module, "schedules_no_store");
+  assert.equal(none.ok, true, `the workflow failed: ${none.error}`);
+  const n = none.result as Record<string, string>;
+  assert.match(n.create, /no workflow store configured/);
+  assert.match(n.list, /no workflow store configured/);
+  assert.match(n.remove, /host error code 1/, "delete_cron's refusal is a bare code, which every SDK reports the same way");
+});
+
 // cleat#3827, group E: the lock store. WITHOUT a `locks` script the engine has no ConcurrencyKeyStore and answers EVERY acquire
 // "not acquired" while recording the events as if a store had been asked, so a workflow that takes a lock runs its did-not-get-it
 // branch and passes having exercised nothing. The second test pins that trap; the first is the store doing its job.
