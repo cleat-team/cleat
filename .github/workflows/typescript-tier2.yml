@@ -170,8 +170,24 @@ jobs:
           # The COUNT, not the exit status. `node --test` exits 0 when nothing ran: measured, a file with no tests
           # exits 0 and so does one whose tests all skip. Without this the step would pass on a harness whose tests had
           # been deleted or disabled -- the same class as this job's Go floor below, and the same reason for it.
-          passed=$(grep -E '^.{0,3}pass [0-9]+$' node-harness-report.txt | grep -oE '[0-9]+$')
-          [ -n "$passed" ] && [ "$passed" -ge 15 ] || { echo "only ${passed:-no} test(s) passed; the thirteen in testing.test.ts and the two in examples/ts-workflow/workflow.test.ts must all run" >&2; exit 1; }
+          #
+          # THE EXPECTED COUNT IS DERIVED, NOT WRITTEN DOWN (cleat#3827), as the Go floor below is. This was a hand-pinned 15
+          # ("the thirteen in testing.test.ts and the two in examples/ts-workflow/workflow.test.ts"), already one short of the
+          # sixteen that existed, and with ten groups each adding harness tests it was one line in ten PRs.
+          # `declared` counts the top-level `test(` / `test.skip(` / `test.todo(` declarations in the same two files the
+          # command above runs, so a test that is skipped or disabled is declared and NOT passed, and fails here.
+          # WHAT IT GIVES UP: a test registered in a loop or under a helper (not at column 0 as `test(`) is invisible to the
+          # count, which only weakens the floor and never fails the job; a deleted test leaves both numbers, and shows in
+          # the diff. The sanity constant is set once and is not raised when tests are added: a grep that matched nothing
+          # (a renamed helper, a moved file) would otherwise read 0 >= 0 and pass.
+          # `|| true`: grep exits 1 when NOTHING matched, and under `-e` plus pipefail that would end the step here, silently, before
+          # the sanity line below could say why.
+          declared=$({ grep -hcE '^test(\.[a-z]+)?\(' packages/cleat-ts/testing.test.ts examples/ts-workflow/workflow.test.ts || true; } | awk '{s += $1} END {print s + 0}')
+          [ "$declared" -ge 15 ] || { echo "found only $declared test declarations in the two harness test files (at least 15 exist); the grep is broken, so the count below would be 0 >= 0" >&2; exit 1; }
+          # `|| true` for the same reason as the grep above: a summary with no `pass` line made this pipeline exit 1 and end the step
+          # silently under -e and pipefail, before `${passed:-no}` below could say so.
+          passed=$(grep -E '^.{0,3}pass [0-9]+$' node-harness-report.txt | grep -oE '[0-9]+$' || true)
+          [ -n "$passed" ] && [ "$passed" -ge "$declared" ] || { echo "only ${passed:-no} of the $declared declared harness tests passed; every one must run" >&2; exit 1; }
 
       # The three numbers, not the exit status: a package that did not build contributes nothing to a count keyed
       # on "Test", and `go test` exits 0 for a pattern that matches nothing.
