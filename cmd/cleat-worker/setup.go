@@ -4355,8 +4355,21 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 	if suspended != nil && suspended.Reason == "continue_as_new" {
 		// ContinueAsNew: atomically append events, create a new run, and
 		// complete the current one — all in a single database transaction.
-		w.logger.InfoContext(context.Background(), "continue_as_new: starting new run", "worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID)
-		newRunID, err := execStore.ContinueAsNew(w.ctx, wf.ID, w.id, wf.Generation, wf.DefName, wf.DefVersion, json.RawMessage(suspended.NewInput), newEvents, result, queryState, wf.Priority)
+		nextVersion, refusal, vErr := continuationVersion(w.ctx, execStore, wf, suspended.NewVersion)
+		if vErr != nil {
+			// A failed READ says nothing about the version. Release the run so a claim replays the segment and
+			// asks again, rather than failing a workflow over a transient store error.
+			w.logger.ErrorContext(context.Background(), "continue_as_new: could not check the requested version; releasing the run", "worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID, "requested_version", suspended.NewVersion, "error", vErr)
+			w.returnToQueueAfterBackoff(wf)
+			return
+		}
+		if refusal != "" {
+			w.logger.ErrorContext(context.Background(), "continue_as_new refused: requested version unavailable", "worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID, "requested_version", suspended.NewVersion, "current_version", wf.DefVersion)
+			w.recordTerminalFailure(wf, workflowStartTime, refusal, engine.ErrPermanent.String(), "")
+			return
+		}
+		w.logger.InfoContext(context.Background(), "continue_as_new: starting new run", "worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID, "next_version", nextVersion)
+		newRunID, err := execStore.ContinueAsNew(w.ctx, wf.ID, w.id, wf.Generation, wf.DefName, nextVersion, json.RawMessage(suspended.NewInput), newEvents, result, queryState, wf.Priority)
 		if errors.Is(err, engine.ErrFenceLost) {
 			// Normal and expected under reaping: another worker now owns
 			// this workflow (this one was reaped as stale and reclaimed).
@@ -9564,4 +9577,36 @@ func checkRequiredDeploymentSecrets(ctx context.Context, plugins []*plugin.Loade
 		}
 	}
 	return nil
+}
+
+// continuationVersion decides which workflow version the run that follows a continue_as_new starts on.
+//
+// requested is the suspension's NewVersion: continue_as_new_versioned asks for a version, the plain form leaves
+// it 0, and 0 means "stay on the version this run is on". Until cleat#4041 the worker read wf.DefVersion
+// unconditionally, so the request was recorded, replayed and compacted and then ignored: a chain asked to move to
+// version 2 ended on version 1 and completed normally, with no error anywhere.
+//
+// A version that cannot serve the next run is REFUSED, loudly and naming the version (refusal != ""). It never
+// falls back to the current version: a long-lived chain that asked to migrate and silently did not is exactly the
+// defect this fixes. ValidateVersion is false for an undeployed version and for a deprecated one, the same
+// refusal the start route gives. The caller checks before ContinueAsNew so that nothing is written: that call
+// appends the segment's events and completes the old run in one transaction, and a refusal has to leave all of
+// it undone rather than half done.
+//
+// err is a failed READ of the definition, which says nothing about the version; the caller releases the run so a
+// later claim replays the segment and asks again.
+func continuationVersion(ctx context.Context, st interface {
+	ValidateVersion(ctx context.Context, defName string, defVersion int) (bool, error)
+}, wf *engine.WorkflowInstance, requested int) (version int, refusal string, err error) {
+	if requested == 0 || requested == wf.DefVersion {
+		return wf.DefVersion, "", nil
+	}
+	ok, err := st.ValidateVersion(ctx, wf.DefName, requested)
+	if err != nil {
+		return 0, "", err
+	}
+	if !ok {
+		return 0, fmt.Sprintf("continue_as_new: version %d of %q was requested for the next run but is not deployed (or is deprecated); the run is failed rather than continued on version %d", requested, wf.DefName, wf.DefVersion), nil
+	}
+	return requested, "", nil
 }
