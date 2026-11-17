@@ -118,7 +118,8 @@ export interface RunOptions {
    * having delivered nothing (cleat#3827 F1).
    *
    * ONE LINE PER GROUP, so ten groups can add their name in parallel without touching the same line:
-   *   updates    group A   in-memory UpdateStore, pending requests
+   *   updates    group A   in-memory UpdateStore. Fixture: [{ name, payload? }], pending from the start, delivered oldest first.
+   *                         Reported in `extras.updates`: { completed: [{ name, requestId, result?, error? }], pending, settled }
    *   signals    group B
    *   children   group C   child handles, waits
    *   detached   group D

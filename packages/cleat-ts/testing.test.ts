@@ -184,3 +184,36 @@ test("a deliberately broken workflow FAILS through the harness", () => {
   assert.equal(run.ok, false, "a workflow that throws was reported as successful; the harness cannot detect a failure");
   assert.match(run.error ?? "", /broken on purpose/);
 });
+
+// cleat#3827, group A: the update store, driven through the command. This is the test that runs `cleat-ts-run` and reads
+// `extras`, which the registry's own unit tests cannot: `extrasFrom` is called after Execute, and moving that call above it
+// leaves every unit test green while this one reports the state the run BEGAN with (pending 3, completed none).
+const UPDATE_ENTRIES = ["updates", "updates_suspending", "updates_no_handler", "updates_explicit", "updates_late"];
+
+test("an update the test queues is delivered to the workflow's handler, and the store reports what it saw", () => {
+  const module = buildEntries("tests/typescript/testdata/workflows/updates.ts", UPDATE_ENTRIES);
+  const run = runWorkflow(module, "updates", {}, {
+    scripts: { updates: [{ name: "add", payload: { n: 5 } }, { name: "add", payload: { n: "x" } }, { name: "nope" }] },
+  });
+  assert.equal(run.ok, true, `the workflow failed: ${run.error}`);
+  assert.equal(run.suspended, true, "the workflow parks at its sleep, after the dispatch point");
+  const u = run.extras?.updates as { completed: { name: string; result?: string; error?: string }[]; pending: number } | undefined;
+  assert.ok(u, `the envelope carries no extras.updates: ${JSON.stringify(run.extras)}`);
+  assert.equal(u.pending, 0, "a request was still pending: it was reported from the state the run began with, or never delivered");
+  assert.deepEqual(
+    u.completed.map((c) => [c.name, c.result ?? "", c.error ?? ""]),
+    [
+      ["add", '{"total":5}', ""],
+      ["add", "", "n must be a number"],
+      ["nope", "", 'cleat: no update handler registered for "nope"'],
+    ],
+  );
+});
+
+test("with no update scripted the same workflow receives none, and no update store is reported", () => {
+  const module = buildEntries("tests/typescript/testdata/workflows/updates.ts", UPDATE_ENTRIES);
+  const run = runWorkflow(module, "updates");
+  assert.equal(run.ok, true);
+  assert.equal(run.suspended, true);
+  assert.equal(run.extras?.updates, undefined, "a store nobody scripted reported something");
+});

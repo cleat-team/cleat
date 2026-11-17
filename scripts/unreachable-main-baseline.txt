@@ -1,4 +1,3 @@
-cmd/cleat-ts-run	registerStore
 cmd/cleat-worker	MemoryController.WorkflowMemoryEstimate
 cmd/cleat-worker	Worker.DrainComplete
 cmd/cleat-worker	Worker.waitForDB
