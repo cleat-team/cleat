@@ -25,19 +25,26 @@ lodash-es 4.18.1, uuid 14.0.3) unmodified; there may be more.
 It is the WHATWG URL algorithm for the part that can be done exactly: the special schemes (`http`, `https`, `ws`, `wss`, `ftp`,
 `file`) and generic ones, relative resolution against a base, percent-encoding, IPv4 hosts (including the hex, octal and short
 forms), IPv6 hosts in brackets (including the embedded-IPv4 form, written back as hex pairs as the specification does),
-`file:` URLs (the empty host, `localhost` folded to it, and a Windows drive letter kept in the path), `URLSearchParams` in full,
-`URL.canParse` and `URL.parse`, and the `search` and `hash` setters (which update `searchParams`).
+`file:` URLs (the empty host, `localhost` folded to it, and a Windows drive letter kept in the path), internationalised hosts,
+`URLSearchParams` in full, `URL.canParse` and `URL.parse`, and the `search` and `hash` setters (which update `searchParams`).
 
-It **throws** `cleat: URL: <what> is not supported in the guest`, and never returns a guess, for: a host that is not ASCII or
-that contains an `xn--` label (both need IDNA processing), and setting `href`, `protocol`, `username`, `password`, `host`,
-`hostname`, `port` or `pathname`. `TestTypeScriptURLRefusesWhatItCannotAnswer` holds each one, and Node accepts or silently
-no-ops all eight setters, so each is loud in the guest and quiet in Node.
+IDNA is the part of UTS46 that needs no tables: NFKC folds fullwidth and compatibility forms, the three non-ASCII dot characters
+become `.`, labels are lowercased, and a non-ASCII label becomes `xn--` plus RFC 3492 Punycode (percent-encoded UTF-8 is decoded
+first, so `m%C3%BCnchen.de` is `münchen.de`). A label already in `xn--` form is **checked, not trusted**: it must decode, its
+re-encoding must be the same payload, and the decoded label must be non-empty, lowercase, NFC, carry no control, format or space
+code point, and neither start nor end with a hyphen. Those are the classes Node was measured to refuse (`xn--a-`, `xn--a-xbb`,
+`xn--kkg`, `xn--1ug`, `xn--ib9b`, `xn----`, … are all failures on both sides). Beyond them there is no UTS46 disallowed-character
+table, so a class not in that list may be accepted where Node refuses it; the corpus is the list of what was measured.
+
+It **throws** `cleat: URL: <what> is not supported in the guest`, and never returns a guess, for setting `href`, `protocol`,
+`username`, `password`, `host`, `hostname`, `port` or `pathname`. `TestTypeScriptURLRefusesWhatItCannotAnswer` holds each one, and
+Node accepts or silently no-ops all eight setters, so each is loud in the guest and quiet in Node.
 
 **That is loud to code that lets the error out, and not to code that catches everything.** zod's `z.url()` wraps `new URL` in a
 `try`/`catch`, which is how the `ReferenceError` was swallowed in the first place: for an input in the list above `z.url()` still
 reports "invalid" where Node says valid, and for a setter the error escapes `z.url()` entirely. So row 2 is fixed for every input
-the shim answers and **remains silent through a catch-all for the ones it refuses** (an internationalised host, and the eight
-setters). It is not a support claim for those. The remaining inputs are cleat#3898; the setters are cleat#4016.
+the shim answers and **remains silent through a catch-all for the ones it refuses** (the eight setters). It is not a support
+claim for those; cleat#4016 holds them.
 
 **Where Node itself departs from the specification** (measured on Node 26.4.0, not in the guest): a relative input that carries a
 fragment is accepted against a base with an opaque path (`new URL("x#y", "foo:bar")` is `foo:bar/x#y`, while `new URL("x",

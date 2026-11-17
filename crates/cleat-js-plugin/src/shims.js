@@ -53,8 +53,9 @@
   // inside a try/catch, which turned that into "invalid" for every URL: a plausible, silent, wrong answer. This is the WHATWG
   // algorithm for the part of it that can be done exactly: the special schemes (http, https, ws, wss, ftp, file) and generic
   // ones, relative resolution against a base, percent-encoding, IPv4 and IPv6 hosts, URLSearchParams in full, and the `search`
-  // and `hash` setters. Everything else THROWS rather than guess (internationalised hosts, and the other setters), because a
-  // value that is plausible and wrong is the failure this exists to remove. typescript_conformance_test.go runs a
+  // and `hash` setters. Internationalised hosts go through the part of IDNA that needs no tables (NFKC, the three non-ASCII
+  // dots, Punycode). Everything else THROWS rather than guess (the eight setters), because a value that is plausible and wrong
+  // is the failure this exists to remove. typescript_conformance_test.go runs a
   // corpus through this and through Node and compares every getter.
   if (on("url") && typeof g.URL === "undefined") {
     // Membership is what makes a scheme "special" (backslash is a separator, the host is parsed, the query uses the special
@@ -225,16 +226,136 @@
       return out;
     };
 
+    // RFC 3492 Punycode. `puny` encodes a label (the caller has already folded and normalised it); `unpuny` decodes one, and
+    // exists only so an "xn--" label that is already in the input can be checked rather than trusted.
+    const PBASE = 36, PTMIN = 1, PTMAX = 26, PSKEW = 38, PDAMP = 700, PBIAS = 72;
+    const pAdapt = (delta, numPoints, first) => {
+      delta = first ? Math.floor(delta / PDAMP) : delta >> 1;
+      delta += Math.floor(delta / numPoints);
+      let k = 0;
+      while (delta > ((PBASE - PTMIN) * PTMAX) >> 1) { delta = Math.floor(delta / (PBASE - PTMIN)); k += PBASE; }
+      return Math.floor(k + (PBASE - PTMIN + 1) * delta / (delta + PSKEW));
+    };
+    const pDigit = (d) => String.fromCharCode(d < 26 ? 97 + d : 22 + d);
+    const puny = (label) => {
+      const cp = Array.from(label, (c) => c.codePointAt(0));
+      const out = [];
+      for (const c of cp) if (c < 0x80) out.push(String.fromCharCode(c));
+      const basic = out.length;
+      let h = basic, n = 128, delta = 0, bias = PBIAS;
+      if (basic) out.push("-");
+      while (h < cp.length) {
+        let m = Infinity;
+        for (const c of cp) if (c >= n && c < m) m = c;
+        delta += (m - n) * (h + 1);
+        n = m;
+        for (const c of cp) {
+          if (c < n) delta++;
+          else if (c === n) {
+            let q = delta;
+            for (let k = PBASE; ; k += PBASE) {
+              const t = k <= bias ? PTMIN : k >= bias + PTMAX ? PTMAX : k - bias;
+              if (q < t) break;
+              out.push(pDigit(t + (q - t) % (PBASE - t)));
+              q = Math.floor((q - t) / (PBASE - t));
+            }
+            out.push(pDigit(q));
+            bias = pAdapt(delta, h + 1, h === basic);
+            delta = 0; h++;
+          }
+        }
+        delta++; n++;
+      }
+      return out.join("");
+    };
+    const pValue = (ch) => {
+      const c = ch.charCodeAt(0);
+      if (c >= 97 && c <= 122) return c - 97;
+      if (c >= 65 && c <= 90) return c - 65;
+      if (c >= 48 && c <= 57) return c - 48 + 26;
+      return -1;
+    };
+    const unpuny = (input) => {
+      const out = [];
+      const delim = input.lastIndexOf("-");
+      let pos = 0;
+      if (delim > 0) { for (let i = 0; i < delim; i++) out.push(input.charCodeAt(i)); pos = delim + 1; }
+      else if (delim === 0) pos = 1;
+      let n = 128, i = 0, bias = PBIAS;
+      while (pos < input.length) {
+        const oldi = i;
+        let w = 1;
+        for (let k = PBASE; ; k += PBASE) {
+          if (pos >= input.length) return null;
+          const d = pValue(input[pos++]);
+          if (d < 0) return null;
+          i += d * w;
+          const t = k <= bias ? PTMIN : k >= bias + PTMAX ? PTMAX : k - bias;
+          if (d < t) break;
+          w *= PBASE - t;
+        }
+        const len = out.length + 1;
+        bias = pAdapt(i - oldi, len, oldi === 0);
+        n += Math.floor(i / len);
+        i = i % len;
+        if (n > 0x10ffff) return null;
+        out.splice(i, 0, n);
+        i++;
+      }
+      return out;
+    };
+    // IDNA, the part of UTS46 that needs no tables: NFKC folds fullwidth and compatibility forms, the three non-ASCII dot
+    // characters become ".", labels are lowercased, and a label that is not ASCII becomes "xn--" + Punycode. A label already
+    // in "xn--" form is decoded and checked rather than trusted (an empty payload, or one that decodes to a control, is
+    // refused), but kept as written -- re-encoding it would need the UTS46 validity tables to agree with Node.
+    const idna = (s) => {
+      const labels = s.replace(/。|．|｡/g, ".").normalize("NFKC").toLowerCase().split(".");
+      for (let i = 0; i < labels.length; i++) {
+        const l = labels[i];
+        if (l.slice(0, 4) === "xn--") {
+          // An "xn--" label is checked rather than trusted: it must decode, the re-encoding must be the same payload (which
+          // is what rejects `xn--a-`, whose payload decodes to the plain ASCII label `a`), and the decoded label may not be
+          // empty, start or end with a hyphen, or contain a control character. Node rejects each of those; measured against
+          // Node 26.4.0 and held by the corpus. This is UTS46's validity check only as far as it has been measured.
+          const payload = l.slice(4), cp = unpuny(payload);
+          if (cp === null || cp.length === 0) return null;
+          // A Punycode label must encode something: `xn--a-` decodes to the plain ASCII label `a`, which Node refuses.
+          if (!cp.some((c) => c > 0x7f)) return null;
+          for (const c of cp) {
+            if (c <= 0x20 || (c >= 0x7f && c <= 0xa0) || (c >= 0xd800 && c <= 0xdfff)) return null;
+            if (c === 0xad || (c >= 0x2000 && c <= 0x200f) || (c >= 0x2028 && c <= 0x202f) || (c >= 0x2060 && c <= 0x206f) ||
+                c === 0x1680 || c === 0x205f || c === 0x3000 || c === 0xfeff || (c >= 0xfff9 && c <= 0xfffb) ||
+                c === 0xe0001 || (c >= 0xe0020 && c <= 0xe007f)) return null;
+          }
+          if (cp[0] === 0x2d || cp[cp.length - 1] === 0x2d) return null;
+          // The decoded label must already be in the form UTS46 would emit: lowercase and NFC. `xn--kkg` decodes to uppercase
+          // SHARP S and `xn--a-xbb` to "a" plus a combining acute, and Node refuses both rather than canonicalising them.
+          const decoded = String.fromCodePoint.apply(null, cp);
+          if (decoded !== decoded.toLowerCase() || decoded !== decoded.normalize("NFC")) return null;
+          const back = puny(decoded);
+          if (back !== payload) return null;
+          labels[i] = "xn--" + back;
+          continue;
+        }
+        if (!/[^\x00-\x7f]/.test(l)) continue;
+        if (/[\x00-\x20#%\/:<>?@[\\\]^|\x7f]/.test(l)) return null;
+        labels[i] = "xn--" + puny(l);
+      }
+      return labels.join(".");
+    };
+
     const parseHost = (str, special) => {
       if (!special) return /[\x00\t\n\r #\/:<>?@[\\\]^|]/.test(str) ? null : pct(str, C0);
-      let d = str.replace(/%([0-9A-Fa-f]{2})/g, (_, h) => {
-        const b = parseInt(h, 16);
-        if (b >= 0x80) throw unsupported("a non-ASCII host");
-        return String.fromCharCode(b);
-      });
-      if (/[^\x00-\x7f]/.test(d)) throw unsupported("a non-ASCII host");
-      d = d.toLowerCase();
-      if (/(^|\.)xn--/.test(d)) throw unsupported("an internationalised (xn--) host");
+      // Percent-escapes decode to bytes and then as UTF-8, so `%C3%BC.com` names the same host as `ü.com`. An escape below
+      // 0x80 decodes to the character it names, as before; an invalid sequence is a failed host, not a throw.
+      let d = str;
+      if (/%[89A-Fa-f][0-9A-Fa-f]/.test(d)) {
+        try { d = decodeURIComponent(d); } catch (_) { return null; }
+      } else {
+        d = d.replace(/%([0-9A-Fa-f]{2})/g, (_, h) => String.fromCharCode(parseInt(h, 16)));
+      }
+      d = idna(d);
+      if (d === null) return null;
       if (d === "" || /[\x00-\x20#%\/:<>?@[\\\]^|\x7f]/.test(d)) return null;
       const parts = d.split(".");
       if (parts[parts.length - 1] === "" && parts.length > 1) parts.pop();
