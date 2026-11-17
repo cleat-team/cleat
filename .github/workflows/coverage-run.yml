@@ -236,7 +236,7 @@ jobs:
           # check has already run, and this reads its output. `|| true` is
           # deliberate: a bug in the reporting half must never change the
           # step's outcome, which is `$rc` and nothing else.
-          python3 - "$RUNNER_TEMP/coverage-check.log" <<'PY' || true
+          python3 - "$RUNNER_TEMP/coverage-check.log" "$rc" <<'PY' || true
           import os, re, sys
 
           # Every row is wrapped in \x1b[31m ... \x1b[0m, so strip ANSI first or
@@ -253,7 +253,14 @@ jobs:
                   if m:
                       rows.append((m.group(1), m.group(2), m.group(3)))
 
+          # AN EMPTY RESULT MUST NOT READ AS "NOTHING BELOW FLOOR". If make failed and no row matched, either every
+          # floor passed (impossible -- make would have exited 0) or the table changed shape and this parser stopped
+          # seeing it. The second is silent by construction: the annotations and the summary simply stop appearing, and
+          # what is left looks exactly like a clean run. cleat#3993.
           if not rows:
+              if int(sys.argv[2]) != 0:
+                  print("::warning title=Coverage parser::make failed but no below-floor rows were parsed -- "
+                        "the table format may have changed (cleat#3993)")
               sys.exit(0)
 
           for pkg, actual, floor in rows:
