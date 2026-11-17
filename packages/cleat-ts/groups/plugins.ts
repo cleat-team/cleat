@@ -50,6 +50,11 @@ export interface PluginsCtx {
    * `{timedOut: true}`: the host reports this one as a call failure, so a `catch` is what distinguishes "no event"
    * from "an event".
    *
+   * That is not a divergence between languages, and it was checked rather than assumed: AssemblyScript's
+   * `waitForEventMs` reports the same timeout the same way (its `errCode` path sets `error`), and Go's
+   * `PluginCallTyped` returns `(Resp, error)`. The two host calls simply answer a timeout differently, and every SDK
+   * mirrors its own export. What follows is that `waitForEvent` and `waitForSignal` cannot be caught by one shape.
+   *
    * On replay every claim attempt is recorded, so the same claims are answered and the wait does not re-poll live.
    */
   waitForEvent<T = unknown>(
