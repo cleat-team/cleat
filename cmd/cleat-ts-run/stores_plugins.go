@@ -109,11 +109,6 @@ func (p *scriptedPlugins) callList() []string {
 	return out
 }
 
-func (p *scriptedPlugins) lookup(pluginName, functionName string) (pluginScript, bool) {
-	s, ok := p.scripts[pluginName+"/"+functionName]
-	return s, ok
-}
-
 // install registers every scripted function on both registries, and returns the single EngineOption that installs
 // them.
 //
