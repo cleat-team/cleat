@@ -15,7 +15,7 @@
 // throws an `Unmeasured` error so a broken harness cannot read as a passing test.
 
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -117,8 +117,13 @@ export function runWorkflow(modulePath: string, entry: string, input: unknown = 
   const args = ["-module", modulePath, "-entry", entry, "-input", JSON.stringify(input)];
   // Temp files rather than flag values: each script is JSON, and quoting arbitrary JSON through argv on every platform
   // is a class of bug this does not need to have.
+  //
+  // Every directory is removed in the `finally` below. A test file that runs a dozen runs would otherwise leave a dozen
+  // directories in the temp area per execution, and on a CI runner that accumulates across a matrix.
+  const scripts: string[] = [];
   const writeScript = (name: string, value: unknown, flag: string): void => {
     const dir = mkdtempSync(join(tmpdir(), `cleat-ts-${name}-`));
+    scripts.push(dir);
     const file = join(dir, `${name}.json`);
     // Values are JSON TEXT on the Go side, so each is stringified HERE rather than there: the harness is JavaScript, and
     // a caller passing an object should not have to serialise it by hand for one argument and not the others.
@@ -156,6 +161,10 @@ export function runWorkflow(modulePath: string, entry: string, input: unknown = 
     }
     // Exit 1 is the workflow failing, and the envelope on stdout says how.
     stdout = err.stdout ?? "";
+  } finally {
+    // Every path out of the block above, including the throws for Unmeasured: the scripts have been handed to the
+    // runner by then, and nothing needs them afterwards.
+    for (const dir of scripts) rmSync(dir, { recursive: true, force: true });
   }
   let raw: WorkflowRun;
   try {

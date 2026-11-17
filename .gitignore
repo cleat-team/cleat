@@ -30,6 +30,15 @@ coverage.*
 *.coverprofile
 profile.cov
 
+# Binaries `go build ./cmd/cleat-ts-*` writes into the REPO ROOT when run without -o. Anchored with a leading slash:
+# an unanchored `cleat-ts-run` would also match nothing else here today, but `coverage.*` -- unanchored, three lines up --
+# is what silently untracked `.github/workflows/coverage.yml`, so the anchor is the point rather than decoration.
+# Checked with `git check-ignore -v cleat-ts-run` (matches this line) and against `cmd/cleat-ts-run/main.go` (must not
+# match).
+/cleat-ts-run
+/cleat-ts-check
+/cleat-ts-meta
+
 # Build output directories
 /tmp/out/
 /out/

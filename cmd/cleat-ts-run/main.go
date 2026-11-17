@@ -125,6 +125,39 @@ func unmeasured(format string, args ...any) {
 	os.Exit(2)
 }
 
+// buildStores turns the three fixture flags into the stores the engine is given (cleat#3828).
+//
+// EXTRACTED SO THE WIRING IS TESTABLE, which a review note earned: the loaders have their own tests, but nothing
+// asserted that `-promise-rejects` reaches loadMessageMap rather than loadStringMap. Putting the original wrong loader
+// back left `go test ./cmd/cleat-ts-run/` green, because every test called the loaders directly. A wiring test is the
+// only thing that can fail on that.
+//
+// The stores are ALWAYS returned, even when nothing was scripted: leaving them nil would make a workflow that touches a
+// promise fail with errNoPromiseStore rather than suspend, so a test could not tell "this workflow uses no store" from
+// "I forgot to script it" -- and the second is the mistake a harness should make loud.
+func buildStores(promisesPath, rejectsPath, signalsPath string) (*memoryPromises, *memorySignals, error) {
+	var resolves, rejects map[string]string
+	var payloads map[string][]string
+	var err error
+	if promisesPath != "" {
+		if resolves, err = loadStringMap(promisesPath, "promises"); err != nil {
+			return nil, nil, err
+		}
+	}
+	if rejectsPath != "" {
+		// loadMessageMap, NOT loadStringMap: a rejection is an error message, not JSON the guest parses.
+		if rejects, err = loadMessageMap(rejectsPath, "promise-rejects"); err != nil {
+			return nil, nil, err
+		}
+	}
+	if signalsPath != "" {
+		if payloads, err = loadSignalScript(signalsPath); err != nil {
+			return nil, nil, err
+		}
+	}
+	return newMemoryPromises(resolves, rejects), newMemorySignals(payloads), nil
+}
+
 func main() {
 	module := flag.String("module", "", "path to a .wasm built by packages/cleat-ts/build.sh")
 	entry := flag.String("entry", "", "the ABI entry point to run (snake_case, as build.sh named it)")
@@ -168,36 +201,9 @@ func main() {
 	} else {
 		caller = stubbedCaller{}
 	}
-	// The stores are ALWAYS configured, even when the test scripted nothing. Leaving them nil would make a workflow
-	// that touches a promise fail with errNoPromiseStore rather than suspend, so a test that supplied no script could
-	// not tell "this workflow uses no store" from "I forgot to script it" -- and the second is the mistake a harness
-	// should make loud.
-	promises := newMemoryPromises(nil, nil)
-	signals := newMemorySignals(nil)
-	if *promisesPath != "" {
-		resolves, err := loadStringMap(*promisesPath, "promises")
-		if err != nil {
-			unmeasured("%v", err)
-		}
-		promises = newMemoryPromises(resolves, nil)
-	}
-	if *promiseRejectsPath != "" {
-		rejects, err := loadMessageMap(*promiseRejectsPath, "promise-rejects")
-		if err != nil {
-			unmeasured("%v", err)
-		}
-		if promises.resolves == nil {
-			promises = newMemoryPromises(nil, rejects)
-		} else {
-			promises.rejects = rejects
-		}
-	}
-	if *signalsPath != "" {
-		payloads, err := loadSignalScript(*signalsPath)
-		if err != nil {
-			unmeasured("%v", err)
-		}
-		signals = newMemorySignals(payloads)
+	promises, signals, err := buildStores(*promisesPath, *promiseRejectsPath, *signalsPath)
+	if err != nil {
+		unmeasured("%v", err)
 	}
 	e := engine.NewEngine(rt, caller,
 		engine.WithWorkflowID(*workflowID),

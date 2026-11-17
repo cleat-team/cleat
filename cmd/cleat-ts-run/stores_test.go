@@ -265,3 +265,66 @@ func TestTheHarnessScriptsAreTheShapeTheseLoadersRead(t *testing.T) {
 		t.Fatalf("signals[approve] = %v, want the payloads in order", signals["approve"])
 	}
 }
+
+// The WIRING, which the loader tests cannot reach: a review note pointed out that putting the original wrong loader
+// back for -promise-rejects (`loadStringMap`, which demands JSON where a rejection is an error message) left
+// `go test ./cmd/cleat-ts-run/` green, because every test above calls a loader directly and none asked which one the
+// runner chose.
+func TestBuildStoresWiresEachFlagToTheLoaderThatCanReadIt(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name, body string) string {
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+
+	promises := write("promises.json", `{"answered":"{\"greeting\":\"pong\"}"}`)
+	// "nope" is a MESSAGE, not JSON. loadStringMap refuses exactly this, so this file is the one that fails if the
+	// wiring regresses to it.
+	rejects := write("promise-rejects.json", `{"refused":"nope"}`)
+	signals := write("signals.json", `{"approve":[{"ok":true}]}`)
+
+	ps, ss, err := buildStores(promises, rejects, signals)
+	if err != nil {
+		t.Fatalf("buildStores refused fixtures the runner must accept: %v", err)
+	}
+
+	if err := ps.CreatePromise(context.Background(), "wf", "answered", "id-a"); err != nil {
+		t.Fatalf("CreatePromise(answered): %v", err)
+	}
+	if status, result, _, _ := ps.GetPromise(context.Background(), "wf", "id-a"); status != "resolved" || result != `{"greeting":"pong"}` {
+		t.Errorf("scripted resolution did not survive the wiring: status=%q result=%q", status, result)
+	}
+	if err := ps.CreatePromise(context.Background(), "wf", "refused", "id-b"); err != nil {
+		t.Fatalf("CreatePromise(refused): %v", err)
+	}
+	if status, _, errMsg, _ := ps.GetPromise(context.Background(), "wf", "id-b"); status != "rejected" || errMsg != "nope" {
+		t.Errorf("scripted rejection did not survive the wiring: status=%q errMsg=%q", status, errMsg)
+	}
+	if d, found, _ := ss.PollSignal(context.Background(), "wf", "approve"); !found || d.Payload != `{"ok":true}` {
+		t.Errorf("scripted signal did not survive the wiring: found=%v payload=%q", found, d.Payload)
+	}
+}
+
+func TestBuildStoresWithNoFixturesStillReturnsUsableStores(t *testing.T) {
+	// The control for the wiring test: no paths must still produce stores rather than nil, or a workflow touching a
+	// promise would fail with errNoPromiseStore instead of parking.
+	ps, ss, err := buildStores("", "", "")
+	if err != nil {
+		t.Fatalf("buildStores with no fixtures: %v", err)
+	}
+	if ps == nil || ss == nil {
+		t.Fatal("buildStores returned a nil store for an unscripted run")
+	}
+	if err := ps.CreatePromise(context.Background(), "wf", "anything", "id-c"); err != nil {
+		t.Fatalf("CreatePromise: %v", err)
+	}
+	if status, _, _, _ := ps.GetPromise(context.Background(), "wf", "id-c"); status != "pending" {
+		t.Errorf("an unscripted promise settled: status=%q, want pending", status)
+	}
+	if _, found, _ := ss.PollSignal(context.Background(), "wf", "approve"); found {
+		t.Error("an unscripted store found a signal")
+	}
+}
