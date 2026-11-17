@@ -246,21 +246,37 @@ jobs:
           ANSI = re.compile(r"\x1b\[[0-9;]*m")
           ROW = re.compile(r"^(\S+)\s+([0-9]+(?:\.[0-9]+)?)%\s+([0-9]+)%\s+FAIL$")
 
-          rows = []
+          # The Makefile's own banner, which is what says the table was reached at all.
+          BANNER = "=== Threshold Check ==="
+
+          rows, banner_seen = [], False
           with open(sys.argv[1], errors="replace") as fh:
               for line in fh:
-                  m = ROW.match(ANSI.sub("", line).rstrip())
+                  plain = ANSI.sub("", line).rstrip()
+                  if BANNER in plain:
+                      banner_seen = True
+                      continue
+                  m = ROW.match(plain)
                   if m:
                       rows.append((m.group(1), m.group(2), m.group(3)))
 
-          # AN EMPTY RESULT MUST NOT READ AS "NOTHING BELOW FLOOR". If make failed and no row matched, either every
-          # floor passed (impossible -- make would have exited 0) or the table changed shape and this parser stopped
-          # seeing it. The second is silent by construction: the annotations and the summary simply stop appearing, and
-          # what is left looks exactly like a clean run. cleat#3993.
+          # AN EMPTY RESULT MUST NOT READ AS "NOTHING BELOW FLOOR", and WHICH KIND of empty it is decides where the
+          # reader should look (cleat#3993, cleat#4007).
+          #
+          # The Makefile prints "=== Threshold Check ===" before the rows, so its presence separates the two causes:
+          #   banner ABSENT  -> make died BEFORE the table printed (a failing `go test`, a missing tool, a compile
+          #                     error). The cause is in the output above; this parser was never reached.
+          #   banner PRESENT -> the table printed and no row of it matched, which is a FORMAT CHANGE.
+          # One message for both pointed the reader at the parser when the parser had done its job, which is the
+          # "documented failure mode absorbs every instance of its symptom" shape.
           if not rows:
               if int(sys.argv[2]) != 0:
-                  print("::warning title=Coverage parser::make failed but no below-floor rows were parsed -- "
-                        "the table format may have changed (cleat#3993)")
+                  if banner_seen:
+                      print("::warning title=Coverage parser::make failed and printed the threshold table, but no "
+                            "row of it was recognised -- the table format may have changed (cleat#4007)")
+                  else:
+                      print("::warning title=Coverage parser::make failed before printing the threshold table -- "
+                            "read the output above for the cause; the table parser never ran (cleat#4007)")
               sys.exit(0)
 
           for pkg, actual, floor in rows:
