@@ -42,6 +42,12 @@ func zzStoreDB(t *testing.T, store WorkflowStore) *sql.DB {
 // runKilledGuest runs a fixture entry point to its terminal error against a real store, and returns the error, the number of events
 // the engine held in memory, and the number the database holds afterwards.
 func runKilledGuest(t *testing.T, store WorkflowStore, wasmBytes []byte, entry string, noFlush bool, opts ...EngineOption) (error, int, []EventRecord) {
+	err, n, persisted, _ := runKilledGuestWithID(t, store, wasmBytes, entry, noFlush, opts...)
+	return err, n, persisted
+}
+
+// runKilledGuestWithID is runKilledGuest that also returns the workflow id it ran under.
+func runKilledGuestWithID(t *testing.T, store WorkflowStore, wasmBytes []byte, entry string, noFlush bool, opts ...EngineOption) (error, int, []EventRecord, string) {
 	t.Helper()
 	ctx := context.Background()
 	rt, err := NewRuntime(ctx, 0, 0)
@@ -66,7 +72,7 @@ func runKilledGuest(t *testing.T, store WorkflowStore, wasmBytes []byte, entry s
 	if lerr != nil {
 		t.Fatalf("LoadEventHistory: %v", lerr)
 	}
-	return execErr, len(hist), persisted
+	return execErr, len(hist), persisted, wfID
 }
 
 func TestAFailedRunsEventsAreWrittenBeforeExecuteReturns(t *testing.T) {
@@ -164,6 +170,44 @@ func TestAReplayOfAFailedRunsPersistedHistoryDoesNotRepeatItsCalls(t *testing.T)
 		}
 		if ops := operationsCalled(caller); len(ops) != 0 {
 			t.Errorf("the recovering worker called the service %v: it re-executed a call the persisted history already records", ops)
+		}
+	})
+}
+
+// Condition 4 of the design: idempotent. An event a partial earlier flush already wrote must not be written twice, or a retried
+// tail after a transient error would duplicate history. flushEventUngated is the tail's only writer, so writing the same persisted
+// event again through it, from the same predecessor checksum, must succeed and leave exactly one row.
+func TestAnEventTheTailWritesAgainIsNotDuplicated(t *testing.T) {
+	wasmBytes, err := os.ReadFile(buildFixtureWasm(t, "killafterwork"))
+	if err != nil {
+		t.Fatalf("read fixture: %v", err)
+	}
+	forEachBackend(t, func(t *testing.T, store WorkflowStore) {
+		ctx := context.Background()
+		execErr, _, persisted, wfID := runKilledGuestWithID(t, store, wasmBytes, "call_then_fail", true)
+		if execErr == nil || len(persisted) != 1 {
+			t.Fatalf("PRECONDITION FAILED: want a failed run with exactly one persisted event, got err=%v and %d events", execErr, len(persisted))
+		}
+		eng := NewEngine(nil, &mockCaller{}, WithWorkflowStore(store), WithDB(zzStoreDB(t, store)), WithTenantID(DefaultTenantUUID), WithWorkflowID(wfID))
+		// The first event of a run chains from the empty checksum, exactly as the tail wrote it.
+		if err := eng.flushEventUngated(ctx, wfID, persisted[0], ""); err != nil {
+			t.Fatalf("writing an already-persisted event again failed: %v", err)
+		}
+		after, err := store.LoadEventHistory(ctx, wfID)
+		if err != nil {
+			t.Fatalf("LoadEventHistory: %v", err)
+		}
+		if len(after) != 1 {
+			t.Fatalf("the event was written twice: %d rows after writing it again, want 1", len(after))
+		}
+		// CONTROL: a DIFFERENT step is a new row, so "still one row" above is about idempotence and not about the writer refusing everything.
+		next := persisted[0]
+		next.Step = 1
+		if err := eng.flushEventUngated(ctx, wfID, next, computeEventChecksum(persisted[0], "")); err != nil {
+			t.Fatalf("CONTROL FAILED: writing a new step failed: %v", err)
+		}
+		if after2, _ := store.LoadEventHistory(ctx, wfID); len(after2) != 2 {
+			t.Fatalf("CONTROL FAILED: a new step left %d rows, want 2: the writer is not writing at all", len(after2))
 		}
 	})
 }

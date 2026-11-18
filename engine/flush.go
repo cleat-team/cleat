@@ -919,8 +919,10 @@ func eventCreatedAt(rec EventRecord) time.Time {
 //   - A fence lost here means another worker owns the run now. Nothing more is written, and the error Execute returns is the
 //     fence error, not the guest's, so the worker does not report a failure for a run it no longer owns. The first fenced insert
 //     is what finds out, so a bumped generation writes nothing at all.
-//   - Idempotent: the insert is ON CONFLICT DO NOTHING for a settled step, so an event a partial earlier flush already wrote is a
-//     no-op and not a duplicate.
+//   - Idempotent: the insert is ON CONFLICT (tenant_id, workflow_id, step) DO UPDATE ... WHERE <a pending await event>, a WHERE that
+//     cannot fire for a settled step, so an event a partial earlier flush already wrote is a no-op and not a duplicate. (The
+//     MySQL and SQL Server writers reach the same result through their own per-step insert.) Pinned by
+//     TestAnEventTheTailWritesAgainIsNotDuplicated.
 //   - Any other write error is logged and the guest's own error stands. The run has already failed, and a history that could not
 //     be written is the situation before this change, not a new one.
 func (s *execSession) flushUnflushedEvents(errp *error) {
