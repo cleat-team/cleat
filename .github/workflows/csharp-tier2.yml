@@ -1,0 +1,195 @@
+name: C# Tier 2
+
+# The C# guest (cleat#4080) is IN DEVELOPMENT and NOT SUPPORTED: see tiers.yaml. This workflow is where its toolchain runs in CI:
+# the SDK's managed unit tests and the Go-side tests in tests/csharp, both in the digest-pinned .NET SDK container, with the toolchain
+# DECLARED to the tests (CLEAT_REQUIRE_TOOLCHAINS) so a missing docker is a failure here and a skip on a laptop.
+#
+# NOT A REQUIRED CHECK: "C# Tier 2 (Linux x86_64)" and "C# Tier 2 (Linux arm64)"
+# Tier 2 must RUN and may fail, so neither is in tiers.yaml's required_contexts and neither is to be added to a ruleset. THAT IS WHAT
+# MAKES THE WORKFLOW-LEVEL `paths:` FILTER BELOW SAFE: a required context behind a path filter never reports on a PR that does not
+# touch the paths, and blocks it (a required context can be absent). If either job is ever made required, the filter must go and the
+# job must always run, with a step guard that skips the work when no C# path changed. Making one required is a branch-protection
+# change, which needs the owner.
+#
+# NO merge_group TRIGGER, ON PURPOSE: nothing here gates a merge, and `paths:` filters do not apply to merge_group events, so adding
+# the trigger would run both jobs in the queue for every PR whatever it touched. They run on the pull request, where the paths filter
+# works, and on workflow_dispatch. There is no `push` trigger either: a post-merge run would repeat the PR's run on the same tree.
+#
+# TWO PLATFORMS, because the pinned image is a manifest list and the lock covers linux/amd64 and linux/arm64 (toolchain.env):
+#   - x86_64 (ubuntu-latest): everything. The linux/arm64 leg of TestCSharpLockResolvesOnEveryPlatform SKIPS here, by design: this
+#     runner has no binfmt/QEMU, so it cannot execute the arm64 image (tests/csharp needPlatform). One skip, declared in
+#     scripts/skip-ledger.d/csharp-tier2.tsv.
+#   - arm64 (ubuntu-24.04-arm, NATIVE, no emulator): the lock's arm64 row and a real arm64 compile. The job declares csharp-arm64, so
+#     if the leg cannot run it FAILS rather than skips. The amd64 leg skips there, for the mirror reason (skip-ledger.d/
+#     csharp-tier2-arm64.tsv). Native rather than QEMU was MEASURED (n=1, 2026-11-18, cleat#4080): restore-only cold 28 s native
+#     against 70 s emulated, warm 1 s against 22 s, and a native full build is 11 s.
+# Arm jobs share the organisation's hosted-runner concurrency limit.
+
+# cleat#3073: surfaces the triggering activity type in the run's display title, so a PR body edit's run set is
+# distinguishable from the one it shares a SHA with. Full rationale in ci.yml, next to the same expression.
+run-name: >-
+  ${{ github.event.pull_request.title || github.event.head_commit.message || github.ref_name }}${{ github.event.action && format(' [{0}]', github.event.action) || '' }}
+
+on:
+  pull_request:
+    branches: [main, develop, "release/**"]
+    # Only what can change a C# result. cmd/cleat is NOT listed whole: cmd/cleat changes constantly and almost never touches C#, so
+    # the build wrapper's own files are named. engine/ is not listed either: the engine's C# tests run in the Tier 2 Gate.
+    paths:
+      - "packages/cleat-csharp/**"
+      - "tests/csharp/**"
+      - "cmd/cleat/build_csharp*.go"
+      - "python-sdk/wit/**"
+      - "wasm/**"
+      - "scripts/skip-ledger.d/csharp-tier2*.tsv"
+      - ".github/workflows/csharp-tier2.yml"
+    # `edited` is required, not decorative: it is the activity type a BASE CHANGE fires. Without it a PR retargeted
+    # onto this branch filter would never trigger this workflow at all. scripts/check-workflow-pr-triggers.sh guards this.
+    types: [opened, synchronize, reopened, edited]
+  workflow_dispatch:
+
+# Least-privilege token: these jobs only check out code and run tests.
+permissions:
+  contents: read
+
+concurrency:
+  # Every dispatch gets its own group; PR runs share one per ref and supersede. A BODY EDIT MUST NOT SUPERSEDE THE RUN IT
+  # RACES (cleat#1688, cleat#3809): an `edited` that did not change the base gets its own group, so it cancels nothing.
+  # ONE LINE ON PURPOSE: scripts/check-workflow-concurrency.sh reads the single line matching `^\s*group:`.
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && (github.event.action == 'edited' && !github.event.changes.base && github.run_id || github.ref) || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  csharp-tier2:
+    name: C# Tier 2 (Linux x86_64)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      # `csharp`: a missing docker daemon is a failure, not a skip. NOT csharp-arm64: this runner cannot execute arm64 images.
+      CLEAT_REQUIRE_TOOLCHAINS: csharp
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Setup Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      # The SDK's managed unit tests, in the same digest-pinned image the build uses, never on a natively installed dotnet.
+      - name: SDK unit tests (in the pinned container)
+        run: |
+          set -o pipefail
+          packages/cleat-csharp/tests/test.sh 2>&1 | tee csharp-unit-tests.log
+          # The COUNT, not the exit status: `dotnet test` exits 0 for a project in which no test was discovered. `declared` counts the
+          # [Fact] and [Theory] attributes in the test sources, so a test that stopped being discovered leaves passed below it. A [Theory]
+          # runs once per row, so passed is normally ABOVE declared; the sanity constant is set once and is not raised when tests are
+          # added, because a grep that matched nothing would otherwise read 0 >= 0 and pass.
+          # `|| true` on both: grep exits 1 when NOTHING matched, and under -e plus pipefail that would end the step before the
+          # sanity line could say why.
+          declared=$({ grep -hcE '^\s*\[(Fact|Theory)' packages/cleat-csharp/tests/Cleat.Tests/*.cs || true; } | awk '{s += $1} END {print s + 0}')
+          [ "$declared" -ge 60 ] || { echo "found only $declared [Fact]/[Theory] declarations (at least 69 exist); the grep is broken, so the count below would be 0 >= 0" >&2; exit 1; }
+          passed=$(grep -oE 'Passed: +[0-9]+' csharp-unit-tests.log | grep -oE '[0-9]+$' | tail -1 || true)
+          failed=$(grep -oE 'Failed: +[0-9]+' csharp-unit-tests.log | grep -oE '[0-9]+$' | tail -1 || true)
+          echo "unit tests: declared=$declared passed=${passed:-none} failed=${failed:-none}"
+          [ "${failed:-1}" = 0 ] || { echo "the unit tests reported ${failed:-no summary} failures" >&2; exit 1; }
+          [ -n "$passed" ] && [ "$passed" -ge "$declared" ] || { echo "only ${passed:-no} of the $declared declared unit tests passed; every one must run" >&2; exit 1; }
+
+      - name: Tests (tests/csharp, toolchain declared)
+        run: |
+          set -o pipefail
+          go test -count=1 -timeout 25m -json ./tests/csharp/... | tee csharp-tier2-report.json > /dev/null
+
+      - name: Upload the report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: csharp-tier2-report-${{ github.sha }}
+          path: csharp-tier2-report.json
+          overwrite: true
+          if-no-files-found: warn
+          retention-days: 7
+
+      # The three numbers, not the exit status: a package that did not build contributes nothing to a count keyed on "Test", and
+      # `go test` exits 0 for a pattern that matches nothing. `if: always()` so a failing test names itself (cleat#3826).
+      - name: Read the result (failures, package failures, tests that ran)
+        if: always()
+        run: |
+          f=csharp-tier2-report.json
+          fail=$(grep '"Action":"fail"' "$f" | grep -c '"Test":' || true)
+          pkgfail=$(grep '"Action":"fail"' "$f" | grep -vc '"Test":' || true)
+          # Top-level tests only: a subtest name carries a "/", and counting subtests could meet a floor while a top-level test had not run.
+          top=$(grep '"Action":"pass"' "$f" | grep '"Test":' | grep -vc '"Test":"[^"]*/' || true)
+          echo "tests failed: $fail, package failures: $pkgfail, top-level tests passed: $top"
+          if grep -q '"Output":"panic: test timed out' "$f"; then
+            echo "TIMED OUT (go test -timeout, not a test failure)" >&2
+          fi
+          if [ "$fail" != 0 ]; then
+            grep '"Action":"fail"' "$f" | grep '"Test":' | sed -E 's/.*"Test":"([^"]+)".*/  FAILED: \1/' | sort -u | head -20 >&2
+          fi
+          if [ "$pkgfail" != 0 ]; then
+            grep '"Action":"fail"' "$f" | grep -v '"Test":' | head -3 >&2
+          fi
+          [ "$fail" = 0 ] && [ "$pkgfail" = 0 ] || { echo "a failure or a package that did not build" >&2; exit 1; }
+          # THE EXPECTED COUNT IS DERIVED, NOT WRITTEN DOWN (cleat#3827): `go test -list` says what exists, and every top-level test must
+          # have passed, so a test that skips, does not build or is filtered out leaves `top` below `listed`. The sanity constant is set
+          # once and is not raised when tests are added: if `-list` printed nothing, `top >= listed` would read 0 >= 0 and pass.
+          listed=$(go test -list '^Test' ./tests/csharp/... | grep -c '^Test' || true)
+          [ "$listed" -ge 5 ] || { echo "go test -list found only $listed top-level tests (at least 7 exist); the listing is broken, so the count below would be 0 >= 0" >&2; exit 1; }
+          [ "$top" -ge "$listed" ] || { echo "only $top of the $listed top-level tests in tests/csharp passed; every one that exists must run" >&2; exit 1; }
+
+      - name: "Skip budget (one: the arm64 leg, which this runner cannot execute)"
+        run: scripts/check-skip-budget.sh csharp-tier2 csharp-tier2-report.json
+
+  csharp-tier2-arm64:
+    name: C# Tier 2 (Linux arm64)
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    env:
+      # `csharp-arm64` too: this runner CAN execute arm64, so a leg that cannot run is a broken setup and must fail, not skip.
+      CLEAT_REQUIRE_TOOLCHAINS: csharp,csharp-arm64
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Setup Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      # Not the whole package: the lock's arm64 row, and one real arm64 compile with its stamp read back. The rest runs on x86_64 and
+      # costs the same here.
+      - name: Tests (the arm64 lock and a native arm64 build)
+        run: |
+          set -o pipefail
+          go test -count=1 -timeout 25m -json -run '^(TestCSharpLockResolvesOnEveryPlatform|TestCSharpBuildProducesAStampedComponent)$' ./tests/csharp/... | tee csharp-tier2-arm64-report.json > /dev/null
+
+      - name: Upload the report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: csharp-tier2-arm64-report-${{ github.sha }}
+          path: csharp-tier2-arm64-report.json
+          overwrite: true
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Read the result (the arm64 leg must have PASSED, not merely not failed)
+        if: always()
+        run: |
+          f=csharp-tier2-arm64-report.json
+          fail=$(grep '"Action":"fail"' "$f" | grep -c '"Test":' || true)
+          pkgfail=$(grep '"Action":"fail"' "$f" | grep -vc '"Test":' || true)
+          echo "tests failed: $fail, package failures: $pkgfail"
+          if [ "$fail" != 0 ]; then
+            grep '"Action":"fail"' "$f" | grep '"Test":' | sed -E 's/.*"Test":"([^"]+)".*/  FAILED: \1/' | sort -u | head -20 >&2
+          fi
+          [ "$fail" = 0 ] && [ "$pkgfail" = 0 ] || { echo "a failure or a package that did not build" >&2; exit 1; }
+          # Named, because a skipped leg also leaves `fail` at 0. Declaring csharp-arm64 makes a leg that cannot run FAIL, but this
+          # is the line that says the thing the job exists for happened: the arm64 lock row resolved, and an arm64 component was built.
+          for t in 'TestCSharpLockResolvesOnEveryPlatform/linux_arm64' 'TestCSharpBuildProducesAStampedComponent'; do
+            grep '"Action":"pass"' "$f" | grep -qF "\"Test\":\"$t\"" || { echo "$t did not pass on this arm64 runner" >&2; exit 1; }
+          done
+
+      - name: "Skip budget (one: the amd64 leg, which this runner cannot execute)"
+        run: scripts/check-skip-budget.sh csharp-tier2-arm64 csharp-tier2-arm64-report.json
