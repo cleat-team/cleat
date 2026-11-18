@@ -87,20 +87,21 @@ func (s *PostgresStore) WriteTenantSettings(ctx context.Context, settings Tenant
 	if settings.WasmInstanceTimeout > 0 {
 		if floorErr := CheckWasmInstanceTimeoutFloor(settings.WasmInstanceTimeout,
 			"tenant setting wasm_instance_timeout_ms", "clear it (0 or unset) to use the operator's flag"); floorErr != nil {
-			carried := false
+			carried, stale := false, false
 			if rev.Existed {
 				var cur *int64
-				// The revision-guarded read: if the row changed since rev, there is nothing to carry through and the write below
-				// reports the conflict as usual.
+				// The revision-guarded read: if the row changed since rev there is nothing to carry through, and the caller needs to
+				// hear "re-read" (ErrTenantSettingsConflict, from the write below) rather than "your value is too low".
 				qErr := tx.QueryRowContext(ctx,
 					`SELECT wasm_instance_timeout_ms FROM tenant_settings WHERE tenant_id = $1 AND updated_at = $2`,
 					s.tenantID, rev.UpdatedAt).Scan(&cur)
 				if qErr != nil && !errors.Is(qErr, sql.ErrNoRows) {
 					return fmt.Errorf("write tenant settings: %w", qErr)
 				}
+				stale = errors.Is(qErr, sql.ErrNoRows)
 				carried = qErr == nil && cur != nil && inst != nil && *cur == *inst
 			}
-			if !carried {
+			if !carried && !stale {
 				return floorErr
 			}
 		}

@@ -16,6 +16,12 @@ import (
 // TestEveryWriterOfTenantSettingsIsKnown for how that is kept true on all three dialects.
 
 func TestATenantInstanceTimeoutBelowTheFloorIsRefused(t *testing.T) {
+	// ONE postgresOnly for the whole table, and the row cleared between cases, rather than one per subtest: on the MySQL and SQL
+	// Server jobs postgresOnly skips, the skip budget counts every skipped subtest, and eight subtests would need a ledger count of
+	// eight for what is one decision.
+	store, teardown := postgresOnly(t)
+	defer teardown()
+
 	for _, tc := range []struct {
 		name    string
 		d       time.Duration
@@ -31,9 +37,10 @@ func TestATenantInstanceTimeoutBelowTheFloorIsRefused(t *testing.T) {
 		{"30s", 30 * time.Second, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			store, teardown := postgresOnly(t)
-			defer teardown()
 			ctx := context.Background()
+			if _, err := store.db.ExecContext(ctx, `DELETE FROM tenant_settings WHERE tenant_id = $1`, store.tenantID); err != nil {
+				t.Fatalf("clearing tenant_settings between cases: %v", err)
+			}
 
 			_, rev, err := store.ReadTenantSettingsForUpdate(ctx)
 			if err != nil {
@@ -119,7 +126,19 @@ func TestAnExistingSubFloorValueIsCarriedThroughButNeverNewlyWritten(t *testing.
 		t.Fatalf("100ms -> 150ms returned %v, want ErrWasmInstanceTimeoutBelowFloor", err)
 	}
 
-	// 3. Raising it to the floor is accepted, and from then on the old value is gone: lowering it again is refused.
+	// 3. A STALE revision reports the conflict, not the floor: if the row changed since it was read there is no stored value to
+	// carry, and the answer the caller needs is "re-read", not "your value is too low".
+	staleRev := rev
+	if err := store.WriteTenantSettings(ctx, TenantSettings{WasmInstanceTimeout: 100 * time.Millisecond, HostRetryBudget: 9 * time.Second}, rev); err != nil {
+		t.Fatalf("a carried write at the current revision failed: %v", err)
+	}
+	if err := store.WriteTenantSettings(ctx, TenantSettings{WasmInstanceTimeout: 100 * time.Millisecond, HostRetryBudget: 3 * time.Second}, staleRev); !errors.Is(err, ErrTenantSettingsConflict) {
+		t.Fatalf("a stale revision with a sub-floor value returned %v, want ErrTenantSettingsConflict", err)
+	}
+	cur, rev, _ = store.ReadTenantSettingsForUpdate(ctx)
+	moved = cur
+
+	// 4. Raising it to the floor is accepted, and from then on the old value is gone: lowering it again is refused.
 	moved.WasmInstanceTimeout = MinWasmInstanceTimeout
 	if err := store.WriteTenantSettings(ctx, moved, rev); err != nil {
 		t.Fatalf("raising 100ms to the floor was refused: %v", err)
