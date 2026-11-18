@@ -1038,15 +1038,31 @@ timeout and is not recommended.
 reason and exits non-zero before it serves anything.** Below about 200ms the
 hard epoch trap beats the soft kill to a poll, so the defers of a workflow
 this timeout stops do not reliably run. Measured: at 100ms the soft kill
-reached the guest 0 times in 20 runs, at 150ms 18 of 20, and at 200ms and above
+reached the guest 0 times in 20 runs, at 150ms 18 of 20, and at 200ms and 240ms
 20 of 20 (`ABI.md`, "There is a cliff below about 200 ms"; cleat#3922). 250ms
 is the floor because it leaves headroom over that measurement. Earlier releases
 accepted any value here, so a deployment that sets this flag low must raise it
 before upgrading.
 
-The floor covers this flag only. A library user setting the engine option
-directly, a context deadline, and a tenant's own `wasm_instance_timeout_ms`
-setting are not checked and can still reach the cliff.
+A tenant's own `wasm_instance_timeout_ms` (`cleatctl set-tenant-setting
+--wasm-instance-timeout-ms`) is held to the same floor: a value above 0 and
+under 250 is refused with the same explanation, and nothing is written. A value
+a tenant already has under 250ms is not rewritten and not newly refused, it is
+used as it stands (`min(run, tenant, operator)`), so it still reaches the cliff
+until an operator raises it; it also does not block changing that tenant's other
+settings. To find them:
+
+    SELECT tenant_id, wasm_instance_timeout_ms FROM tenant_settings
+    WHERE wasm_instance_timeout_ms > 0 AND wasm_instance_timeout_ms < 250;
+
+(Run it as a role that is not subject to row-level security; on MySQL it is the
+control-plane database, on SQL Server `dbo.tenant_settings`.) The table's CHECK
+only requires the value to be positive, so a direct SQL write can still store a
+low one.
+
+Not covered, and still reaching the cliff as ABI.md documents: the engine option
+a library user sets directly, a context deadline, the epoch tick, and a per-run
+`wasm_instance_timeout_ms` on the start request.
 
 ---
 

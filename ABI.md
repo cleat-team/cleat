@@ -643,6 +643,10 @@ soft kill reached the guest 0 times in 20 runs, at 150 ms 18 of 20, and at 200 m
 20 (cleat#3922 review, 2026-11-18). Below that range the hard trap wins the race to a poll, so a
 workflow's cleanup is not reliable — an operator who needs defers to run should leave the instance
 timeout well above 200 ms.
+The worker refuses `--wasm-instance-timeout` above 0 and under 250 ms at startup, and
+`cleatctl set-tenant-setting` refuses a tenant's `wasm_instance_timeout_ms` in the same range
+(cleat#3922). Values already stored for a tenant are not rewritten, and the engine option, context
+deadlines, the epoch tick and a per-run override on the start request are not checked.
 
 **It is best-effort, and the host does not promise it will be asked.** The margin is sized from the
 longest gap measured between two consecutive polls, but a single operation that burns more budget
