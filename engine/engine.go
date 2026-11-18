@@ -844,7 +844,15 @@ func WithBackend(language string, backend WasmBackend) EngineOption {
 // here. It was deliberately kept OUT of deferSegmentLanguages below until the guest
 // decoded the sentinel and the plugin exported something to drain; cleat#3826 added it there,
 // and the verification is recorded beside that entry.
-var WasmtimeLanguages = []string{"go", "java", "rust", "python", "javascript"}
+//
+// "csharp" is the C# guest built with componentize-dotnet (cleat#4080; the spike is cleat#4077), and like "javascript" before it
+// it is a LABEL ahead of the build chain: it makes a module that declares itself C# routable to the wasmtime backend, and nothing
+// else. The language is IN DEVELOPMENT and tiers.yaml grants it no support claim. It is a component, not a core module, so it
+// reaches the component path (like python); the spike measured that a C# component that carries a cleat.metadata section naming
+// "csharp" ran as csharp once this label existed, and that one WITHOUT the section is detected as "python" and routed as a Python
+// guest, which is why the build chain's stamp is mandatory (C# PR 2). It is deliberately OUT of deferSegmentLanguages below: the
+// guest has no SDK yet, and C# PR 3 adds it there with the test that earns it.
+var WasmtimeLanguages = []string{"go", "java", "rust", "python", "javascript", "csharp"}
 
 // removedGuestLanguages are guest languages cleat once built for and no longer does, mapped to what an operator is told. A module
 // that declares one is REFUSED, by name, rather than reaching resolveBackend's generic "no WASM backend registered for guest

@@ -61,7 +61,7 @@ LANG_KEY = {
     "TypeScript (real)": "typescript",
     "C": None,
     "Zig": None,
-    "C#/.NET": None,
+    "C#/.NET": "csharp",
 }
 
 NOT_SUPPORTED = re.compile(r"^\s*(IN DEVELOPMENT|NOT SUPPORTED)", re.I)

@@ -257,7 +257,7 @@ crates/cleat-macro/src/*.rs`) — grown substantially from the original
 | **C** | clang (mature) | Not built | 10-50 KB (design estimate) | — |
 | **Zig** | zig build-exe (mature) | Not built | 5-30 KB (design estimate) | — |
 | **TypeScript** (real) | Javy/QuickJS | Shipped (tier 2; known differences from Node in `packages/cleat-ts/DIVERGENCES.md`) | ~1.45 MB (measured 2026-11-17, the example module; see below) | 2 |
-| **C#/.NET** | NativeAOT-LLVM (exp.) | Not built | 1-5 MB (design estimate) | — |
+| **C#/.NET** | componentize-dotnet (NativeAOT-LLVM, Component Model) | In development, not supported (cleat#4080) | 0.7-1 MB (measured in the cleat#4077 spike: a hello and a 9-mode test workflow) | — |
 
 ### TypeScript (real): tier 2
 
