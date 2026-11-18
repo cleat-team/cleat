@@ -87,6 +87,14 @@ package engine
 //     v->of.u64 = val;
 // }
 //
+// // The WIT's `s64` is a different component type from `u64`, and wasmtime
+// // checks a callback's result against the declared type: a u64 where the
+// // function says s64 traps with "type mismatch: expected s64, found u64".
+// static void component_val_set_s64(wasmtime_component_val_t *v, int64_t val) {
+//     v->kind = WASMTIME_COMPONENT_S64;
+//     v->of.s64 = val;
+// }
+//
 // static wasmtime_component_val_t make_component_val_string(const char *s, size_t len) {
 //     wasmtime_component_val_t val;
 //     val.kind = WASMTIME_COMPONENT_STRING;
@@ -891,6 +899,19 @@ func setResultU64(results *C.wasmtime_component_val_t, nresults C.size_t, val ui
 	}
 	r := (*C.wasmtime_component_val_t)(unsafe.Pointer(results))
 	C.component_val_set_u64(r, C.uint64_t(val))
+}
+
+// setResultS64 sets the first result value to an s64. Use it for a function the
+// WIT declares `-> s64`; setResultU64 on one traps (cleat#4081). Today that is
+// exactly durable-acquire-lock and durable-release-lock -- every other import
+// returns u64 -- which is why the defect went unseen: nothing had ever called
+// either on a component.
+func setResultS64(results *C.wasmtime_component_val_t, nresults C.size_t, val int64) {
+	if int(nresults) < 1 {
+		return
+	}
+	r := (*C.wasmtime_component_val_t)(unsafe.Pointer(results))
+	C.component_val_set_s64(r, C.int64_t(val))
 }
 
 // setResultString sets the first result value to a WIT string.
