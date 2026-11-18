@@ -38,8 +38,8 @@ import (
 // WHAT ALREADY EXISTS AND WHY THIS IS NOT IT. The Java parity test
 // (java_sdk_stop_bit_parity_test.go) pins the host-side count and fires when it
 // moves -- it is what caught §3.111 -- but it checks ONE guest language, and
-// Rust and AssemblyScript have per-method coverage with no host-side pin at all,
-// so a ninth site passes both of them silently. This test is about the
+// Rust (and AssemblyScript, until cleat#4023 removed it) had per-method coverage
+// with no host-side pin at all, so a ninth site passed both of them silently. This test is about the
 // correspondence rather than about any one SDK.
 
 // exemption reasons. Constants rather than comments, because "why is this

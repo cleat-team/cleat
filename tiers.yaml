@@ -208,15 +208,8 @@ tier1:
     # leave a pair whose halves run in different jobs.
     - "^TestJavaDeferSegmentRunsOnlyTheDefers$"
     - "^TestJavaOrdinarySegmentRunsTheBody$"
-    # tier 2 -- assemblyscript. engine/as_workflow_e2e_test.go and the npx-based
-    # transform/vet checks; all need node.
-    - "^TestAssemblyScriptWorkflowExecute$"
-    # tier 2 -- assemblyscript. engine/as_defer_segment_e2e_test.go (3.106); needs node.
-    #
-    # No control alongside it, unlike the Java pair above: TestAssemblyScriptWorkflowDefersRun
-    # in engine/as_workflow_e2e_test.go already plays that part and is covered by the
-    # ^TestAssemblyScript prefix the e2e job selects on.
-    - "^TestAssemblyScriptDeferSegmentRunsOnlyTheDefers$"
+    # tier 2 -- assemblyscript, in cmd/cleat: the npx-based transform and vet checks; both need
+    # node. (The engine's AssemblyScript tests were listed here too until cleat#4023 deleted them.)
     - "^TestASTransform$"
     - "^TestVetAS$"
     #
@@ -260,15 +253,6 @@ tier1:
     # would also take TestAssemblyScriptImportsAllExist and
     # TestTheAssemblyScriptSDKAgreesOnTheStopBit, which build nothing and cost
     # nothing and belong in this gate. Tiering follows what a test NEEDS.
-    - "^TestAssemblyScriptWorkflowDefersRun$"
-    - "^TestAssemblyScriptDefersDoNotRunOnSuspension$"
-    - "^TestAssemblyScriptExportsTheDeferRunner$"
-    - "^TestADeferBodyCannotContinueAsNew$"
-    - "^TestADeferBodyCannotRegisterAnotherDefer$"
-    - "^TestAMissingDeferExportIsNotReportedAsAFailure$"
-    - "^TestTheBackendLogsToTheConfiguredLogger$"
-    - "^TestTheWazeroPathRunsDefersOfATrappedWorkflow$"
-    - "^TestTheHostRunsDefersOfAKilledAssemblyScriptWorkflow$"
     - "^TestJavaExportsTheDeferRunner$"
     - "^TestTheHostRunsDefersOfAKilledJavaWorkflow$"
     # tier 2 -- java and assemblyscript, in cmd/cleat (cleat#3690, from cleat#3689).
