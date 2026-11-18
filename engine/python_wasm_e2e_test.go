@@ -563,7 +563,7 @@ var pythonUnboundBaseline = []string{
 	"cleat_json_stringify",
 
 	// cleat_interrupt_requested (cleat#3922) is bound by ONE guest: the TypeScript
-	// plugin, which polls it from a QuickJS interrupt handler so a kill can unwind
+	// plugin, which polls it from the JavaScript engine's interrupt handler so a kill can unwind
 	// the guest cleanly and the host can then run its defers. It is recorded
 	// rather than called "not workflow-facing", because it is workflow-facing and
 	// this list exists to show the gap. It is OPTIONAL: a guest that never imports

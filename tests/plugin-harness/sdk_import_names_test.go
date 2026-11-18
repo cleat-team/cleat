@@ -313,8 +313,9 @@ var notWorkflowFacing = map[string]bool{
 // reason this direction is worth checking at all.
 var sdkUnreachedBaseline = map[string][]string{
 	// cleat_interrupt_requested (cleat#3922) is bound by ONE guest: the
-	// TypeScript plugin, which polls it from a QuickJS interrupt handler so a
-	// kill can unwind the guest cleanly and the host can then run its defers.
+	// TypeScript plugin, which polls it from the JavaScript engine's interrupt
+	// handler so a kill can unwind the guest cleanly and the host can then run
+	// its defers.
 	//
 	// It is workflow-facing, not a runtime handshake, so it is recorded here
 	// rather than in notWorkflowFacing above -- it widens the gap, which is

@@ -85,7 +85,6 @@ engine/version_metrics.go	func LogStaleAlerts
 engine/wasm_cache.go	func NewWASMCache
 engine/wasm_disk_cache.go	func WasmDiskCache.LookupBytes
 engine/wasmtime_hostfuncs.go	func InterruptStats
-engine/wasmtime_hostfuncs.go	func InterruptTimeStats
 engine/wasmtime_hostfuncs.go	func MeasureInterrupt
 internal/telemetry/tracing.go	func InitTracing
 migration/catalogdiff/catalogdiff.go	func AssertNoPluginObjects

@@ -4,7 +4,7 @@ package engine
 
 // cleat#3922: only a trap the HOST asked for is reported as the kill it was enforcing.
 //
-// The soft kill's surface is javy's process::abort(), which wasmtime renders as a bare
+// The soft kill's surface is the plugin runtime's own abort path, which wasmtime renders as a bare
 // `unreachable` -- indistinguishable from a guest that executes `unreachable` itself. So the
 // mapping is gated on the host's own record that it raised the interrupt, and this file pins both
 // sides of that gate: unmapped when nobody asked, mapped and correctly named when the host did.

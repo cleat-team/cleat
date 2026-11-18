@@ -634,29 +634,6 @@ func isExecutionLimit(err error) bool {
 	return errors.As(err, &limitErr)
 }
 
-// resourceLimitError recognizes traps caused by the resource bounds
-// configureStore applies (epoch interruption, fuel exhaustion) and turns
-// them into a clear, actionable message naming the limit that was hit and
-// its configured value. Returns nil for any other error (including other
-// kinds of traps), so the caller should fall back to its normal error
-// wrapping in that case.
-//
-// Two detection routes, because the two execution paths report the same trap
-// differently:
-//
-//   - Core modules and decomposition go through wasmtime-go, which surfaces a
-//     *wasmtime.Trap carrying a machine-readable code. Preferred wherever it
-//     is available.
-//   - The native component path goes through the Component Model C API, whose
-//     wasmtime_error_t exposes only a rendered message, an exit status and a
-//     wasm trace -- there is no trap-code accessor on it (see
-//     wasmtimeinc/wasmtime/error.h). So that path is matched on wasmtime's own
-//     rendering of the two trap codes.
-//
-// The string match is deliberately anchored on the full canonical phrases
-// rather than a fragment like "fuel" or "interrupt", which is the distinction
-// 2.26 was about: matching a short token inside a longer message is how the
-// SQL Server classifier matched error numbers as substrings.
 // grantUnwind grants the guest enough budget to unwind, ONCE per execution.
 //
 // The poll that fires the soft kill returns through the host-call bracket, which re-arms the epoch
@@ -705,6 +682,29 @@ func (b *wasmtimeBackend) fuelLimitError(err error) error {
 	return &executionLimitError{fmt.Errorf("instruction limit exceeded (%d fuel units; configure with --wasm-instruction-limit): %w", b.limits.instructionLimit, err)}
 }
 
+// resourceLimitError recognizes traps caused by the resource bounds
+// configureStore applies (epoch interruption, fuel exhaustion) and turns
+// them into a clear, actionable message naming the limit that was hit and
+// its configured value. Returns nil for any other error (including other
+// kinds of traps), so the caller should fall back to its normal error
+// wrapping in that case.
+//
+// Two detection routes, because the two execution paths report the same trap
+// differently:
+//
+//   - Core modules and decomposition go through wasmtime-go, which surfaces a
+//     *wasmtime.Trap carrying a machine-readable code. Preferred wherever it
+//     is available.
+//   - The native component path goes through the Component Model C API, whose
+//     wasmtime_error_t exposes only a rendered message, an exit status and a
+//     wasm trace -- there is no trap-code accessor on it (see
+//     wasmtimeinc/wasmtime/error.h). So that path is matched on wasmtime's own
+//     rendering of the two trap codes.
+//
+// The string match is deliberately anchored on the full canonical phrases
+// rather than a fragment like "fuel" or "interrupt", which is the distinction
+// 2.26 was about: matching a short token inside a longer message is how the
+// SQL Server classifier matched error numbers as substrings.
 func (b *wasmtimeBackend) resourceLimitError(err error, timeout time.Duration) error {
 	if err == nil {
 		return nil
