@@ -53,7 +53,7 @@
 # NewWasmtimeBackend is compiled out and the Python tests would run on wazero,
 # which is not what they are there to check. With it the run reports
 #
-#   wasmtime registered for [go assemblyscript java rust python]
+#   wasmtime registered for [go java rust python javascript]
 #
 # ---------------------------------------------------------------------------
 # If the mount check above FAILS -- recipe verified on colima

@@ -1306,7 +1306,7 @@ tier2:
   #
   # Both entries below run under `scripts/check-skip-budget.sh <name> <report.json>` with a
   # budget of 0, and e2e-cross-language.yml additionally sets
-  # CLEAT_REQUIRE_TOOLCHAINS=rust,python,java,assemblyscript so an absent toolchain is a
+  # CLEAT_REQUIRE_TOOLCHAINS=rust,python,java so an absent toolchain is a
   # Fatal rather than a skip. tier2.rules.skips_allowed is true, so routing these through
   # tier2-gate.sh would permit skips that their own jobs currently fail on.
   #
@@ -1371,9 +1371,9 @@ tier2:
       job: "Layer 2 — WASM Integration"
       workflow: .github/workflows/plugin-harness-ci.yml
       why: >-
-        Two things, not one. The Go, Rust, AssemblyScript and Python guest PLUGINS
+        Two things, not one. The Go, Rust, Java and Python guest PLUGINS
         (TestPluginCalls_Wasm), and since 2026-09-05 the host-call execution HARNESS
-        (TestHostCalls*, IMPROVEMENT-PLAN 3.406) -- Go, Rust and AssemblyScript guests
+        (TestHostCalls*, IMPROVEMENT-PLAN 3.406) -- Go, Rust and Java guests
         each making all 24 wave-1 host calls against a real host, one call per
         invocation, checked against recorded outcome tables. Both are named explicitly
         in the job's -run pattern, and neither is run by any other workflow: every job
@@ -1406,8 +1406,8 @@ tier2:
         Self-contained; brings up postgres and minio as service containers. Note the minio
         image is pinned to :latest, which is a real fragility now that this gates merges.
 
-    # The three non-Go SDKs. These are tier-2 COMPONENTS (sdk-rust, sdk-java,
-    # sdk-assemblyscript above) rather than Go packages, so tier2-gate.sh cannot run them
+    # The two non-Go SDKs. These are tier-2 COMPONENTS (sdk-rust and sdk-java; sdk-assemblyscript
+    # was a third until cleat#4023) rather than Go packages, so tier2-gate.sh cannot run them
     # -- it drives `go test -json` and these need cargo, gradle and npm.
     #
     # Every one of them was already tested on every pull request and none of it gated.
@@ -1422,7 +1422,7 @@ tier2:
     #   gh run list --workflow=ci.yml --branch develop --limit 8 \
     #     --json databaseId --jq '.[].databaseId' | while read r; do
     #       gh run view "$r" --json jobs --jq '[.jobs[]
-    #         |select(.name=="Test Rust" or .name=="Java Tests" or .name=="AssemblyScript Tests")
+    #         |select(.name=="Test Rust" or .name=="Java Tests")
     #         |"\(.name)=\(.conclusion)"]|join("  ")'; done
     - suite: crates/cleat-sdk, crates/cleat-macro
       job: "Test Rust"
@@ -1435,9 +1435,6 @@ tier2:
       job: "Java Tests"
       workflow: .github/workflows/ci.yml
       why: gradle test. Measured 2026-08-07 - 280 tests, 0 failures, 0 skipped.
-    - suite: packages/cleat-as
-      job: "AssemblyScript Tests"
-      workflow: .github/workflows/ci.yml
 
     # NOT gated, and deliberately named rather than silently omitted:
     #
@@ -1446,11 +1443,9 @@ tier2:
     #   double the registry exposure for the same signal, and D5's whole argument is
     #   about how much registry surface a blocking check should have.
     #
-    #   "AssemblyScript WASM Build" (ci.yml) and "AssemblyScript SDK Integration"
-    #   (ecosystem-ci.yml) both carried continue-on-error until 2026-08-07. It was
-    #   removed -- measured, every step in both was already passing -- so they can now
-    #   fail. They are left unrequired for the same duplicate-coverage reason: they
-    #   should be able to fail visibly first, and be promoted only if that proves useful.
+    #   (There were two more, "AssemblyScript WASM Build" in ci.yml and "AssemblyScript SDK
+    #   Integration" in ecosystem-ci.yml, unrequired for the same duplicate-coverage reason.
+    #   cleat#4023 removed both with the SDK.)
 
   # Separate Go modules, tested from inside their own directory -- `go test ./cleat/...`
   # from the root fails with "main module does not contain package".
@@ -1627,7 +1622,7 @@ required_contexts:
   # protection itself, not the date this file was last edited. Only --check-live and the
   # default run's live attempt can move it; an entry added from a PR description cannot.
   measured: 2026-09-29
-  total: 35
+  total: 34
 
   # `covers` is one of:
   #   tier1        the context runs only tier-1 packages/modules
@@ -1747,15 +1742,6 @@ required_contexts:
         cluster-and-scale among the suites that do). It is required because multi-worker
         claim/fence behaviour has no other blocking coverage: the tier-1 engine suite
         runs one process.
-    - context: AssemblyScript Tests
-      workflow: ci.yml
-      job: test-assemblyscript
-      covers: tier2
-      why_required: |
-        tier2.components sdk-assemblyscript. Required because the SDK ships to npm and
-        its stop-bit parity with the host is one of the boundaries §3.400 lists as
-        guarded; an unrequired check there would let the guest and host drift apart
-        between releases.
     - context: Java Tests
       workflow: ci.yml
       job: test-java

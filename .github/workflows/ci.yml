@@ -23,14 +23,13 @@
 #   test-go           — matrix (go version x package group), race detector
 #   test-python       — matrix (python 3.10 / 3.11 / 3.12)
 #   test-java         — gradle test (TeaVM + JUnit 5)
-#   test-assemblyscript — npm test (as-pect)
 #   fuzz              — fuzz tests on wasm/... (60s per fuzz func)
 #   benchmarks        — push to main only; uploads a 90-day artifact, no
 #                       trend/comparison store (cleat#2487: the step that did
 #                       that, benchmark-action's trend tracking, was removed
 #                       for good — see the job's own comment)
 #   cluster-tests     — docker-compose cluster, integration tests, tear-down
-#   build             — Go bin, Python SDK, Java, AssemblyScript, examples
+#   build             — Go bin, Python SDK, Java, examples
 # ---------------------------------------------------------------------------
 name: CI/CD Pipeline
 
@@ -3314,24 +3313,18 @@ jobs:
         with:
           go-version-file: go.mod
 
-      # The Rust, Java and AssemblyScript agent clients, for cleat#2978's
-      # extension of cleat#1983's acceptance to those three SDKs. These tests
-      # are `cmd/cleat`'s -- TestRustExampleEntryPointResolutionLive and its
-      # AssemblyScript and Java counterparts all live in that package -- so
-      # they follow the leg that carries cmd/cleat and no other. Each is a
-      # toolchain a skip would hide: the test SKIPS without it and the job goes
-      # green having run nothing.
+      # The Rust and Java agent clients, for cleat#2978's extension of cleat#1983's
+      # acceptance to those SDKs. These tests are `cmd/cleat`'s --
+      # TestRustExampleEntryPointResolutionLive and its Java counterpart live in that
+      # package -- so they follow the leg that carries cmd/cleat and no other. Each is a
+      # toolchain a skip would hide: the test SKIPS without it and the job goes green
+      # having run nothing. (AssemblyScript was a third until cleat#4023 removed it, and
+      # its Node setup went with it: nothing in this package needs Node any more.)
       - name: Setup Rust + wasm32-unknown-unknown
         if: matrix.leg == 'cleat'
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
-
-      - name: Setup Node (AssemblyScript build path)
-        if: matrix.leg == 'cleat'
-        uses: actions/setup-node@v7
-        with:
-          node-version: "20"
 
       - name: Setup Java (Java build path)
         if: matrix.leg == 'cleat'
@@ -3815,11 +3808,6 @@ jobs:
         with:
           targets: wasm32-unknown-unknown
 
-      - name: Setup Node (AssemblyScript build path)
-        uses: actions/setup-node@v7
-        with:
-          node-version: "20"
-
       - name: Setup Java
         uses: actions/setup-java@v6
         with:
@@ -4139,48 +4127,6 @@ jobs:
         run: gradle test
 
   # -------------------------------------------------------------------------
-  # Test AssemblyScript
-  # -------------------------------------------------------------------------
-  test-assemblyscript:
-    if: ${{ !cancelled() && (github.event_name != 'push' || github.ref != 'refs/heads/develop') }}
-    name: AssemblyScript Tests
-    needs: [edit-gate]
-    # No continue-on-error. Measured 2026-08-06 on a clean checkout, `npm test`
-    # in packages/cleat-as runs 106 assertions across three spec files, 106
-    # passing -- so the exemption was protecting nothing, and meanwhile the one
-    # job that could report an AssemblyScript regression could not fail. Note
-    # `npm ci` has to run first: as-pect is a devDependency and `asp` is not on
-    # PATH without it, which is why this cannot be reproduced by running npm
-    # test alone in a checkout.
-    runs-on: ubuntu-latest
-    timeout-minutes: 10  # max 0.4m over 57 successful runs (develop push + pull_request samples), 2026-10-27; cleat#3479
-    steps:
-      # A required context must still report SUCCESS on a body edit: a
-      # `skipped` one beside its `success` twin leaves the PR un-mergeable
-      # (cleat#3958, measured on #3960). So the job runs and does nothing.
-      - name: Nothing to do -- this head already passed
-        if: ${{ needs.edit-gate.outputs.skip == 'true' }}
-        run: echo "the PR head already passed this workflow; nothing to re-run"
-      - uses: actions/checkout@v7
-        if: ${{ needs.edit-gate.outputs.skip != 'true' }}
-
-      - name: Setup Node
-        if: ${{ needs.edit-gate.outputs.skip != 'true' }}
-        uses: actions/setup-node@v7
-        with:
-          node-version: "20"
-
-      - name: Install dependencies
-        if: ${{ needs.edit-gate.outputs.skip != 'true' }}
-        working-directory: packages/cleat-as
-        run: npm ci
-
-      - name: Run tests
-        if: ${{ needs.edit-gate.outputs.skip != 'true' }}
-        working-directory: packages/cleat-as
-        run: npm test
-
-  # -------------------------------------------------------------------------
   # Web Dashboard
   #
   # NOTHING RAN THIS BEFORE 2026-08-08. `grep -ln web .github/workflows/*.yml`
@@ -4250,9 +4196,9 @@ jobs:
           # exact symptom, which persisted here after the version bumps because
           # the blocker was never the package pairing. cleat#1709.
           #
-          # Bumped for this job only. The other three setup-node jobs
-          # (AssemblyScript, AssemblyScript WASM, Build) do not use this
-          # toolchain and are left on 20 rather than moved speculatively.
+          # Bumped for this job only. The other setup-node jobs do not use this
+          # toolchain and are left on 20 rather than moved speculatively. (There were
+          # three until cleat#4023 removed the two AssemblyScript ones.)
           node-version: "22"
 
       - name: Install dependencies
@@ -4362,72 +4308,6 @@ jobs:
         if: ${{ needs.edit-gate.outputs.skip != 'true' }}
         working-directory: crates/cleat-sdk
         run: cargo build --target wasm32-wasip1 --release
-
-  # -------------------------------------------------------------------------
-  # Test AssemblyScript WASM compilation
-  # -------------------------------------------------------------------------
-  test-assemblyscript-wasm:
-    if: ${{ !cancelled() && (github.event_name != 'push' || github.ref != 'refs/heads/develop') && needs.edit-gate.outputs.skip != 'true' }}
-    name: AssemblyScript WASM Build
-    needs: [edit-gate]
-    runs-on: ubuntu-latest
-    timeout-minutes: 10  # max 0.4m over 58 successful runs (develop push + pull_request samples), 2026-10-27; cleat#3479
-    # continue-on-error removed 2026-08-07. It was protecting nothing: measured on
-    # develop run 31193028xxx, every one of this job's steps -- Install SDK
-    # dependencies, Install example dependencies, Build example WASM, Verify WASM output
-    # exists and is non-empty, Inspect WASM exports -- reported success. A job that
-    # cannot fail while passing anyway is indistinguishable from one that is broken and
-    # forgiven, which is the whole reason nobody could tell what this repo tested.
-    #
-    #   gh run view <id> --json jobs \
-    #     --jq '.jobs[]|select(.name=="AssemblyScript WASM Build")|.steps[]|"\(.conclusion)\t\(.name)"'
-    steps:
-      - uses: actions/checkout@v7
-
-      - name: Setup Node
-        uses: actions/setup-node@v7
-        with:
-          node-version: "20"
-
-      - name: Install SDK dependencies
-        working-directory: packages/cleat-as
-        run: npm ci
-
-      - name: Install example dependencies
-        working-directory: examples/as-workflow
-        run: npm install
-
-      - name: Build example WASM
-        working-directory: examples/as-workflow
-        run: npx asc assembly/index.ts --target release --transform ./node_modules/@cleat/transform/index.js
-
-      - name: Verify WASM output exists and is non-empty
-        working-directory: examples/as-workflow
-        run: |
-          if [ ! -f dist/workflow.wasm ]; then
-            echo "ERROR: dist/workflow.wasm not found after build"
-            exit 1
-          fi
-          FILE_SIZE=$(stat -c%s dist/workflow.wasm)
-          echo "WASM file size: $FILE_SIZE bytes"
-          if [ "$FILE_SIZE" -le 100 ]; then
-            echo "ERROR: workflow.wasm is too small ($FILE_SIZE bytes)"
-            exit 1
-          fi
-          echo "workflow.wasm is valid (size: $FILE_SIZE bytes)"
-
-      - name: Inspect WASM exports
-        working-directory: examples/as-workflow
-        run: |
-          if command -v wasm-objdump &>/dev/null; then
-            echo "=== WASM Exports ==="
-            wasm-objdump -x dist/workflow.wasm 2>/dev/null | grep -A1 "Export\| - func\["
-          elif command -v wasm2wat &>/dev/null; then
-            echo "=== WASM exports (wasm2wat) ==="
-            wasm2wat dist/workflow.wasm 2>/dev/null | grep "(export " | head -20
-          else
-            echo "No WASM inspection tools available. File size check passed."
-          fi
 
   # -------------------------------------------------------------------------
   # Fuzz tests (WASM boundary)
@@ -4888,12 +4768,6 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Setup Node
-        if: ${{ needs.edit-gate.outputs.skip != 'true' }}
-        uses: actions/setup-node@v7
-        with:
-          node-version: "20"
-
       - name: Setup Rust
         if: ${{ needs.edit-gate.outputs.skip != 'true' }}
         uses: dtolnay/rust-toolchain@stable
@@ -4923,13 +4797,6 @@ jobs:
           cd crates/cleat-macro && cargo build --all-targets
           cd ../cleat-sdk && cargo build --all-targets
           cargo build --target wasm32-wasip1 --release
-
-      - name: Build AssemblyScript
-        if: ${{ needs.edit-gate.outputs.skip != 'true' }}
-        working-directory: packages/cleat-as
-        run: |
-          npm ci
-          npm run build
 
       # `|| echo "non-blocking"` used to swallow the exit status here, which
       # made this step incapable of reporting anything but success. The Java
