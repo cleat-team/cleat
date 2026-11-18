@@ -1,0 +1,8 @@
+id	version	sha512
+bytecodealliance.componentize.dotnet.wasm.sdk	0.8.0-preview00011	//c0nZ8MX7+7/QA2cM/N+uwYkd+MBmegfjPKVJhtXg2s8oiXuZoTktlmupT+I+99lMWNyzoc3oTE7yjawVB/4A==
+bytecodealliance.componentize.dotnet.witbindgen	0.8.0-preview00011	9EcFiz4wEMpJ/fwSOx/7WimhO+xj8Nn8cPSc/3zCYVaPrjRd8/zCYXR66mi9FKZ55qlW9B/S2scSvmJ57L+OoQ==
+microsoft.dotnet.ilcompiler.llvm	10.0.0-rc.1.26306.1	ivY3nUB+uoKDqnJt9De6B2eu1GR+LALm2ub5F7SkRjmgOt3LfMVbGizKZiboiXGWXuAxQx7Q3MIQo1bs6c4VFg==
+microsoft.net.illink.tasks	10.0.15	q/cuZxi8XPwa4dpK+7y9t3KoL7T6qQZUtIqqN96YKx1Kcgr/bhD0K3U+OaLlrWVn6R23UrsEr8FARqKYVuE3Zg==
+runtime.linux-arm64.microsoft.dotnet.ilcompiler.llvm	10.0.0-rc.1.26306.1	CFXY8OMdla40jbfAjjGJrULTALJN7q0tI5lywX4gziQpUGhyYh/y2sSdC5S8u+YNHfBRCDpV74p8HhJOzo1ZeQ==
+runtime.linux-x64.microsoft.dotnet.ilcompiler.llvm	10.0.0-rc.1.26306.1	Bxd4OmpsQvrOHUok4nX8B/+W1P8vvTBZumNCF4b17zP/Kq2CfL2YvyDDF2ggBru1dqHGO8KZTPHsH1mNx9QUiQ==
+runtime.wasi-wasm.microsoft.dotnet.ilcompiler.llvm	10.0.0-rc.1.26306.1	SdrXEFreL7s+ywk66CJwWvsZ170MTaIcBgJb1UPbDlizlbcOhbfZ3rpSuF+HllrGNxpkcZG8C+azBJ3Tp0BbmA==
