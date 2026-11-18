@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -156,16 +157,11 @@ func TestEveryToolchainBuildingTestInAnyTier1PackageIsExcludedAndRunByAJobThatPr
 	// changed -- a renamed helper, `"--target", "<lang>"` no longer written as
 	// adjacent literals, or tests/crash's table no longer holding the builders by
 	// name -- and both checks below pass vacuously for that language.
-	for _, dir := range []string{"../cmd/cleat", "../tests/crash"} {
-		for _, lang := range []string{"java", "assemblyscript", "rust"} {
-			if perDirLang[dir][lang] == 0 {
-				t.Fatalf("the scan found no %s toolchain test in %s (found %v).\n\n"+
-					"There are several of each in cmd/cleat and one test in tests/crash that "+
-					"reaches all three. Zero means the way tests reach a builder changed, and "+
-					"both checks below pass vacuously for it.",
-					lang, strings.TrimPrefix(dir, "../"), perDirLang[dir])
-			}
-		}
+	if missing := toolchainTestsTheScanMustFind(perDirLang); len(missing) > 0 {
+		t.Fatalf("the scan found no toolchain test where one is expected:\n  %s\n\n"+
+			"There are several of each in cmd/cleat and one test in tests/crash that reaches "+
+			"each language it lists. Zero means the way tests reach a builder changed, and "+
+			"both checks below pass vacuously for it.", strings.Join(missing, "\n  "))
 	}
 
 	// An entry that is no longer a finding, or is now excluded, is stale: the list
@@ -689,4 +685,70 @@ func (f *testGoLegFacts) problemsFor(lang string) []string {
 		}
 	}
 	return out
+}
+
+// expectedToolchainTests is, per package, every tier-2 language that package must have at least one toolchain-building test for.
+//
+// A TABLE PER PACKAGE rather than one list applied to all of them, because a language leaves a package when that package's last
+// test for it is deleted, and the change that deletes it must be able to say so in one line without touching the other package's
+// expectation (the AssemblyScript removal, cleat#4023, removes cmd/cleat's and tests/crash's on different branches). Until then
+// each package lists what it has.
+var expectedToolchainTests = []struct {
+	dir   string
+	langs []string
+}{
+	{"../cmd/cleat", []string{"java", "assemblyscript", "rust"}},
+	{"../tests/crash", []string{"java", "assemblyscript", "rust"}},
+}
+
+// toolchainTestsTheScanMustFind names every (package, language) pair in expectedToolchainTests for which perDirLang, the scan's
+// own count, has no test. A function so the check can be tested against a count the scan did not produce: a guard that reports
+// nothing when a package's last toolchain test is deleted is the failure this exists to catch, and it cannot be shown to catch it
+// by deleting a real test.
+func toolchainTestsTheScanMustFind(perDirLang map[string]map[string]int) []string {
+	var missing []string
+	for _, pkg := range expectedToolchainTests {
+		for _, lang := range pkg.langs {
+			if perDirLang[pkg.dir][lang] == 0 {
+				missing = append(missing, fmt.Sprintf("no %s toolchain test in %s (found %v)", lang, strings.TrimPrefix(pkg.dir, "../"), perDirLang[pkg.dir]))
+			}
+		}
+	}
+	return missing
+}
+
+func TestTheToolchainPresenceCheckNamesAPackageWhoseLastTestForALanguageIsGone(t *testing.T) {
+	// A count that satisfies the table exactly, built FROM the table: a hand-written one went stale the first time a language was
+	// removed from a package, and the test failed for that rather than for what it is about.
+	full := func() map[string]map[string]int {
+		m := map[string]map[string]int{}
+		for _, pkg := range expectedToolchainTests {
+			m[pkg.dir] = map[string]int{}
+			for _, lang := range pkg.langs {
+				m[pkg.dir][lang] = 1
+			}
+		}
+		return m
+	}
+	if got := toolchainTestsTheScanMustFind(full()); len(got) != 0 {
+		t.Fatalf("a complete count was reported as missing %v: the check would fail on a healthy tree", got)
+	}
+	// Each package's last test for a language, deleted in turn: the check must name exactly that pair and no other.
+	for _, pkg := range expectedToolchainTests {
+		for _, lang := range pkg.langs {
+			m := full()
+			delete(m[pkg.dir], lang)
+			got := toolchainTestsTheScanMustFind(m)
+			if len(got) != 1 || !strings.Contains(got[0], lang) || !strings.Contains(got[0], strings.TrimPrefix(pkg.dir, "../")) {
+				t.Errorf("with %s's last %s test gone the check reported %v, want exactly that one pair", pkg.dir, lang, got)
+			}
+		}
+	}
+	// A package the scan found nothing in at all is every one of its languages missing, not a skipped package.
+	pkg := expectedToolchainTests[len(expectedToolchainTests)-1]
+	m := full()
+	delete(m, pkg.dir)
+	if got := toolchainTestsTheScanMustFind(m); len(got) != len(pkg.langs) {
+		t.Errorf("with %s absent from the count the check reported %d pairs (%v), want %d", pkg.dir, len(got), got, len(pkg.langs))
+	}
 }
