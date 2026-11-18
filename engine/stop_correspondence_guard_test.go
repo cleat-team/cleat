@@ -62,6 +62,15 @@ const (
 	// cleat#3786 redesigned that signature, because a constant nothing carries is
 	// a reason nobody can be held to.
 	reasonNotInTheComponentWorld exemptReason = "not-in-the-component-world"
+
+	// reasonWitReturnsNothing: the WIT function IS declared but returns no value
+	// at all, so a component guest has no word and no case in which to receive a
+	// refusal. The refused call simply has no effect, which is the guarantee the
+	// host needs; the guest continues past it and the next new-work call it makes
+	// is refused in its own right. Today that is durable-delete-cron, and it is a
+	// wire-format gap rather than an SDK one: closing it is a WIT change, as for
+	// python-sdk's delete_cron (3.201).
+	reasonWitReturnsNothing exemptReason = "wit-returns-nothing"
 )
 
 // stopSurface declares, for one host stop site, which Go adapters and which WIT
@@ -147,6 +156,12 @@ var stopSurfaces = map[string]stopSurface{
 	"ScheduleCron": {
 		adapters: []string{"ScheduleCron"},
 		wit:      []string{"durable-schedule-cron"},
+	},
+	// cleat#4083. Go's adapter is guarded; Java and Rust carry the check; a
+	// component guest cannot receive it because the WIT function has no return.
+	"DeleteCron": {
+		adapters: []string{"DeleteCron"},
+		witWhy:   reasonWitReturnsNothing,
 	},
 	"DurableCall": {
 		adapters: []string{"DurableCall"},

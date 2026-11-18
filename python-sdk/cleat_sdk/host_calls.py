@@ -3537,6 +3537,11 @@ class HostCalls:
         # function in that file that is. A failed deletion is therefore
         # unreportable to a component guest, and closing that needs a WIT
         # change rather than an SDK one. See IMPROVEMENT-PLAN 3.201.
+        #
+        # The same goes for a REFUSED delete (cleat#4083): the host refuses it in
+        # a defer segment's workflow body, past recorded history, and the schedule
+        # is untouched, but the refusal cannot reach this call either, so the
+        # guest continues and its next new-work call is refused in its own right.
         _import_cleat_delete_cron(schedule_id)
 
     # --------------------------------------------------------------------

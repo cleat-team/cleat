@@ -2578,11 +2578,13 @@ public class HostCalls {
     /**
      * Remove a previously registered cron schedule by its ID.
      * <p>
-     * There is no stop-bit check here, and that is deliberate rather than an
-     * omission: {@code DeleteCron} does not call {@code stopBeforeNewWork}
-     * host-side, because removing a schedule is not new work. Verified against
-     * {@code engine/schedules.go} on 2026-09-07; {@code ScheduleCron} is the
-     * only one of the three that can be refused.
+     * The host refuses this in a defer segment's workflow body, past the end of
+     * its recorded history, and marks the refusal with bit 31 (cleat#4083). It
+     * was unguarded until then, and a terminated workflow's segment deleted a
+     * schedule the workflow had not reached. The refusal reads as errCode 0 in
+     * this layout, which is a SUCCESSFUL delete, so the stop is tested before
+     * the result is decoded and unwinds the guest. A defer body's own call is
+     * not refused.
      *
      * @param scheduleID the schedule ID returned by scheduleCron
      * @return a result indicating success, or an error description
@@ -2590,6 +2592,8 @@ public class HostCalls {
     public CleatResult<Void> deleteCron(String scheduleID) {
         int[] p = packStrings(scheduleID);
         long result = cleatDeleteCronRaw(p[0], p[1]);
+
+        Memory.throwIfStopped(result);
 
         int errCode = Memory.decodeSimpleErrCode(result);
         if (errCode != 0) {
@@ -2603,8 +2607,9 @@ public class HostCalls {
     /**
      * List all registered cron schedules, as a JSON array.
      * <p>
-     * See {@link #deleteCron(String)} for why there is no stop-bit check here
-     * either.
+     * There is no stop-bit check here, deliberately: this is a read that changes
+     * no schedule, so the host never refuses it (cleat#4083 left it unguarded on
+     * purpose). Unlike {@link #deleteCron(String)}, a refusal is not possible.
      *
      * @return a result containing the JSON array of schedules, or an error
      */
