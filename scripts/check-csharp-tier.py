@@ -54,7 +54,15 @@ TOOLCHAIN = re.compile(r"componentize[-._]?dotnet|ilcompiler|dotnet-experimental
 # Empty at the time this guard was written (2026-11-18), because every C# test on develop was in tests/csharp/. C# PR 3 (engine)
 # adds tests of the prebuilt-fixture kind and is where its entries belong: a stale or missing path is UNMEASURED
 # (check_exemptions), so an entry cannot be written before its file exists.
-EXEMPT = {}
+EXEMPT = {
+    "engine/csharp_defer_segment_e2e_test.go":
+        "reads the checked-in engine/testdata/csharp_defer_order/defer_order.wasm (a prebuilt C# component), needs no toolchain and "
+        "has no t.Skip, so it runs in Tier 1 on every machine; it tests the ENGINE's defer-segment path, which belongs in engine/ "
+        "(cleat#4080, C# PR 3)",
+    "engine/a_component_gets_the_durable_clock_and_entropy_at_every_wasi_minor_test.go":
+        "reads the checked-in engine/testdata/wasi_minor/probe-*.wasm (tiny hand-written components), needs no toolchain and has no "
+        "t.Skip; it names componentize-dotnet only in a comment explaining why the WASI minor matters (cleat#4080, C# PR 3)",
+}
 
 
 class Unmeasured(Exception):
