@@ -4,7 +4,7 @@
 set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 pkg="$(cd "$here/.." && pwd)"
-# shellcheck source=../toolchain.env
+# shellcheck source=/dev/null
 . "$pkg/toolchain.env"
 docker run --rm --platform linux/amd64 \
   -v "${CLEAT_CS_NUGET_VOLUME:-cleat-cs-nuget}":/root/.nuget \

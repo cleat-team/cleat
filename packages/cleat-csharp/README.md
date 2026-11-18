@@ -58,11 +58,11 @@ public static class Orders
 **Host calls are synchronous, and `async` works over them.** There are no threads and no scheduler. A workflow can use
 `async`/`await`, `ValueTask`, `await foreach` and `Task.WhenAll` over `HostCalls`, because every task it awaits is
 already complete (measured on the real engine, cleat#4077). `Task.Delay`, `Task.Yield`, `Task.Run` and a blocking wait on
-an incomplete task throw `PlatformNotSupportedException`. **To wait, call `h.Sleep`**, which is durable. The generated
+an incomplete task throw `PlatformNotSupportedException`. **To wait, call `HostCalls.Sleep`**, which is durable. The generated
 entry blocks on the entry method with `GetAwaiter().GetResult()`, never `.Result`, which would wrap the exception in an
 `AggregateException`.
 
-**A suspension is an exception, and it can be caught. Do not.** `h.Sleep`, and a host call the engine has stopped, throw
+**A suspension is an exception, and it can be caught. Do not.** `HostCalls.Sleep`, and a host call the engine has stopped, throw
 `CleatSuspendException`; the generated entry turns it into `run-outcome::suspended`. Measured on the real engine:
 
 - the engine records the suspension on the host side, so a `catch (Exception)` that swallows it **does not change the

@@ -9,7 +9,7 @@
 set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo="$(cd "$here/../.." && pwd)"
-# shellcheck source=toolchain.env
+# shellcheck source=/dev/null
 . "$here/toolchain.env"
 fixture="${1:-fixture}"
 rel="packages/cleat-csharp/$fixture"
