@@ -1593,9 +1593,10 @@ var wasiDeterminismInterfaces = map[string]map[string]cbType{
 	},
 }
 
-// wasiDeterminismImportRE matches an import of one of the shadowed interfaces and captures its version.
+// wasiDeterminismImportRE matches an import of one of the shadowed interfaces and captures its version. 0.2.x only: a later
+// WASI generation is a different set of function shapes, and shadowing it with 0.2 callbacks would be wrong, not safe.
 var wasiDeterminismImportRE = regexp.MustCompile(
-	`wasi:(?:clocks/wall-clock|random/random|random/insecure-seed|random/insecure)@(\d+\.\d+\.\d+)`)
+	`wasi:(?:clocks/wall-clock|random/random|random/insecure-seed|random/insecure)@(0\.2\.\d+)`)
 
 // wasiDeterminismVersionsOf returns every "@x.y.z" the shadows must be registered under for this component: the
 // default, plus each version the component imports one of the shadowed interfaces at. Sorted and distinct.

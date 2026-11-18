@@ -186,7 +186,7 @@ Three memory controls work together:
 
 | Flag | What it does |
 |------|-------------|
-| `--wasm-memory-max-mb` | Per-WASM-module linear memory cap. A workflow exceeding this is killed. |
+| `--wasm-memory-max-mb` | Per-WASM-module linear memory cap. A workflow exceeding this is killed. Leave it unset for a C# guest: unset, C# gets 64 MiB (a .NET runtime needs 52 MiB to start); setting it applies that value to every language, so the `32` in the examples below would stop a C# guest from starting. |
 | `--memory-soft-limit` | When system memory exceeds this fraction (0.0–1.0), stop claiming new work. |
 | `--memory-hard-limit` | When system memory exceeds this fraction, reject API workflow starts (HTTP 503). |
 

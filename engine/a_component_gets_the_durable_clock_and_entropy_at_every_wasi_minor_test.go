@@ -131,6 +131,17 @@ func TestWasiDeterminismVersionsOf(t *testing.T) {
 		}
 	}
 
+	// A later WASI generation is a different set of function shapes: shadowing it with 0.2 callbacks would be wrong, so
+	// the pattern must not match it.
+	for _, imp := range []string{"wasi:clocks/wall-clock@0.3.0", "wasi:random/random@1.0.0"} {
+		if m := wasiDeterminismImportRE.FindSubmatch([]byte(imp)); m != nil {
+			t.Errorf("%s matched as version %q: only 0.2.x may be shadowed", imp, m[1])
+		}
+	}
+	if m := wasiDeterminismImportRE.FindSubmatch([]byte("wasi:clocks/wall-clock@0.2.17")); m == nil || string(m[1]) != "0.2.17" {
+		t.Errorf("a 0.2.17 import was not matched: %v", m)
+	}
+
 	// Not a component, empty, truncated, and a lying section length: the default alone, and no panic.
 	for name, in := range map[string][]byte{
 		"nil":           nil,

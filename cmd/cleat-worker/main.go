@@ -2276,19 +2276,8 @@ func main() {
 	// IMPROVEMENT-PLAN.md 1.5) and StoreLimits (memory/table/instance
 	// ceilings), plus optional fuel-based instruction metering when
 	// --wasm-instruction-limit is set.
-	wasmtimeMemoryLimitBytes := int64(0) // 0 => wasmtimeBackend applies its own default, per language
-	// Only a limit the operator SET is passed. The flag's own default (32) is not a decision, and passing it would
-	// pin every language to 32 MiB: a .NET guest needs more than that just to start, and the backend raises the
-	// default for it (engine.languageMemoryFloorBytes) only when it is told no limit was chosen. cleat#4077.
-	memoryFlagSet := false
-	flag.Visit(func(f *flag.Flag) {
-		if f.Name == "wasm-memory-max-mb" {
-			memoryFlagSet = true
-		}
-	})
-	if *wasmMemoryMaxMB > 0 && memoryFlagSet {
-		wasmtimeMemoryLimitBytes = int64(*wasmMemoryMaxMB) * 1024 * 1024
-	}
+	// 0 => wasmtimeBackend applies its own default, per language. See wasmtimeMemoryLimitFromFlags.
+	wasmtimeMemoryLimitBytes := wasmtimeMemoryLimitFromFlags(flag.CommandLine, *wasmMemoryMaxMB)
 	wt, wasmtimeErr := engine.NewWasmtimeBackend(ctx,
 		engine.WithWasmtimeExecutionTimeout(*wasmInstanceTimeout),
 		engine.WithWasmtimeInstructionLimit(uint64(*wasmInstructionLimit)),
@@ -3173,4 +3162,27 @@ func flushRetryWindowAdvice(flushWindow, reclaim, heartbeat time.Duration) strin
 			"and a retry that succeeds after that loses its fence. Raise --reclaim-timeout to at least "+
 			"%v to make the extra retrying reachable, or ignore this if nothing else reaps for this deployment.",
 		flushWindow, window, flushWindow)
+}
+
+// wasmtimeMemoryLimitFromFlags is the per-store memory limit to hand the wasmtime backend, in bytes, or 0 for "the
+// operator chose none, so the backend applies its own default, per language".
+//
+// Only a limit the operator SET is passed. The flag's own default (32) is not a decision, and passing it would pin every
+// language to 32 MiB: a .NET guest needs more than that just to start, and the backend raises the default for it
+// (engine.languageMemoryFloorBytes) only when it is told no limit was chosen. cleat#4077.
+//
+// A function of a FlagSet and a value, not inline in main, because the gate is the whole fix and nothing else exercised
+// it: with the condition reverted to "always pass the flag's value" every engine test still passed, since they build the
+// backend directly, and a real worker would have pinned every C# guest to 32 MiB.
+func wasmtimeMemoryLimitFromFlags(fs *flag.FlagSet, mb int) int64 {
+	set := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "wasm-memory-max-mb" {
+			set = true
+		}
+	})
+	if mb > 0 && set {
+		return int64(mb) * 1024 * 1024
+	}
+	return 0
 }
