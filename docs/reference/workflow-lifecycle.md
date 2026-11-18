@@ -479,6 +479,23 @@ what the run's history still holds.
 | **retry** | `POST /api/workflows/{id}/retry` | `dead_lettered` | the same run, in place, back to `ready` |
 | **reprocess** | `POST /api/dead-letters/{id}/reprocess` | `dead_lettered` | a **new** run, from the definition and input — not from history |
 
+**A redrive replays the history position by position, and a defer segment writes its events after the last
+event the body recorded.** When a run is terminated while it is running or sleeping, the engine runs its
+defers in a segment before the run settles, and those events end the history. A redrive replays the body,
+reaches that point and makes a fresh call at a step the segment already filled, so it fails with
+`replay divergence at step N: workflow called X but history has <the cleanup's call>`. Measured on PostgreSQL,
+MySQL and SQL Server (cleat#4094).
+
+- **`terminated` and `cancelled` runs:** `re-replay` refuses a run whose history holds defer-phase events, with
+  a conflict that says so. Start a new run instead. This also refuses a dead-lettered run that was terminated
+  off the queue after an ordinary failure's own cleanup, which would in fact replay; the two cannot be told
+  apart without a marker, and there is none.
+- **`failed` runs:** not refused, and this is a known limit. A run that was killed (for example by the
+  execution fence) and then ran its defers in a segment can diverge on `re-replay` or `retry` the same way,
+  because nothing marks its segment events as different from an ordinary failure's own cleanup. If a redrive of
+  a failed run reports `replay divergence` at the step after its last recorded call, this is the cause, and
+  the run should be reprocessed as a new run.
+
 The re-replay and retry endpoints are gated by `--enable-admin-api` for the admin routes and by
 tenant ownership for the rest; while the admin API is off, its routes answer 404.
 
