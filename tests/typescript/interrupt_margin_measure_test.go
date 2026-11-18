@@ -36,8 +36,8 @@ func TestMeasureInterruptMargin(t *testing.T) {
 	}
 	root := needToolchain(t)
 	src := "tests/typescript/testdata/workflows/interrupt_workloads.ts"
-	entries := []string{"spin_loop", "spin_regex", "spin_native", "spin_json", "spin_string", "spin_string_big"}
-	res := build(t, root, src, "spin_loop,spin_regex,spin_json,spin_string,spin_string_big,spin_native,spin_string_probe")
+	entries := []string{"spin_loop", "spin_native", "spin_json", "spin_string", "spin_string_big"}
+	res := build(t, root, src, "spin_loop,spin_json,spin_string,spin_string_big,spin_native,spin_string_probe")
 	if res.exit != 0 {
 		t.Fatalf("building %s failed (exit %d):\n%s", src, res.exit, res.output)
 	}

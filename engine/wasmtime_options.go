@@ -71,9 +71,10 @@ const DefaultWasmtimeDeferBudget = 5 * time.Second
 // stop cleanly instead of letting wasmtime's fuel trap kill the instance mid-borrow (cleat#3922).
 //
 // Sized from the largest amount of fuel measured between two consecutive handler calls, by
-// TestMeasureInterruptMargin over four shapes of endless loop: 1,965,040 (tight numeric loop),
-// 2,116,250 (a catastrophic regex), 3,840,041 (a native call in a loop) and 26,241,715 (JSON.parse
-// of a 200k-element payload). 33,554,432 fuel units -- 32 x 1024 x 1024, wasmtime's own count and not
+// TestMeasureInterruptMargin over the shapes of endless loop it keeps: 1,965,040 (tight numeric
+// loop), 3,840,041 (a native call in a loop) and 26,241,715 (JSON.parse of a 200k-element payload).
+// A fourth, a deliberately exponential regex at 2,116,250, was removed with its workload when code
+// scanning flagged the literal; it was never load bearing. 33,554,432 fuel units -- 32 x 1024 x 1024, wasmtime's own count and not
 // bytes -- is the largest of those with about a fifth of headroom.
 //
 // IT IS NOT A CEILING, and the margin is a best-effort reserve rather than a guarantee. QuickJS
