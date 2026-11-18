@@ -220,7 +220,7 @@ every check had settled:
 | #500 | docs + `engine/` | 46 |
 | #503 | `engine/` + `cmd/` | **50** |
 
-The four `{AssemblyScript,Java,Python,Rust} SDK Integration` jobs are the whole of the gap; they
+The four `{AssemblyScript,Java,Python,Rust} SDK Integration` jobs (three once AssemblyScript is removed, cleat#4023) are the whole of the gap; they
 trigger only on some paths. `Benchmarks` and `Coverage` report `skipping` on a normal PR, so a
 green run shows two fewer passing than the total. Re-derive with
 `gh pr checks <pr> | grep -c .`, and diff two PRs with `comm -23` over the sorted name column to
@@ -539,7 +539,7 @@ finding — which is why it was not questioned."
 
 **The fifth instance is the sharpest, and it is one line of source.** A scan for binding names
 scored the AssemblyScript SDK as *having* `cleat_register_query_handler` — by matching this, at
-`packages/cleat-as/assembly/host-calls.ts:391`:
+`packages/cleat-as/assembly/host-calls.ts:391` (deleted with the AssemblyScript SDK, cleat#4023):
 
     // There is no import_cleat_register_query_handler here (removed 2026-08-09).
 
@@ -549,7 +549,7 @@ survives a rename. The two agreeing would have proved nothing; their *disagreein
 reason anybody looked, and it is why #757 publishes no binding counts until they reconcile. This
 is the "grep a retraction satisfies" trap under *Build*, one level up, and worse: that line is the
 **only** occurrence of `register_query_handler` in the file
-(`grep -c register_query_handler packages/cleat-as/assembly/host-calls.ts` → 1). The sole evidence
+(`grep -c register_query_handler packages/cleat-as/assembly/host-calls.ts` → 1; that path was deleted with the AssemblyScript SDK, cleat#4023, so it can no longer be re-run, and read 1 when this was written). The sole evidence
 the scan had was a sentence denying the thing it recorded.
 
 So when a check and the thing it checks agree, ask what a differently-wrong reading would say
@@ -1772,7 +1772,7 @@ faster than reading the remaining sites.
 - `web/` — Svelte 5 admin dashboard
 - `crates/` — Rust SDK + Java SDK
 - `python-sdk/` — Python SDK
-- `packages/` — AssemblyScript SDK
+- `packages/` — TypeScript SDK (`cleat-ts`)
 - `examples/` — Example workflows
 - `tests/` — Integration test suites (cluster, cross-language, integrity, plugin-harness,
   scale, soak, upgrade)
