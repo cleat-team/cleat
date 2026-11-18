@@ -454,6 +454,10 @@ func main() {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
+	if err := validateWasmInstanceTimeout(*wasmInstanceTimeout); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
 
 	// Before anything else, and before any database is needed: --verify-backend
 	// answers "does this binary have the wasmtime backend?" and exits.
