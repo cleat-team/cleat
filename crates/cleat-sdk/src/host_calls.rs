@@ -1919,7 +1919,12 @@ impl HostCalls {
             return Err("cleat: host refused this call -- the workflow is running its defer phase".to_string());
         }
 
-        let (response_len, _call_error_code, err_code) = memory::decode_cleat_call_result(result);
+        // cleat_fetch is packed with packSimpleResult (engine/memory.go:427), which puts the response length at bits
+        // 32-63 -- so it is decoded with decode_simple_result, not decode_cleat_call_result, which reads bits 40-63.
+        // Reading it the durable way returned 0 for every response under 256 bytes and a truncated length above that,
+        // so every Rust guest's fetch parsed an empty buffer and failed with "parse fetch response: EOF ...". The other
+        // six wrappers that use the durable decoder call hosts that really do pack durably; this one did not.
+        let (response_len, err_code) = memory::decode_simple_result(result);
         if err_code != 0 {
             let err_msg = memory::read_result(&resp_buf, response_len);
             return Err(err_msg);
@@ -2257,6 +2262,28 @@ mod stop_bit_tests {
         assert!(crate::is_suspended(), "stop_requested must route through suspend() so the \
             #[cleat_entry] backstop still ends the segment when a workflow body discards the \
             error half of a tuple return");
+    }
+
+    // cleat_fetch is packed with packSimpleResult (length at bits 32-63), and used to be decoded with
+    // decode_cleat_call_result (length at bits 40-63). Every response under 256 bytes therefore decoded as a ZERO length, so the
+    // guest parsed an empty buffer and reported "parse fetch response: EOF while parsing a value". This test DOCUMENTS the two
+    // layouts and states their difference as an assertion; it does NOT catch a wrapper that uses the wrong decoder (it passes on
+    // the old decoder too), because every wrapper calls an `extern "C"` import that exists only inside a WASM runtime. What goes
+    // red on the old decoder is an end-to-end test of a fetch: tests/typescript/typescript_utilities_test.go.
+    #[test]
+    fn a_simple_result_carries_its_length_at_bits_32_to_63() {
+        for len in [0u32, 1, 40, 255, 256, 1024, 65535] {
+            // What engine/memory.go packSimpleResult(errCode=0, written=len) returns.
+            let packed: i64 = (len as i64) << 32;
+            let (simple_len, err_code) = memory::decode_simple_result(packed);
+            assert_eq!(simple_len, len, "decode_simple_result lost the length of a {}-byte response", len);
+            assert_eq!(err_code, 0);
+
+            // The durable decoder reads bits 40-63, which is len >> 8 -- the defect, stated as an assertion so the two
+            // layouts cannot be confused again without this failing.
+            let (durable_len, _, _) = memory::decode_cleat_call_result(packed);
+            assert_eq!(durable_len, len >> 8, "the durable decoder reads a different field; that is why fetch broke");
+        }
     }
 
     #[test]
