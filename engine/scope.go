@@ -73,6 +73,15 @@ func (s *execSession) freshSetScope(ctx context.Context, m api.Module, objectTyp
 		return packSimpleResult(prevEC, prevLen)
 	}
 
+	// Taking a scope is new work: it writes a 24-hour row to the concurrency-key store and blocks every
+	// live workflow that wants the same virtual object. In a defer segment the workflow BODY is running
+	// past its recorded history, so it is refused; a defer body still gets through (inDeferDrain).
+	// Clearing a scope, above, is a release and stays allowed. Measured against a real store, cleat#4079
+	// audit row set_scope.
+	if s.stopBeforeNewWork() {
+		return callSuspendSentinel
+	}
+
 	// If switching from an existing scope, release the old key first.
 	if s.scopeSet && s.scopePrefix != "" {
 		oldKey := "vo:" + s.scopeObjType + ":" + s.scopeInstKey

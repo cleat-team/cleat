@@ -1352,6 +1352,10 @@ class HostCalls:
             The previous scope as a JSON string (empty string if none was
             set).
         """
+        # A defer segment's body is refused here too (cleat#4079 audit), and like
+        # create_promise the refusal arrives as an empty string because the WIT
+        # function returns a plain string: no scope key is taken, and the guest
+        # reads an empty previous scope. A WIT change would carry it.
         prev_scope = _import_set_scope(object_type, instance_key)
 
         # Keep local scope in sync for _scoped_key compatibility.
@@ -2461,6 +2465,11 @@ class HostCalls:
         RuntimeError
             If the host reports an error.
         """
+        # The host refuses this in a defer segment's workflow body, past recorded
+        # history (cleat#4079 audit), but `durable-create-promise` returns a plain
+        # string, so the refusal reaches a component guest as an empty id and cannot
+        # be told apart from a reply. The call has no effect; the first call that
+        # needs the id is refused in its own right. Closing that is a WIT change.
         return _import_cleat_create_promise(name, ttl_ms or 0)
 
     # --------------------------------------------------------------------

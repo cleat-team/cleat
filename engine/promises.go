@@ -31,6 +31,14 @@ func (s *execSession) CreatePromise(ctx context.Context, m api.Module, name stri
 		s.exitReplay()
 	}
 
+	// A fresh create_promise is new work: it appends an event that finishDeferPhase writes into the
+	// terminal transaction and writes a promise row at once. In a defer segment that is the workflow
+	// BODY running past its recorded history, so it is refused; a defer body still gets through
+	// (inDeferDrain). Measured against a real store, cleat#4079 audit row create_promise.
+	if s.stopBeforeNewWork() {
+		return callSuspendSentinel
+	}
+
 	// Fresh execution: generate promise ID.
 	id, err := uuid.NewRandom()
 	var promiseID string

@@ -79,6 +79,11 @@ var rustCallsTheHostCanRefuse = []sdkRefusableCall{
 	// host_calls.rs. The simple layout reads a stop as error code 0, which is a
 	// successful delete.
 	{"delete_cron", "DeleteCron"},
+	// create_promise and set_scope joined in the cleat#4079 audit, with the
+	// stop_requested guards in host_calls.rs. Both layouts read a refusal as
+	// error code 0, a success.
+	{"create_promise", "CreatePromise"},
+	{"set_scope", "freshSetScope"}, // the unexported method that holds the check; see the Java list
 	{"cleat_call_heartbeat", "DurableCallWithHeartbeat"},
 	{"child_workflow", "childWorkflowWithVersion"},
 	{"child_workflow_with_options", "childWorkflowWithVersion"},

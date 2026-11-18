@@ -897,6 +897,11 @@ public class HostCalls {
             p[0], p[1],
             Memory.OUTPUT_OFFSET, Memory.OUT_BUF_SIZE);
 
+        // The host refuses a promise created by a defer segment's workflow body
+        // (cleat#4079 audit). The refusal reads as errCode 0 with an empty id in
+        // this layout, a SUCCESSFUL create_promise, so ask before decoding.
+        Memory.throwIfStopped(result);
+
         int errCode = Memory.decodeSimpleErrCode(result);
         int idLen = Memory.decodeSimpleExtra(result);
 
@@ -1722,6 +1727,11 @@ public class HostCalls {
             objTypeOff, objTypeLen,
             instKeyOff, instKeyLen,
             Memory.OUTPUT_OFFSET, Memory.OUT_BUF_SIZE);
+
+        // The host refuses a scope taken by a defer segment's workflow body
+        // (cleat#4079 audit); the refusal reads as a successful set_scope with an
+        // empty previous scope, so ask before anything below runs on.
+        Memory.throwIfStopped(result);
 
         // Still update _scopePrefix for backward compat with state operations.
         this._scopePrefix = (objectType != null && !objectType.isEmpty()

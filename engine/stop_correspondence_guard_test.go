@@ -71,6 +71,15 @@ const (
 	// wire-format gap rather than an SDK one: closing it is a WIT change, as for
 	// python-sdk's delete_cron (3.201).
 	reasonWitReturnsNothing exemptReason = "wit-returns-nothing"
+
+	// reasonWitReturnsAPlainString: the WIT function returns a bare string, which
+	// is neither result<string, call-failure> nor a 64-bit scalar, so a component
+	// guest receives a refusal as an empty string. The refused call has no effect
+	// and every later call that needs its answer (an empty promise id, an empty
+	// previous scope) is refused in its own right, so the host's guarantee holds;
+	// what is lost is the guest's chance to unwind at the call itself. Closing it
+	// is a WIT change, the same one the durable-defer redesign makes for that call.
+	reasonWitReturnsAPlainString exemptReason = "wit-returns-a-plain-string"
 )
 
 // stopSurface declares, for one host stop site, which Go adapters and which WIT
@@ -162,6 +171,18 @@ var stopSurfaces = map[string]stopSurface{
 	"DeleteCron": {
 		adapters: []string{"DeleteCron"},
 		witWhy:   reasonWitReturnsNothing,
+	},
+	// The cleat#4079 audit. Go's adapters are guarded; Java and Rust carry the
+	// check; a component guest cannot receive it because both WIT functions
+	// return a plain string.
+	"CreatePromise": {
+		adapters: []string{"CreatePromise"},
+		witWhy:   reasonWitReturnsAPlainString,
+	},
+	// Keyed by freshSetScope, the method that holds the check; the Go adapter is SetScope.
+	"freshSetScope": {
+		adapters: []string{"SetScope"},
+		witWhy:   reasonWitReturnsAPlainString,
 	},
 	"DurableCall": {
 		adapters: []string{"DurableCall"},
