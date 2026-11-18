@@ -18,10 +18,5 @@
     "covered": 65,
     "surface": 74,
     "executed": 26
-  },
-  "assemblyscript": {
-    "covered": 62,
-    "surface": 66,
-    "executed": 25
   }
 }

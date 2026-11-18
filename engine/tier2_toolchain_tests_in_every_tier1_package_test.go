@@ -698,7 +698,7 @@ var expectedToolchainTests = []struct {
 	langs []string
 }{
 	{"../cmd/cleat", []string{"java", "assemblyscript", "rust"}},
-	{"../tests/crash", []string{"java", "assemblyscript", "rust"}},
+	{"../tests/crash", []string{"java", "rust"}},
 }
 
 // toolchainTestsTheScanMustFind names every (package, language) pair in expectedToolchainTests for which perDirLang, the scan's

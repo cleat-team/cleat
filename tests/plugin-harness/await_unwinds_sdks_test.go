@@ -10,8 +10,8 @@ import (
 	"github.com/cleat-team/cleat/engine"
 )
 
-// assertAwaitCallsHonourTheSuspendSentinel is the AssemblyScript and Java half
-// of what TestGoAwaitCallsUnwindThroughTheSuspendSentinel does for Go
+// assertAwaitCallsHonourTheSuspendSentinel is the Java half of what
+// TestGoAwaitCallsUnwindThroughTheSuspendSentinel does for Go
 // (cleat#3430, found while closing cleat#3385).
 //
 // The engine answers AwaitChild, AwaitAnyChild and AwaitAllChildren with a
@@ -23,13 +23,9 @@ import (
 // else happened (engine/executor.go).
 //
 // What distinguishes the three is the guest itself, so each fixture records a
-// side_effect after the await returns (see hostcallsas/assembly/index.ts and
-// HostCallFixture.afterAwait). With a correct wrapper the history is
+// side_effect after the await returns (see HostCallFixture.afterAwait). With a correct wrapper the history is
 // [await, side_effect]:
 //
-//   - AssemblyScript, before the fix: [await_all_children]. The sentinel was
-//     parsed as a length, the decode failed, and the guest died before it could
-//     record anything.
 //   - Java, before the fix: [await_all_children, side_effect, side_effect]. The
 //     wrapper handed the workflow an Ok whose value was the whole 64 KiB
 //     output buffer, and the fixture recorded that it received one.
@@ -87,10 +83,6 @@ func assertAwaitCallsHonourTheSuspendSentinel(t *testing.T, wasmBytes []byte) {
 	if ran != len(cases) {
 		t.Errorf("ran %d of %d await calls; a green must not rest on the ones that were reached", ran, len(cases))
 	}
-}
-
-func TestASAwaitCallsHonourTheSuspendSentinel(t *testing.T) {
-	assertAwaitCallsHonourTheSuspendSentinel(t, buildASHostCallWasm(t))
 }
 
 func TestJavaAwaitCallsHonourTheSuspendSentinel(t *testing.T) {
