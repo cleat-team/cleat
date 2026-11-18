@@ -835,11 +835,17 @@ tier2:
         is checked against this entry by scripts/check-typescript-tier.py, which compares
         every row of the table with tiers.yaml.
       open_items:
-        - "the build chain: `cleat build --target csharp` in a pinned linux/amd64 container,
-           a toolchain lock (SDK image digest, the dotnet-experimental feed and package
-           versions, wasi-sdk 29 by hash), and a MANDATORY cleat.metadata stamp naming
-           \"csharp\" -- an unstamped C# component is detected as python and routed as a Python
-           guest (C# PR 2, cleat#4080)"
+        - "the build chain, C# PR 2 (cleat#4080): `cleat build --target csharp` in a pinned
+           container (native on linux/arm64 and linux/amd64 hosts), with the lock in packages/cleat-csharp/ (toolchain.env,
+           toolchain.packages.tsv, nuget.config) and a MANDATORY cleat.metadata stamp naming
+           \"csharp\", because an unstamped C# component is detected as python and routed as
+           a Python guest. Built and measured against a stand-in project that writes the
+           entry-point list itself; the SDK that writes it for real is PR 4. The Go tests run in
+           CI today, in the Tier 2 Gate, because ./tests/csharp/... is in tier2.packages; the
+           linux/arm64 lock leg skips on a runner that cannot execute arm64 (the Tier 2 runner
+           is x86_64 with no binfmt/QEMU), so that row of the lock is verified only on arm64
+           hosts until a job provides the emulator and declares csharp-arm64 in
+           CLEAT_REQUIRE_TOOLCHAINS (C# PR 7)"
         - "engine: a per-language memory default, WASI determinism shadows that tolerate the
            WASI 0.2 minor a component imports, and `csharp` in deferSegmentLanguages with the
            test that earns it (C# PR 3)"

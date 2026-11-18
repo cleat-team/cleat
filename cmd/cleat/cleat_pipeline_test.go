@@ -955,9 +955,9 @@ func TestInvalidTargetError(t *testing.T) {
 	// (the message in main.go lines 88-91).
 	if os.Getenv("TEST_INVALID_TARGET") == "1" {
 		// Simulate what the build command does.
-		target := "csharp"
+		target := "zig"
 		if !isValidTarget(target) {
-			os.Stderr.WriteString("Error: unknown target \"csharp\". Valid targets: go, rust, java, python\n")
+			os.Stderr.WriteString("Error: unknown target \"zig\". Valid targets: go, rust, java, python\n")
 			os.Exit(1)
 		}
 		return
