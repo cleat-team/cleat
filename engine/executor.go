@@ -298,6 +298,9 @@ func (e *Engine) executeWithBackend(
 		originalInput: string(input),
 		eventCount:    e.initialEventCount,
 	}
+	// A deferred tail on the NAMED results, not a branch at one kill site: every terminal error return of this function goes
+	// through it. It runs after every other deferred function registered below it (LIFO), and before the caller sees err.
+	defer session.flushUnflushedEvents(&err)
 
 	execCtx, stepCancel := context.WithCancel(ctx)
 	session.stepCancel = stepCancel

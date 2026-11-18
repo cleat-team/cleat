@@ -545,6 +545,14 @@ func (e *Engine) flushEvent(ctx context.Context, workflowID string, rec EventRec
 	if e.db == nil || e.noPerStepFlush {
 		return nil
 	}
+	return e.flushEventUngated(ctx, workflowID, rec, prevChecksum)
+}
+
+// flushEventUngated is flushEvent without the two early returns: it writes whether or not per-step flush is on. The gate is
+// the caller's decision. flushEvent keeps it for the per-step path, and the failure-path tail (flushUnflushedEvents) calls
+// this directly, because that is the one place a run with per-step flush OFF must write what it has. Everything below the gate
+// is unchanged: the same fence, the same checksum chain, the same idempotent insert.
+func (e *Engine) flushEventUngated(ctx context.Context, workflowID string, rec EventRecord, prevChecksum string) error {
 
 	// Everything below this point is PostgreSQL-dialect SQL. When the store
 	// says otherwise, hand the event to it instead -- see perStepEventFlusher.
@@ -894,4 +902,53 @@ func eventCreatedAt(rec EventRecord) time.Time {
 		return time.UnixMilli(rec.TimestampMs)
 	}
 	return time.Now()
+}
+
+// flushUnflushedEvents writes, on a FAILED execution, the events recorded while per-step flush was off. cleat#4079.
+//
+// With per-step flush on, every event is durable as it is recorded, so a killed or failed run's history is already in the
+// database when the worker writes the terminal failure. With it off the engine writes nothing as it goes and relies on the
+// worker's finalization at segment end, which a failed run never reaches: FailWorkflow takes no events. Measured on all three
+// dialects, a guest killed after two events left 0 of 2 in the database with the flag off and 2 of 2 with it on. This makes the
+// flag-off failure path behave like the flag-on one: the same fenced, chained, idempotent writer (flushEventUngated), run before
+// Execute returns, so the worker's terminal write always lands after it.
+//
+// Called from a defer on Execute's named results, so it covers EVERY terminal error return (the epoch kill, the instruction
+// limit, a trap, a host error, a guest that returns an error), not one branch.
+//
+//   - A fence lost here means another worker owns the run now. Nothing more is written, and the error Execute returns is the
+//     fence error, not the guest's, so the worker does not report a failure for a run it no longer owns. The first fenced insert
+//     is what finds out, so a bumped generation writes nothing at all.
+//   - Idempotent: the insert is ON CONFLICT (tenant_id, workflow_id, step) DO UPDATE ... WHERE <a pending await event>, a WHERE that
+//     cannot fire for a settled step, so an event a partial earlier flush already wrote is a no-op and not a duplicate. (The
+//     MySQL and SQL Server writers reach the same result through their own per-step insert.) Pinned by
+//     TestAnEventTheTailWritesAgainIsNotDuplicated.
+//   - Any other write error is logged and the guest's own error stands. The run has already failed, and a history that could not
+//     be written is the situation before this change, not a new one.
+func (s *execSession) flushUnflushedEvents(errp *error) {
+	if errp == nil || *errp == nil || len(s.unflushed) == 0 || s.engine == nil || s.engine.db == nil || !s.engine.noPerStepFlush {
+		return
+	}
+	// Not the execution's context: that is already cancelled or timed out in exactly the case this exists for.
+	ctx := context.Background()
+	pending := s.unflushed
+	s.unflushed = nil
+	for _, u := range pending {
+		u := u
+		ferr := retryFlushUntilDeadline(ctx, s.engine.flushRetryWindow, "failure-path flush", func() error {
+			return s.engine.flushEventUngated(ctx, s.workflowID, u.rec, u.prev)
+		})
+		if ferr == nil {
+			continue
+		}
+		if errors.Is(ferr, ErrFenceLost) {
+			s.engine.log().DebugContext(ctx, "failure-path flush: fence lost, workflow reassigned to another worker; nothing more written",
+				"workflow_id", s.workflowID, "step", u.rec.Step)
+			*errp = fmt.Errorf("host: workflow %s: %w (the run had failed with: %v)", s.workflowID, ErrFenceLost, *errp)
+			return
+		}
+		s.engine.log().ErrorContext(ctx, "failure-path flush failed; the failed run's history is incomplete",
+			"workflow_id", s.workflowID, "step", u.rec.Step, "event_type", u.rec.EventType, "error", ferr)
+		return
+	}
 }
