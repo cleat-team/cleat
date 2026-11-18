@@ -628,9 +628,10 @@ spent. The two arms have different rules:
   never below **120 ms** (two 50 ms epoch ticks plus a poll gap) unless half the budget is smaller
   still. The floor exists because the epoch deadline is armed in whole ticks and a reserve under two
   ticks can be overtaken by the hard trap before any poll sees it.
-- **Fuel arm** (`--wasm-instruction-limit` set): margin = the smaller of **32 MiB** and **a tenth
-  of the instruction limit**. There is no floor and no half-cap: fuel is spent in counted
-  increments, so the tick rounding that forces the epoch floor does not apply.
+- **Fuel arm** (`--wasm-instruction-limit` set): margin = the smaller of **33,554,432 fuel units**
+  (32 × 1024 × 1024, `DefaultWasmtimeInterruptMarginFuel`) and **a tenth of the instruction limit**.
+  There is no floor and no half-cap: fuel is spent in counted increments, so the tick rounding that
+  forces the epoch floor does not apply. Fuel units are wasmtime's own count, not bytes.
 
 **The kill can therefore arrive EARLY** — the workflow is stopped with part of its budget unspent.
 That is up to the epoch margin for a budget above about a second, and **up to HALF the budget** on

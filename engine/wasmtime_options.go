@@ -73,7 +73,8 @@ const DefaultWasmtimeDeferBudget = 5 * time.Second
 // Sized from the largest amount of fuel measured between two consecutive handler calls, by
 // TestMeasureInterruptMargin over four shapes of endless loop: 1,965,040 (tight numeric loop),
 // 2,116,250 (a catastrophic regex), 3,840,041 (a native call in a loop) and 26,241,715 (JSON.parse
-// of a 200k-element payload). 32M is the largest of those with about a fifth of headroom.
+// of a 200k-element payload). 33,554,432 fuel units -- 32 x 1024 x 1024, wasmtime's own count and not
+// bytes -- is the largest of those with about a fifth of headroom.
 //
 // IT IS NOT A CEILING, and the margin is a best-effort reserve rather than a guarantee. QuickJS
 // polls its interrupt handler once per ~10,000 BYTECODE operations, while fuel is spent by whatever
