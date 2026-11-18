@@ -1,0 +1,168 @@
+using System.Diagnostics;
+using System.Text;
+using CleatWorkflowWorld.wit.Imports.cleat.hostCalls;
+
+namespace CleatWorkflowWorld;
+
+sealed class SuspendException : Exception { }
+
+public class CleatWorkflowWorldExportsImpl : ICleatWorkflowWorldExports
+{
+    static volatile bool Stop;
+    static bool SkipPhase;
+    static readonly List<(string id, Action body)> Defers = new();
+
+    static string Field(string a, string key, string dflt)
+    {
+        var k = "\"" + key + "\":\"";
+        var i = a.IndexOf(k, StringComparison.Ordinal);
+        if (i < 0) return dflt;
+        i += k.Length;
+        var j = a.IndexOf('"', i);
+        return a.Substring(i, j - i);
+    }
+
+    static void Sleep(ulong ms)
+    {
+        var r = IDurableSleepImports.DurableSleep(ms);
+        if ((r >> 56) == 1) throw new SuspendException();   // engine said: suspend
+    }
+
+    static int Deep(int n, ulong ms)
+    {
+        if (n == 0) { Sleep(ms); return 0; }
+        return 1 + Deep(n - 1, ms);                          // exception unwinds through N frames
+    }
+
+    public static ICleatWorkflowWorldImports.RunOutcome Run(string args)
+    {
+        try
+        {
+            switch (Field(args, "mode", "hello"))
+            {
+                case "hello":
+                {
+                    var id = IDurableIdentityImports.DurableWorkflowId();
+                    var reply = IDurableCallImports.DurableCall("payments", "Charge", args);
+                    return ICleatWorkflowWorldImports.RunOutcome.Completed("{\"id\":\"" + id + "\",\"reply\":" + reply + "}");
+                }
+                case "sleep":
+                {
+                    var first = IDurableCallImports.DurableCall("payments", "Charge", args);   // event 0: anchors the sleep
+                    Deep(20, 400);                           // suspends first run, completes on replay
+                    var reply = IDurableCallImports.DurableCall("payments", "Charge", args);
+                    return ICleatWorkflowWorldImports.RunOutcome.Completed("{\"first\":" + first + ",\"after_sleep\":" + reply + "}");
+                }
+                case "det2":
+                {
+                    var anchor = IDurableCallImports.DurableCall("payments", "Charge", args);   // event 0 anchors the durable clock
+                    var s2 = "{\"utcnow_ticks\":" + DateTime.UtcNow.Ticks +
+                             ",\"now_ms\":" + DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() +
+                             ",\"rnd\":" + Random.Shared.Next() +
+                             ",\"rnd2\":" + new Random().Next() +
+                             ",\"guid\":\"" + Guid.NewGuid() + "\"" +
+                             ",\"tick64\":" + Environment.TickCount64 +
+                             ",\"durable_now\":" + IDurableSleepImports.DurableNow() +
+                             ",\"durable_rnd\":" + IDurableSleepImports.DurableRandom() + "}";
+                    return ICleatWorkflowWorldImports.RunOutcome.Completed(s2);
+                }
+                case "det":
+                {
+                    string task;
+                    try { task = Task.Run(() => 42).Result.ToString(); } catch (Exception e) { task = "EXC:" + e.GetType().Name; }
+                    var sw = Stopwatch.StartNew();
+                    var s = "{\"utcnow_ticks\":" + DateTime.UtcNow.Ticks +
+                            ",\"now_ms\":" + DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() +
+                            ",\"rnd\":" + Random.Shared.Next() +
+                            ",\"guid\":\"" + Guid.NewGuid() + "\"" +
+                            ",\"task\":\"" + task + "\"" +
+                            ",\"tick64\":" + Environment.TickCount64 +
+                            ",\"sw_ticks\":" + (sw.ElapsedTicks >= 0 ? 1 : 0) + "}";
+                    return ICleatWorkflowWorldImports.RunOutcome.Completed(s);
+                }
+                case "alloc":
+                {
+                    var mb = int.Parse(Field(args, "mb", "10"));
+                    var keep = new List<byte[]>();
+                    long sum = 0;
+                    for (int i = 0; i < mb; i++)
+                    {
+                        var b = new byte[1024 * 1024];
+                        b[0] = (byte)i; b[^1] = 7;
+                        keep.Add(b);
+                        sum += b[0] + b[^1];
+                    }
+                    GC.Collect();
+                    return ICleatWorkflowWorldImports.RunOutcome.Completed("{\"mb\":" + mb + ",\"sum\":" + sum + ",\"input_len\":" + args.Length + ",\"gc_total\":" + GC.GetTotalMemory(false) + "}");
+                }
+                case "exc":
+                {
+                    string r;
+                    try { throw new InvalidOperationException("boom"); } catch (InvalidOperationException e) { r = e.Message; }
+                    try { _ = int.Parse("nope"); } catch (FormatException) { r += "+fmt"; }
+                    return ICleatWorkflowWorldImports.RunOutcome.Completed("{\"caught\":\"" + r + "\"}");
+                }
+                case "defer":
+                {
+                    var id = IDurableLifecycleImports.DurableDefer("refund");
+                    Defers.Add((id, () => IDurableCallImports.DurableCall("payments", "Refund", "{\"x\":1}")));
+                    Deep(3, 400);                            // suspends: the defer must then run on this instance
+                    return ICleatWorkflowWorldImports.RunOutcome.Completed("{\"done\":true}");
+                }
+                case "spin":
+                {
+                    SkipPhase = Field(args, "phase", "1") == "0";
+                    var id = IDurableLifecycleImports.DurableDefer("refund");
+                    Defers.Add((id, () => IDurableCallImports.DurableCall("payments", "Refund", "{\"x\":1}")));
+                    long x = 0;
+                    while (!Stop) { x++; }                   // killed by the epoch fence; Stop is volatile so this cannot be folded
+                    return ICleatWorkflowWorldImports.RunOutcome.Completed("{\"never\":true}");
+                }
+                case "defer_order":
+                {
+                    // Models what an SDK's entry wrapper does: register a defer, make the body's own call, and drain the
+                    // defers when the body completes. In a defer segment the body call is refused (suspended), so the
+                    // body never completes and the HOST drains through run-deferred instead.
+                    var id = IDurableLifecycleImports.DurableDefer("refund");
+                    Defers.Add((id, () => IDurableCallImports.DurableCall("payments", "Refund", "{}")));
+                    IDurableCallImports.DurableCall("payments", "Body", "{}");
+                    RunDeferred();
+                    return ICleatWorkflowWorldImports.RunOutcome.Completed("{\"done\":true}");
+                }
+                case "poll":
+                {
+                    var c = IDurableLifecycleImports.DurablePollCancellation();
+                    return ICleatWorkflowWorldImports.RunOutcome.Completed("{\"cancel\":\"" + c + "\"}");
+                }
+                default:
+                    return ICleatWorkflowWorldImports.RunOutcome.Failed("unknown mode");
+            }
+        }
+        catch (SuspendException)
+        {
+            return ICleatWorkflowWorldImports.RunOutcome.Suspended();
+        }
+        catch (WitException e) when (e.Value is IOutcomesImports.CallFailure f && f.Tag == IOutcomesImports.CallFailure.Tags.Suspended)
+        {
+            return ICleatWorkflowWorldImports.RunOutcome.Suspended();
+        }
+        catch (WitException e) when (e.Value is IOutcomesImports.CallFailure f)
+        {
+            return ICleatWorkflowWorldImports.RunOutcome.Failed(f.AsFailed.message);
+        }
+    }
+
+    public static uint RunDeferred()
+    {
+        uint n = 0;
+        if (!SkipPhase) IDurableLifecycleImports.DurableDeferPhase(true);
+        try
+        {
+            var table = Defers.ToArray();
+            Defers.Clear();
+            foreach (var (_, body) in table) { body(); n++; }
+        }
+        finally { if (!SkipPhase) IDurableLifecycleImports.DurableDeferPhase(false); }
+        return n;
+    }
+}

@@ -370,10 +370,13 @@ func TestDeferSegmentLanguagesIsExactlyWhatHasBeenVerified(t *testing.T) {
 		// records the defers because the module exports __cleat_run_deferred for the host to call; without it the segment
 		// suspends correctly and records nothing.
 		"javascript": true,
-		"go":         true,
-		"java":       true,
-		"rust":       true,
-		"python":     true,
+		// csharp (cleat#4077) crosses the boundary in csharp_defer_segment_e2e_test.go: a real C# component, run as a defer
+		// segment, records only its defer, and the same entry point with the phase off records the body's call too.
+		"csharp": true,
+		"go":     true,
+		"java":   true,
+		"rust":   true,
+		"python": true,
 	}
 	if len(deferSegmentLanguages) != len(want) {
 		t.Fatalf("deferSegmentLanguages = %v, want %v.\n\n"+

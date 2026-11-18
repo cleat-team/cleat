@@ -49,6 +49,8 @@ import (
 	"encoding/binary"
 	"fmt"
 	"log/slog"
+	"regexp"
+	"sort"
 	"unsafe"
 
 	"github.com/cleat-team/cleat/wasm"
@@ -1550,6 +1552,12 @@ var witTypeMap = map[string]map[string]cbType{
 // TestAPythonGuestsWasiImportsAreAllShadowed is what makes that loud: it walks
 // a freshly compiled guest's import section and fails if it imports a
 // wall-clock or random interface this list does not name.
+//
+// THE VERSION IS NO LONGER ONLY THIS ONE. It is the default, always registered, but registerWasiDeterminismImports
+// now also registers every version the component itself imports (wasiDeterminismVersionsOf), because the pin was a
+// property of the componentize-py build and a C# component built with componentize-dotnet imports @0.2.6: its
+// DateTime.UtcNow, Random and Guid read the host's real clock and entropy and differed on every replay, with no
+// error anywhere. Measured, cleat#4078.
 const wasiDeterminismVersion = "@0.2.9"
 
 // wasiDeterminismInterfaces are the WASI interfaces cleat shadows so a
@@ -1568,21 +1576,75 @@ const wasiDeterminismVersion = "@0.2.9"
 // which it uses and "insecure" is a statement about entropy quality, not about
 // determinism. A guest reaching randomness through either must replay.
 var wasiDeterminismInterfaces = map[string]map[string]cbType{
-	"wasi:clocks/wall-clock" + wasiDeterminismVersion: {
+	"wasi:clocks/wall-clock": {
 		"now":        cbTypeWasiWallClockNow,
 		"resolution": cbTypeWasiWallClockResolution,
 	},
-	"wasi:random/random" + wasiDeterminismVersion: {
+	"wasi:random/random": {
 		"get-random-bytes": cbTypeWasiRandomBytes,
 		"get-random-u64":   cbTypeWasiRandomU64,
 	},
-	"wasi:random/insecure" + wasiDeterminismVersion: {
+	"wasi:random/insecure": {
 		"get-insecure-random-bytes": cbTypeWasiRandomBytes,
 		"get-insecure-random-u64":   cbTypeWasiRandomU64,
 	},
-	"wasi:random/insecure-seed" + wasiDeterminismVersion: {
+	"wasi:random/insecure-seed": {
 		"insecure-seed": cbTypeWasiRandomU64,
 	},
+}
+
+// wasiDeterminismImportRE matches an import of one of the shadowed interfaces and captures its version. 0.2.x only: a later
+// WASI generation is a different set of function shapes, and shadowing it with 0.2 callbacks would be wrong, not safe.
+var wasiDeterminismImportRE = regexp.MustCompile(
+	`wasi:(?:clocks/wall-clock|random/random|random/insecure-seed|random/insecure)@(0\.2\.\d+)`)
+
+// wasiDeterminismVersionsOf returns every "@x.y.z" the shadows must be registered under for this component: the
+// default, plus each version the component imports one of the shadowed interfaces at. Sorted and distinct.
+//
+// It reads only the component's own top-level IMPORT sections (id 10). A componentize-py build is ~19 MB nearly all of
+// it core modules, and a regexp over that on every execution would cost more than the call it guards, so the section
+// table is walked and everything but section 10 is skipped by its length. Registering a version the guest does not
+// import is harmless (nothing resolves to it), so this only has to find a superset, never to be exact; bytes that are
+// not a component, or a table that does not parse, give the default alone, which is what the engine did before.
+func wasiDeterminismVersionsOf(wasmBytes []byte) []string {
+	versions := map[string]bool{wasiDeterminismVersion: true}
+	// A component is an 8-byte header ("\0asm", version, layer 0x01) and then (id, LEB size, contents) sections.
+	if len(wasmBytes) > 8 && string(wasmBytes[:4]) == "\x00asm" && wasmBytes[6] == 0x01 && wasmBytes[7] == 0x00 {
+		const componentImportSection = 10
+		for pos := 8; pos < len(wasmBytes); {
+			id := wasmBytes[pos]
+			pos++
+			size, n := uleb128(wasmBytes[pos:])
+			if n == 0 || size > uint64(len(wasmBytes)-pos-n) {
+				break
+			}
+			pos += n
+			if id == componentImportSection {
+				for _, m := range wasiDeterminismImportRE.FindAllSubmatch(wasmBytes[pos:pos+int(size)], -1) {
+					versions["@"+string(m[1])] = true
+				}
+			}
+			pos += int(size)
+		}
+	}
+	out := make([]string, 0, len(versions))
+	for v := range versions {
+		out = append(out, v)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// uleb128 decodes an unsigned LEB128 and returns the value and the bytes it took (0 if it does not terminate).
+func uleb128(b []byte) (uint64, int) {
+	var v uint64
+	for i := 0; i < len(b) && i < 10; i++ {
+		v |= uint64(b[i]&0x7f) << (7 * uint(i))
+		if b[i]&0x80 == 0 {
+			return v, i + 1
+		}
+	}
+	return 0, 0
 }
 
 // registerWasiDeterminismImports shadows the WASI interfaces a guest would
@@ -1592,26 +1654,29 @@ var wasiDeterminismInterfaces = map[string]map[string]cbType{
 // already true at the one call site; this comment exists because the ordering
 // is invisible at a glance and reversing it produces no error, only a guest
 // that keeps the real clock.
-func (b *wasmtimeBackend) registerWasiDeterminismImports(linker *C.wasmtime_component_linker_t) error {
+func (b *wasmtimeBackend) registerWasiDeterminismImports(linker *C.wasmtime_component_linker_t, versions []string) error {
 	root := C.wasmtime_component_linker_root(linker)
 	if root == nil {
 		return fmt.Errorf("component linker root is nil")
 	}
-	for iface, funcs := range wasiDeterminismInterfaces {
-		nameBytes := []byte(iface)
-		var sub *C.wasmtime_component_linker_instance_t
-		if err := C.wasmtime_component_linker_instance_add_instance(
-			root, (*C.char)(unsafe.Pointer(&nameBytes[0])), C.size_t(len(iface)), &sub); err != nil {
-			return fmt.Errorf("shadow %s: %s", iface, componentErrorMessage(err))
-		}
-		for fnName, fnType := range funcs {
-			fnBytes := []byte(fnName)
-			cbID := registerCB(b, fnType)
-			if err := C.wasmtime_component_linker_instance_add_func(
-				sub, (*C.char)(unsafe.Pointer(&fnBytes[0])), C.size_t(len(fnName)),
-				C.wasmtime_component_func_callback_t(C.goComponentCallback),
-				C.cbid_as_env(C.uintptr_t(cbID)), nil); err != nil {
-				return fmt.Errorf("shadow %s.%s: %s", iface, fnName, componentErrorMessage(err))
+	for _, version := range versions {
+		for ifaceBase, funcs := range wasiDeterminismInterfaces {
+			iface := ifaceBase + version
+			nameBytes := []byte(iface)
+			var sub *C.wasmtime_component_linker_instance_t
+			if err := C.wasmtime_component_linker_instance_add_instance(
+				root, (*C.char)(unsafe.Pointer(&nameBytes[0])), C.size_t(len(iface)), &sub); err != nil {
+				return fmt.Errorf("shadow %s: %s", iface, componentErrorMessage(err))
+			}
+			for fnName, fnType := range funcs {
+				fnBytes := []byte(fnName)
+				cbID := registerCB(b, fnType)
+				if err := C.wasmtime_component_linker_instance_add_func(
+					sub, (*C.char)(unsafe.Pointer(&fnBytes[0])), C.size_t(len(fnName)),
+					C.wasmtime_component_func_callback_t(C.goComponentCallback),
+					C.cbid_as_env(C.uintptr_t(cbID)), nil); err != nil {
+					return fmt.Errorf("shadow %s.%s: %s", iface, fnName, componentErrorMessage(err))
+				}
 			}
 		}
 	}
