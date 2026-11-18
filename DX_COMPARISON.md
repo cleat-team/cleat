@@ -1,8 +1,9 @@
 # Developer Experience: Cleat vs Temporal, DBOS, and Restate
 
-Insights from porting 19 open-source projects across 5 languages (Go, Python,
-TypeScript/AssemblyScript, Java, Rust), producing 202 documented issues and
-validating cleat's architecture against real-world code.
+Insights from porting 19 open-source projects, producing 202 documented issues and
+validating cleat's architecture against real-world code. The counts are over the
+five languages the study covered; the findings for the one cleat has since removed
+are not repeated here.
 
 ---
 
@@ -11,12 +12,10 @@ validating cleat's architecture against real-world code.
 1. **Cleat's DX is cleaner than all three competitors for common patterns** —
    one-file workflows, no workflow/activity split, built-in Saga, and single-call
    signal handling. This section previously quantified that as "~28% lines of
-   code vs equivalent Temporal/DBOS ports," cited to the widget-store AS port.
-   That port has since grown past what the workaround-free comparison assumed
-   (`examples/widget-store-as/ISSUES.md` — the AS 0.27.32 SDK did not compile
-   against it, `JSON.parse<T>` and `@json` were unavailable, the stub runtime
-   had no `try`/`catch`), and is now roughly 1,073 non-blank, non-comment lines
-   against the claimed 195 — see Part 1. No reproducible line-count comparison
+   code vs equivalent Temporal/DBOS ports," cited to the widget-store port.
+   That port had grown past what the workaround-free comparison assumed, at
+   roughly 1,073 non-blank, non-comment lines against the claimed 195 — see
+   Part 1. No reproducible line-count comparison
    currently backs a percentage, so none is quoted here; the structural claim
    above does not depend on one.
 
@@ -25,10 +24,9 @@ validating cleat's architecture against real-world code.
    analyses reached this conclusion.
 
 3. **Go and Python are the two tier-1, record-proven SDKs** (`tiers.yaml`, D2
-   decision, 2026-08-06). Rust, Java, and AssemblyScript are tier 2 — clean
+   decision, 2026-08-06). Rust and Java are tier 2 — clean
    and working, with named open items short of the tier-1 bar. Java/TeaVM
-   works with painful build workarounds. AssemblyScript is constrained by its
-   runtime subset. The Python SDK is the most comprehensive (13,948 lines,
+   works with painful build workarounds. The Python SDK is the most comprehensive (13,948 lines,
    52 WIT function imports, LangChain/LangGraph integration — re-derived
    2026-08-09, `find python-sdk/cleat_sdk -name '*.py' | xargs wc -l` and
    `grep -cE '^\s+[a-z][a-z0-9-]*:\s*func' python-sdk/wit/cleat.wit`) and
@@ -57,15 +55,14 @@ validating cleat's architecture against real-world code.
 
 ## Part 1: Code Volume Comparison
 
-**Retired.** This section quoted a DBOS-widget-store-port table claiming cleat's AS port
+**Retired.** This section quoted a DBOS-widget-store-port table claiming cleat's port
 totaled ~195 lines against DBOS's ~270 (~28% shorter), and the headline finding above
-repeated the percentage. Measured on `develop` (non-blank, non-comment lines):
-`examples/widget-store-as/assembly/workflows.ts` (157) + `host/main.go` (600) +
-`host/shop_test.go` (316) = **1,073** — roughly 5.5x the claimed total, not counting the
-267 more in a vendored, patched copy of the SDK. The port grew past the comparison after
-it was written: the AS 0.27.32 SDK did not compile against it, `JSON.parse<T>` and `@json`
-were unavailable, and the stub runtime had no `try`/`catch` — see
-`examples/widget-store-as/ISSUES.md`. No corrected replacement is quoted here rather than
+repeated the percentage. Measured at the time (non-blank, non-comment lines): the port's
+workflow file (157) + `host/main.go` (600) + `host/shop_test.go` (316) = **1,073** —
+roughly 5.5x the claimed total, not counting the 267 more in a vendored, patched copy of
+the SDK. The port grew past the comparison after it was written: the SDK it used did not
+compile against it, `JSON.parse<T>` and `@json` were unavailable, and the stub runtime
+had no `try`/`catch`. No corrected replacement is quoted here rather than
 substituting a new unverified number; see cleat#2595. Cleat's real advantages in this area
 — database-enforced tenancy, build-time refusal of nondeterminism, simulated-clock tests
 with no database, deploy-as-INSERT — are ones a line count cannot see, which is itself an
@@ -150,25 +147,6 @@ exports automatically. The `preservedClasses` workaround is no longer needed.
 - `String.replace()` compiles to `Pattern.compile()`, unsupported by TeaVM WASM target
 - Multi-project Gradle plugin version conflicts
 - No `fetch_get_json` convenience wrapper
-
-### AssemblyScript (3 ports — Severely Constrained)
-
-WASM binaries are small (~12-14 KB) but the language subset is restrictive.
-SDK hardening added a `TestEnv` test harness (1,626 lines) and K/V state operations.
-
-**Resolved (SDK hardening pass):**
-- Test harness exists (`test_runner/test-harness.ts` — `TestEnv` class with mock HostCalls)
-- K/V state operations present
-
-**Remaining critical constraints:**
-- **No try/catch** with `--runtime stub` — AS runtime limitation, all error handling
-  must use return-value checks
-- **No closures** — AS limitation, only named top-level functions
-- **No async/await** — cleat's sync + suspend model is correct but different from original TS
-- **No `any` type** — all types must be explicit
-- **SUSPEND_SENTINEL bug** — bit 62 overlaps with signal name length field, causing
-  potential out-of-bounds reads on `awaitSignals` (AS runtime issue)
-- `@durableEntry` transform partially fixed but untested end-to-end with `durableSleep`/`awaitSignals`
 
 ### Python (5 ports — Comprehensive SDK, WASM Validated, tier 1)
 
@@ -350,7 +328,6 @@ assignment within workflow code.
 | Python | `CleatTestHarness` — stub-based, call recording, state persistence | Functional |
 | Rust | `test.rs` — WASM-free mock HostCalls with call assertions | Functional |
 | Java | `TestHostCalls` — mock HostCalls with call recording, simulated clock | Functional |
-| AS | `TestEnv` (1,626 lines) — mock HostCalls class | Functional |
 
 All SDKs now have a test harness (added in SDK hardening pass). Go's
 `cleattest.TestEnv` remains the gold standard — it's the only one with
@@ -365,7 +342,7 @@ Now normalized to match Temporal/DBOS conventions:
 |--------|-----------|-------------|
 | Cleat (Go) | `time.Duration` (+ `*Ms` variants) | `time.Duration` |
 | Cleat (Rust) | `std::time::Duration` (+ `*_ms` variants) | `Duration` |
-| Cleat (Java/AS) | Seconds (+ `*Ms` variants) | Seconds |
+| Cleat (Java) | Seconds (+ `*Ms` variants) | Seconds |
 | Cleat (Python) | Seconds float (+ `*_ms` variants) | Seconds |
 | Temporal | `time.Duration` (Go) / seconds (TS) | Same |
 | DBOS | Seconds | Milliseconds |
@@ -385,7 +362,6 @@ The 202 documented issues across 19 ports break down into these categories:
 
 - **Go**: 2 issues remaining — `DurableDefer` is description-only (Saga is the recommended replacement), no per-call `StartToCloseTimeout`. 6 of 8 original issues closed.
 - **Python**: 0 issues remaining. All 16 original issues closed. WASM compilation validated end-to-end (hello_workflow.py → 19.2 MB WASM binary).
-- **AS**: 3 issues — AS runtime limitations (no try/catch, no closures, no async/await). These are compiler constraints, not SDK bugs. SUSPEND_SENTINEL fix deferred (AS runtime). 7 of 10 original issues closed.
 - **Java**: 2 issues — `JsonHelper` String.class only (TeaVM WASM limitation), Gradle conflicts. TeaVM tree-shaking FIXED via `WorkflowEntry` reference chain. 11 of 13 original issues closed.
 - **Rust**: 0 issues remaining. All 4 original gaps closed (K/V state, resolve_promise, test harness, Saga). ContinueAsNew return type fixed.
 
@@ -395,14 +371,13 @@ The 202 documented issues across 19 ports break down into these categories:
 - Virtual Object runtime enforcement — DONE (scope keys via `ConcurrencyKeyStore`, suspend-on-conflict)
 - `AwaitCondition` / predicate-based blocking — DONE (SDK helper using `AwaitSignals` loop)
 - Per-call timeouts — DONE (`CallOptions.Timeout` enforced via `select`/`time.After`)
-- Unit mismatches — FIXED (native Duration in Go/Rust, seconds in Java/AS/Python)
+- Unit mismatches — FIXED (native Duration in Go/Rust, seconds in Java/Python)
 
 ### Remaining Gaps (all external tool limitations or by-design tradeoffs)
 
 - `DurableDefer` is description-only, not a closure — by design, Saga is the recommended replacement
 - TeaVM tree-shaking — TeaVM limitation, manual `preservedClasses` workaround exists
 - `JsonHelper.parse()` String.class only — TeaVM WASM limitation
-- AS no try/catch / no closures — AssemblyScript `--runtime stub` limitations
 
 
 ### Build System
@@ -416,7 +391,6 @@ The 202 documented issues across 19 ports break down into these categories:
 
 - TeaVM Gradle plugin resolution (Java)
 - `@durableEntry` tree-shaking by TeaVM (Java — TeaVM limitation)
-- WASM export class warnings with `--runtime stub` (AS — AS limitation)
 
 ### Documentation
 
@@ -438,7 +412,7 @@ The WASM sandbox is the right architectural choice. All architecture gaps
 identified during the 19-port analysis are now closed — side-effect caching,
 Virtual Object enforcement, AwaitCondition, per-call timeouts, unit mismatches,
 and lock API are all implemented end-to-end. The Go SDK is production-ready.
-Rust, Java, and AS SDKs have full core API coverage with test harnesses.
+Rust and Java SDKs have full core API coverage with test harnesses.
 The Python SDK is comprehensive (13,948 lines, 52 WIT function imports,
 LangChain/LangGraph integration) with WASM compilation validated
 end-to-end in CI, and is tier 1 alongside Go in `tiers.yaml`.
@@ -446,7 +420,6 @@ end-to-end in CI, and is tier 1 alongside Go in `tiers.yaml`.
 The only remaining gaps are external tool limitations:
 1. **Python WASM validation** — DONE. `build_wasm.py` + `componentize-py` 0.23.0 produce valid WASM binaries
 2. **TeaVM tree-shaking** — Java entry points must be manually listed (TeaVM limitation)
-3. **AS runtime constraints** — no try/catch, no closures (AssemblyScript `--runtime stub` limitation)
 
 None of these are cleat bugs. They are external tool maturity issues.
 

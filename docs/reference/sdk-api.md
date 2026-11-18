@@ -2,9 +2,9 @@
 
 ## Installing an SDK
 
-Five language SDKs exist; **only Python is published to a package registry**
-for 0.3.0 (PyPI, `cleat-sdk`). Go is fetched with `go get`. The other three --
-Rust, Java, AssemblyScript -- are not published anywhere and are installed
+Four language SDKs are covered here; **only Python is published to a package registry**
+for 0.3.0 (PyPI, `cleat-sdk`). Go is fetched with `go get`. The other two --
+Rust and Java -- are not published anywhere and are installed
 from git at the release tag. Full instructions, with commands verified
 outside a cleat checkout, live in each SDK's own README:
 
@@ -14,7 +14,6 @@ outside a cleat checkout, live in each SDK's own README:
 | Python | `pip install cleat-sdk` | [`python-sdk/README.md`](../../python-sdk/README.md#installation) |
 | Rust | `git`+`tag` in `Cargo.toml` | [`crates/cleat-sdk/README.md`](../../crates/cleat-sdk/README.md#installation) |
 | Java | git-cloned Gradle subproject (source-only) | [`crates/cleat-java/README.md`](../../crates/cleat-java/README.md#installation) |
-| AssemblyScript | pnpm git+subdirectory, or npm clone+`file:` | [`packages/cleat-as/README.md`](../../packages/cleat-as/README.md#installation) |
 
 The rest of this page documents the Go SDK's `HostCalls` interface and its
 generated plugin clients (`cleat/pluginclients`, below).
@@ -472,7 +471,7 @@ RunDetached(name, inputJSON string) error
 
 Starts `name` fire-and-forget: it does not become a child of this workflow and
 this workflow does not wait for it. Matches `cleat_run_detached` and the same
-call in the Rust, Java, AssemblyScript and Python SDKs.
+call in the Rust, Java and Python SDKs.
 
 Took a closure until it was changed: `RunDetached(fn func(h HostCalls) error)`.
 A closure cannot cross the WASM ABI, so that form worked only under `localdev`
@@ -489,8 +488,8 @@ The same work as `RunDetached`, returning the run id of the workflow it started
 so the caller has a handle to it — to poll it, signal it, or record it
 somewhere durable. `RunDetached` computes the same id and discards it.
 
-Bound in Go, Rust (`start_detached`), Java (`startDetached`) and
-AssemblyScript (`startDetached`). **Not in Python**: the component path needs a
+Bound in Go, Rust (`start_detached`) and Java (`startDetached`).
+**Not in Python**: the component path needs a
 WIT function returning `result<string, call-failure>` and a dispatcher to match,
 because an out-pointer addresses the guest's linear memory and component
 dispatch writes into a host buffer. Tracked in
@@ -760,7 +759,7 @@ same schedule when it replays, instead of leaving an unreferenced one firing
 forever. `DeleteCron` on an already-deleted schedule is likewise a success, not
 an error.
 
-**Availability.** Go and AssemblyScript. **Not available to Python workflows** —
+**Availability.** Go. **Not available to Python workflows** —
 `python-sdk/wit/cleat.wit` declares no interface for these calls, so
 componentize-py generates no binding and they raise. The Rust and Java SDKs
 declare no cron surface at all. See `tiers.yaml`, `workflow-callable-cron`.
@@ -787,7 +786,7 @@ instance at once.
 > `ClearScope` set local fields and never call `cleat_set_scope`: there is no
 > `HostCallsOptions` field, no row in `wasm/usage.go`, and no adapter
 > definition, so nothing generates the host call. **A Go workflow calling
-> `SetScope` takes no lock.** Rust, Java and AssemblyScript all bind and call
+> `SetScope` takes no lock.** Rust and Java both bind and call
 > the import. See IMPROVEMENT-PLAN §3.223.
 >
 > `cleat/embedded` is inert for a separate reason: its scope does not touch the
@@ -994,24 +993,21 @@ and two of those copies -- one per template -- were never tested.
 | Python | ✅ `cleat_sdk.agent.run_agent(h, cfg, msg)` | [`python-sdk/cleat_sdk/agent.py`](../../python-sdk/cleat_sdk/agent.py) |
 | Rust | ✅ `cleat_sdk::agent::run_agent(h, cfg, msg)` | [`crates/cleat-sdk/src/agent.rs`](../../crates/cleat-sdk/src/agent.rs) |
 | Java | ✅ `cleat.Agent.runAgent(host, cfg, msg)` | [`crates/cleat-java/src/main/java/cleat/Agent.java`](../../crates/cleat-java/src/main/java/cleat/Agent.java) |
-| AssemblyScript | ✅ `runAgent(h, cfg, msg)` from `@cleat/sdk` | [`packages/cleat-as/assembly/agent.ts`](../../packages/cleat-as/assembly/agent.ts) |
 
-**Each of the five converges on the same shape for a different reason.** Go and
+**Each of the four converges on the same shape for a different reason.** Go and
 Python bind a config argument by name or position; Rust's `#[cleat_entry]` and
 Java's `@CleatEntry` both require exactly one user parameter and so would
 *permit* a typed struct there in principle, but Rust takes the whole input as
 one deserialized value and Java's `JsonHelper` cannot deserialize an arbitrary
 POJO (see [`Agent.java`](../../crates/cleat-java/src/main/java/cleat/Agent.java)'s
 class doc comment, and cleat#3204) -- so both parse the payload by hand, same
-as Go. AssemblyScript's `@cleat/transform` enforces primitive-only parameters
-at compile time, so a single defaultless `string` is the one shape left; it
-too parses by hand. All five end up handed one JSON payload and parsing it
-themselves, for three different reasons.
+as Go. All four end up handed one JSON payload and parsing it
+themselves, for two different reasons.
 
 Rust's `AgentResult`/`ToolCallRecord` need `Serialize` as well as
 `Deserialize`: a workflow that forwards the agent's result as its *own*
 output has to re-encode it (`testdata/agentclientrust` does exactly this),
-where Go, Python, Java and AssemblyScript only ever decode one.
+where Go, Python and Java only ever decode one.
 
 **Why a workflow.** Each LLM turn and each tool call is a durable step inside
 the agent, so a run that dies mid-conversation resumes from its recorded history

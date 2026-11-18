@@ -146,14 +146,9 @@ construction* rather than because the author remembered to check a flag, and
 the difference matters: a missed check is silent, and the corresponding missed
 `SideEffect` is a divergence the engine detects.
 
-The AssemblyScript SDK carried an `isReplaying()` method until 2026-08-09. It
-was hardcoded to return `false` and no host call ever backed it, so every
-"only on first execution" branch fired on every replay too. It has been
-removed rather than implemented, for the reason above.
-
 ## Why there is no `RegisterQueryHandler`
 
-Every SDK (Go, Rust, Java, Python, AssemblyScript) carried a
+Every SDK (Go, Rust, Java, Python) carried a
 `RegisterQueryHandler` / `register_query_handler` method until 2026-08-09.
 Unlike `isReplaying()`, the underlying host call was real -- it recorded the
 handler name and returned success -- but nothing downstream ever used what

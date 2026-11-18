@@ -398,9 +398,9 @@ That grep will not find the Homebrew formula, which is Ruby — but as of
 cleat#2068 nothing here needs to bump it by hand.
 
 **That grep is not the SDK version check, and does not stand in for one
-(cleat#2454).** It reaches one of the six places an SDK version lives — the
+(cleat#2454).** It reaches one of the places an SDK version lives — the
 Rust metadata stamper, via `--include="*.rs"` — and is structurally blind to
-the Python, Java and AssemblyScript ones, and to `pyproject.toml`, because
+the Python and Java ones, and to `pyproject.toml`, because
 none of those carry a bare `vX.Y.Z` in a `.go`/`.rs`/`.mod` file. Verify SDK
 version agreement with the script written for exactly this:
 
@@ -425,8 +425,8 @@ the tag — `::error::tag vX.Y.Z (version X.Y.Z) does not match
 pyproject.toml's version ...`, failing the job before any upload runs. A
 mismatch here is not a warning to notice later; it is a failed release. See
 `CONTRIBUTING.md`'s "SDK versions: which numbers are load-bearing" for why
-the Python version is load-bearing while the three inert `0.1.0`s (Rust,
-Java, AssemblyScript) are deliberately left alone.
+the Python version is load-bearing while the two inert `0.1.0`s (Rust,
+Java) are deliberately left alone.
 
 ### Releasing a Homebrew formula bump — now automatic
 

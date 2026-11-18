@@ -35,7 +35,7 @@ input, validates fields, marshals JSON output, and registers itself with the
 
 ### For SDKs: eliminate drift
 
-Currently, each language SDK (TypeScript, Python, Rust) has hand-maintained
+Currently, each language SDK (Python, Rust) has hand-maintained
 `Plugins` wrapper classes with typed methods for every plugin's host functions.
 Adding a new function requires coordinated changes across 4+ SDKs. With the
 manifest system:
@@ -213,13 +213,6 @@ If you haven't already, write a `plugin.json` manifest for your plugin (see
 
 For each SDK, remove the hand-maintained wrapper files:
 
-**TypeScript:**
-
-```bash
-# Before: hand-written wrappers in plugins/
-rm packages/cleat-as/assembly/plugins/myplugin.ts
-```
-
 **Python:**
 
 ```bash
@@ -236,7 +229,6 @@ rm crates/cleat-sdk/src/plugins/myplugin.rs
 ### Step 3: Regenerate from manifest
 
 ```bash
-cleat-gen-plugin --manifest plugins/myplugin/plugin.json --lang typescript --out packages/cleat-as/assembly/plugins/myplugin.ts
 cleat-gen-plugin --manifest plugins/myplugin/plugin.json --lang python --out python-sdk/cleat_sdk/plugins/myplugin.py
 cleat-gen-plugin --manifest plugins/myplugin/plugin.json --lang rust --out crates/cleat-sdk/src/plugins/myplugin.rs
 ```
@@ -244,9 +236,6 @@ cleat-gen-plugin --manifest plugins/myplugin/plugin.json --lang rust --out crate
 ### Step 4: Verify SDK tests pass
 
 ```bash
-# TypeScript
-cd packages/cleat-as && npm test
-
 # Python
 cd python-sdk && pytest
 
@@ -453,7 +442,7 @@ DROP ROLE cleat_tenant_<uuid>;
 
 - [ ] Hand-written SDK wrappers deleted for all languages
 - [ ] Generated SDK wrappers compile without errors
-- [ ] All SDK tests pass (TypeScript, Python, Rust)
+- [ ] All SDK tests pass (Python, Rust)
 - [ ] Workflow examples using the plugin still compile and run
 
 ### For tenant isolation migration
@@ -491,15 +480,10 @@ If the generated code has issues:
 
 1. Restore the hand-written wrappers from git:
    ```bash
-   git checkout -- packages/cleat-as/assembly/plugins/myplugin.ts
    git checkout -- python-sdk/cleat_sdk/plugins/myplugin.py
    git checkout -- crates/cleat-sdk/src/plugins/myplugin.rs
    ```
-2. Delete the generated files:
-   ```bash
-   rm packages/cleat-as/assembly/plugins/myplugin.ts  # generated one
-   ```
-3. Run SDK tests to verify.
+2. Run SDK tests to verify.
 
 ### Tenant isolation rollback
 

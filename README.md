@@ -244,7 +244,8 @@ walkthrough with a real-world example.
   is the one multi-dialect entry point, and it covers `deploy` only (see `tiers.yaml`).
 - **Plugin system** -- extensible via LLM, Slack, webhooks, and custom plugins;
   plugins run in-process with lifecycle hooks.
-- **WASM workflows** -- write in Go, Rust, Python, Java, or AssemblyScript, compile to
+- **WASM workflows** -- write in Go, Rust, Python, Java, or
+  [TypeScript](docs/tutorials/typescript-quick-start.md), compile to
   WebAssembly. wasmtime is the only WASM backend cleat has, and it requires CGO --
   CPU/wall-clock/memory limits come from epoch interruption, fuel, and store limits.
   There is no fallback: a `CGO_ENABLED=0` build has no backend at all, and

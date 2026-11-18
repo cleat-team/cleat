@@ -26,11 +26,6 @@ May 7, 2026.
 - Added `releaseLock(String key)` public method
 - String packing via `packStrings`, result decoding matches Go host convention
 
-**AssemblyScript SDK** (`packages/cleat-as/assembly/host-calls.ts`):
-- Added `@external("env", ...)` import declarations
-- Added `acquireLock(key, ttlMs) -> DurableResult<bool>` method
-- Added `releaseLock(key) -> string | null` method
-
 **Python SDK** (`python-sdk/cleat_sdk/host_calls.py`):
 - WIT imports and stubs already present from previous work
 - Added `acquire_lock(key, ttl_ms) -> bool` method on HostCalls class
@@ -83,8 +78,6 @@ May 7, 2026.
 | `ctx.run()` side-effect caching | Requires engine event history changes |
 | Virtual Object runtime enforcement | Requires worker-level key routing |
 | TeaVM tree-shaking fix | TeaVM limitation, not cleat bug |
-| SUSPEND_SENTINEL bit overlap | AssemblyScript runtime issue |
-| try/catch in AS | AS runtime limitation |
 | String-based service routing | Fundamental to WASM architecture |
 | Unit mismatches | Convention, documented in DX_COMPARISON.md |
 
@@ -92,4 +85,4 @@ May 7, 2026.
 
 - `go build ./cleat/... ./internal/host/...` — PASS
 - `go vet ./cleat/... ./internal/host/...` — PASS
-- Rust, Java, AS, Python SDKs: manual verification of syntax and patterns
+- Rust, Java, Python SDKs: manual verification of syntax and patterns

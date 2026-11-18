@@ -64,8 +64,8 @@ object.**
 Stated this way on purpose. There is no "object" at this boundary — it carries a
 length and a byte range — so "return an object" is a per-language notion the ABI
 cannot express, and every SDK that tried to express it invented a different
-answer. A string containing a JSON object is the same rule for Go, Rust, Java,
-Python and AssemblyScript.
+answer. A string containing a JSON object is the same rule for Go, Rust, Java
+and Python.
 
 The consequence for an SDK: the returned string **is** the serialized form, not a
 value awaiting serialization. Re-encoding it produces a JSON string containing
@@ -1907,8 +1907,8 @@ inputOffset  = scratchBase
 outputOffset = scratchBase + OutBufSize
 ```
 
-The 10 MiB floor exists because some SDKs (Java/TeaVM, AssemblyScript) hardcode that
-convention and break if the region moves below it. A module whose heap already exceeds
+The 10 MiB floor exists because the Java/TeaVM SDK hardcodes that
+convention and breaks if the region moves below it. A module whose heap already exceeds
 10 MiB gets a correspondingly higher base.
 
 | Offset | Size | Use |
@@ -2009,7 +2009,6 @@ When workflow behavior depends on map iteration order (e.g., iterating over a `H
 | Go | `map[key]value` + `sort.Strings(keys)` before iteration | Raw `for k, v := range m` iteration |
 | Rust | `BTreeMap<K, V>` (default for `serde_json::Map`) | `HashMap<K, V>` when used with non-default hasher or when order-dependent logic is applied |
 | Python | `dict` + `sorted(d.keys())` or `sort_keys=True` | Raw `for k in d` (insertion-order in 3.7+ but not guaranteed across implementations) |
-| AssemblyScript | Sort keys before iteration | Raw `Map.forEach` / `for (k in map)` |
 
 **When this matters**: Map iteration order only matters when the workflow logic depends on it. If a map is only used for lookups (get by key), iteration order is irrelevant. If iteration order affects which host call is made next or what JSON is produced, use sorted iteration.
 
@@ -2071,7 +2070,6 @@ All random values used in workflows MUST come from `cleat_random` (ABI 2.6). The
 - Go: `math/rand`, `crypto/rand`
 - Rust: `rand::random()`, `rand::thread_rng()`
 - Python: `random.random()`, `secrets.*`
-- AssemblyScript: `Math.random()`
 
 These are non-deterministic and will cause replay divergence errors.
 
@@ -2090,16 +2088,16 @@ Use `cleat_uuid` (ABI 2.40) for deterministic UUID generation from a seed.
 
 ### 6.6 SDK Compliance Matrix
 
-| Requirement | Go SDK | Rust SDK | Python SDK | AssemblyScript SDK |
-|---|---|---|---|---|
-| IEEE 754 floats | ✅ Go float64 | ✅ f64 | ✅ float | ✅ f64 |
-| NaN canonicalization | ⚠️ via host json_stringify | ⚠️ via host json_stringify (added in cleat-207) | ⚠️ verify | ⚠️ verify |
-| Map iteration order | ⚠️ manual sort required | ✅ BTreeMap default for serde_json::Map | ⚠️ sort_keys=True required | ⚠️ manual sort required |
-| JSON canonical output | ✅ encoding/json | ⚠️ via host json_stringify (added in cleat-207) | ⚠️ verify componentize-py | ✅ via host json_stringify |
-| GC-timing independence | ✅ manual defer | ✅ manual defer | ✅ manual defer | ✅ manual defer |
-| RNG via cleat_random | ✅ | ✅ | ✅ | ✅ |
-| cleat_json_parse (2.51) | ✅ host import | ✅ added in cleat-207 | ✅ via WIT bindings | ✅ host import |
-| cleat_json_stringify (2.52) | ✅ host import | ✅ added in cleat-207 | ✅ via WIT bindings | ✅ host import |
+| Requirement | Go SDK | Rust SDK | Python SDK |
+|---|---|---|---|
+| IEEE 754 floats | ✅ Go float64 | ✅ f64 | ✅ float |
+| NaN canonicalization | ⚠️ via host json_stringify | ⚠️ via host json_stringify (added in cleat-207) | ⚠️ verify |
+| Map iteration order | ⚠️ manual sort required | ✅ BTreeMap default for serde_json::Map | ⚠️ sort_keys=True required |
+| JSON canonical output | ✅ encoding/json | ⚠️ via host json_stringify (added in cleat-207) | ⚠️ verify componentize-py |
+| GC-timing independence | ✅ manual defer | ✅ manual defer | ✅ manual defer |
+| RNG via cleat_random | ✅ | ✅ | ✅ |
+| cleat_json_parse (2.51) | ✅ host import | ✅ added in cleat-207 | ✅ via WIT bindings |
+| cleat_json_stringify (2.52) | ✅ host import | ✅ added in cleat-207 | ✅ via WIT bindings |
 
 ✅ = compliant by default or already implemented  
 ⚠️ = requires explicit use of the recommended pattern (manual or verified)

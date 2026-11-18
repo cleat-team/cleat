@@ -14,8 +14,8 @@ Cleat's architecture imposes four non-negotiable constraints on the VM:
    execution must produce bit-for-bit identical results. This is the hardest
    constraint and eliminates most candidates.
 
-2. **Language agnosticism.** Must compile Go, Rust, Java/Kotlin, TypeScript/
-   AssemblyScript, and potentially Python to a common target.
+2. **Language agnosticism.** Must compile Go, Rust, Java/Kotlin, TypeScript,
+   and potentially Python to a common target.
 
 3. **Sandboxing.** Workflow code must not access the network, filesystem, or
    non-deterministic system calls. Sandboxing must be enforced by the runtime,
@@ -53,8 +53,7 @@ Cleat's architecture imposes four non-negotiable constraints on the VM:
 **Current weaknesses:**
 
 - **Immature non-Go toolchains.** The 38 fork/port issues are direct evidence —
-  AS SDK doesn't compile on current AS 0.27.32, TeaVM has 6 blockers, Python
-  WASM binaries are ~20MB.
+  TeaVM has 6 blockers, Python WASM binaries are ~20MB.
 - **Go version lock-in.** cleat requires Go 1.27+ (go.mod pins `toolchain go1.27.3`, and Go 1.27.4 and newer cannot build it yet, see CONTRIBUTING.md);
   `//go:wasmimport` and `//go:wasmexport` themselves need Go 1.24+. This is
   bleeding-edge.
@@ -170,7 +169,7 @@ architectural — they can't be fixed without rebuilding the JVM. WASM's
 problems are toolchain maturity problems — they're fixable one by one.
 
 The 38 fork/port issues aren't a WASM problem — they're a toolchain maturity
-problem. The AS SDK compilation error, the TeaVM blockers, the Python WASM
+problem. The TeaVM blockers, the Python WASM
 binary size — these are all fixable with engineering effort. The JVM's
 non-determinism is not fixable without forking the JVM.
 
@@ -186,6 +185,6 @@ Re-evaluate if:
 - A new WASM alternative emerges with deterministic replay and multi-language
   support (unlikely in the next 2-3 years)
 - The WASM Component Model stabilizes and all target languages support it
-- The non-Go toolchains (AS, Java, Python) prove too expensive to maintain
+- The non-Go toolchains (Java, Python) prove too expensive to maintain
   and a single-language (Go-only) strategy becomes preferable — at which
   point Lua or a Go interpreter could be considered for scripting use cases
