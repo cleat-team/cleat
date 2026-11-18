@@ -644,11 +644,16 @@ jobs:
       # A call no fixture makes is one no test compiles and no test runs, which
       # is how four Go host calls shipped uncompilable (IMPROVEMENT-PLAN 3.204)
       # and how the Python end-to-end test's coverage stayed one method wide
-      # (3.205). The baseline can only shrink; a rise is reported, not failed.
+      # (3.205). The baseline must be EXACTLY current: a fall fails, a rise fails, and a
+      # changed method count (the surface) fails, in either direction. It used to compare
+      # `covered` only and let a rise through with a printed hint, so it sat ten calls behind
+      # on Go and four SDKs' surfaces were wrong, all under a green job (cleat#4054). The
+      # --self-test line runs known-positive baselines through the same comparison.
       - name: SDK host-call coverage guard
         if: always() && (needs.edit-gate.outputs.skip != 'true')
         run: |
           bash -e <<'LINT_GUARD_EOF' || echo "SDK host-call coverage guard" >> "$LINT_FAILURES_FILE"
+          scripts/sdk-host-call-coverage.py --self-test
           scripts/sdk-host-call-coverage.py --check
           LINT_GUARD_EOF
 
