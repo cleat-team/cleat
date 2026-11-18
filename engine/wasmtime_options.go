@@ -122,12 +122,6 @@ const DefaultWasmtimeInterruptMarginTime = 250 * time.Millisecond
 // for the case where a poll gap or a short ctx deadline still lands the stop inside one tick.
 const interruptUnwindGrant = 100 * time.Millisecond
 
-// interruptMinMarginTime is the floor under the epoch reserve. Two epoch ticks plus a poll gap:
-// a deadline of N ticks expires 50*(N-1) to 50*N ms out, so anything under two ticks can be
-// overtaken by the hard trap before a poll observes the reserve. See the call site for the
-// measurement that put it here.
-const interruptMinMarginTime = 2*epochTickInterval + 20*time.Millisecond
-
 // wasmtimeLimits bundles the resource bounds applied to a wasmtime
 // execution. Zero/negative fields mean "use the backend's built-in
 // default" (see the Default* constants above) except instructionLimit,

@@ -32,6 +32,14 @@ import (
 // backend is configured with.
 const epochTickInterval = 50 * time.Millisecond
 
+// interruptMinMarginTime is the floor under the epoch reserve. Two epoch ticks plus a poll gap: a
+// deadline of N ticks expires 50*(N-1) to 50*N ms out, so anything under two ticks can be overtaken
+// by the hard trap before a poll observes the reserve. It lives here rather than beside the other
+// interrupt constants because it is written in terms of epochTickInterval, which exists only in this
+// cgo-tagged file: put in the untagged options file it breaks `CGO_ENABLED=0 go build ./engine/`,
+// and with it the CLI's pure-Go cross-compile. (cleat#3922 review.)
+const interruptMinMarginTime = 2*epochTickInterval + 20*time.Millisecond
+
 // Compile-time check: wasmtimeBackend implements WasmBackend.
 var _ WasmBackend = (*wasmtimeBackend)(nil)
 

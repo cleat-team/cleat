@@ -638,6 +638,12 @@ That is up to the epoch margin for a budget above about a second, and **up to HA
 a sub-second one, where the floor is what binds. It is the price of stopping while the guest can
 still clean up.
 
+**There is a cliff below about 200 ms, and it is measured.** At an instance timeout of 100 ms the
+soft kill reached the guest 0 times in 20 runs, at 150 ms 18 of 20, and at 200 ms and 240 ms 20 of
+20 (cleat#3922 review, 2026-11-18). Below that range the hard trap wins the race to a poll, so a
+workflow's cleanup is not reliable — an operator who needs defers to run should leave the instance
+timeout well above 200 ms.
+
 **It is best-effort, and the host does not promise it will be asked.** The margin is sized from the
 longest gap measured between two consecutive polls, but a single operation that burns more budget
 than the margin — a very large `JSON.parse`, or a loop dominated by native string allocation — can
