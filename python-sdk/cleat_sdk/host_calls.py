@@ -4,7 +4,7 @@ Provides the :class:`HostCalls` class that wraps all 29 WASM host function
 imports in Pythonic methods matching the patterns from:
 
 * Rust: ``crates/cleat-sdk/src/host_calls.rs``
-* AssemblyScript: ``packages/cleat-as/assembly/host-calls.ts``
+* AssemblyScript (SDK removed, cleat#4023; last at ``71026ace``): ``packages/cleat-as/assembly/host-calls.ts``
 * Java: ``crates/cleat-java/src/main/java/cleat/HostCalls.java``
 * ABI: ``ABI.md``
 
@@ -1265,7 +1265,7 @@ class HostCalls:
 
     Reference implementations:
         * Rust: ``crates/cleat-sdk/src/host_calls.rs``
-        * AssemblyScript: ``packages/cleat-as/assembly/host-calls.ts``
+        * AssemblyScript (SDK removed, cleat#4023; last at ``71026ace``): ``packages/cleat-as/assembly/host-calls.ts``
         * Java: ``crates/cleat-java/src/main/java/cleat/HostCalls.java``
     """
 

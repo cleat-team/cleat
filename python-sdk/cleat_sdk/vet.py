@@ -959,8 +959,8 @@ def analyze_file(filepath: str) -> AnalysisResult:
     # `h`, and demanding it would be noise on every string or arithmetic helper
     # a workflow uses. Measured while fixing the AssemblyScript twin
     # (cleat#1799), where the same substitution made SIX pure helpers in
-    # examples/as-workflow -- extractStringField, isDigit, parseI64 and
-    # friends -- fail E005 on an unmodified example.
+    # examples/as-workflow (removed with the AssemblyScript SDK, cleat#4023) -- extractStringField,
+    # isDigit, parseI64 and friends -- fail E005 on an unmodified example.
     #
     # The question the check actually asks is "can this function obtain the `h`
     # it needs?", and that is only meaningful for a function that BOTH

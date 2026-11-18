@@ -19,7 +19,8 @@ import (
 // a test that re-derives the layout from the packer it is testing asserts only
 // that the packer is self-consistent. The AS SDK is used as the reference
 // because its layouts are written down as documented bit tables:
-// packages/cleat-as/assembly/memory.ts, decodeSleepResult and friends.
+// packages/cleat-as/assembly/memory.ts, decodeSleepResult and friends. (That SDK was removed in cleat#4023;
+// read the file with `git show 71026ace:packages/cleat-as/assembly/memory.ts`. The decoders below are what is left of it.)
 //
 // Three properties, and the second is the one that matters:
 //
@@ -35,7 +36,7 @@ import (
 // number rather than being weakened to pass. A pinned limit is a fact the next
 // reader can check; a loosened assertion is one they cannot.
 
-// ---- guest-side decoders, transcribed from packages/cleat-as/assembly/memory.ts ----
+// ---- guest-side decoders, transcribed from packages/cleat-as/assembly/memory.ts (removed, cleat#4023; see 71026ace) ----
 
 // decodeSleepResultGuest mirrors decodeSleepResult: bits 56-63 status,
 // bits 0-55 durationMs.

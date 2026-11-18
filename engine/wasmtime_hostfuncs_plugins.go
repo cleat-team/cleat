@@ -85,7 +85,8 @@ func (b *wasmtimeBackend) registerCleatCreatePromise(linker *wasmtime.Linker) er
 	// generator (wasm/generator.go, name + promise_id_out), the Rust SDK
 	// (crates/cleat-sdk/src/host_calls.rs), the Java SDK (HostCalls.java) and
 	// AssemblyScript (packages/cleat-as/assembly/host-calls.ts, whose comment
-	// spells the signature out). wazero's registration in engine/imports.go is
+	// spells the signature out; the SDK was removed in cleat#4023, and the file is
+	// at `git show 71026ace:packages/cleat-as/assembly/host-calls.ts`). wazero's registration in engine/imports.go is
 	// four as well.
 	//
 	// Since an arity mismatch is a hard link error, the extra parameter meant a
