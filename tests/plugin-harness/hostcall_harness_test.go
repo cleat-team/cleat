@@ -114,7 +114,7 @@ type expectedOutcome struct {
 type resultShape int
 
 const (
-	// resultObject: the entry returns the outcome object. Go, Rust, AssemblyScript.
+	// resultObject: the entry returns the outcome object. Go and Rust.
 	resultObject resultShape = iota
 	// resultJSONWrapped: the entry returns a JSON string containing the object. Java.
 	resultJSONWrapped
@@ -145,8 +145,8 @@ func executeOneCall(t *testing.T, eng *engine.Engine, wasmBytes []byte, call str
 	// The shape is asserted, not accommodated.
 	//
 	// Java/TeaVM returns the entry's value as a JSON-ENCODED STRING -- a JSON
-	// string whose contents are the JSON object -- where Go, Rust and
-	// AssemblyScript return the object itself. That is the Java SDK's ABI
+	// string whose contents are the JSON object -- where Go and Rust
+	// return the object itself. That is the Java SDK's ABI
 	// contract, not a fixture bug: TestPluginCalls_Wasm_Java unwraps the same
 	// way, and #724 turned the two skips that hid it into failures.
 	//

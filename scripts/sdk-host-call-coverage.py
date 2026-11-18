@@ -85,22 +85,9 @@ def java_surface() -> set[str]:
     )
 
 
-def as_surface() -> set[str]:
-    src = _read(ROOT / "packages" / "cleat-as" / "assembly" / "host-calls.ts")
-    m = re.search(r"^export class HostCalls\b.*?\{", src, re.M | re.S)
-    if not m:
-        return set()
-    rest = src[m.end() :]
-    end = re.search(r"^\}", rest, re.M)
-    body = rest[: end.start()] if end else rest
-    names = set(re.findall(r"^  ([a-zA-Z][A-Za-z0-9]*)\s*\(", body, re.M))
-    return names - {"constructor", "if", "for", "while", "return", "switch", "catch"}
-
-
 # The call pattern below ends `\s*\(`, so it does not match a call that carries
 # an explicit type-argument list between the method name and the paren --
-# `h.cleat_call_with_retry::<Value, Value>(..)` in Rust, `h.method<T>(..)` in
-# AssemblyScript. Measured 2026-09-05 against a loosened pattern over every
+# `h.cleat_call_with_retry::<Value, Value>(..)` in Rust. Measured 2026-09-05 against a loosened pattern over every
 # glob in EXECUTED: zero calls are missed today, so this costs no number. It is
 # recorded because the zero is an accident. The one turbofish call site in the
 # tree is credited anyway, by examples/rust-workflow calling the same method in
@@ -131,11 +118,6 @@ SDKS = {
     "java": (
         java_surface,
         ["examples/java-workflow/**/*.java", "examples/saga-java-port/**/*.java", "tests/plugin-harness/testdata/javaworkflow/**/*.java", "crates/cleat-java/src/test/java/cleat/AllHostCallsCompileTest.java"],
-        lambda n: rf"\b(?:h|host|hc)\.{n}\s*\(",
-    ),
-    "assemblyscript": (
-        as_surface,
-        ["examples/as-workflow/assembly/*.ts", "examples/widget-store-as/assembly/*.ts", "tests/plugin-harness/testdata/asworkflow/assembly/*.ts", "packages/cleat-as/assembly/__compile__/*.ts"],
         lambda n: rf"\b(?:h|host|hc)\.{n}\s*\(",
     ),
 }
@@ -573,30 +555,10 @@ EXECUTED = {
             "globs": ["tests/plugin-harness/testdata/hostcallsjava/**/*.java"],
             "test": "TestHostCallsJava",
             "why": "the host-call execution harness, which java was the ONLY SDK not to count. go, rust and "
-                   "assemblyscript all list their own hostcalls* fixture here and java did not, so java's "
+                   "the others list their own hostcalls* fixture here and java did not, so java's "
                    "executed number was measured over a strictly smaller set of sources than its peers' and "
                    "was not comparable to them -- it read 8/70 against rust's 27/70, a difference that was "
                    "mostly about which files the scan opened",
-        },
-    ],
-    "assemblyscript": [
-        {
-            "globs": ["tests/plugin-harness/testdata/asworkflow/assembly/*.ts"],
-            "test": "TestPluginCalls_Wasm_AS",
-            "why": "built by buildASWorkflowWasm and executed",
-        },
-        {
-            "globs": ["examples/as-workflow/assembly/*.ts"],
-            "test": "TestAssemblyScriptWorkflowExecute",
-            "why": "engine/as_workflow_e2e_test.go:30 builds examples/as-workflow and executes it",
-        },
-        # The host-call execution harness (C2, IMPROVEMENT-PLAN 3.406). All 24
-        # wave-1 calls execute here -- unlike Rust, the AssemblyScript SDK
-        # binds both cron imports.
-        {
-            "globs": ["tests/plugin-harness/testdata/hostcallsas/assembly/*.ts"],
-            "test": "TestHostCallsAS",
-            "why": "the host-call execution harness (C2); all 24 wave-1 calls, one invocation each",
         },
     ],
 }
@@ -785,12 +747,12 @@ LOOSE = {
         "crates/cleat-java/src/main/java/cleat/HostCalls.java",
         r"^    public\s+(?:static\s+)?[\w<>,\[\]\.\s]+?\s+([a-zA-Z][A-Za-z0-9]*)\s*\(",
     ),
-    "assemblyscript": (
-        "packages/cleat-as/assembly/host-calls.ts",
-        r"^  ([a-zA-Z][A-Za-z0-9]*)\s*(?:<[^)]*>)?\s*\(",
-    ),
 }
-_AS_KEYWORDS = {"constructor", "if", "for", "while", "return", "switch", "catch"}
+
+
+# Words the looser parse of a source file can match that are not method names. It subtracted these for every SDK; they were
+# defined for AssemblyScript and the subtraction is harmless for the others.
+_LOOSE_KEYWORDS = {"constructor", "if", "for", "while", "return", "switch", "catch"}
 
 
 def check_surface_extraction() -> list[str]:
@@ -801,7 +763,7 @@ def check_surface_extraction() -> list[str]:
         if not f.exists():
             problems.append(f"{sdk}: {path} is missing; the surface scan has nothing to read")
             continue
-        loose = set(re.findall(pattern, _read(f), re.M)) - _AS_KEYWORDS
+        loose = set(re.findall(pattern, _read(f), re.M)) - _LOOSE_KEYWORDS
         strict = SDKS[sdk][0]()
         missed = loose - strict
         if missed:
@@ -823,7 +785,7 @@ def check_hostcall_fixtures_are_counted() -> list[str]:
     the gap was not about Java. `tests/plugin-harness/testdata/hostcallsjava/`
     existed, was built and executed by TestHostCallsJava, and exercised roughly
     two dozen host calls -- and was simply not in java's EXECUTED globs, where
-    go, rust and assemblyscript all listed their own. Adding it moved java from
+    go and rust listed their own (as did the AssemblyScript SDK, since removed). Adding it moved java from
     8 to 26 with no Java code changed at all.
 
     So the number was never a statement about the SDK. It was a statement about
@@ -843,8 +805,7 @@ def check_hostcall_fixtures_are_counted() -> list[str]:
         if not d.is_dir() or not d.name.startswith("hostcalls"):
             continue
         sdk_key = d.name[len("hostcalls"):]          # hostcallsjava -> java
-        aliases = {"as": "assemblyscript"}
-        sdk = aliases.get(sdk_key, sdk_key)
+        sdk = sdk_key
         if sdk not in EXECUTED:
             continue
         rel = f"tests/plugin-harness/testdata/{d.name}/"

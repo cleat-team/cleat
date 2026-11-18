@@ -64,7 +64,6 @@ var sdkImportSources = []sdkImportSource{
 	// 2026-09-06 by diffing the SETS, not the counts -- origin/develop 46,
 	// this branch 44, removed exactly those two and added none.
 	{"java", 44, javaDeclaredImports},
-	{"assemblyscript", 45, asDeclaredImports},
 
 	// Go and Python declare nothing themselves, and are covered here by
 	// the tables that decide their import names instead.
@@ -194,18 +193,6 @@ func javaDeclaredImports(t *testing.T, root string) map[string]string {
 	return out
 }
 
-func asDeclaredImports(t *testing.T, root string) map[string]string {
-	t.Helper()
-	p := filepath.Join(root, "packages", "cleat-as", "assembly", "host-calls.ts")
-	src := readFileOrFatal(t, p)
-	out := map[string]string{}
-	re := regexp.MustCompile(`@external\("env",\s*"([^"]+)"\)`)
-	for _, m := range re.FindAllStringSubmatch(src, -1) {
-		out[m[1]] = "packages/cleat-as/assembly/host-calls.ts"
-	}
-	return out
-}
-
 func readFileOrFatal(t *testing.T, path string) string {
 	t.Helper()
 	b, err := os.ReadFile(path)
@@ -308,9 +295,9 @@ var notWorkflowFacing = map[string]bool{
 // SDK cannot reach. SHRINK-ONLY: removing an entry when the binding lands is
 // the point; adding one widens the gap and needs a reason here.
 //
-// Measured 2026-09-07. Note that AssemblyScript, not Go, is the only SDK at
-// full parity -- which is the sort of thing nobody would have guessed, and the
-// reason this direction is worth checking at all.
+// Measured 2026-09-07, when AssemblyScript (since removed from this table), not Go,
+// was the only SDK at full parity -- which is the sort of thing nobody would have
+// guessed, and the reason this direction is worth checking at all.
 var sdkUnreachedBaseline = map[string][]string{
 	// cleat_interrupt_requested (cleat#3922) is bound by ONE guest: the
 	// TypeScript plugin, which polls it from the JavaScript engine's interrupt
@@ -325,12 +312,11 @@ var sdkUnreachedBaseline = map[string][]string{
 	// buys deferred cleanup after a kill, and no other SDK has asked for it.
 	// When one does, delete its entry rather than re-labelling it -- this list
 	// is shrink-only.
-	"rust":           {"cleat_interrupt_requested"},
-	"java":           {"cleat_interrupt_requested"},
-	"assemblyscript": {"cleat_interrupt_requested"},
+	"rust": {"cleat_interrupt_requested"},
+	"java": {"cleat_interrupt_requested"},
 
-	// rust and java: deliberately absent, as assemblyscript is. Both bound the
-	// cron trio in 3.242 -- which is what this baseline existed to make
+	// rust and java: the cron trio is deliberately absent from their entries above, because both
+	// bound it in 3.242 -- which is what this baseline existed to make
 	// visible, and it worked on its first real use: applying the bindings made
 	// this test fail with "names 3 host export(s) this SDK now reaches", naming
 	// all three.
@@ -445,7 +431,7 @@ var sdkUnreachedBaseline = map[string][]string{
 		"cleat_json_stringify",
 
 		// A real gap, and the only one here. cleat_start_detached (cleat#1154)
-		// is bound by Go, Rust, Java and AssemblyScript; Python is not, and the
+		// is bound by Go, Rust and Java; Python is not, and the
 		// reason is that it needs more than a table row.
 		//
 		// It returns a STRING, so its WIT cannot be the `-> u64` that
@@ -495,15 +481,12 @@ var sdkUnreachedBaseline = map[string][]string{
 		// it without one of its own. All of it is the out-pointer state
 		// §3.267 records it.
 		//
-		// Bound in Go, Rust, Java and AssemblyScript. pythonUnboundBaseline in
+		// Bound in Go, Rust and Java. pythonUnboundBaseline in
 		// engine/python_wasm_e2e_test.go records the same fact from
 		// python-sdk/cleat_sdk/host_calls.py, deliberately from the other
 		// source; the two move together.
 		"cleat_wait_for_event",
 	},
-
-	// assemblyscript: deliberately absent. It reaches every workflow-facing
-	// export, and an empty entry here would read as "not yet measured".
 }
 
 // TestEverySDKReachesEveryHostExport is the reverse of
