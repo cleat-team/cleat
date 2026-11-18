@@ -332,7 +332,8 @@ The function runs once on first execution and its result is recorded in the
 event history; every replay afterwards returns the recorded value without
 running it again. Available in the Go SDK (`cleat/runtime.go`,
 `SideEffectTyped` in `cleat/runtime_workflow.go`), the AssemblyScript SDK
-(`sideEffect()`), and exported by both WASM backends as `cleat_side_effect`.
+(`sideEffect()`), and registered as `cleat_side_effect` by the wasmtime backend that
+runs workers and by the wazero runtime the dev tools use.
 
 `random()` remains available for deterministic randomness and does not need
 `SideEffect`.
