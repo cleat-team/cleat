@@ -781,9 +781,12 @@ func WithBackend(language string, backend WasmBackend) EngineOption {
 //
 //   - go: the primary path and the backend of record (CLAUDE.md).
 //
-//   - assemblyscript, java: reached wasmtime for a long time by accident --
-//     DetectLanguage could not identify them and defaulted to "go" -- and were
+//   - java: reached wasmtime for a long time by accident --
+//     DetectLanguage could not identify it and defaulted to "go" -- and was
 //     confirmed to load and execute before being named explicitly. See 2.72.
+//     (AssemblyScript was in this entry too, and was removed with its SDK in
+//     cleat#4023: see removedGuestLanguages, which says what a module declaring it
+//     now gets.)
 //
 //   - rust: exercised by tests/cross-language, which builds the same
 //     wasm32-unknown-unknown cdylib that `cleat build --target rust` ships. All
@@ -834,14 +837,29 @@ func WithBackend(language string, backend WasmBackend) EngineOption {
 //
 // "javascript" is the TypeScript/JavaScript guest built on Javy (cleat#3825), and it is a
 // LABEL ahead of the build chain: it selects the wasmtime backend's direct-export path
-// (the one assemblyscript and rust take) and nothing else. The language is IN DEVELOPMENT,
+// (the one rust takes, and assemblyscript did until cleat#4023) and nothing else. The language is IN DEVELOPMENT,
 // and tiers.yaml grants it no support claim; the label was here first so that the module's
 // own declaration would be true, instead of a TypeScript module having to call itself "rust"
 // to be routed. The prototype measured that routing on its own branch (its Phase 0), not
 // here. It was deliberately kept OUT of deferSegmentLanguages below until the guest
 // decoded the sentinel and the plugin exported something to drain; cleat#3826 added it there,
 // and the verification is recorded beside that entry.
-var WasmtimeLanguages = []string{"go", "assemblyscript", "java", "rust", "python", "javascript"}
+var WasmtimeLanguages = []string{"go", "java", "rust", "python", "javascript"}
+
+// removedGuestLanguages are guest languages cleat once built for and no longer does, mapped to what an operator is told. A module
+// that declares one is REFUSED, by name, rather than reaching resolveBackend's generic "no WASM backend registered for guest
+// language", which reads as a typo in the module's metadata when the truth is that the toolchain is gone.
+//
+// The refusal applies whether or not the engine has any backend registered. With none (cleatctl replay|debug, cleat run_embedded,
+// cleat-bench, cleat/wasmtest) the module would otherwise fall through to the wazero runtime and RUN, on the one runtime CLAUDE.md
+// records as unfenceable for a compute-bound guest, so "removed" would mean "removed from the worker" and nothing else.
+//
+// What counts as declaring it: wasm.DetectLanguage's answer, which is the module's own cleat.metadata Language field or, when that is
+// absent, the shape of its imports. DetectLanguage still identifies an AssemblyScript module on purpose. Forgetting the shape would
+// make an AssemblyScript module with no metadata default to "go" and run as one, which is a worse failure than the refusal.
+var removedGuestLanguages = map[string]string{
+	"assemblyscript": "AssemblyScript support was removed from cleat (cleat#4023): the SDK, `cleat build --target assemblyscript` and the engine's routing for it no longer exist",
+}
 
 // deferSegmentLanguages are the guest languages whose SDK decodes
 // callSuspendSentinel, and so can be run as a defer segment.
@@ -869,13 +887,6 @@ var WasmtimeLanguages = []string{"go", "assemblyscript", "java", "rust", "python
 //     engine/java_defer_segment_e2e_test.go, which builds the real TeaVM module
 //     and measures that a defer segment records the two cleanup calls and not
 //     the body's (3.105).
-//   - assemblyscript: examples/as-workflow's defer_order entry point +
-//     engine/as_defer_segment_e2e_test.go (3.106). Note this one does NOT stop
-//     by unwinding -- the SDK has no exceptions, so the body runs on past the
-//     stop with every further call refused, and what ends the segment is the
-//     transformer-generated wrapper checking isWorkflowSuspended() before it
-//     drains. Membership still means the same thing (the segment runs only the
-//     defers, measured), but read that test's comment for how it gets there.
 //   - rust: examples/rust-workflow's defer_order entry point +
 //     engine/rust_defer_segment_e2e_test.go (3.107). That fixture DISCARDS the
 //     error from its body call, which is the case worth having: six of the
@@ -926,7 +937,7 @@ var WasmtimeLanguages = []string{"go", "assemblyscript", "java", "rust", "python
 // backend language starts refused rather than silently running a segment it
 // cannot be stopped in. Do not delete it for being full.
 var deferSegmentLanguages = map[string]bool{
-	"go": true, "java": true, "assemblyscript": true, "rust": true, "python": true,
+	"go": true, "java": true, "rust": true, "python": true,
 	// javascript (cleat#3826): the Javy plugin's bindings are cleat-sdk's HostCalls, so they decode the sentinel and
 	// the stop bit, and a defer segment suspends correctly. What made it NOT work until now was not the decode: the host
 	// drains a suspended segment by calling the module's __cleat_run_deferred export, and a JavaScript module exported
