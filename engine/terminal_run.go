@@ -55,15 +55,53 @@ func walkToTerminalRun(
 		return nil, nil
 	}
 
-	cur, err := terminalRunID(ctx, id, successorOf)
-	if err != nil {
-		return nil, err
+	// The walk and the read are separate statements, and a chain moves between
+	// them. cleat#4061: the run the walk settled on can continue as new before
+	// its row is read, and a run that continues is finalised as `done` with an
+	// empty result -- so the reply was an INTERMEDIATE run, status done, result
+	// {}, that a client polling for a terminal status takes for the answer. The
+	// real end was one or two rows further on. TestTypeScriptContinueAsNewOnARealWorker
+	// saw it on SQL Server and then on MySQL.
+	//
+	// So the successor is asked again AFTER the row is read, and the walk goes on
+	// if one has appeared. What this returns is then a row that had no successor
+	// at a moment later than the moment it was read, which is the strongest
+	// "last run as of now" a client can be given without one transaction across
+	// the whole walk. It costs one extra successor lookup per call (a fan-out
+	// per shard on a ShardedStore).
+	cur, row := id, head
+	for hops := 0; ; hops++ {
+		if hops >= maxContinueAsNewChainWalk {
+			return nil, fmt.Errorf("%w: gave up at %s after %d re-reads",
+				ErrContinueAsNewChainTooLong, cur, hops)
+		}
+		end, err := terminalRunID(ctx, cur, successorOf)
+		if err != nil {
+			return nil, err
+		}
+		if end != cur {
+			cur, row = end, nil
+		}
+		if row == nil {
+			row, err = get(ctx, cur)
+			if err != nil {
+				return nil, err
+			}
+			if row == nil {
+				return nil, nil
+			}
+		}
+		next, err := successorOf(ctx, cur)
+		if err != nil {
+			return nil, err
+		}
+		if next == "" {
+			return row, nil
+		}
+		// cur continued while its row was being read: that row is the run the
+		// chain LEFT. Keep walking from its successor.
+		cur, row = next, nil
 	}
-
-	if cur == id {
-		return head, nil
-	}
-	return get(ctx, cur)
 }
 
 // terminalRunID walks a ContinueAsNew chain forward and returns the id of its
