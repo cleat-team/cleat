@@ -448,15 +448,6 @@ func TestDetectVetLang(t *testing.T) {
 			wantLang: "java",
 		},
 		{
-			name: "assemblyscript_package_json",
-			setup: func(t *testing.T) string {
-				dir := t.TempDir()
-				os.WriteFile(filepath.Join(dir, "package.json"), []byte("{}"), 0644)
-				return dir
-			},
-			wantLang: "as",
-		},
-		{
 			name: "fallback_go_ext",
 			setup: func(t *testing.T) string {
 				dir := t.TempDir()

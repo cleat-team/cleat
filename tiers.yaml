@@ -208,10 +208,6 @@ tier1:
     # leave a pair whose halves run in different jobs.
     - "^TestJavaDeferSegmentRunsOnlyTheDefers$"
     - "^TestJavaOrdinarySegmentRunsTheBody$"
-    # tier 2 -- assemblyscript, in cmd/cleat: the npx-based transform and vet checks; both need
-    # node. (The engine's AssemblyScript tests were listed here too until cleat#4023 deleted them.)
-    - "^TestASTransform$"
-    - "^TestVetAS$"
     #
     # ------------------------------------------------------------------------
     # 2026-09-03, IMPROVEMENT-PLAN 3.109. Everything below builds a tier-2
@@ -273,7 +269,8 @@ tier1:
     # -skip; the guard checks all four of those facts rather than the leg's name.
     #
     # Six of the thirteen cmd/cleat tests that reach a builder, not all thirteen,
-    # and the rest are deliberate. Measured 2026-11-08 with no java, node, npx,
+    # and the rest are deliberate. (Measured when AssemblyScript was one of the three
+    # languages; cleat#4023 removed its tests, so the counts are history.) Measured 2026-11-08 with no java, node, npx,
     # cargo or gradle on PATH: these six SKIPPED; the other seven PASSED
     # (TestRunBuild_{Java,Rust,AS}Target_*, TestJavaBuildRefusesNondeterminism,
     # TestRustBuildRefusesNondeterminism, TestRustBuildAcceptsProseNamingAForbiddenPattern)
@@ -284,9 +281,6 @@ tier1:
     - "^TestJavaBuildRefusesAStaleManifest$"
     - "^TestJavaBuildRefusesMultipleManifests$"
     - "^TestJavaExampleEntryPointResolutionLive$"
-    - "^TestAssemblyScriptBuildRefusesAStaleManifest$"
-    - "^TestAssemblyScriptExampleEntryPointResolutionLive$"
-    - "^TestASBuildRefusesNondeterminism$"
     # tier 2 -- rust, java and assemblyscript, in tests/crash (cleat#3692, the last of
     # the three guard findings cleat#3690 left open).
     #

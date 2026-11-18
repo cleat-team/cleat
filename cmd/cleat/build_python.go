@@ -35,8 +35,8 @@ import (
 // skipped. Making that read work made wfMeta non-nil, and 0 then disagreed with
 // the def_version a deploy records (cleat deploy prefers the stamp, and its own
 // --version defaults to 1), so every Python run was released as "version_check"
-// on claim and looped forever without ever running. Rust, Java and
-// AssemblyScript get the same value from nonGoMetadata.
+// on claim and looped forever without ever running. Rust and Java
+// get the same value from nonGoMetadata.
 func pythonStampEnv(workflowName string, workflowVersion int, entryPoints, channel string) map[string]string {
 	env := map[string]string{
 		"CLEAT_WORKFLOW_VERSION": strconv.Itoa(workflowVersion),
@@ -161,8 +161,7 @@ func runBuildPython(pattern, outDir, runtime, channel string, workflowVersion in
 	// Determinism gate. runBuild early-returns here before reaching analyze(),
 	// so a Python workflow compiled to a deployable artifact with no
 	// determinism checking at all (cleat#1770). Rust landed in #1784, Java in
-	// #1791; AssemblyScript needed none, because its transform already runs
-	// inside the compile.
+	// #1791.
 	//
 	// It runs BEFORE the componentize-py lookup for the same reason as the Rust
 	// and Java gates run before their toolchain lookups: a workflow with
