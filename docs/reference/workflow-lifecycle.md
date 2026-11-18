@@ -345,6 +345,21 @@ that their action was already submitted; it is not worth branching the happy pat
 
 ---
 
+### Per-run limit overrides on a start request
+
+`POST /api/workflows/<name>/start` accepts four optional per-run bounds, in milliseconds:
+`wasm_instance_timeout_ms`, `wasm_wall_clock_ceiling_ms`, `host_retry_budget_ms` and
+`max_workflow_duration_ms`. Each can only **tighten**: a run's bound is clamped to its tenant's, and
+that to the operator's flag (`min(run, tenant, operator)`). `0` or absent means no override. A
+negative value is a `400` (`per-run limit overrides must be positive milliseconds`).
+
+**`wasm_instance_timeout_ms` above `0` and under `250` is a `400`** that names the value, the 250ms
+floor and why: below about 200ms the hard trap beats the soft kill to a poll, so the defers of a run
+this timeout stops do not reliably run (`ABI.md`, "There is a cliff below about 200 ms"). Before
+cleat#3922 such a request was accepted. It is the same floor as the worker's
+`--wasm-instance-timeout` and a tenant's `wasm_instance_timeout_ms` setting. The three other bounds
+are not subject to it.
+
 ## Outcomes
 
 The five settled statuses are a run's **outcomes**. Everything else in this document says how a run

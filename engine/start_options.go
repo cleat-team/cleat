@@ -34,6 +34,17 @@ type StartOptions struct {
 	RunLimits TenantSettings
 }
 
+// Validate refuses a StartOptions that asks for something cleat will not run: a per-run instance timeout above 0 and under
+// MinWasmInstanceTimeout (cleat#3922, owner decision 2026-11-18). The same floor, through the same function and with the same
+// wording, as the worker's --wasm-instance-timeout and a tenant's wasm_instance_timeout_ms; see MinWasmInstanceTimeout for why.
+//
+// Called at the top of every store's StartNewRunWithOptions, so a library caller is held to it as well as an HTTP one, and by the
+// start handler before any store work so that the client gets a 400 rather than a store error. 0 means "no override" and passes.
+func (o StartOptions) Validate() error {
+	return CheckWasmInstanceTimeoutFloor(o.RunLimits.WasmInstanceTimeout, "per-run wasm_instance_timeout_ms",
+		"omit it (or send 0) to use the tenant's and the operator's bounds")
+}
+
 // msOrNil renders a duration as nullable milliseconds for the per-run limit
 // columns.
 //

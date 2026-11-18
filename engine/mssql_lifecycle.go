@@ -1462,6 +1462,9 @@ func (s *MSSQLStore) StartNewRunWithConcurrencyKey(ctx context.Context, runID, d
 // StartNewRunWithOptions records every per-run value a start can set, in the
 // INSERT that creates the run. See StartOptions.
 func (s *MSSQLStore) StartNewRunWithOptions(ctx context.Context, runID, defName string, defVersion int, input json.RawMessage, idempotencyKey string, tenantID string, priority int, opts StartOptions) (string, bool, error) {
+	if err := opts.Validate(); err != nil {
+		return "", false, err
+	}
 	return s.startNewRun(ctx, runID, defName, defVersion, input, idempotencyKey, tenantID, priority, opts)
 }
 

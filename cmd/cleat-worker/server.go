@@ -1265,6 +1265,15 @@ func (s *apiServer) handleStartWorkflow(w http.ResponseWriter, r *http.Request, 
 		s.writeError(w, 400, "per-run limit overrides must be positive milliseconds; 0 or absent means no override")
 		return
 	}
+	// The same floor as --wasm-instance-timeout and a tenant's wasm_instance_timeout_ms (cleat#3922): a run asking to be stopped
+	// sooner than the soft kill can reach it would have its defers silently not run. Refused here, before any store work, so the
+	// caller gets a 400 that says why; the stores check it too, for library callers.
+	if err := (engine.StartOptions{RunLimits: engine.TenantSettings{
+		WasmInstanceTimeout: time.Duration(input.WasmInstanceTimeoutMs) * time.Millisecond,
+	}}).Validate(); err != nil {
+		s.writeError(w, 400, err.Error())
+		return
+	}
 	startOpts := engine.StartOptions{
 		ConcurrencyKey: concurrencyKey,
 		RunLimits: engine.TenantSettings{

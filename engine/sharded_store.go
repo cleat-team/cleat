@@ -803,6 +803,9 @@ func (s *ShardedStore) StartNewRunWithConcurrencyKey(ctx context.Context, runID,
 // StartNewRunWithOptions routes like StartNewRun -- by RUN id -- and refuses
 // rather than silently dropping what it cannot record. See StartOptions.
 func (s *ShardedStore) StartNewRunWithOptions(ctx context.Context, runID, defName string, defVersion int, input json.RawMessage, idempotencyKey string, tenantID string, priority int, opts StartOptions) (string, bool, error) {
+	if err := opts.Validate(); err != nil {
+		return "", false, err
+	}
 	if runID == "" {
 		runID = uuid.New().String()
 	}
