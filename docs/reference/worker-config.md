@@ -1022,6 +1022,34 @@ tight loop inside one function never enters another.
 
 ---
 
+### --wasm-instance-timeout
+
+| Type | Default | Description |
+|------|---------|-------------|
+| duration | `30s` | Max guest execution time for one WASM invocation |
+
+Bounds the time a guest spends *executing* (a fresh execution or one replay
+pass) before it is forcibly interrupted, via wasmtime epoch interruption, which
+stops even a tight loop that never calls the host. Time blocked in a host call
+is not charged; `--wasm-wall-clock-ceiling` bounds that. `0` disables the
+timeout and is not recommended.
+
+**A value above `0` and under `250ms` is refused: the worker prints the
+reason and exits non-zero before it serves anything.** Below about 200ms the
+hard epoch trap beats the soft kill to a poll, so the defers of a workflow
+this timeout stops do not reliably run. Measured: at 100ms the soft kill
+reached the guest 0 times in 20 runs, at 150ms 18 of 20, and at 200ms and above
+20 of 20 (`ABI.md`, "There is a cliff below about 200 ms"; cleat#3922). 250ms
+is the floor because it leaves headroom over that measurement. Earlier releases
+accepted any value here, so a deployment that sets this flag low must raise it
+before upgrading.
+
+The floor covers this flag only. A library user setting the engine option
+directly, a context deadline, and a tenant's own `wasm_instance_timeout_ms`
+setting are not checked and can still reach the cliff.
+
+---
+
 ### --wasm-output-buffer-size
 
 > Corrected 2026-08-09: was documented as `1048576` (1 MiB). The actual
