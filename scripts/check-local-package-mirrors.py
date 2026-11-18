@@ -6,8 +6,8 @@ cleat#2455 / cleat#2506: `examples/widget-store-as/package-lock.json` pinned
 `@cleat/sdk@0.1.0` with `peerDependencies.assemblyscript ^0.27.0` while
 `packages/cleat-as/package.json` had moved to `0.3.2` / `^0.28.19`, and
 `npm ci` refused. Nothing in CI ran `npm ci` there, so nothing noticed. (Both directories were removed
-with the AssemblyScript SDK, cleat#4023; the guard stays for every other `file:` link, and this is the case
-it was written for.)
+with the AssemblyScript SDK, cleat#4023. As of 42223c71 no tracked lock carries a `file:` entry -- 0 of 5
+tracked package-lock.json files -- so the guard checks nothing today; it stays so the next one is checked.)
 
 Two guards existed before this one and neither reaches the case above:
 `.github/workflows/plugin-harness-ci.yml`'s "Tests did not rewrite their own

@@ -865,8 +865,9 @@ jobs:
       # @cleat/sdk@0.1.0 with peerDependencies.assemblyscript ^0.27.0 while
       # packages/cleat-as had moved to 0.3.2 / ^0.28.19, npm ci refused, and
       # nothing in CI ever ran npm ci there to notice. (Both directories went
-      # with the AssemblyScript SDK, cleat#4023; the guard stays for every other
-      # `file:` link.) Needs no npm and no
+      # with the AssemblyScript SDK, cleat#4023. As of 42223c71 no tracked lock carries a
+      # `file:` entry -- 0 of 5 -- so the guard checks nothing today; it stays so the next one
+      # is checked.) Needs no npm and no
       # network -- pure JSON, so it belongs in Lint rather than an ecosystem
       # job, and it reaches every consumer the same way regardless of which
       # CI job (if any) actually builds that consumer's directory.
