@@ -55,6 +55,7 @@
   "unbound": {
     "cleat_poll_work": "permanent: the worker's work handshake; a workflow does not run the queue.",
     "cleat_complete": "permanent: the worker's completion handshake, the pair of cleat_poll_work; not guest-reachable.",
-    "cleat_register_query_handler": "permanent: deliberately unbindable from a guest (ABI). A workflow may answer query state, not register the handler."
+    "cleat_register_query_handler": "permanent: deliberately unbindable from a guest (ABI). A workflow may answer query state, not register the handler.",
+    "cleat_interrupt_requested": "permanent: polled by the plugin's own Rust QuickJS interrupt handler (crates/cleat-js-plugin/src/lib.rs), never through a __cleat_* global -- the guest's JavaScript never calls it, so there is nothing for index.ts to declare. It IS reached: this guest is the one SDK that stops cleanly and runs its defers after a kill (ABI.md 2.10b, cleat#3922). Unbound here means no TypeScript binding, not unused."
   }
 }

@@ -312,6 +312,23 @@ var notWorkflowFacing = map[string]bool{
 // full parity -- which is the sort of thing nobody would have guessed, and the
 // reason this direction is worth checking at all.
 var sdkUnreachedBaseline = map[string][]string{
+	// cleat_interrupt_requested (cleat#3922) is bound by ONE guest: the
+	// TypeScript plugin, which polls it from the JavaScript engine's interrupt
+	// handler so a kill can unwind the guest cleanly and the host can then run
+	// its defers.
+	//
+	// It is workflow-facing, not a runtime handshake, so it is recorded here
+	// rather than in notWorkflowFacing above -- it widens the gap, which is
+	// what this baseline exists to make visible. The reason it is a gap and not
+	// a defect: the call is OPTIONAL. A guest that never imports it is
+	// unaffected and keeps the hard kill exactly as before; the poll is what
+	// buys deferred cleanup after a kill, and no other SDK has asked for it.
+	// When one does, delete its entry rather than re-labelling it -- this list
+	// is shrink-only.
+	"rust":           {"cleat_interrupt_requested"},
+	"java":           {"cleat_interrupt_requested"},
+	"assemblyscript": {"cleat_interrupt_requested"},
+
 	// rust and java: deliberately absent, as assemblyscript is. Both bound the
 	// cron trio in 3.242 -- which is what this baseline existed to make
 	// visible, and it worked on its first real use: applying the bindings made
@@ -374,6 +391,9 @@ var sdkUnreachedBaseline = map[string][]string{
 	// Go therefore has NO real gap left; the four below are all reachable
 	// another way.
 	"go (wasm/usage.go hostFunctions)": {
+		// Optional soft-kill poll, cleat#3922 -- see the note at the top of this
+		// map. Go keeps the hard kill until someone binds it.
+		"cleat_interrupt_requested",
 		// NOT a gap: Go reaches it, just not through the table this scanner
 		// reads. hostFunctions maps an import to a HostCalls METHOD, and
 		// cleat_defer_phase has none -- its caller is the generated defer
@@ -411,6 +431,9 @@ var sdkUnreachedBaseline = map[string][]string{
 	// they share, differing only on cleat_register_query_handler, which is in
 	// notWorkflowFacing above.
 	"python (wasm/component_rewrite.go WitToEnvImport)": {
+		// Optional soft-kill poll, cleat#3922 -- see the note at the top of this
+		// map. Python keeps the hard kill until someone binds it.
+		"cleat_interrupt_requested",
 
 		// The json pair. Not gaps: the
 		// `json` module is in the standard library and engine/lifecycle.go's

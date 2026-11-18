@@ -81,6 +81,26 @@ func (h *hostBudget) arm() {
 	h.resumedAt = time.Now()
 }
 
+// guestRemaining reports what the guest has left, and is only meaningful from INSIDE a host
+// function: enterHost has just charged the guest for the run that ended and the guest is not
+// running, so whatever is left is exactly the budget the epoch trap will fire against. Outside a
+// host call the same value is stale by however long the guest has been running since.
+func (h *hostBudget) guestRemaining() time.Duration {
+	if h == nil {
+		return 0
+	}
+	return h.remaining
+}
+
+// grant adds d to the guest's remaining budget. Used when the soft kill has decided to stop the
+// guest: the hard bound must not fire while the exception unwinds (cleat#3922).
+func (h *hostBudget) grant(d time.Duration) {
+	if h == nil {
+		return
+	}
+	h.remaining += d
+}
+
 // enterHost charges the guest for the time it has just run.
 func (h *hostBudget) enterHost() {
 	if h == nil {

@@ -248,6 +248,20 @@ func registerHostFunctions(builder wazero.HostModuleBuilder, rt *Runtime) {
 		return uint64(handlerFromContext(ctx).SetDeferPhase(ctx, on != 0))
 	}).Export("cleat_defer_phase")
 
+	// cleat_interrupt_requested: () -> i32
+	//
+	// The soft kill's stop bit (cleat#3922). A guest's runtime polls it from its own loop and stops
+	// cleanly when it answers 1, so the host can run the workflow's deferred cleanup afterwards --
+	// which a hard trap makes impossible, because it kills the instance mid-borrow.
+	//
+	// This is the wazero side, and it always answers 0: wazero has no fuel and no epoch, so nothing
+	// here can ask a guest to stop early, and this backend is developer tooling (cleatctl, cleat
+	// run, wasmtest) rather than anything a worker runs. Registered so the two runtimes expose the
+	// same host ABI, which engine/hostabi_runtime_parity_test.go enforces.
+	builder.NewFunctionBuilder().WithFunc(func(context.Context) uint32 {
+		return 0
+	}).Export("cleat_interrupt_requested")
+
 	// cleat_poll_cancellation: (ptr,maxLen) -> i64
 	builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module,
 		reasonPtr, reasonMaxLen uint32) uint64 {

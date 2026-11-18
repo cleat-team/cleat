@@ -562,6 +562,16 @@ var pythonUnboundBaseline = []string{
 	"cleat_json_parse",
 	"cleat_json_stringify",
 
+	// cleat_interrupt_requested (cleat#3922) is bound by ONE guest: the TypeScript
+	// plugin, which polls it from the JavaScript engine's interrupt handler so a kill can unwind
+	// the guest cleanly and the host can then run its defers. It is recorded
+	// rather than called "not workflow-facing", because it is workflow-facing and
+	// this list exists to show the gap. It is OPTIONAL: a guest that never imports
+	// it keeps the hard kill, unaffected, and the poll is what buys deferred
+	// cleanup after a kill. Python reaches the same guarantee today by keeping the
+	// hard kill; when it grows a soft one, delete this entry -- shrink-only.
+	"cleat_interrupt_requested",
+
 	// A real gap, and the only one here (cleat#1154). cleat_start_detached is
 	// bound by Go, Rust, Java and AssemblyScript. Python needs more than a
 	// binding: the call returns a STRING, so its WIT cannot be the `-> u64`
