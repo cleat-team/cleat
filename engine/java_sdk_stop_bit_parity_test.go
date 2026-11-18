@@ -97,6 +97,10 @@ var javaCallsTheHostCanRefuse = []sdkRefusableCall{
 	// lives in the _ms form -- the same shape as awaitSignalsMs above.
 	{"waitForEventMs", "WaitForEvent"},
 	{"acquireLockMs", "AcquireLock"},
+	// deleteCron joined in cleat#4083: a terminated workflow's defer segment
+	// could delete a schedule the workflow never reached. The refusal reads as
+	// errCode 0 in the simple layout, which is a successful delete.
+	{"deleteCron", "DeleteCron"},
 	{"signalWorkflow", "SignalWorkflow"},
 	{"cleatSend", "DurableSend"},
 	{"scheduleInvokeMs", "DurableScheduleInvoke"},
@@ -307,7 +311,17 @@ func TestTheRequiredJavaGuardsCoverEveryHostStopSite(t *testing.T) {
 	// already declares and already guards -- javaCallsTheHostCanRefuse covers
 	// the CALL, not the site. A count of sites and a list of methods are
 	// different things, and this is the case that separates them.
-	const stopSitesOn20260904 = 18
+	//
+	// 19 since cleat#4083: DeleteCron consults it, because a defer segment's
+	// body past recorded history deleted a schedule from a real store (measured).
+	// The other side was checked rather than assumed, and it needed code:
+	// Java's deleteCron went straight to Memory.decodeSimpleErrCode, where a stop
+	// reads as errCode 0, a SUCCESSFUL delete. Both the list entry above and the
+	// Memory.throwIfStopped guard in HostCalls.java were added, not only this
+	// number. Python and TypeScript need nothing in code: durable-delete-cron is
+	// declared with no return value, so a component guest cannot receive the
+	// refusal at all (the call simply has no effect).
+	const stopSitesOn20260904 = 19
 	if stopSites != stopSitesOn20260904 {
 		t.Errorf("the engine has %d `if s.stopBeforeNewWork() {` sites; this test was written "+
 			"against %d.\n\nIf a site was ADDED, the Java SDK has a call the host can now "+

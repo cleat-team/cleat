@@ -75,6 +75,10 @@ func TestTheRustSDKAgreesOnTheStopBit(t *testing.T) {
 // Eight, not nine: this SDK has no call_with_retry.
 var rustCallsTheHostCanRefuse = []sdkRefusableCall{
 	{"cleat_call", "DurableCall"},
+	// delete_cron joined in cleat#4083, with the stop_requested guard in
+	// host_calls.rs. The simple layout reads a stop as error code 0, which is a
+	// successful delete.
+	{"delete_cron", "DeleteCron"},
 	{"cleat_call_heartbeat", "DurableCallWithHeartbeat"},
 	{"child_workflow", "childWorkflowWithVersion"},
 	{"child_workflow_with_options", "childWorkflowWithVersion"},

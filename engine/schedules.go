@@ -222,6 +222,16 @@ func (s *execSession) DeleteCron(ctx context.Context, m api.Module, scheduleID s
 		s.exitReplay()
 	}
 
+	// A fresh delete_cron is work the workflow BODY is doing past the end of its
+	// recorded history. In a defer segment that is a terminated workflow's body
+	// running on, and it would delete a schedule the workflow never reached --
+	// measured against a real store in cleat#4083, where it removed the row.
+	// A defer BODY still gets through: inDeferDrain is how stopBeforeNewWork
+	// tells cleanup that deletes its own workflow's schedule from the body.
+	if s.stopBeforeNewWork() {
+		return callSuspendSentinel
+	}
+
 	var err error
 	if store := s.engine.workflowStore; store != nil {
 		// Deleting a schedule that is not there is the success a retry should

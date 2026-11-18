@@ -869,7 +869,10 @@ var adapterDefs = map[string]adapterDef{
 		Params: []adapterParam{
 			{"scheduleID", "string"},
 		},
-		ResultStmts: []string{
+		// withSuspendCheck since cleat#4083: the host refuses a delete made by a
+		// defer segment's body, and without the check a Go guest would read the
+		// sentinel as an ordinary error code and run on.
+		ResultStmts: withSuspendCheck(
 			"errCode := uint32(result)",
 			"if errCode != 0 {",
 			// No out buffer in this call's ABI, so there is no message to
@@ -878,7 +881,7 @@ var adapterDefs = map[string]adapterDef{
 			`	return fmt.Errorf("cleat_delete_cron failed (code %d)", errCode)`,
 			"}",
 			"return nil",
-		},
+		),
 	},
 	"ListCrons": {
 		FieldName:  "ListCrons",

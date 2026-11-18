@@ -1534,15 +1534,19 @@ impl HostCalls {
 
     /// Remove a previously registered cron schedule by its ID.
     ///
-    /// No stop-bit check, and that is deliberate rather than an omission:
-    /// `DeleteCron` does not call `stopBeforeNewWork` host-side, because
-    /// removing a schedule is not new work. Verified against
-    /// `engine/schedules.go` on 2026-09-07; `ScheduleCron` is the only one of
-    /// the three that can be refused.
+    /// The host refuses this in a defer segment's workflow body, past the end
+    /// of its recorded history, and marks the refusal with bit 31 (cleat#4083).
+    /// It was unguarded until then, and a terminated workflow's segment deleted
+    /// a schedule the workflow had not reached. The refusal reads as error code
+    /// 0 in this layout, which is a SUCCESSFUL delete, so the stop is tested
+    /// before the result is decoded. A defer body's own call is not refused.
     pub fn delete_cron(&self, schedule_id: &str) -> Result<(), String> {
         let result = unsafe {
             imports::cleat_delete_cron(schedule_id.as_ptr(), schedule_id.len() as u32)
         };
+        if stop_requested(result) {
+            return Err("cleat: host refused this call -- the workflow is running its defer phase".to_string());
+        }
         let (_extra, err_code) = memory::decode_simple_result(result);
         if err_code != 0 {
             return Err(format!(
@@ -1555,7 +1559,9 @@ impl HostCalls {
 
     /// List all registered cron schedules, as a JSON array.
     ///
-    /// See `delete_cron` for why there is no stop-bit check here either.
+    /// No stop-bit check, deliberately: this is a read that changes no schedule,
+    /// so the host never refuses it (cleat#4083 left it unguarded on purpose).
+    /// Unlike `delete_cron`, a refusal is not possible.
     pub fn list_crons(&self) -> Result<String, String> {
         let mut buf = vec![0u8; memory::OUT_BUF_SIZE as usize];
         let result = unsafe {
