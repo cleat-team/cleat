@@ -133,7 +133,7 @@ func TestEveryToolchainBuildingTestIsExcludedFromTier1AndRunByTheE2EJob(t *testi
 	for _, entry := range tests {
 		perLanguage[strings.SplitN(entry, "\t", 2)[1]]++
 	}
-	for _, lang := range []string{"java", "assemblyscript", "rust"} {
+	for _, lang := range []string{"java", "rust"} {
 		if perLanguage[lang] == 0 {
 			t.Fatalf("the source scan found no %s toolchain tests at all (found %v).\n\n"+
 				"There are several of each in engine/. Zero means the builder "+

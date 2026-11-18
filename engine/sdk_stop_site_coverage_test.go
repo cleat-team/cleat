@@ -65,20 +65,19 @@ var sdkStopSiteExemptions = map[string][]sdkCoverageExemption{
 			hostSite: "ScheduleCron",
 			why: "the Java SDK declares no scheduleCron method and no raw import for it, " +
 				"so a Java guest cannot register a cron trigger and there is no decoder " +
-				"to guard. Same absence as the Rust entry above; AssemblyScript DOES " +
-				"have one and is covered by its list rather than exempted here.",
+				"to guard. Same absence as the Rust entry above.",
 		},
 	},
 }
 
 // TestEverySDKCoversEveryHostStopSite closes the hole that
-// TestTheRequiredJavaGuardsCoverEveryHostStopSite left open for two of the
-// three core-module SDKs.
+// TestTheRequiredJavaGuardsCoverEveryHostStopSite left open for the other
+// core-module SDKs (Rust, and AssemblyScript until cleat#4023 removed it).
 //
 // That test pins the host-site COUNT and fires when it moves -- it is what
 // caught §3.111 on the PR that introduced the eighth site, with a message that
-// named the fix. But it checks one language. Rust and AssemblyScript have
-// per-method coverage of their OWN lists and no host-side pin at all, so a
+// named the fix. But it checks one language. Rust (and AssemblyScript, then) had
+// per-method coverage of its OWN list and no host-side pin at all, so a
 // ninth stop site passed both of them silently: their loops verify that every
 // entry they already list carries a guard, which is true and says nothing about
 // an entry that was never added.
@@ -109,9 +108,6 @@ func TestEverySDKCoversEveryHostStopSite(t *testing.T) {
 		{"rust", rustCallsTheHostCanRefuse,
 			"add the function to rustCallsTheHostCanRefuse and the stop_requested guard " +
 				"to crates/cleat-sdk/src/host_calls.rs"},
-		{"assemblyscript", asCallsTheHostCanRefuse,
-			"add the method to asCallsTheHostCanRefuse and the stopRequested guard to " +
-				"packages/cleat-as/assembly/host-calls.ts"},
 	} {
 		if len(sdk.calls) == 0 {
 			t.Errorf("%s: the refusable-call list is empty, so this SDK's arm checks nothing", sdk.name)

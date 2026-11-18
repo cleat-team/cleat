@@ -31,20 +31,6 @@ func TestReadImportSection_ParsesEveryImport(t *testing.T) {
 		wantHas   wasmImport
 	}{
 		{
-			// 3 until cleat#1660 regenerated this fixture. The binary was
-			// frozen on 2026-09-04, before #1240 added cleat_defer_phase, so
-			// this count was pinned to a shape the SDK had stopped producing
-			// and the test passed by measuring a stale artefact. The count
-			// itself is not the subject here -- what this test is for is that
-			// a LATER import is reached at all -- but leave it exact: a
-			// deliberately loose bound would have hidden the same drift.
-			name:      "assemblyscript",
-			path:      "../tests/plugin-harness/testdata/asworkflow/prebuilt/workflow.wasm",
-			wantCount: 4,
-			wantFirst: wasmImport{module: "env", field: "abort"},
-			wantHas:   wasmImport{module: "env", field: "plugin_call_streaming"},
-		},
-		{
 			name:      "java-teavm",
 			path:      "../tests/plugin-harness/testdata/javaworkflow/prebuilt/workflow.wasm",
 			wantCount: 7,
@@ -101,7 +87,6 @@ func TestDetectLanguage_IdentifiesNonGoGuests(t *testing.T) {
 	cases := []struct {
 		name, path, want string
 	}{
-		{"assemblyscript", "../tests/plugin-harness/testdata/asworkflow/prebuilt/workflow.wasm", "assemblyscript"},
 		{"java-teavm", "../tests/plugin-harness/testdata/javaworkflow/prebuilt/workflow.wasm", "java"},
 	}
 	for _, tc := range cases {
@@ -132,7 +117,10 @@ func TestDetectLanguage_IdentifiesNonGoGuests(t *testing.T) {
 // silently taken on every module with more than one import -- so the
 // optimisation it exists for had never applied.
 func TestNeededEnvImports_NoLongerAlwaysNil(t *testing.T) {
-	b, err := os.ReadFile("../tests/plugin-harness/testdata/asworkflow/prebuilt/workflow.wasm")
+	// The Java prebuilt: this read the AssemblyScript one until cleat#4023 removed that SDK. It still imports plugin_call
+	// from env, which is all the assertion below needs, and it has more than one import, which is the case the
+	// register-everything fallback was silently taken on.
+	b, err := os.ReadFile("../tests/plugin-harness/testdata/javaworkflow/prebuilt/workflow.wasm")
 	if err != nil {
 		t.Fatalf("fixture missing: %v", err)
 	}
@@ -141,7 +129,7 @@ func TestNeededEnvImports_NoLongerAlwaysNil(t *testing.T) {
 		t.Fatal("NeededEnvImports returned nil (the register-everything fallback), " +
 			"meaning the import section still failed to parse")
 	}
-	for _, want := range []string{"abort", "plugin_call", "plugin_call_streaming"} {
+	for _, want := range []string{"plugin_call"} {
 		if !needed[want] {
 			t.Errorf("env import %q missing from %v", want, needed)
 		}
