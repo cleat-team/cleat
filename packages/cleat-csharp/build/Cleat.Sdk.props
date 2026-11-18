@@ -1,0 +1,24 @@
+<Project>
+  <!--
+    The Cleat C# SDK, imported by a workflow project (cleat#4080). It is a SOURCE package: the SDK's types sit
+    on top of bindings that the componentize toolchain generates INSIDE the consuming project, so they cannot be
+    precompiled. This file adds the SDK's sources to the project and points the component toolchain at the one
+    WIT world the engine reads.
+
+    The project properties the toolchain needs (target framework, runtime identifier, trimming, the pinned
+    package references) are the build chain's, not this file's: see the fixture's .csproj, and PR 2 of cleat#4080
+    for the template that the csharp target of `cleat build` generates.
+  -->
+  <PropertyGroup>
+    <CleatSdkDir>$([MSBuild]::EnsureTrailingSlash('$([System.IO.Path]::GetFullPath('$(MSBuildThisFileDirectory)..'))'))</CleatSdkDir>
+    <!-- Inside a repo checkout the world is python-sdk/wit/cleat.wit, the file the engine's tests read. A packed
+         SDK carries a byte-identical copy at wit/cleat.wit (a test compares them). -->
+    <CleatWitFile Condition="'$(CleatWitFile)' == '' and Exists('$(CleatSdkDir)wit/cleat.wit')">$(CleatSdkDir)wit/cleat.wit</CleatWitFile>
+    <CleatWitFile Condition="'$(CleatWitFile)' == ''">$([System.IO.Path]::GetFullPath('$(CleatSdkDir)../../python-sdk/wit/cleat.wit'))</CleatWitFile>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="$(CleatSdkDir)src/**/*.cs" Visible="false" />
+    <Wit Include="$(CleatWitFile)" World="cleat-workflow" />
+  </ItemGroup>
+</Project>
