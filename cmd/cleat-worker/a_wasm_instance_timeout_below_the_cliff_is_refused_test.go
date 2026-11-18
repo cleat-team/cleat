@@ -63,29 +63,22 @@ func TestTheDefaultWasmInstanceTimeoutPassesTheFloor(t *testing.T) {
 // (CLAUDE.md, "A mechanism that exists and is wired to nothing reads as done"). So run main() itself, in a child process, with the
 // flag under the floor, and require that it exits non-zero with the refusal before anything else.
 //
-// The child is this test binary re-executed with CLEAT_TEST_WORKER_MAIN set, which makes TestWorkerMainHelperProcess hand control to
-// main() with os.Args replaced.
-func TestWorkerMainHelperProcess(t *testing.T) {
-	if os.Getenv("CLEAT_TEST_WORKER_MAIN") != "1" {
-		t.Skip("helper process for TestWorkerRefusesToStartBelowTheInstanceTimeoutFloor; not a test on its own")
-	}
-	os.Args = append([]string{"cleat-worker"}, strings.Fields(os.Getenv("CLEAT_TEST_WORKER_ARGS"))...)
-	main()
-	os.Exit(0)
-}
-
+// The child is this test binary launched with envBootRefusalSubprocess set: TestMain (a_stale_route_signature_refuses_to_boot_test.go)
+// hands control to main() before go test parses a flag or selects a test, so the child sees a plain worker argv. That harness is
+// reused rather than a second one added, which also means this file has no t.Skip and needs no skip-ledger line.
 func runWorkerMainHelper(t *testing.T, args string) (int, string) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestWorkerMainHelperProcess$", "-test.count=1")
-	cmd.Env = append(os.Environ(), "CLEAT_TEST_WORKER_MAIN=1", "CLEAT_TEST_WORKER_ARGS="+args, "CLEAT_DATABASE_URL=")
+	cmd := exec.CommandContext(ctx, os.Args[0], strings.Fields(args)...)
+	// No database is configured for the child: --db defaults to "" and CLEAT_DATABASE_URL is cleared.
+	cmd.Env = append(os.Environ(), envBootRefusalSubprocess+"=1", "CLEAT_DATABASE_URL=")
 	out, err := cmd.CombinedOutput()
 	code := 0
 	if err != nil {
 		var ee *exec.ExitError
 		if !errors.As(err, &ee) {
-			t.Fatalf("could not run the helper process: %v", err)
+			t.Fatalf("could not run the child process: %v", err)
 		}
 		code = ee.ExitCode()
 	}
