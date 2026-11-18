@@ -49,9 +49,10 @@ func TestTypeScriptScheduleCronRefusesBadArgumentsWithTheHostsOwnReason(t *testi
 	want := map[string]string{
 		"badExpr": "schedule_cron \"wf\":",
 		"badZone": "Mars/Olympus_Mons",
-		// An EMPTY name is refused by the ABI wrapper before the scheduler runs, so the host writes no reason; the plugin says so
-		// rather than hand the guest the NUL bytes the SDK reads from the unwritten buffer.
-		"noName":   "refused a parameter and gave no reason",
+		// An EMPTY name is refused by the ABI wrapper before the scheduler runs, so the host writes no reason. The SDK
+		// names the call and the code instead of returning the 64 KiB of NULs it used to read from the unwritten buffer
+		// (cleat#4035), and the plugin no longer stands in for it -- the workaround went when the cause did.
+		"noName":   "host error code 1",
 		"badInput": "unsupported value: NaN",
 	}
 	for k, w := range want {

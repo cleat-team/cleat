@@ -36,7 +36,10 @@ pub(crate) fn install(g: &Object<'_>) {
                         &input_json,
                     ) {
                         Ok(id) => json!({ "ok": id }),
-                        Err(e) => json!({ "err": host_reason(e, "schedule_cron") }),
+                        // The SDK reports the host's own text, or -- when the host refused before writing one -- a
+                        // message naming the call and the host error code. cleat#4035 fixed that at the source, so the
+                        // stand-in this used to call is gone: a workaround for a broken decoder is not a binding detail.
+                        Err(e) => json!({ "err": e }),
                     }
                 })
             },
@@ -69,18 +72,4 @@ pub(crate) fn install(g: &Object<'_>) {
     .unwrap();
 }
 
-/// The host's reason, or an honest stand-in. When the host refuses a parameter before it reaches the scheduler (an EMPTY workflow
-/// name is read by `readServiceName`, which rejects it) it returns a bad-parameter code and writes no message, and
-/// `HostCalls::schedule_cron` then reads a buffer nobody wrote: the guest was handed a string of NUL bytes as its error. Measured,
-/// not assumed (`TestTypeScriptScheduleCronRefusesBadArgumentsWithTheHostsOwnReason`: `noName` was rejected with `"\x00\x00..."`).
-/// Trimmed, and replaced by a statement of what is known when nothing readable is left.
-fn host_reason(e: String, call: &str) -> String {
-    let trimmed = e.trim_matches('\0').trim();
-    if trimmed.is_empty() {
-        format!(
-            "{call}: the host refused a parameter and gave no reason (an empty or over-long workflow name, cron expression or zone)"
-        )
-    } else {
-        trimmed.to_string()
-    }
-}
+

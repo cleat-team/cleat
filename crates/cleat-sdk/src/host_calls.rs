@@ -482,7 +482,7 @@ impl HostCalls {
 
         let (response_len, _call_error_code, err_code) = memory::decode_cleat_call_result(result);
         if err_code != 0 {
-            let err_msg = memory::read_result(&resp_buf, response_len);
+            let err_msg = memory::host_message_or(&resp_buf, response_len, format!("cleat_call(service=\"{}\", operation=\"{}\") failed: host error code {}.", service, operation, err_code));
             return (String::new(), Some(err_msg));
         }
         let resp = memory::read_result(&resp_buf, response_len);
@@ -1032,7 +1032,7 @@ impl HostCalls {
 
         let (response_len, _call_error_code, err_code) = memory::decode_cleat_call_result(result);
         if err_code != 0 {
-            let err_msg = memory::read_result(&resp_buf, response_len);
+            let err_msg = memory::host_message_or(&resp_buf, response_len, format!("plugin_call(plugin=\"{}\", function=\"{}\") failed: host error code {}.", plugin_name, function_name, err_code));
             return (String::new(), Some(err_msg));
         }
         let resp = memory::read_result(&resp_buf, response_len);
@@ -1518,14 +1518,16 @@ impl HostCalls {
             // cleat_fetch, plugin_call and plugin_call_streaming. Following the
             // majority would have been the easy call and the wrong one; the
             // remaining 15 are tracked separately.
-            let msg = memory::read_result(&buf, result_len);
-            if msg.is_empty() {
-                return Err(format!(
-                    "schedule_cron(workflow_name=\"{}\", cron_expr=\"{}\") failed: host error code {}.",
-                    workflow_name, cron_expr, err_code
-                ));
-            }
-            return Err(msg);
+            // host_message_or, NOT read_result plus an is_empty() check: on a
+            // bad-parameter refusal the host writes nothing, yet the sentinel
+            // still decodes to a length of 4294967295, so read_result clamps it
+            // to the (zero-filled) buffer and returns 64 KiB of NULs -- which is
+            // non-empty, so the fallback below it was unreachable on exactly the
+            // path it existed for. cleat#4035.
+            return Err(memory::host_message_or(&buf, result_len, format!(
+                "schedule_cron(workflow_name=\"{}\", cron_expr=\"{}\") failed: host error code {}.",
+                workflow_name, cron_expr, err_code
+            )));
         }
         Ok(memory::read_result(&buf, result_len))
     }
@@ -1561,12 +1563,14 @@ impl HostCalls {
         };
         let (result_len, err_code) = memory::decode_simple_result(result);
         if err_code != 0 {
-            // The host's message, not the code -- see schedule_cron above.
-            let msg = memory::read_result(&buf, result_len);
-            if msg.is_empty() {
-                return Err(format!("list_crons() failed: host error code {}.", err_code));
-            }
-            return Err(msg);
+            // The host's message, not the code -- and host_message_or rather
+            // than read_result, for the reason spelled out in schedule_cron:
+            // an unwritten buffer decodes to a bogus length and reads back as
+            // 64 KiB of NULs. cleat#4035.
+            return Err(memory::host_message_or(&buf, result_len, format!(
+                "list_crons() failed: host error code {}.",
+                err_code
+            )));
         }
         Ok(memory::read_result(&buf, result_len))
     }
@@ -1821,7 +1825,7 @@ impl HostCalls {
             if call_error_code == CALL_ERROR_RETRY_POLICY_TOO_LONG {
                 return Err(CallError::RetryPolicyTooLong);
             }
-            let err_msg = memory::read_result(&resp_buf, response_len);
+            let err_msg = memory::host_message_or(&resp_buf, response_len, format!("cleat_call_with_retry(service=\"{}\", operation=\"{}\") failed: host error code {}.", service, operation, err_code));
             return Err(CallError::Failed(err_msg));
         }
         let resp = memory::read_result(&resp_buf, response_len);
@@ -1926,7 +1930,7 @@ impl HostCalls {
         // six wrappers that use the durable decoder call hosts that really do pack durably; this one did not.
         let (response_len, err_code) = memory::decode_simple_result(result);
         if err_code != 0 {
-            let err_msg = memory::read_result(&resp_buf, response_len);
+            let err_msg = memory::host_message_or(&resp_buf, response_len, format!("cleat_fetch(method=\"{}\", url=\"{}\") failed: host error code {}.", method, url, err_code));
             return Err(err_msg);
         }
         let resp = memory::read_result(&resp_buf, response_len);
@@ -2035,7 +2039,7 @@ impl HostCalls {
 
         let (response_len, _call_error_code, err_code) = memory::decode_cleat_call_result(result);
         if err_code != 0 {
-            let err_msg = memory::read_result(&resp_buf, response_len);
+            let err_msg = memory::host_message_or(&resp_buf, response_len, format!("cleat_call_heartbeat(service=\"{}\", operation=\"{}\") failed: host error code {}.", service, operation, err_code));
             return (String::new(), Some(err_msg));
         }
         let resp = memory::read_result(&resp_buf, response_len);
@@ -2113,7 +2117,7 @@ impl HostCalls {
 
         let (response_len, _call_error_code, err_code) = memory::decode_cleat_call_result(result);
         if err_code != 0 {
-            let err_msg = memory::read_result(&resp_buf, response_len);
+            let err_msg = memory::host_message_or(&resp_buf, response_len, format!("plugin_call_streaming(plugin=\"{}\", function=\"{}\") failed: host error code {}.", plugin_name, function_name, err_code));
             return (String::new(), Some(err_msg));
         }
         let resp = memory::read_result(&resp_buf, response_len);
@@ -2475,5 +2479,134 @@ mod quorum_conformance {
                 assert_eq!(signal_names, caller_set, "{}: the caller's set was edited", name);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod refused_parameter_tests {
+    //! cleat#4035. Host-side stubs for the externs let the REAL wrappers run in a
+    //! unit test, which is the only way this regression can be asserted: the bug is
+    //! in how each wrapper decodes an error, so a test over a shared helper would
+    //! stay green while any call site reverted.
+    //!
+    //! Every stub writes NOTHING into the caller's buffer and returns errBadParam
+    //! (0xFFFFFFFF_00000001) -- exactly what engine/imports.go returns when its ABI
+    //! wrapper refuses a parameter before the handler runs.
+    //!
+    //! `list_crons` takes no parameter, so it cannot reach that refusal by bad input;
+    //! it is in the table because it decoded the payload the same way and the host
+    //! can still refuse a call it will not serve. The other seven are reached by any
+    //! parameter the wrapper refuses.
+
+    use super::*;
+
+    const ERR_BAD_PARAM: i64 = 0xFFFFFFFF_00000001u64 as i64;
+
+    #[no_mangle]
+    pub extern "C" fn cleat_schedule_cron(
+        _a: *const u8, _b: u32, _c: *const u8, _d: u32, _e: *const u8, _f: u32,
+        _g: *const u8, _h: u32, _out: *mut u8, _out_max: u32,
+    ) -> i64 { ERR_BAD_PARAM }
+
+    #[no_mangle]
+    pub extern "C" fn cleat_list_crons(_out: *mut u8, _out_max: u32) -> i64 { ERR_BAD_PARAM }
+
+    #[no_mangle]
+    pub extern "C" fn cleat_call(
+        _a: *const u8, _b: u32, _c: *const u8, _d: u32, _e: *const u8, _f: u32,
+        _out: *mut u8, _out_max: u32,
+    ) -> i64 { ERR_BAD_PARAM }
+
+    #[no_mangle]
+    pub extern "C" fn cleat_call_retry(
+        _a: *const u8, _b: u32, _c: *const u8, _d: u32, _e: *const u8, _f: u32,
+        _g: i64, _h: i64, _i: i64, _j: i64, _k: *const u8, _l: u32,
+        _out: *mut u8, _out_max: u32,
+    ) -> i64 { ERR_BAD_PARAM }
+
+    #[no_mangle]
+    pub extern "C" fn cleat_call_heartbeat(
+        _a: *const u8, _b: u32, _c: *const u8, _d: u32, _e: *const u8, _f: u32,
+        _g: i64, _out: *mut u8, _out_max: u32,
+    ) -> i64 { ERR_BAD_PARAM }
+
+    #[no_mangle]
+    pub extern "C" fn plugin_call(
+        _a: *const u8, _b: u32, _c: *const u8, _d: u32, _e: *const u8, _f: u32,
+        _out: *mut u8, _out_max: u32,
+    ) -> i64 { ERR_BAD_PARAM }
+
+    #[no_mangle]
+    pub extern "C" fn plugin_call_streaming(
+        _a: *const u8, _b: u32, _c: *const u8, _d: u32, _e: *const u8, _f: u32,
+        _out: *mut u8, _out_max: u32,
+    ) -> i64 { ERR_BAD_PARAM }
+
+    #[no_mangle]
+    pub extern "C" fn cleat_fetch(
+        _a: *const u8, _b: u32, _c: *const u8, _d: u32, _e: *const u8, _f: u32,
+        _g: *const u8, _h: u32, _out: *mut u8, _out_max: u32,
+    ) -> i64 { ERR_BAD_PARAM }
+
+    /// Every call site that decoded the error payload by hand before cleat#4035.
+    /// Each entry returns the wrapper's error text.
+    #[test]
+    fn a_refused_parameter_never_returns_the_unwritten_buffer() {
+        type Case = (&'static str, Box<dyn Fn() -> String>);
+        let cases: Vec<Case> = vec![
+            ("schedule_cron", Box::new(|| {
+                HostCalls.schedule_cron("", "0 0 1 1 *", "", "{}").expect_err("refused")
+            })),
+            ("list_crons", Box::new(|| HostCalls.list_crons().expect_err("refused"))),
+            ("cleat_call", Box::new(|| {
+                HostCalls.cleat_call("", "", "{}").1.expect("refused")
+            })),
+            ("cleat_call_with_retry", Box::new(|| {
+                let r: Result<serde_json::Value, _> = HostCalls.cleat_call_with_host_retry(
+                    "", "", &serde_json::json!({}), &RetryPolicy{max_attempts:1, initial_interval_ms:1, backoff_multiplier:1.0, maximum_interval_ms:1, non_retryable_errors: vec![]});
+                // The MESSAGE, not the Debug form: `{:?}` escapes a NUL as `\0`, which
+                // would slip past the NUL count this table is built on.
+                match r { Err(CallError::Failed(m)) => m, _ => panic!("refused") }
+            })),
+            ("cleat_call_heartbeat", Box::new(|| {
+                HostCalls.cleat_call_heartbeat("", "", "{}", 1000).1.expect("refused")
+            })),
+            ("plugin_call", Box::new(|| {
+                HostCalls.plugin_call("", "", "{}").1.expect("refused")
+            })),
+            ("plugin_call_streaming", Box::new(|| {
+                HostCalls.plugin_call_streaming("", "", "{}").1.expect("refused")
+            })),
+            ("cleat_fetch", Box::new(|| {
+                HostCalls.cleat_fetch("GET", "", "", "").expect_err("refused")
+            })),
+        ];
+
+        // Collect every case rather than stopping at the first: a mutation that reverts
+        // one call site must name THAT call, and a table that panics on the first failure
+        // cannot tell a reader which of the eight came back.
+        let mut failures = Vec::new();
+        for (name, call) in cases {
+            let err = call();
+            let nuls = err.chars().filter(|c| *c == '\0').count();
+            if nuls != 0 {
+                failures.push(format!(
+                    "{name}: the error is {} bytes and {nuls} of them are NUL. The wrapper read an \
+                     unwritten buffer because errBadParam's length field decodes to 4294967295 and \
+                     read_result clamps it to the buffer (cleat#4035).",
+                    err.len()
+                ));
+            } else if !err.contains("host error code 1") {
+                failures.push(format!(
+                    "{name}: with no message from the host the error must name the code, got {err:?}"
+                ));
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "{} of 8 call sites still read the unwritten buffer:\n  {}",
+            failures.len(),
+            failures.join("\n  ")
+        );
     }
 }
