@@ -302,11 +302,11 @@ commit until cleat#3898's fix removed the last silent divergence from Node, whic
 language can be built, tested and run, and [the getting-started page](docs/tutorials/typescript-quick-start.md) is where to
 start. What it cannot do or has not been shown to do, each with its issue:
 
-- **Updates are unsupported** (cleat#3827): the update host calls are not bound, so no TypeScript workflow can issue or serve one.
-- **A killed workflow's `ctx.defer` cleanup does not run** (cleat#3922); a *cancelled* workflow's does.
+- **Every host call is bound or deliberately unbound; none is pending** (cleat#3827; checked 2026-11-18). Four are deliberately unbound, each with a `permanent:` reason in `packages/cleat-ts/host-calls.json`: `cleat_poll_work` and `cleat_complete` (the worker's own handshake), `cleat_register_query_handler` (not bindable from a guest) and `cleat_interrupt_requested` (polled by the plugin itself, never by a workflow). `TestEveryHostCallIsBoundOrListed` reads that file and `host-calls.d/*.json` and fails when a call is in neither list, so a host call added later without a binding turns it red. Re-derive it, reading both files: `python3 -c "import json,glob;u={n:str(r) for f in ['packages/cleat-ts/host-calls.json']+glob.glob('packages/cleat-ts/host-calls.d/*.json') for n,r in json.load(open(f)).get('unbound',{}).items()};print(len(u),'unbound; pending:',[n for n,r in u.items() if r.startswith('pending:')])"` should print `4 unbound; pending: []`.
+- **A killed workflow's `ctx.defer` cleanup runs, except for a guest whose work never returns to the bytecode loop** (cleat#3922, fixed in cleat#4053). The host asks the guest to stop through an interrupt poll before its hard limit, so the drain runs; a single native operation that never yields (a `"x".repeat(1_000_000)` loop reached no poll at all) still ends on the hard trap and its defers are lost. Measured and stated in `packages/cleat-ts/DIVERGENCES.md` D1. A *cancelled* workflow's cleanup runs on its own path.
 - **`CheckJoiners` is not implemented** (cleat#4020): a ZWNJ or ZWJ in a host label is refused whatever its context, so a
   Devanagari, Malayalam or Arabic host that Node accepts is refused here. Loud, not silent.
-- **No timers, no `crypto`, no `TextEncoder`/`TextDecoder`** (cleat#3829); local time is UTC.
+- **No timers and no `crypto`; `TextEncoder`/`TextDecoder` are UTF-8 only** (cleat#3829, `DIVERGENCES.md` rows 3, 7 and 8): a `TextDecoder` for another encoding throws `RangeError`, and the stream variants are undefined. Local time is UTC.
 - **Dialects:** the database-backed worker tests run on PostgreSQL, MySQL and SQL Server in tier-2 CI jobs (they must run, they
   gate no merge), and only those tests run on MySQL and SQL Server. **Deploying a *plugin* is PostgreSQL-only** (cleat#4005);
   `cleatctl deploy workflow` works on all three (cleat#4004).

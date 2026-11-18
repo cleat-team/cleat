@@ -121,14 +121,14 @@ export interface RunOptions {
    *   updates    group A   in-memory UpdateStore. Fixture: [{ name, payload? }], pending from the start, delivered oldest first.
    *                         Reported in `extras.updates`: { completed: [{ name, requestId, result?, error? }], pending, settled }
    *   signals    group B   the existing -signals queue; `extras.signalsSent` is what the run sent (`signalWorkflow`)
-   *   children   group C   child handles, waits
-   *   detached   group D
+   *   children   group C   no store of its own: the `children` field above scripts the child store these calls read
+   *   detached   group D   no store of its own: a detached start goes through the same child store a child does (engine/children.go), and nothing waits for the run it mints
    *   locks      group E   ConcurrencyKeyStore; WITHOUT a locks script every acquire answers false (no store at all)
-   *   schedules  group F   cron
-   *   continuation group G   (NOT `continue`: it is a Rust keyword, so `mod continue;` does not compile)
-   *   calls      group H   retry, heartbeat, send, schedule-invoke
-   *   plugins    group I
-   *   utilities  group J   fetch, json_parse
+   *   schedules  group F   NO store: the cron calls need a workflow store the harness does not have, so they answer "no workflow store"
+   *   continuation group G   NO store: a continuation ends the segment, reported as a suspension with reason continue_as_new (NOT `continue`: a Rust keyword)
+   *   calls      group H   no store of its own: the durable calls are scripted through `answers` above, and an unscripted one is refused
+   *   plugins    group I   scripted PluginRegistry. Fixture: { "plugin/function": { result | error | chunks } }, exactly one of the three; `extras.pluginCalls` is what reached it
+   *   utilities  group J   scripted Fetcher. Fixture: { "METHOD url": { status | error, headers?, body? } }; `extras.fetchRequests` is what it was asked. WITHOUT a fetch script every fetch is refused
    */
   scripts?: Record<string, unknown>;
 }
