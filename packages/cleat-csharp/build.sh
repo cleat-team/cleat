@@ -7,6 +7,10 @@
 #
 #   mount-root   a directory that holds the project AND whatever it references by relative path (the WIT file, the SDK sources).
 #                Mounted read-write: the project's obj/ and bin/ are written there, and chowned back to the caller afterwards.
+#                NOTE THE REACH OF THAT: the container runs as root with the WHOLE mount root writable, and the mount root is the
+#                enclosing git checkout, not just the project. A project's build (MSBuild targets, source generators) can therefore
+#                modify any file in the checkout. This build verifies the TOOLCHAIN (image, wasi-sdk, packages); it does not sandbox
+#                the PROJECT, so build only a project you would be willing to run.
 #   project-dir  the project's directory, relative to mount-root (a .csproj must be the only one in it).
 #   out-dir      where to write <name>.wasm and entry-points.txt. Created if absent.
 #
@@ -31,6 +35,9 @@ set -uo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=/dev/null
 . "$here/toolchain.env"
+# Sourced, so shellcheck cannot see these assigned (SC2153 on CLEAT_CS_PLATFORMS, which resembles CLEAT_CS_PLATFORM below). Naming each
+# one the lock must define makes a toolchain.env that lacks it an UNMEASURED refusal that says which, not an unbound-variable abort.
+: "${CLEAT_CS_PLATFORMS:?UNMEASURED: toolchain.env does not define CLEAT_CS_PLATFORMS}"
 
 if [ "$#" -ne 3 ]; then
   echo "usage: build.sh <mount-root> <project-dir> <out-dir>" >&2
@@ -75,7 +82,7 @@ fail() { echo "$2" >&2; exit "$1"; }
 # directory there WITHOUT our marker is not trusted: it is the package'"'"'s own unverified download (or another lock'"'"'s), so it is replaced.
 sdk="/root/.wasi-sdk/wasi-sdk-${CLEAT_CS_WASISDK_VERSION}"
 if [ ! -f "$sdk/.cleat-verified-$WASISDK_SHA" ]; then
-  rm -rf /root/.wasi-sdk/* /tmp/wasi.tgz
+  find /root/.wasi-sdk -mindepth 1 -maxdepth 1 -exec rm -rf {} +; rm -f /tmp/wasi.tgz
   curl -fsSL -o /tmp/wasi.tgz "$WASISDK_URL" || fail 2 "UNMEASURED: could not download wasi-sdk from $WASISDK_URL"
   echo "$WASISDK_SHA  /tmp/wasi.tgz" | sha256sum -c - >/dev/null 2>&1 \
     || fail 2 "UNMEASURED: the wasi-sdk archive does not match its pinned sha256 ($WASISDK_SHA); refusing to use it"
@@ -124,8 +131,12 @@ dotnet build -c Release --no-restore >/tmp/build.log 2>&1
 rc=$?
 # The componentize package downloads its own (x86_64, unverified) wasi-sdk when its path is absent. We put the verified tree there, so
 # this must not have happened; if it did, whatever it produced was built with a compiler nothing here has checked.
-if grep -q "Extracting .*wasi-sdk" /tmp/build.log; then
-  fail 2 "UNMEASURED: the build downloaded its own wasi-sdk instead of using the verified one at $sdk; nothing was written."
+# Judged by the ARTIFACT, not by the log: the package'"'"'s download lands in ~/.wasi-sdk, so the volume must still hold exactly our
+# verified directory and nothing else. (An earlier version grepped the log for the word "Extracting", which a changed message or a
+# quieter verbosity would have turned into a silent pass.)
+extra=$(ls -A /root/.wasi-sdk | grep -v -x "wasi-sdk-${CLEAT_CS_WASISDK_VERSION}" || true)
+if [ -n "$extra" ] || [ ! -f "$sdk/.cleat-verified-$WASISDK_SHA" ]; then
+  fail 2 "UNMEASURED: the build downloaded its own wasi-sdk instead of using the verified one at $sdk (the volume also holds: ${extra:-nothing else; our marker is gone}); nothing was written."
 fi
 if [ "$rc" -ne 0 ]; then
   grep -E "error|Error" /tmp/build.log | head -40 >&2
