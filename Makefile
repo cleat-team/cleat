@@ -50,7 +50,7 @@ lint-sh:
 # ---- test ------------------------------------------------------------------
 
 .PHONY: test
-test: test-go test-python test-java test-as test-plugin-harness
+test: test-go test-python test-java test-plugin-harness
 
 .PHONY: test-go
 test-go:
@@ -76,10 +76,6 @@ test-python:
 .PHONY: test-java
 test-java:
 	cd crates/cleat-java && if [ -x gradlew ]; then ./gradlew test; else gradle test; fi
-
-.PHONY: test-as
-test-as:
-	cd packages/cleat-as && npm test
 
 # ./engine/... , not ./internal/host/... : commit 3eeb74e moved internal/host/
 # to engine/, so this target has been running `go test` against a path that
@@ -361,7 +357,7 @@ bench-save:
 # ---- build -----------------------------------------------------------------
 
 .PHONY: build
-build: build-go build-python build-java build-as
+build: build-go build-python build-java
 
 .PHONY: build-go
 build-go:
@@ -374,10 +370,6 @@ build-python:
 .PHONY: build-java
 build-java:
 	cd crates/cleat-java && if [ -x gradlew ]; then ./gradlew build; else gradle build; fi
-
-.PHONY: build-as
-build-as:
-	cd packages/cleat-as && npm ci && npm run build
 
 # ---- cluster ---------------------------------------------------------------
 
@@ -446,7 +438,7 @@ GO_MIN_VERSION := 1.27
 # fails the moment go.mod's toolchain reaches this version, which is the reminder.
 GO_CGO_BROKEN_FROM := 1.27.4
 .PHONY: tools
-tools: tools-go tools-rust tools-python tools-java tools-as
+tools: tools-go tools-rust tools-python tools-java
 	@echo "=== All toolchains checked ==="
 
 .PHONY: tools-go
@@ -521,19 +513,6 @@ tools-java:
 		echo "[MISSING] JDK 11+ — install from https://adoptium.net"; \
 	fi
 
-.PHONY: tools-as
-tools-as:
-	@if command -v npm >/dev/null 2>&1; then \
-		echo "[OK] npm $$(npm --version)"; \
-	else \
-		echo "[MISSING] Node.js/npm — install from https://nodejs.org"; \
-	fi
-	@if command -v npx >/dev/null 2>&1 && npx --yes asc --version >/dev/null 2>&1; then \
-		echo "[OK] AssemblyScript compiler (asc)"; \
-	else \
-		echo "[MISSING] asc — install with: npm install -g assemblyscript"; \
-	fi
-
 .PHONY: tools-check
 tools-check:
 	@echo "=== WASM Compilation Toolchains ==="
@@ -543,8 +522,6 @@ tools-check:
 	@$(MAKE) --no-print-directory tools-python
 	@echo ""
 	@$(MAKE) --no-print-directory tools-java
-	@echo ""
-	@$(MAKE) --no-print-directory tools-as
 	@echo ""
 	@echo "=== Done ==="
 

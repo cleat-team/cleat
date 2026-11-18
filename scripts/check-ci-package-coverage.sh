@@ -23,11 +23,9 @@ CI_FILE="${1:-$REPO_ROOT/.github/workflows/ci.yml}"
 # Directories that legitimately need no entry in the test-go matrix.
 #   examples, testdata           — fixtures and demos, not product code
 #   benchmarks, tests            — driven by their own dedicated CI jobs
-#   packages                     — AssemblyScript SDK. NOTE: its Go harness
-#     (packages/cleat-as/test_runner/test_runner.go) is NOT run by any CI job;
-#     the `assemblyscript` job runs `npm test`, which invokes as-pect only.
-#     Exempt here because this guard checks matrix drift, not overall coverage.
-#     Wiring that harness into CI is tracked in IMPROVEMENT-PLAN.md Phase 2.
+#   packages                     — the TypeScript SDK (packages/cleat-ts), which holds
+#     no Go. This entry named the AssemblyScript SDK's Go harness until cleat#4023
+#     removed it; it stays exempt so a Go file added there is a deliberate choice.
 #   scripts                      — scripts/finddeadexports.go is a
 #     //go:build ignore helper invoked by scripts/check-dead-exports.sh via
 #     `go run`, not a package `go build ./...` or `go test ./...` ever

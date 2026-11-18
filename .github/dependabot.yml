@@ -66,12 +66,10 @@ updates:
           - "minor"
           - "patch"
 
-  # The admin dashboard, the AssemblyScript SDK and the TypeScript guest's build chain (cleat#3825).
+  # The admin dashboard and the TypeScript guest's build chain (cleat#3825).
   - package-ecosystem: "npm"
     directories:
       - "/web"
-      - "/packages/cleat-as"
-      - "/packages/cleat-as/transform"
       - "/packages/cleat-ts"
     schedule:
       interval: "weekly"
