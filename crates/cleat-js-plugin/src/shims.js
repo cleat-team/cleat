@@ -955,5 +955,232 @@
     }
   }
 
+  // TextEncoder / TextDecoder (cleat#3829). Javy 9.1.0 defines neither (measured: `typeof TextEncoder` is "undefined" in the
+  // guest), and the absence was LOUD -- a library that calls one failed with a ReferenceError -- so this shim turns "missing"
+  // into "UTF-8 only, and everything else throws". UTF-8 is the whole of what is implemented; every other WHATWG encoding is
+  // refused on the CONSTRUCTOR, before any data is touched, so nothing can silently decode as if it were UTF-8.
+  //
+  // The label handling distinguishes two refusals that Node merges: a label that is not in WHATWG's table at all is a typo
+  // (RangeError, worded like Node's), while a label that IS valid but names an encoding this guest does not implement says so
+  // and names cleat#3829. A user can then tell "not supported here" from "you spelled it wrong".
+  if (on("textcodec")) {
+    const UTF8_LABELS = new Set(["unicode-1-1-utf-8", "unicode11utf8", "unicode20utf8", "utf-8", "utf8", "x-unicode20utf8"]);
+    // WHATWG labels for encodings this guest does not implement. Not the whole table: the common families, plus utf-16, which is
+    // the one a Node user is most likely to reach for. A valid label missing from this list falls into the typo branch, which is
+    // a worse message and not a wrong answer -- the refusal is the same.
+    const OTHER_LABELS = new Set([
+      // utf-16le / utf-16be
+      "utf-16", "utf-16le", "ucs-2", "unicode", "csunicode", "iso-10646-ucs-2", "unicodefeff",
+      "utf-16be", "unicodefffe",
+      // windows-1252 and the ISO-8859-1 aliases
+      "ansi_x3.4-1968", "ascii", "cp1252", "cp819", "csisolatin1", "ibm819", "iso-8859-1", "iso-ir-100", "iso8859-1",
+      "iso88591", "iso_8859-1", "iso_8859-1:1987", "l1", "latin1", "us-ascii", "windows-1252", "x-cp1252",
+      // the rest of windows-125x and the ISO-8859 family
+      "cp1250", "cp1251", "cp1253", "cp1254", "cp1255", "cp1256", "cp1257", "cp1258", "iso-8859-2", "iso-8859-3",
+      "iso-8859-4", "iso-8859-5", "iso-8859-6", "iso-8859-7", "iso-8859-8", "iso-8859-8-i", "iso-8859-10",
+      "iso-8859-13", "iso-8859-14", "iso-8859-15", "iso-8859-16", "windows-1250", "windows-1251", "windows-1253",
+      "windows-1254", "windows-1255", "windows-1256", "windows-1257", "windows-1258", "x-mac-cyrillic", "macintosh",
+      "koi8-r", "koi8-u", "ibm866", "x-user-defined",
+      // CJK
+      "gbk", "gb18030", "chinese", "csgb2312", "csiso58gb231280", "gb_2312", "gb_2312-80", "iso-ir-58", "x-gbk",
+      "big5", "big5-hkscs", "cn-big5", "csbig5", "x-x-big5", "euc-jp", "cseucpkdfmtjapanese", "x-euc-jp", "iso-2022-jp",
+      "csiso2022jp", "shift_jis", "csshiftjis", "ms932", "ms_kanji", "shift-jis", "sjis", "windows-31j", "x-sjis",
+      "euc-kr", "cseuckr", "csksc56011987", "iso-ir-149", "korean", "ks_c_5601-1987", "ks_c_5601-1989", "ksc5601",
+      "ksc_5601", "windows-949", "replacement", "csiso2022kr", "hz-gb-2312", "iso-2022-cn", "iso-2022-cn-ext",
+      "iso-2022-kr",
+    ]);
+
+    // A WHATWG label is trimmed of ASCII whitespace and ASCII-lowercased; nothing else is normalised.
+    const normaliseLabel = (label) => String(label).replace(/^[\t\n\f\r ]+|[\t\n\f\r ]+$/g, "")
+      .replace(/[A-Z]/g, (c) => c.toLowerCase());
+
+    // USVString conversion: a lone surrogate becomes U+FFFD. Done once, up front, because every path here needs it.
+    const toUSVString = (value) => {
+      const s = String(value);
+      let out = "";
+      for (let i = 0; i < s.length; i++) {
+        const c = s.charCodeAt(i);
+        if (c >= 0xd800 && c <= 0xdbff) {
+          const d = i + 1 < s.length ? s.charCodeAt(i + 1) : 0;
+          if (d >= 0xdc00 && d <= 0xdfff) { out += s[i] + s[i + 1]; i++; continue; }
+          out += "\ufffd"; continue;
+        }
+        if (c >= 0xdc00 && c <= 0xdfff) { out += "\ufffd"; continue; }
+        out += s[i];
+      }
+      return out;
+    };
+
+    // The number of bytes a code point takes in UTF-8.
+    const width = (cp) => (cp < 0x80 ? 1 : cp < 0x800 ? 2 : cp < 0x10000 ? 3 : 4);
+
+    const utf8Encode = (s) => {
+      let n = 0;
+      for (const ch of s) n += width(ch.codePointAt(0));
+      const out = new Uint8Array(n);
+      let i = 0;
+      for (const ch of s) {
+        const cp = ch.codePointAt(0);
+        if (cp < 0x80) {
+          out[i++] = cp;
+        } else if (cp < 0x800) {
+          out[i++] = 0xc0 | (cp >> 6);
+          out[i++] = 0x80 | (cp & 0x3f);
+        } else if (cp < 0x10000) {
+          out[i++] = 0xe0 | (cp >> 12);
+          out[i++] = 0x80 | ((cp >> 6) & 0x3f);
+          out[i++] = 0x80 | (cp & 0x3f);
+        } else {
+          out[i++] = 0xf0 | (cp >> 18);
+          out[i++] = 0x80 | ((cp >> 12) & 0x3f);
+          out[i++] = 0x80 | ((cp >> 6) & 0x3f);
+          out[i++] = 0x80 | (cp & 0x3f);
+        }
+      }
+      return out;
+    };
+
+    class TextEncoder {
+      get encoding() { return "utf-8"; }
+      encode(input = "") {
+        return utf8Encode(toUSVString(input));
+      }
+      encodeInto(source, destination) {
+        if (!(destination instanceof Uint8Array)) {
+          throw new TypeError("TextEncoder.encodeInto: destination must be a Uint8Array");
+        }
+        const s = toUSVString(source);
+        let read = 0, written = 0;
+        for (let i = 0; i < s.length;) {
+          const cp = s.codePointAt(i);
+          const units = cp > 0xffff ? 2 : 1;
+          const bytes = utf8Encode(String.fromCodePoint(cp));
+          if (written + bytes.length > destination.length) break;
+          destination.set(bytes, written);
+          written += bytes.length;
+          read += units;
+          i += units;
+        }
+        return { read, written };
+      }
+    }
+
+    // The WHATWG UTF-8 decoder, including its error handling: an invalid byte yields ONE U+FFFD per maximal subpart, and the
+    // byte that broke a sequence is re-examined in the start state rather than skipped. Streaming keeps a genuinely incomplete
+    // trailing sequence for the next call; a non-streaming call treats one as invalid.
+    class TextDecoder {
+      #fatal; #ignoreBOM; #pending; #bomDecided;
+      constructor(label = "utf-8", options = undefined) {
+        const name = normaliseLabel(label);
+        if (!UTF8_LABELS.has(name)) {
+          if (OTHER_LABELS.has(name)) {
+            throw new RangeError("cleat: the encoding label '" + name + "' names an encoding this guest does not implement " +
+              "(cleat#3829). Only UTF-8 is available.");
+          }
+          throw new RangeError("The encoding label provided ('" + name + "') is invalid.");
+        }
+        const o = options == null ? {} : Object(options);
+        this.#fatal = !!o.fatal;
+        this.#ignoreBOM = !!o.ignoreBOM;
+        this.#pending = new Uint8Array(0);
+        this.#bomDecided = false;
+      }
+      get encoding() { return "utf-8"; }
+      get fatal() { return this.#fatal; }
+      get ignoreBOM() { return this.#ignoreBOM; }
+      decode(input = undefined, options = undefined) {
+        const stream = options == null ? false : !!options.stream;
+        let bytes;
+        if (input === undefined || input === null) {
+          bytes = new Uint8Array(0);
+        } else if (input instanceof ArrayBuffer) {
+          bytes = new Uint8Array(input);
+        } else if (ArrayBuffer.isView(input)) {
+          bytes = new Uint8Array(input.buffer, input.byteOffset, input.byteLength);
+        } else {
+          throw new TypeError("TextDecoder.decode: input must be an ArrayBuffer or an ArrayBufferView");
+        }
+        if (this.#pending.length > 0) {
+          const joined = new Uint8Array(this.#pending.length + bytes.length);
+          joined.set(this.#pending, 0);
+          joined.set(bytes, this.#pending.length);
+          bytes = joined;
+        }
+        let i = 0;
+        const out = [];
+        let need = 0, cp = 0, seen = 0, lower = 0x80, upper = 0xbf;
+        // The BOM is decided on the FIRST CODE POINT, not on the first three bytes, and that is the whole subtlety: a stream
+        // whose first chunk is a single 0xEF has produced no code point yet, so the decision is still open and the next chunk
+        // can complete a BOM to strip -- while a fist chunk of 0x41 has already produced "A", so a later EF BB BF is DATA and
+        // its U+FEFF stays. Both cases are Node's behaviour and both are in the corpus (cleat#4049 review).
+        const emit = (code) => {
+          if (!this.#bomDecided) {
+            this.#bomDecided = true;
+            if (code === 0xfeff && !this.#ignoreBOM) return;
+          }
+          if (code <= 0xffff) out.push(String.fromCharCode(code));
+          else {
+            const v = code - 0x10000;
+            out.push(String.fromCharCode(0xd800 + (v >> 10), 0xdc00 + (v & 0x3ff)));
+          }
+        };
+        const error = () => {
+          if (this.#fatal) throw new TypeError("The encoded data was not valid for encoding utf-8");
+          // Through emit(), not a bare push: WHATWG marks the BOM seen for ANY emitted item, a replacement character included,
+          // so a first stream chunk of just 0xFF closes the decision and a later EF BB BF is data (cleat#4049 review).
+          emit(0xfffd);
+          need = 0; seen = 0; cp = 0; lower = 0x80; upper = 0xbf;
+        };
+        while (i < bytes.length) {
+          const b = bytes[i];
+          if (need === 0) {
+            if (b <= 0x7f) { emit(b); i++; continue; }
+            if (b >= 0xc2 && b <= 0xdf) { need = 1; cp = b & 0x1f; }
+            else if (b >= 0xe0 && b <= 0xef) {
+              if (b === 0xe0) lower = 0xa0;
+              if (b === 0xed) upper = 0x9f;
+              need = 2; cp = b & 0x0f;
+            } else if (b >= 0xf0 && b <= 0xf4) {
+              if (b === 0xf0) lower = 0x90;
+              if (b === 0xf4) upper = 0x8f;
+              need = 3; cp = b & 0x07;
+            } else { error(); i++; continue; }
+            seen = 0; i++; continue;
+          }
+          if (b < lower || b > upper) {
+            // The byte that broke the sequence is RE-EXAMINED from the start state, which is what makes "E0 80" one U+FFFD and
+            // "E0 41" a U+FFFD followed by an "A".
+            error();
+            lower = 0x80; upper = 0xbf;
+            continue;
+          }
+          lower = 0x80; upper = 0xbf;
+          cp = (cp << 6) | (b & 0x3f);
+          seen++;
+          i++;
+          if (seen === need) { emit(cp); need = 0; seen = 0; cp = 0; }
+        }
+        if (need !== 0) {
+          if (stream) {
+            // Keep the start of the sequence for the next call.
+            this.#pending = bytes.slice(bytes.length - (seen + 1));
+          } else {
+            if (this.#fatal) throw new TypeError("The encoded data was not valid for encoding utf-8");
+            emit(0xfffd);
+            this.#pending = new Uint8Array(0);
+          }
+        } else {
+          this.#pending = new Uint8Array(0);
+        }
+        // A non-streaming call ends the stream, so the next one starts a fresh BOM decision.
+        if (!stream) this.#bomDecided = false;
+        return out.join("");
+      }
+    }
+
+    g.TextEncoder = TextEncoder;
+    g.TextDecoder = TextDecoder;
+  }
+
   delete g.__cleat_shims_off;
 })();
