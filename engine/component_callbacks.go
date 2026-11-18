@@ -997,7 +997,7 @@ func (b *wasmtimeBackend) dispatchAcquireLock(
 	}
 	ttlMs := int64(readU64Arg(args, 1, nargs))
 	r := b.handler.AcquireLock(context.Background(), nil, key, ttlMs)
-	setResultU64(results, nresults, uint64(r))
+	setResultS64(results, nresults, r)
 	return nil
 }
 
@@ -1014,7 +1014,7 @@ func (b *wasmtimeBackend) dispatchReleaseLock(
 		return refuseNameWithBadParam(results, nresults)
 	}
 	r := b.handler.ReleaseLock(context.Background(), nil, key)
-	setResultU64(results, nresults, uint64(r))
+	setResultS64(results, nresults, r)
 	return nil
 }
 

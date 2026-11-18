@@ -20,7 +20,7 @@ import (
 // It holds this file's only skip site, on purpose: scripts/check-skips.sh
 // counts skip sites per enclosing function, so three tests sharing one helper
 // add one baseline line, not three.
-func pythonExecuteFixture(t *testing.T, wfID, pyFile, funcName string) (
+func pythonExecuteFixture(t *testing.T, wfID, pyFile, funcName string, opts ...EngineOption) (
 	result string, susp *SuspendResult, ops []string, err error,
 ) {
 	t.Helper()
@@ -52,7 +52,7 @@ func pythonExecuteFixture(t *testing.T, wfID, pyFile, funcName string) (
 	t.Cleanup(func() { wt.Close(ctx) })
 
 	caller := &mockCaller{}
-	eng := NewEngine(rt, caller, WithBackends(WasmtimeLanguages, wt), WithWorkflowID(wfID))
+	eng := NewEngine(rt, caller, append([]EngineOption{WithBackends(WasmtimeLanguages, wt), WithWorkflowID(wfID)}, opts...)...)
 
 	result, _, susp, _, _, err = eng.Execute(ctx, wasmBytes, "run", []byte(`{}`))
 	return result, susp, operationsCalled(caller), err

@@ -52,16 +52,13 @@ from typing import Any, TypeVar
 
 from .memory import (
     CALL_SUSPEND_SENTINEL,
-    OUT_BUF_SIZE,
     OUTPUT_OFFSET,
-    SCRATCH_BASE,
     SLEEP_STATUS_SUSPEND,
     SUSPEND_SENTINEL,
     decode_await_promise_result,
     decode_simple_result,
     decode_sleep_result,
     read_string,
-    write_string,
 )
 from .signal_envelope import decode_signal_envelope, encode_signal_envelope
 
@@ -3602,8 +3599,10 @@ class HostCalls:
         RuntimeError
             If the host reports an error.
         """
-        key_len = write_string(SCRATCH_BASE, key, OUT_BUF_SIZE)
-        result = _import_cleat_acquire_lock(SCRATCH_BASE, key_len, ttl_ms)
+        # The component binding takes the key itself: (key: str, ttl_ms: int).
+        # This used to pass a scratch pointer and a length -- the core-module
+        # ABI -- and raised TypeError before the host was reached (cleat#4081).
+        result = _import_cleat_acquire_lock(key, ttl_ms)
 
         # Before decoding: this layout puts `acquired` at bit 8 and errCode in
         # the low byte, so a stop would decode as errCode=0, acquired=False --
@@ -3638,8 +3637,8 @@ class HostCalls:
         RuntimeError
             If the host reports an error.
         """
-        key_len = write_string(SCRATCH_BASE, key, OUT_BUF_SIZE)
-        result = _import_cleat_release_lock(SCRATCH_BASE, key_len)
+        # (key: str) on the component binding; see acquire_lock_ms.
+        result = _import_cleat_release_lock(key)
 
         err_code = result & 0xFF
         if err_code != 0:
