@@ -69,9 +69,12 @@ var goFixtureExpectations = map[string]string{
 	"summarise":    "",
 	"deferfunc":    "",
 	"hotfixmarker": "",
-	"durablesend":  "",
-	"fencereentry": "",
-	"generics":     "",
+	// cleat#4079: a workflow that makes a call, registers a defer and then spins or fails, so the engine's failure path has a guest
+	// to be killed in. Must verify cleanly.
+	"killafterwork": "",
+	"durablesend":   "",
+	"fencereentry":  "",
+	"generics":      "",
 	// cleat#1967: the workflow README.md's first command runs. No DurableCall,
 	// so it must verify cleanly with nothing else running.
 	"hello": "",
