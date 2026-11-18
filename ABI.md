@@ -601,6 +601,63 @@ and then runs a defer that touches the host is classified `failed` rather than
 `dead_lettered`, and so is deleted by retention rather than retained for an
 operator. See cleat#1155.
 
+#### 2.10b `cleat_interrupt_requested`
+
+Ask the host whether the guest should stop now, so that it can stop **cleanly** rather than be
+killed by a trap.
+
+```
+(func (import "env" "cleat_interrupt_requested")
+  (result i32))
+```
+
+**Return:** `1` when the host is asking the guest to stop, `0` otherwise.
+
+**Why it exists.** A guest that loops for ever is stopped by wasmtime's fuel or epoch trap, at
+whatever instruction it happens to be on. That kills the *instance* mid-borrow: a runtime that
+holds a borrow across the trap never runs its destructor, and the host's subsequent attempt to run
+the workflow's deferred cleanup then traps too, so no defer body runs. A guest that polls this call
+from its own loop can stop through its runtime's own unwinding instead, and the host can then run
+the defers — which is the difference between "the cleanup happened" and "the cleanup was lost".
+
+**Polling frequency and the stop policy.** The host answers `1` only when the budget is nearly
+spent: within an interrupt margin of the remaining fuel when fuel is metered
+(`--wasm-instruction-limit`), or of the remaining instance timeout otherwise (the default
+configuration). Each margin is capped at a tenth of the budget it protects. **The kill can therefore
+arrive up to that margin EARLY** — the workflow is stopped with a small part of its budget unspent.
+That is the price of stopping while the guest can still clean up.
+
+**It is best-effort, and the host does not promise it will be asked.** The margin is sized from the
+longest gap measured between two consecutive polls, but a single operation that burns more budget
+than the margin — a very large `JSON.parse`, or a loop dominated by native string allocation — can
+still reach the hard trap first. Some runtimes never reach a polling point at all in such a loop
+(measured for one in `packages/cleat-ts/DIVERGENCES.md`). An SDK that relies on deferred cleanup
+should poll often enough that its own loops stay well inside the margin.
+
+**It is answered `0` for the whole of a deferred drain**, so a drain can never be interrupted by
+its own stop bit.
+
+**The epoch deadline can expire up to one tick (50ms) early**, because it is armed in whole
+`epochTickInterval` ticks of 50ms and a deadline of N ticks expires between 50*(N-1) and 50*N ms
+after it is set. The effective epoch margin is therefore the margin minus up to 50ms, and a
+workflow with a budget small enough that the margin falls under 100ms is stopped up to a tick
+before the reserve.
+
+**The stop gives the guest back a little budget before it unwinds.** A host-call bracket re-arms the
+epoch deadline from whatever the guest has left, and at the reserve that is a single 50ms tick whose
+expiry is 0-50ms away; an unwind that lost that race would be killed mid-borrow and its cleanup lost
+again. So the first `1` is accompanied by 100ms of granted budget, ONCE per execution, and the
+projected worst case a runaway workflow can occupy a worker becomes the instance timeout, plus that
+100ms, plus the defer budget.
+
+**Replay and determinism.** The answer depends on how much budget is left, which depends on machine
+speed, so it is **not deterministic** and an SDK must not make a *durable* decision on it — no event
+may be recorded conditionally on this value. It is for stopping, and stopping happens after the
+durable history it belongs to has already been written.
+
+**SDK obligation.** Poll it from any loop that can run long. An SDK that does not import it is
+unaffected: the host answers nothing, and the hard trap is the only stop, exactly as before.
+
 #### 2.11 `cleat_poll_cancellation`
 
 Check if workflow cancellation has been requested.

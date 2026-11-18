@@ -67,6 +67,65 @@ const DefaultWasmtimeInstancesLimit = 256
 // that loops forever exactly the way the fence stops an entry point that does.
 const DefaultWasmtimeDeferBudget = 5 * time.Second
 
+// DefaultWasmtimeInterruptMarginFuel is the fuel reserve at which the soft kill asks the guest to
+// stop cleanly instead of letting wasmtime's fuel trap kill the instance mid-borrow (cleat#3922).
+//
+// Sized from the largest amount of fuel measured between two consecutive handler calls, by
+// TestMeasureInterruptMargin over four shapes of endless loop: 1,965,040 (tight numeric loop),
+// 2,116,250 (a catastrophic regex), 3,840,041 (a native call in a loop) and 26,241,715 (JSON.parse
+// of a 200k-element payload). 32M is the largest of those with about a fifth of headroom.
+//
+// IT IS NOT A CEILING, and the margin is a best-effort reserve rather than a guarantee. QuickJS
+// polls its interrupt handler once per ~10,000 BYTECODE operations, while fuel is spent by whatever
+// that operation does, so an operation that spends a lot of wasm fuel in one go widens the gap
+// without bound: a loop of `"x".repeat(10_000)` did not reach a single poll inside a 400M budget
+// (measured 2026-11-17). A guest dominated by that shape still ends on the hard fuel trap, and its
+// defers then do not run. That residue is recorded in packages/cleat-ts/DIVERGENCES.md.
+//
+// It applies only when fuel is metered at all: with --wasm-instruction-limit 0 (the default) there
+// is no budget to approach and no soft stop to offer.
+const DefaultWasmtimeInterruptMarginFuel = 32 * 1024 * 1024
+
+// DefaultWasmtimeInterruptMarginTime is the epoch arm's reserve: how much of the instance-timeout
+// budget must be left for the soft kill to stop the guest cleanly (cleat#3922).
+//
+// This arm is the one that matters in the default configuration, where --wasm-instruction-limit is
+// 0 and the kill is the epoch fence. Sized from the larger of one epoch tick (epochTickInterval,
+// 50ms -- a guest stops at the first tick after the deadline, so a reserve smaller than one tick
+// can pass the deadline before the handler is asked again) and the longest time measured between
+// two consecutive handler calls; see TestMeasureInterruptMargin.
+//
+// Capped at a tenth of the budget it is applied to: a fixed reserve cannot be larger than the
+// budget it protects, or a workflow with a short deadline is killed on its first poll.
+const DefaultWasmtimeInterruptMarginTime = 250 * time.Millisecond
+
+// interruptUnwindGrant is how much budget the soft kill gives back before the guest unwinds
+// (cleat#3922). Measured 2026-11-17, from the handler answering 1 to the host observing the call's
+// error, over the workloads in TestMeasureInterruptMargin: 0.10-0.46ms in the ordinary shapes and
+// 1.33ms for the largest (JSON.parse of a 200k-element payload), spending at most 9.16M fuel.
+//
+// It has to exceed ONE EPOCH TICK, and that is the real reason it exists rather than the unwind's
+// cost. hostBudget.setDeadline arms ticks = remaining/50ms floored at one, and a deadline of N
+// ticks expires 50*(N-1) to 50*N ms after it is armed. So the tight case is a budget under 100ms at
+// the moment of the stop: that arms ONE tick, whose expiry is a uniform 0-50ms away, and a 0.15ms
+// unwind loses that race about once in 330 stops.
+//
+// WHERE THAT CASE ACTUALLY ARISES, because it is not the ordinary default. With
+// --wasm-instance-timeout at its 30s default the margin is 250ms and the bracket arms 5 ticks at
+// the stop, so the guest has 200-250ms to unwind and no race exists. A budget under 100ms at the
+// stop needs the budget/10 cap to be binding, i.e. an instance timeout under about 1s -- which is
+// how the one observed failure happened: TestTypeScriptDefaultConfigurationSoftKills uses an 800ms
+// timeout so the test is quick, which caps the margin at 80ms and arms one tick. It was seen once
+// and not reproduced in five re-runs of that same test; 100ms is two ticks, and about 75x the
+// longest measured unwind.
+const interruptUnwindGrant = 100 * time.Millisecond
+
+// interruptMinMarginTime is the floor under the epoch reserve. Two epoch ticks plus a poll gap:
+// a deadline of N ticks expires 50*(N-1) to 50*N ms out, so anything under two ticks can be
+// overtaken by the hard trap before a poll observes the reserve. See the call site for the
+// measurement that put it here.
+const interruptMinMarginTime = 2*epochTickInterval + 20*time.Millisecond
+
 // wasmtimeLimits bundles the resource bounds applied to a wasmtime
 // execution. Zero/negative fields mean "use the backend's built-in
 // default" (see the Default* constants above) except instructionLimit,
@@ -79,6 +138,10 @@ type wasmtimeLimits struct {
 	tableElementsLimit int64
 	instancesLimit     int64
 	deferBudget        time.Duration
+
+	// interruptMargin is the fuel reserve the soft kill stops at (cleat#3922). Zero takes
+	// DefaultWasmtimeInterruptMarginFuel; it is only consulted when instructionLimit > 0.
+	interruptMargin uint64
 }
 
 // wasmtimeConfig is everything NewWasmtimeBackend accepts: the resource

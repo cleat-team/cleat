@@ -400,7 +400,24 @@ fn modify_runtime(runtime: Runtime) -> Runtime {
         g.set("__cleat_shims_off", SHIMS_OFF).unwrap();
         ctx.eval::<(), _>(include_str!("shims.js")).unwrap();
     });
+    // cleat#3922: the soft kill. QuickJS calls this handler from its own bytecode loop; returning true raises
+    // an exception user code cannot catch, and -- unlike a wasmtime trap, which abandons whatever the guest was
+    // doing -- the Rust call frames RETURN, so no borrow is left outstanding when the host drains the workflow's
+    // defers. The host answers 1 only near the end of the execution budget, and never during a drain.
+    #[cfg(target_arch = "wasm32")]
+    {
+        runtime
+            .context()
+            .runtime()
+            .set_interrupt_handler(Some(Box::new(|| unsafe { cleat_interrupt_requested() != 0 })));
+    }
     runtime
+}
+
+#[cfg(target_arch = "wasm32")]
+#[link(wasm_import_module = "env")]
+unsafe extern "C" {
+    fn cleat_interrupt_requested() -> i32;
 }
 
 fn config() -> Config {
