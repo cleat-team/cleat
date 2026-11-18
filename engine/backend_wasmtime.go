@@ -132,6 +132,10 @@ type wasmtimeBackend struct {
 	// envNeeded is the set of "env" module imports the WASM module requests.
 	// nil means "register everything" (conservative fallback on parse error).
 	envNeeded map[string]bool
+	// language is the guest's language, set by Execute from the module's metadata before it is run. The per-language
+	// memory default (languageMemoryFloorBytes) reads it in configureStore for the component path; this backend is
+	// PerExecution, so the field has the same lifetime as envNeeded.
+	language string
 
 	// Work data for the Go dispatcher (cleat_poll_work).
 	workEntryPoint string
@@ -398,8 +402,8 @@ func (b *wasmtimeBackend) configureStore(ctx context.Context, store *wasmtime.St
 	}
 
 	memLimit := int64(-1)
-	if b.limits.memoryLimitBytes > 0 {
-		memLimit = b.limits.memoryLimitBytes
+	if lim := b.limits.memoryLimitFor(b.language); lim > 0 {
+		memLimit = lim
 	}
 	tblLimit := int64(-1)
 	if b.limits.tableElementsLimit > 0 {
@@ -813,6 +817,7 @@ func (b *wasmtimeBackend) Execute(ctx context.Context, wasmBytes []byte, entryPo
 		b.metaCache.Store(wKey, meta)
 	}
 	b.envNeeded = meta.envNeeded
+	b.language = meta.language
 	needsWasi := meta.hasWasi
 	if needsWasi {
 		wasiConfig := wasmtime.NewWasiConfig()

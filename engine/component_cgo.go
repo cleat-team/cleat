@@ -1478,7 +1478,7 @@ func (b *wasmtimeBackend) ExecuteComponentCGo(
 	// Shadow the WASI clock and entropy interfaces before cleat's own, inside
 	// the allow_shadowing bracket opened above and after add_wasip2 supplied
 	// the real ones. cleat#1410.
-	if err := b.registerWasiDeterminismImports(linker); err != nil {
+	if err := b.registerWasiDeterminismImports(linker, wasiDeterminismVersionsOf(wasmBytes)); err != nil {
 		return nil, fmt.Errorf("register wasi determinism imports: %w", err)
 	}
 	if err := b.registerCleatComponentImports(linker); err != nil {

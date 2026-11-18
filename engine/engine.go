@@ -946,6 +946,12 @@ var deferSegmentLanguages = map[string]bool{
 	// tests/typescript/typescript_defer_segment_test.go, which builds a real module and asserts the segment records only
 	// the defers on the same entry point whose control records the body's call.
 	"javascript": true,
+	// csharp (cleat#4077): a Component Model guest like python, so the stop is a case of the WIT return type
+	// (call-failure.suspended) and not a sentinel. Verified end to end by csharp_defer_segment_e2e_test.go, which runs a
+	// real C# component as a defer segment and asserts the segment records only its defer -- with a control, on the same
+	// entry point, that records the body's call when the defer phase is off. The guest there is a spike, not the SDK;
+	// the SDK has to pass that same test.
+	"csharp": true,
 }
 
 // RunsOnWasmtime reports whether a detected guest language is served by the

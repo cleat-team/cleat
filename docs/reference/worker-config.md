@@ -1004,7 +1004,11 @@ on every call.
 Corresponds to 512 WASM pages at 32 MB (64 KiB per page). Enforced by the
 wasmtime store limiter; set to `0` to use the built-in default
 (`DefaultWasmtimeMemoryLimitBytes`, `engine/wasmtime_options.go`). Increasing
-this allows workflows with larger memory requirements to execute. (This said
+this allows workflows with larger memory requirements to execute.
+
+The `32` is a default and not a decision: when the flag is not passed, the limit is raised for a guest language whose
+runtime cannot start in 32 MiB (C#: 64 MiB, `languageMemoryFloorBytes` in `engine/wasmtime_options.go`). When the flag
+IS passed, its value applies to every language as given, including a value too small for the guest. (This said
 "the wazero default" until 2026-09-06; wazero has not been a backend since
 #459.)
 

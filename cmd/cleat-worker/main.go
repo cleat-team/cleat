@@ -2276,8 +2276,17 @@ func main() {
 	// IMPROVEMENT-PLAN.md 1.5) and StoreLimits (memory/table/instance
 	// ceilings), plus optional fuel-based instruction metering when
 	// --wasm-instruction-limit is set.
-	wasmtimeMemoryLimitBytes := int64(0) // 0 => wasmtimeBackend applies its own default
-	if *wasmMemoryMaxMB > 0 {
+	wasmtimeMemoryLimitBytes := int64(0) // 0 => wasmtimeBackend applies its own default, per language
+	// Only a limit the operator SET is passed. The flag's own default (32) is not a decision, and passing it would
+	// pin every language to 32 MiB: a .NET guest needs more than that just to start, and the backend raises the
+	// default for it (engine.languageMemoryFloorBytes) only when it is told no limit was chosen. cleat#4077.
+	memoryFlagSet := false
+	flag.Visit(func(f *flag.Flag) {
+		if f.Name == "wasm-memory-max-mb" {
+			memoryFlagSet = true
+		}
+	})
+	if *wasmMemoryMaxMB > 0 && memoryFlagSet {
 		wasmtimeMemoryLimitBytes = int64(*wasmMemoryMaxMB) * 1024 * 1024
 	}
 	wt, wasmtimeErr := engine.NewWasmtimeBackend(ctx,
