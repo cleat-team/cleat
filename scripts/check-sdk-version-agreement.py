@@ -73,7 +73,13 @@ from pathlib import Path
 # because all three spellings are in use, and a case-sensitive name pattern
 # reports the third as an ABSENCE -- which is how this script's first run
 # reported version.py as carrying no version at all.
-SDK_VERSION_FIELD = re.compile(r'sdk_version"?\s*[:=]\s*"([^"]+)"', re.IGNORECASE)
+#
+# The name must not start in the MIDDLE of a longer word: `(?<![A-Za-z0-9])`. Unanchored, `CLEAT_CS_WASISDK_VERSION="29.0"` (the C#
+# build's wasi-sdk pin, passed to a container) matched because WASI*SDK_VERSION* contains SDK_VERSION (cleat#4096), and the guard
+# demanded that a shell script which stamps no SDK version be declared as a stamper. Only letters and digits are excluded in front,
+# not `_`, on purpose: `CLEAT_SDK_VERSION="x"` and `_SDK_VERSION = "x"` are real stamper spellings and must still be found, and an
+# over-match fails loudly here (it asks for a declaration) where a missed stamper would pass.
+SDK_VERSION_FIELD = re.compile(r'(?<![A-Za-z0-9])sdk_version"?\s*[:=]\s*"([^"]+)"', re.IGNORECASE)
 
 # Gradle is not a data format anything here can parse, so `.kts` is matched at
 # the line start -- precise enough that a dependency constraint cannot match.
@@ -377,6 +383,31 @@ def self_test() -> int:
                 "discovered although it is not excluded -- the exclusion is swallowing "
                 "files it should not, which would silently hide a real, un-checked stamper"
             )
+
+    # THE FIELD PATTERN ITSELF (cleat#4096): a name that merely CONTAINS sdk_version is not a version assignment, and every spelling a
+    # real stamper uses still is. One file per spelling so a miss names itself. The negative is the line that broke this guard.
+    cases += 1
+    spellings = {
+        "positive_json.py": '"sdk_version": "1.2.3"\n',
+        "positive_upper.py": 'SDK_VERSION = "1.2.3"\n',
+        "positive_bare.sh": 'sdk_version="1.2.3"\n',
+        "positive_prefixed.sh": 'CLEAT_SDK_VERSION="1.2.3"\n',
+        "positive_private.py": '_SDK_VERSION = "1.2.3"\n',
+        "negative_wasisdk.sh": '  -e CLEAT_CS_WASISDK_VERSION="29.0" \\\n',
+        "negative_word.py": 'mysdk_version = "9"\n',
+    }
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        for name, text in spellings.items():
+            path = root / "packages" / "fieldcheck" / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(text)
+        found = {Path(f).name for f in discovered_sites(root)}
+    for name in spellings:
+        if name.startswith("positive_") and name not in found:
+            failures.append(f"field-pattern case: {name} ({spellings[name].strip()!r}) is not discovered, so a real stamper spelled like it would escape this guard")
+        if name.startswith("negative_") and name in found:
+            failures.append(f"field-pattern case: {name} ({spellings[name].strip()!r}) IS discovered, but it only contains sdk_version inside a longer name")
 
     if failures:
         for f in failures:
