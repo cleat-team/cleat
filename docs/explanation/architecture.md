@@ -15,7 +15,7 @@
 
 Cleat is a durable workflow engine that runs on PostgreSQL, MySQL, or SQL
 Server. Workflows are written in near-standard Go (or Rust, Python, Java, or
-AssemblyScript — see `tiers.yaml`), compiled to WebAssembly (WASM), stored in
+TypeScript — see `tiers.yaml`), compiled to WebAssembly (WASM), stored in
 the database, and executed by stateless worker daemons.
 
 ## Architecture Diagram

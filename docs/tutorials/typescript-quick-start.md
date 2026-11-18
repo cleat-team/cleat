@@ -4,7 +4,7 @@
 > listed in `packages/cleat-ts/DIVERGENCES.md`, and the limits below are not a complete list.
 
 Cleat runs a TypeScript workflow as a WASM module: your code runs on QuickJS (through Javy, in static mode) inside the
-same engine that runs Go, Rust, Python, Java and AssemblyScript workflows. The module is about 1.45 MB, almost all of it
+same engine that runs Go, Rust, Python and Java workflows. The module is about 1.45 MB, almost all of it
 the JavaScript engine (the example below built to 1,446,426 bytes on 2026-11-17; the Javy plugin it embeds is 1,296,266 of that).
 
 ## What has and has not been run

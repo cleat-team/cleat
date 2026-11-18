@@ -166,7 +166,7 @@ plugin that wants a key of the same name.
 
   The floor (loopback, link-local, private ranges) is refused whatever is
   listed. See `docs/operations/egress-policy.md`. The raw `cleat_fetch` import,
-  which the Java and AssemblyScript SDKs call directly, is a different path and
+  which the Java SDK calls directly, is a different path and
   is off unless the worker starts with `--enable-workflow-fetch`.
 
   Or **write a plugin.** A bundled plugin's host function is how a workflow

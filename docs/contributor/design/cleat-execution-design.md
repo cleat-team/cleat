@@ -199,7 +199,7 @@ Each language needs a transformer that generates the WASM bindings and host adap
 | **Rust** | `wasm32-wasip1` target, wasm-bindgen | Production-ready | ~8 weeks |
 | **C** | Clang `--target=wasm32-wasip1` | Production-ready | ~6 weeks |
 | **Zig** | `zig build-exe -target wasm32-wasip1` | Production-ready | ~6 weeks |
-| **TypeScript** | AssemblyScript, Javy (Shopify) | Emerging, subset of JS | ~12 weeks |
+| **TypeScript** | Javy (Shopify) | Emerging, subset of JS | ~12 weeks |
 | **C#** | NativeAOT + wasm-experimental (.NET 9+) | Emerging | ~10 weeks |
 | **Python** | Pyodide / python2wasm | Not practical yet | Would need language subset |
 | **Java/Kotlin** | TeaVM, GraalVM native-image | Experimental | Would need language subset |

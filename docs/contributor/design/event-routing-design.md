@@ -650,7 +650,7 @@ Adding one host call is not one edit:
 | `engine/compaction.go` | the `EventType ↔ EventCode` tables, **both directions** |
 | `engine/events.go` | typed event + the replay switch |
 | `ABI.md` | §2 entry, and the count — **do not write the number here** (see below) |
-| SDKs | Go, Rust, Python, Java, AssemblyScript |
+| SDKs | Go, Rust, Python, Java |
 | `tests/plugin-harness` | a fixture row in each language's table (the per-language `hostcall_<language>_test.go` files; `hostcall_harness_test.go` is the shared rig, not a language) |
 
 §3.312 is the worked example of skipping one: a nine-parameter import against a

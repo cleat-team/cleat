@@ -950,9 +950,10 @@ produces from them, which measures 2–3× larger for a release build.
 
 This is the bound to size a deployment against. Its sibling,
 `--wasm-module-cache-max-entries`, cannot say what a hundred modules cost —
-measured on cleat's own artifacts, a hundred entries is **8.6 MB of
-AssemblyScript or 4.6 GB of Python**, a ~500× spread in what one flag value
-means. Both bounds apply: the entry count still bounds map and list overhead
+measured on cleat's own artifacts, a hundred entries was **8.6 MB of
+AssemblyScript or 4.6 GB of Python** when this was measured (AssemblyScript has
+since been removed from cleat; see the historical row below), a ~500× spread in
+what one flag value meant. Both bounds apply: the entry count still bounds map and list overhead
 independently of artifact size.
 
 **Estimated, not measured**, and every layer says so. A compiled
@@ -963,7 +964,7 @@ each entry is costed at **4× the wasm it came from**.
 
 | artifact | wasm | compiled | ratio |
 |---|---|---|---|
-| widget-store (AssemblyScript) | 9.5 KB | 86 KB | 9.1× |
+| widget-store (AssemblyScript, **historical**) | 9.5 KB | 86 KB | 9.1× |
 | rust-workflow (release) | 149 KB | 458 KB | 3.1× |
 | java-workflow | 299 KB | 694 KB | 2.3× |
 | hostcallsjava | 506 KB | 1.04 MB | 2.1× |
@@ -977,7 +978,11 @@ is the one failure it cannot tolerate. The cost is that a typical artifact is
 over-counted by about a third, so a given value holds correspondingly fewer
 modules than raw arithmetic suggests.
 
-Both outliers fail safely: tiny AssemblyScript modules run high but cost tens
+The AssemblyScript row is a historical measurement: cleat no longer supports
+that language and the module is not rebuilt for this table. It is kept because
+it is the measured example of a tiny module running high.
+
+Both outliers fail safely: tiny modules (that row was one) run high but cost tens
 of kilobytes, and debug builds run low so the estimate over-counts them
 further. Over-counting shrinks the cache; it cannot overrun the bound.
 

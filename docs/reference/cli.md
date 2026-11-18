@@ -25,7 +25,7 @@ and compilation.
 | Flag | Default | Description |
 |------|---------|-------------|
 | `-o <dir>` | temp dir | Output directory for generated WASM and auxiliary files |
-| `--target <name>` | `go` | Compilation target: `go` (standard Go toolchain, fully implemented), `rust`, `java`, `assemblyscript`, or `python` |
+| `--target <name>` | `go` | Compilation target: `go` (standard Go toolchain, fully implemented), `rust`, `java`, or `python` |
 | `--entry <file:func>` | `""` | Entry point in `file.py:func_name` format (Python target only) |
 | `--json` | `false` | Output diagnostics as JSON to stdout (progress goes to stderr) |
 
