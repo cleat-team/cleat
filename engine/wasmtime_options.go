@@ -71,7 +71,8 @@ const DefaultWasmtimeDeferBudget = 5 * time.Second
 // stop cleanly instead of letting wasmtime's fuel trap kill the instance mid-borrow (cleat#3922).
 //
 // Sized from the largest amount of fuel measured between two consecutive handler calls, by
-// TestMeasureInterruptMargin over the shapes of endless loop it keeps: 1,965,040 (tight numeric
+// TestMeasureInterruptMargin (`go test -tags measure ./tests/typescript/`) over the shapes of
+// endless loop it keeps: 1,965,040 (tight numeric
 // loop), 3,840,041 (a native call in a loop) and 26,241,715 (JSON.parse of a 200k-element payload).
 // A fourth, a deliberately exponential regex at 2,116,250, was removed with its workload when code
 // scanning flagged the literal; it was never load bearing. 33,554,432 fuel units -- 32 x 1024 x 1024, wasmtime's own count and not
@@ -95,7 +96,7 @@ const DefaultWasmtimeInterruptMarginFuel = 32 * 1024 * 1024
 // 0 and the kill is the epoch fence. Sized from the larger of one epoch tick (epochTickInterval,
 // 50ms -- a guest stops at the first tick after the deadline, so a reserve smaller than one tick
 // can pass the deadline before the handler is asked again) and the longest time measured between
-// two consecutive handler calls; see TestMeasureInterruptMargin.
+// two consecutive handler calls; see TestMeasureInterruptMargin (built only with `-tags measure`).
 //
 // The effective reserve is the smaller of this, a tenth of the budget and half of it, with a floor
 // of interruptMinMarginTime (two epoch ticks plus a poll gap): a reserve under two ticks can be
@@ -106,7 +107,7 @@ const DefaultWasmtimeInterruptMarginTime = 250 * time.Millisecond
 
 // interruptUnwindGrant is how much budget the soft kill gives back before the guest unwinds
 // (cleat#3922). Measured 2026-11-17, from the handler answering 1 to the host observing the call's
-// error, over the workloads in TestMeasureInterruptMargin: 0.10-0.46ms in the ordinary shapes and
+// error, over the workloads in TestMeasureInterruptMargin (`-tags measure`): 0.10-0.46ms in the ordinary shapes and
 // 1.33ms for the largest (JSON.parse of a 200k-element payload), spending at most 9.16M fuel.
 //
 // It has to exceed ONE EPOCH TICK, and that is the real reason it exists rather than the unwind's

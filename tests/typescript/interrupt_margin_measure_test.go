@@ -1,3 +1,17 @@
+//go:build measure
+
+// SPIKE-FREE MEASUREMENT HARNESS -- cleat#3922. Build-tagged so it is not a test in the ordinary
+// suite: the PostgreSQL Tier 2 job requires every top-level test in this package to RUN and PASS,
+// and a harness that skips by default counted as a failure there.
+//
+// Run it with the tag:
+//
+//	go test -tags measure ./tests/typescript/ -run TestMeasureInterruptMargin -v
+//
+// It takes about a minute: twelve runs of an endless loop, two arms. Its output is the derivation
+// for DefaultWasmtimeInterruptMarginFuel, DefaultWasmtimeInterruptMarginTime and the unwind grant;
+// see the constants in engine/wasmtime_options.go.
+
 package typescript
 
 // cleat#3922: the measurement both interrupt margins are derived from.
@@ -27,13 +41,6 @@ import (
 )
 
 func TestMeasureInterruptMargin(t *testing.T) {
-	// A measurement harness, not a regression test: twelve runs of a 2s (or 400M fuel) endless loop,
-	// about a minute. It is skipped by default because the TypeScript tier-2 job already runs close
-	// to go test's 10-minute default (cleat#4051), and nothing here can fail in a way that says
-	// anything about the tree. Re-run it when a margin needs re-deriving.
-	if os.Getenv("CLEAT_MEASURE_INTERRUPT") == "" {
-		t.Skip("set CLEAT_MEASURE_INTERRUPT=1 to re-derive the interrupt margins (about a minute)")
-	}
 	root := needToolchain(t)
 	src := "tests/typescript/testdata/workflows/interrupt_workloads.ts"
 	entries := []string{"spin_loop", "spin_native", "spin_json", "spin_string", "spin_string_big"}
