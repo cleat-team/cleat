@@ -84,22 +84,21 @@ child workflows (`children`). A name your script does not cover is not invented:
 unqueued signal is not found, and an unscripted child stays running, so a workflow waiting on any of them **suspends** instead of
 failing or quietly getting `{}`. Signals are delivered **before** the run starts; there is no mid-run delivery (`DIVERGENCES.md` H1).
 
-**What it cannot test: updates.** The three update host calls are not bound for TypeScript yet (cleat#3827), so a workflow cannot
-ask for an update and there is nothing for a harness to simulate (H2). That is a reachability gap in the guest, not a harness
-simplification.
+**Updates, locks, fetch.** Updates are scripted with `scripts: { updates: [{ name, payload? }] }` and are all pending before the run starts, so a test covers a handler's answer, not an update arriving while the workflow is parked. A lock call without a `locks` script answers `false` (there is no store at all), and a `fetch` without a `fetch` script is **refused**, which is also a worker's default: configure the script you mean to test. A plugin call is answered from a scripted registry (`scripts: { plugins: { "plugin/function": { result | error | chunks } } }`), and `extras.pluginCalls` says what reached it. See the table in `packages/cleat-ts/testing.ts` for each store's fixture and what it reports.
 
 ## 5. Known limits
 
 Each is recorded, with the test that holds it, in [`packages/cleat-ts/DIVERGENCES.md`](../../packages/cleat-ts/DIVERGENCES.md).
 
-- **Updates are unsupported** (cleat#3827): the update host calls are not bound, so no TypeScript workflow can issue or serve one.
-- **A killed workflow's `ctx.defer` cleanup does not run** (D1, cleat#3922). The host calls the guest's drain after a kill (the
-  instruction limit, the fence) and the call traps, so no body runs.
-- **A cancelled one does.** Cancelling a *suspended* workflow that registered a defer makes the worker run the cleanup, asserted
+- **Every host call is bound or deliberately unbound; none is pending** (cleat#3827; checked 2026-11-18). Four are deliberately unbound, each with a `permanent:` reason in `packages/cleat-ts/host-calls.json`: `cleat_poll_work` and `cleat_complete` (the worker's own handshake), `cleat_register_query_handler` (not bindable from a guest) and `cleat_interrupt_requested` (polled by the plugin itself, never by a workflow). `TestEveryHostCallIsBoundOrListed` reads that file and `host-calls.d/*.json` and fails when a call is in neither list, so a host call added later without a binding turns it red. Re-derive it, reading both files: `python3 -c "import json,glob;u={n:str(r) for f in ['packages/cleat-ts/host-calls.json']+glob.glob('packages/cleat-ts/host-calls.d/*.json') for n,r in json.load(open(f)).get('unbound',{}).items()};print(len(u),'unbound; pending:',[n for n,r in u.items() if r.startswith('pending:')])"` should print `4 unbound; pending: []`.
+- **`continueAsNew` with `options.version` starts the next run on that version, or fails the run** if it is not deployed (cleat#4041). It never continues on the current version instead.
+- **A synchronous `ctx.fetch` throws a plain `Error`, not a `CleatError`**, which differs from the other bindings (a synchronous call cannot get the class).
+- **A killed workflow's `ctx.defer` cleanup runs, except for a guest whose work never returns to the bytecode loop** (D1, cleat#3922, fixed in cleat#4053). The host asks the guest to stop through an interrupt poll before its hard limit, so the drain runs. A single native operation that never yields can still reach the hard trap, and its defers are lost.
+- **A cancelled one runs its cleanup too, on a different path.** Cancelling a *suspended* workflow that registered a defer makes the worker run the cleanup, asserted
   through the worker's own outbound calls (`TestTypeScriptDeferSegmentRunsOnARealWorker`). The two paths differ, and which one
   your workflow takes depends on how it stops.
 - A defer body that itself suspends stops the later bodies' calls (D2); no fixture covers it yet.
-- **No timers, no `crypto`, no `TextEncoder`/`TextDecoder`** (rows 3-5): `ReferenceError`, loud.
+- **No timers, no `crypto`** (rows 4-5): `ReferenceError`, loud. **`TextEncoder`/`TextDecoder` are UTF-8 only** (rows 3, 7, 8): a `TextDecoder` for another encoding throws `RangeError`, and `TextDecoderStream`/`TextEncoderStream` are undefined.
 - **Local time is UTC** (row 6).
 - **Silent divergences from Node are the dangerous kind, and the list is not closed.** Row 1 (`Date` setters given a non-finite
   argument) is fixed and held by a 631-case comparison against Node. Row 2 (`URL`) is fixed **only for what the shim can answer
