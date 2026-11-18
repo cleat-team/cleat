@@ -259,7 +259,6 @@ var toolchainFreeBuilderCallers = map[string]string{
 	"TestRunBuild_JavaTarget_NoBuildFile":              "exits on a missing build.gradle before any toolchain starts",
 	"TestRunBuild_JavaTarget_RelativePathWithGradlew":  "a fake gradlew stands in for the real one; asserts which path was invoked (cleat#1890)",
 	"TestRunBuild_RustTarget_NoCargoToml":              "exits on a missing Cargo.toml before cargo starts",
-	"TestRunBuild_ASTarget_NoPackageJSON":              "exits on a missing package.json before node starts",
 	"TestJavaBuildRefusesNondeterminism":               "asserts on the determinism finding, reported before the gradle stage; later-stage failure is tolerated by design",
 	"TestRustBuildRefusesNondeterminism":               "asserts on the determinism finding, reported before the cargo stage",
 	"TestRustBuildAcceptsProseNamingAForbiddenPattern": "asserts the checker did not refuse; the later cargo failure is tolerated by design",
@@ -697,7 +696,7 @@ var expectedToolchainTests = []struct {
 	dir   string
 	langs []string
 }{
-	{"../cmd/cleat", []string{"java", "assemblyscript", "rust"}},
+	{"../cmd/cleat", []string{"java", "rust"}},
 	{"../tests/crash", []string{"java", "rust"}},
 }
 

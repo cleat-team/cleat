@@ -35,7 +35,7 @@ import (
 // (CLAUDE.md, "Is this result real?").
 //
 // So this is the same shape as build_metadata_test.go's assertion that
-// --version reaches Rust, Java and AssemblyScript through nonGoMetadata: a
+// --version reaches Rust and Java through nonGoMetadata: a
 // value-level check on the seam, in a job that always runs it.
 func TestPythonStampEnvCarriesTheWorkflowVersion(t *testing.T) {
 	for _, version := range []int{1, 2, 3, 7} {

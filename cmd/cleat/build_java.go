@@ -86,9 +86,9 @@ func runBuildJava(pattern, outDir, channel string, workflowVersion int) {
 	// a fresh manifest -- an IOException from generateEntryPointManifest(), a
 	// round of incremental compilation Gradle decides not to rerun -- would
 	// fall through to the WalkDir search below and find a STALE one, silently
-	// embedding entry points that do not match this compile. Same hazard
-	// build_as.go guards against, above; see its comment for why
-	// verifyEntryPointsAreExports cannot catch this on its own -- a stale
+	// embedding entry points that do not match this compile. The Rust and
+	// AssemblyScript builds had the same hazard (the latter's builder, build_as.go,
+	// is gone, cleat#4023); verifyEntryPointsAreExports cannot catch this on its own -- a stale
 	// manifest can easily still name real exports, just the wrong build's.
 	_ = filepath.WalkDir(filepath.Join(javaDir, "build"), func(path string, d os.DirEntry, err error) error {
 		if err != nil {

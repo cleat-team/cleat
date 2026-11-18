@@ -255,7 +255,6 @@ REST_PIN_0=(
   TestShutdownDuringABackoffNeverReachesAGuestThatCompensates
   TestRunBuild_PythonTarget_WasmRoundtrip
   TestConcurrentMintsCannotPassTheLiveKeyCap
-  TestTheASRowsOfTheBindingTableAreAsserted
   TestATenantIsDroppedOnSQLServer
   TestSignalPluginWorkflow_MSSQLScopesToTheTargetsTenant
   TestStartPluginWorkflow_MSSQLScopesTheWriteUnderTheDestinationTenantsSessionContext
@@ -431,7 +430,6 @@ REST_PIN_1=(
   TestAPluginStartIsRefusedForASuspendedTenantOnSQLServer
   TestATenantsRunExecutesItsOwnDefinitionEvenThroughARoleThatBypassesRLS
   TestATenantsRunOutlivesItsHeartbeatsUnderRLSOnSQLServer
-  TestRunBuild_ASTarget_NoPackageJSON
   TestRunInit_NoArgs
   TestAFencedExecutionMakesNoFurtherCallsAndASecondWorkerFinishesTheWorkflow
   TestRunEmbedded_NoWasmFlag
@@ -445,7 +443,6 @@ REST_PIN_1=(
   TestDebugWatch_PollNewEvents
   TestEveryDocumentedCleatInvocationClearsFlagParsing
   TestFrozenBuildRefusesAChildItCannotPin
-  TestAnAssemblyScriptDefaultMakesAParameterOptional
   TestATypedPromiseIsCreatedAndAwaitedOnARealWorker
   TestASlowHeartbeatCycleDoesNotOpenAGapWiderThanReclaimAfterAllows
   TestDispatchLoop_StickyErrorContinuesLoop

@@ -30,7 +30,10 @@
     "outcome is a semantic tag, never a message. The SDKs word their errors",
     "differently and always will; each test maps a tag to its own check. Asserting",
     "the string here would make this a translation table instead of a behavioural",
-    "one -- the same reasoning quorum_cases.json gives for error_kind."
+    "one -- the same reasoning quorum_cases.json gives for error_kind.",
+    "",
+    "AssemblyScript rows were removed with the AssemblyScript SDK (cleat#4023). Prose in this file that names it records",
+    "the comparison as it was measured while that SDK existed; the table now compares the SDKs that remain."
   ],
   "outcomes": {
     "bound_zero": "The parameter bound its type's zero value and the workflow RAN.",
@@ -59,8 +62,7 @@
       "payload": {},
       "expect": {
         "go": "refused",
-        "python": "refused",
-        "assemblyscript": "refused"
+        "python": "refused"
       }
     },
     {
@@ -75,8 +77,7 @@
       "payload": {},
       "expect": {
         "go": "refused",
-        "python": "refused",
-        "assemblyscript": "refused"
+        "python": "refused"
       }
     },
     {
@@ -93,8 +94,7 @@
       },
       "expect": {
         "go": "bound_value",
-        "python": "bound_value",
-        "assemblyscript": "bound_value"
+        "python": "bound_value"
       }
     },
     {
@@ -109,8 +109,7 @@
       "payload": {},
       "expect": {
         "go": "refused",
-        "python": "refused",
-        "assemblyscript": "refused_at_compile_time"
+        "python": "refused"
       }
     },
     {
@@ -130,8 +129,7 @@
       },
       "expect": {
         "go": "bound_value",
-        "python": "bound_value",
-        "assemblyscript": "refused_at_compile_time"
+        "python": "bound_value"
       }
     },
     {
@@ -148,8 +146,7 @@
       "payload": {},
       "expect": {
         "go": "bound_absent_marker",
-        "python": "bound_default",
-        "assemblyscript": "bound_default"
+        "python": "bound_default"
       }
     },
     {
@@ -164,8 +161,7 @@
       "payload": {},
       "expect": {
         "go": "bound_whole_payload",
-        "python": "refused",
-        "assemblyscript": "bound_whole_payload"
+        "python": "refused"
       }
     }
   ]

@@ -13,7 +13,7 @@ import (
 // printed `Build SUCCESS ... Metadata stamped successfully.` and then exited 1
 // with `Error: writing WASM output to out/hello.wasm: open ...: no such file or
 // directory` when `out` did not exist. The Go build creates what it needs; the
-// Java, Rust, AssemblyScript and Python builds write into the directory
+// Java, Rust and Python builds write into the directory
 // themselves and assumed it was there.
 //
 // The property is "the directory exists before the target-specific work", so
@@ -26,7 +26,7 @@ func TestEveryTargetCreatesTheOutputDirectoryItWritesInto(t *testing.T) {
 	if cleatBinary == "" {
 		t.Fatal("TestMain did not build the cleat binary (short mode?); this test measures nothing without it")
 	}
-	for _, target := range []string{"java", "assemblyscript", "rust", wasm.PythonTarget} {
+	for _, target := range []string{"java", "rust", wasm.PythonTarget} {
 		t.Run(target, func(t *testing.T) {
 			proj := t.TempDir()
 			out := filepath.Join(t.TempDir(), "does", "not", "exist")

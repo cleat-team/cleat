@@ -957,7 +957,7 @@ func TestInvalidTargetError(t *testing.T) {
 		// Simulate what the build command does.
 		target := "csharp"
 		if !isValidTarget(target) {
-			os.Stderr.WriteString("Error: unknown target \"csharp\". Valid targets: go, rust, java, assemblyscript, python\n")
+			os.Stderr.WriteString("Error: unknown target \"csharp\". Valid targets: go, rust, java, python\n")
 			os.Exit(1)
 		}
 		return
@@ -1729,27 +1729,6 @@ func TestRunBuild_RustTarget_NoCargoToml(t *testing.T) {
 	}
 	if !strings.Contains(string(out), "no Cargo.toml") {
 		t.Errorf("expected 'no Cargo.toml' in output, got: %s", string(out))
-	}
-}
-
-func TestRunBuild_ASTarget_NoPackageJSON(t *testing.T) {
-	if os.Getenv("TEST_BUILD_AS") == "1" {
-		dir := os.Getenv("TEST_BUILD_DIR")
-		runBuildAssemblyScript(dir, ".", "latest", 1)
-		return
-	}
-	emptyDir := t.TempDir()
-	cmd := exec.Command(os.Args[0], "-test.run=^TestRunBuild_ASTarget_NoPackageJSON$")
-	cmd.Env = append(os.Environ(),
-		"TEST_BUILD_AS=1",
-		"TEST_BUILD_DIR="+emptyDir,
-	)
-	out, err := cmd.CombinedOutput()
-	if err == nil {
-		t.Fatal("expected exit error for missing package.json, got none")
-	}
-	if !strings.Contains(string(out), "no package.json") {
-		t.Errorf("expected 'no package.json' in output, got: %s", string(out))
 	}
 }
 
