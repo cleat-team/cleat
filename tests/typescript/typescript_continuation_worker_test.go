@@ -9,6 +9,7 @@ package typescript
 // first 200.
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -38,6 +39,40 @@ func chainEnd(t *testing.T, w *worker, key, id string, within time.Duration) map
 	return nil
 }
 
+// chainReport describes the chain that ends at end, newest first, by walking continued_from back to the run that was started.
+//
+// It exists for cleat#4061: this test failed twice in CI (SQL Server, then MySQL) with only "the chain ended with map[]", which names
+// neither the run that ended the chain nor what that run was given. The fields kept are the ones that separate the readings of that
+// failure: the input each link ran with (an empty one makes the guest return {}), its status, and reclaim_count, which says whether a
+// link was taken over from another worker. A link that cannot be read is reported as such rather than ending the walk silently.
+func chainReport(t *testing.T, w *worker, key string, end map[string]any) string {
+	t.Helper()
+	keep := []string{"id", "status", "input", "result", "error", "error_code", "assigned_to", "continued_from", "reclaim_count", "created_at", "updated_at", "completed_at"}
+	var lines []string
+	cur := end
+	for hops := 0; cur != nil && hops < 16; hops++ {
+		row := map[string]any{}
+		for _, k := range keep {
+			if v, ok := cur[k]; ok {
+				row[k] = v
+			}
+		}
+		b, _ := json.Marshal(row)
+		lines = append(lines, string(b))
+		prev, _ := cur["continued_from"].(string)
+		if prev == "" {
+			break
+		}
+		code, r := api(t, w, key, "GET", "/api/workflows/"+prev, nil)
+		if code != 200 {
+			lines = append(lines, fmt.Sprintf("(could not read the predecessor %s: HTTP %d)", prev, code))
+			break
+		}
+		cur = r
+	}
+	return strings.Join(lines, "\n")
+}
+
 func TestTypeScriptContinueAsNewOnARealWorker(t *testing.T) {
 	const src = "tests/typescript/testdata/workflows/continuation.ts"
 	e := newWorkerEnv(t, map[string]string{"continuation": src})
@@ -45,13 +80,17 @@ func TestTypeScriptContinueAsNewOnARealWorker(t *testing.T) {
 
 	// A run that continues as new three times, each with the input the guest chose, and then returns: the end of the chain holds the
 	// answer that only the continued runs could have computed, and it is a DIFFERENT run from the one that was started.
+	began := time.Now()
 	id := startRun(t, w, e.key, "continuation", map[string]any{"n": 1, "limit": 4})
 	end := chainEnd(t, w, e.key, id, 120*time.Second)
+	// Logged on EVERY run, passing ones too: cleat#4061's two failures both sat near 95s of the 120s budget, and CI logs held no passing
+	// duration to compare them with, so "how long does this normally take" had no answer.
+	t.Logf("the chain ended after %s", time.Since(began).Round(time.Millisecond))
 	if s, _ := end["status"].(string); s != "done" {
-		t.Fatalf("the end of the chain is %q, want done: %v\nworker log tail:\n%s", s, end, tail(w.out.String(), 3000))
+		t.Fatalf("the end of the chain is %q, want done: %v\nthe chain, newest first:\n%s\nworker log tail:\n%s", s, end, chainReport(t, w, e.key, end), tail(w.out.String(), 3000))
 	}
 	if got := resultObject(t, end); got["n"] != float64(4) {
-		t.Errorf("the chain ended with %v, want n=4: the new runs did not receive the input the previous run asked for", got)
+		t.Errorf("the chain ended with %v, want n=4: the new runs did not receive the input the previous run asked for\nthe chain, newest first:\n%s\nthe end run's whole reply: %v\nworker log tail:\n%s", got, chainReport(t, w, e.key, end), end, tail(w.out.String(), 3000))
 	}
 	if endID, _ := end["id"].(string); endID == id {
 		t.Errorf("the end of the chain is the run that was started (%s): nothing continued", id)
