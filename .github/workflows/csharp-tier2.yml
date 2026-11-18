@@ -20,9 +20,12 @@ name: C# Tier 2
 #     runner has no binfmt/QEMU, so it cannot execute the arm64 image (tests/csharp needPlatform). One skip, declared in
 #     scripts/skip-ledger.d/csharp-tier2.tsv.
 #   - arm64 (ubuntu-24.04-arm, NATIVE, no emulator): the lock's arm64 row and a real arm64 compile. The job declares csharp-arm64, so
-#     if the leg cannot run it FAILS rather than skips. The amd64 leg skips there, for the mirror reason (skip-ledger.d/
-#     csharp-tier2-arm64.tsv). Native rather than QEMU was MEASURED (n=1, 2026-11-18, cleat#4080): restore-only cold 28 s native
-#     against 70 s emulated, warm 1 s against 22 s, and a native full build is 11 s.
+#     if the leg cannot run it FAILS rather than skips. It runs ONLY the linux_arm64 subtest (the `/^linux_arm64$` in its -run), so it
+#     skips nothing and its budget is zero. It does not probe linux/amd64, and that is measured, not assumed: on this runner's first
+#     run (cleat#4098) the amd64 probe pulled the image and then failed with "docker: cannot overwrite digest" (one digest reference,
+#     a second platform, a daemon that will not hold both), which is neither a missing emulator nor a finding about the lock. The
+#     amd64 row is verified by the x86_64 job. Native rather than QEMU was MEASURED (n=1, 2026-11-18, cleat#4080): restore-only cold
+#     28 s native against 70 s emulated, warm 1 s against 22 s, and a native full build is 11 s.
 # Arm jobs share the organisation's hosted-runner concurrency limit.
 
 # cleat#3073: surfaces the triggering activity type in the run's display title, so a PR body edit's run set is
@@ -158,11 +161,12 @@ jobs:
           go-version-file: go.mod
 
       # Not the whole package: the lock's arm64 row, and one real arm64 compile with its stamp read back. The rest runs on x86_64 and
-      # costs the same here.
+      # costs the same here. `/^linux_arm64$` selects the one subtest, so the amd64 leg is not run (see the header for why it is not
+      # probed either); the Stamped test has no subtests, so the subtest filter leaves it whole.
       - name: Tests (the arm64 lock and a native arm64 build)
         run: |
           set -o pipefail
-          go test -count=1 -timeout 25m -json -run '^(TestCSharpLockResolvesOnEveryPlatform|TestCSharpBuildProducesAStampedComponent)$' ./tests/csharp/... | tee csharp-tier2-arm64-report.json > /dev/null
+          go test -count=1 -timeout 25m -json -run '^(TestCSharpLockResolvesOnEveryPlatform|TestCSharpBuildProducesAStampedComponent)$/^linux_arm64$' ./tests/csharp/... | tee csharp-tier2-arm64-report.json > /dev/null
 
       - name: Upload the report
         if: always()
@@ -191,5 +195,5 @@ jobs:
             grep '"Action":"pass"' "$f" | grep -qF "\"Test\":\"$t\"" || { echo "$t did not pass on this arm64 runner" >&2; exit 1; }
           done
 
-      - name: "Skip budget (one: the amd64 leg, which this runner cannot execute)"
+      - name: "Skip budget (zero: only the arm64 leg is selected, and csharp-arm64 is declared)"
         run: scripts/check-skip-budget.sh csharp-tier2-arm64 csharp-tier2-arm64-report.json
