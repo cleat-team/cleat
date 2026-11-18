@@ -112,7 +112,25 @@ public sealed partial class HostCalls
 
     /// <inheritdoc cref="Defer(string, Action)"/>
     public void Defer(string description, Func<Task> body)
-        => _defers.Register(IDurableLifecycleImports.DurableDefer(description), body);
+        => _defers.Register(() => HostDefer(description), body);
+
+    /// <summary>
+    /// The host half of <see cref="Defer(string, Func{Task})"/>: <c>durable-defer</c> returns <c>result&lt;string,
+    /// call-failure&gt;</c> since cleat#4079, and a stop arrives as the <c>suspended</c> case. It becomes
+    /// <see cref="CleatSuspendException"/> like every other stop, and <see cref="DeferTable"/> decides what each case
+    /// does to the table.
+    /// </summary>
+    private static string HostDefer(string description)
+    {
+        try
+        {
+            return IDurableLifecycleImports.DurableDefer(description);
+        }
+        catch (WitException e) when (e.Value is IOutcomesImports.CallFailure f)
+        {
+            throw Translate("workflow", "defer", f);
+        }
+    }
 
     /// <summary>The cancellation reason if cancellation has been requested, or an empty string.</summary>
     public string PollCancellation() => IDurableLifecycleImports.DurablePollCancellation();

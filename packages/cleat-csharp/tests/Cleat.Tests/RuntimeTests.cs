@@ -154,6 +154,91 @@ public class DeferTableTests
         t.Drain(true);
         Assert.True(done);
     }
+
+    // ---- reserve first (cleat#4079): durable-defer can stop the guest AFTER the host recorded the registration ----
+
+    private static Func<Task> Body(List<string> ran, string name) => () => { ran.Add(name); return Task.CompletedTask; };
+
+    [Fact]
+    public void TheBodyIsOnTheTableBeforeTheHostIsAsked()
+    {
+        var t = Table(new());
+        IReadOnlyList<string>? seen = null;
+        t.Register(() => { seen = t.Ids(); return "d1"; }, Body(new(), "a"));
+        // One entry, not yet carrying an id, at the moment the host call runs. Appending after the call would read [].
+        Assert.Equal(new[] { "" }, seen);
+        Assert.Equal(new[] { "d1" }, t.Ids());
+    }
+
+    [Fact]
+    public void TheHostsIdReplacesTheEntryInPlaceAndTheOrderIsUnchanged()
+    {
+        var ran = new List<string>();
+        var t = Table(new());
+        t.Register(() => "A", Body(ran, "a"));
+        t.Register(() => "B", Body(ran, "b"));
+        t.Register(() => "C", Body(ran, "c"));
+        Assert.Equal(new[] { "A", "B", "C" }, t.Ids());
+        t.Drain(true);
+        Assert.Equal(new[] { "c", "b", "a" }, ran);
+    }
+
+    [Fact]
+    public void TheDrainDoesNotLookABodyUpByItsId()
+    {
+        // Two registrations that came back with the SAME id: a lookup by id could run only one body. The id is a label.
+        var ran = new List<string>();
+        var t = Table(new());
+        t.Register(() => "same", Body(ran, "a"));
+        t.Register(() => "same", Body(ran, "b"));
+        Assert.Equal(2u, t.Drain(true));
+        Assert.Equal(new[] { "b", "a" }, ran);
+    }
+
+    [Fact]
+    public void AStopKeepsTheEntryPropagatesAndTheDrainRunsIt()
+    {
+        var ran = new List<string>();
+        var t = Table(new());
+        t.Register(() => "A", Body(ran, "a"));
+        var calls = 0;
+        Assert.Throws<CleatSuspendException>(() =>
+            t.Register(() => { calls++; throw new CleatSuspendException(); }, Body(ran, "b")));
+        // The stop arrived after the host recorded "b", so "b" must still be there to run, in its place.
+        Assert.Equal(1, calls);
+        Assert.Equal(new[] { "A", "" }, t.Ids());
+        Assert.Equal(2u, t.Drain(true));
+        Assert.Equal(new[] { "b", "a" }, ran);
+    }
+
+    [Fact]
+    public void AnyOtherFailureDiscardsTheEntryAndSurfacesTheFailure()
+    {
+        var ran = new List<string>();
+        var t = Table(new());
+        t.Register(() => "A", Body(ran, "a"));
+        var boom = Assert.Throws<CleatCallPermanentException>(() =>
+            t.Register(() => throw new CleatCallPermanentException("workflow", "defer", "refused", 3u), Body(ran, "b")));
+        Assert.Contains("refused", boom.Message);
+        // The host never registered "b", so it must not run, and "a" is untouched.
+        Assert.Equal(new[] { "A" }, t.Ids());
+        Assert.Equal(1u, t.Drain(true));
+        Assert.Equal(new[] { "a" }, ran);
+    }
+
+    [Fact]
+    public void AStopFromTheFirstRegistrationStillLeavesThatBodyToRun()
+    {
+        // The case the whole change exists for: a killed run stops at its FIRST durable-defer. Nothing is on the table
+        // but the body that call was registering.
+        var ran = new List<string>();
+        var t = Table(new());
+        Assert.Throws<CleatSuspendException>(() =>
+            t.Register(() => throw new CleatSuspendException(), Body(ran, "only")));
+        Assert.Equal(1, t.Count);
+        Assert.Equal(1u, t.Drain(true));
+        Assert.Equal(new[] { "only" }, ran);
+    }
 }
 
 public class EntryHostTests
