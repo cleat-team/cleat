@@ -795,6 +795,61 @@ tier2:
            prototype-era figure the plugin has since outgrown. The 100 KB line applies to
            dynamic mode only, which is out of scope"
 
+    - id: sdk-csharp
+      status: IN DEVELOPMENT -- NOT SUPPORTED
+      why: |
+        C# guests as Component Model components built with componentize-dotnet against the
+        existing `cleat-workflow` world in python-sdk/wit/cleat.wit (Route B of the cleat#4077
+        spike). Owner decision 2026-11-18: build it, as tier 2, in the seven PRs tracked in
+        cleat#4080. This entry exists so that having a label and a test package is not read
+        as having support; it claims nothing, and it stays "IN DEVELOPMENT -- NOT SUPPORTED"
+        until the last of the seven (the one that wires the tier-2 gate and the promotion
+        criteria). The status changes in that PR, not before.
+
+        What the spike measured on the real engine (a spike branch, a mock caller, amd64 under
+        emulation; cleat#4077 separates measured from inferred, and nothing below is a
+        support claim): a C# component ran an identity call, a durable call recorded as one
+        history event, a suspension thrown 20 frames deep, a replay from history and a
+        `run-deferred` after a suspend; a component is 0.7-1.05 MB. Three things stood between
+        it and a usable guest, all on the engine side, tracked as C# PR 3: the engine's default
+        per-store memory limit (32 MiB) is below what .NET needs to start (at least 52 MiB);
+        the WASI determinism shadows are registered for one 0.2 minor and the toolchain imports
+        another, so DateTime.UtcNow, Random and Guid differ on every replay (a measured
+        defect); and a kill gives a component no defer drain (cleat#4079).
+
+        What exists on develop as of the PR that added this entry (2026-11-18; re-derive from
+        the tree, do not trust this sentence): the label "csharp" in engine.WasmtimeLanguages
+        (routes a module that declares it to the wasmtime backend and does nothing else;
+        defer-segment membership is C# PR 3's decision), the Go test package tests/csharp/,
+        and the guard below. What did not exist then: a build chain, a stamper, an SDK, a
+        host-call binding, a CI job.
+
+        Where its tests live, and why it matters (the exclusion is structural, not a list):
+        every Go-side C# test is named TestCSharp* and lives in tests/csharp/, a package in
+        tier2.packages and in NO tier-1 pattern, so it cannot run in the Tier 1 gate, where a
+        skip is a failure. scripts/check-csharp-tier.py refuses a TestCSharp* function
+        anywhere else, refuses a test that names the C# toolchain outside that package, and
+        refuses to pass if tests/csharp/ holds none. The SDK itself and its managed unit tests
+        will live in packages/cleat-csharp/ and run in a digest-pinned .NET SDK container, not
+        under `go test`; that directory does not exist yet. LANGUAGE_SUPPORT.md's C#/.NET row
+        is checked against this entry by scripts/check-typescript-tier.py, which compares
+        every row of the table with tiers.yaml.
+      open_items:
+        - "the build chain: `cleat build --target csharp` in a pinned linux/amd64 container,
+           a toolchain lock (SDK image digest, the dotnet-experimental feed and package
+           versions, wasi-sdk 29 by hash), and a MANDATORY cleat.metadata stamp naming
+           \"csharp\" -- an unstamped C# component is detected as python and routed as a Python
+           guest (C# PR 2, cleat#4080)"
+        - "engine: a per-language memory default, WASI determinism shadows that tolerate the
+           WASI 0.2 minor a component imports, and `csharp` in deferSegmentLanguages with the
+           test that earns it (C# PR 3)"
+        - "the SDK, host-call coverage, a determinism vet, and the tier-2 gate (C# PRs 4-7).
+           async/await over host calls was measured for PR 4's design (cleat#4077, comment
+           6985233908) and is not built"
+        - "the toolchain is a prerelease: Microsoft.DotNet.ILCompiler.LLVM 10.0.0-rc.1.* from
+           the dotnet-experimental feed (not on nuget.org) and componentize-dotnet
+           0.8.0-preview; builds are not byte-reproducible"
+
     - id: plugins
       why: 22 built-in, all with unit tests; 10 covered by the integration harness.
       open_items:
@@ -1246,6 +1301,10 @@ tier2:
     # package is in no tier-1 pattern, and scripts/check-typescript-tier.py checks both
     # halves. It must hold at least one test, or "must run" is satisfied by nothing.
     - ./tests/typescript/...
+    # Added with the C# tier-2 scaffolding (cleat#4080), the same shape as ./tests/typescript/... above: the Go-side C# tests live
+    # here and nowhere else, the package is in no tier-1 pattern, and scripts/check-csharp-tier.py checks both halves. It must hold
+    # at least one test, or "must run" is satisfied by nothing.
+    - ./tests/csharp/...
 
   # Tier-2 suites gated by a dedicated job rather than by scripts/tier2-gate.sh, because
   # that job already enforces something STRICTER than this gate would.
