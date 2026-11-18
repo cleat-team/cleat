@@ -11,8 +11,9 @@ grep and GNU grep disagree on exactly those. `re` is the same everywhere.
 
 Usage:
   scripts/sdk-host-call-coverage.py            # report
-  scripts/sdk-host-call-coverage.py --check    # fail if coverage fell below the baseline
+  scripts/sdk-host-call-coverage.py --check    # fail if coverage or the surface differs from the baseline, either way
   scripts/sdk-host-call-coverage.py --update   # rewrite the baseline
+  scripts/sdk-host-call-coverage.py --self-test  # prove --check fails on a stale baseline
 """
 
 from __future__ import annotations
@@ -210,7 +211,82 @@ MODES = {
     "--executed",
     "--check-executed",
     "--update-executed",
+    "--self-test",
 }
+
+
+def compare_to_baseline(got: dict, base: dict) -> list[str]:
+    """Every way the measured coverage differs from the committed baseline, as messages.
+
+    Empty means the baseline is exactly current. Pure -- it reads no file -- so --self-test can
+    hand it a baseline that is wrong on purpose.
+    """
+    problems: list[str] = []
+    for name, d in sorted(got.items()):
+        want = base.get(name)
+        if want is None:
+            problems.append(f"{name}: not in the baseline -- add it with --update")
+            continue
+        if d["covered"] < want["covered"]:
+            problems.append(
+                f"{name}: coverage fell {want['covered']} -> {d['covered']} of {d['surface']}. "
+                f"A host call that stopped being exercised is one nothing compiles or runs."
+            )
+        elif d["covered"] > want["covered"]:
+            # A RISE FAILS, for the reason --check-executed's rise fails (read the comment there):
+            # a shrink-only ratchet cannot tell a stale baseline from an accurate one, so the file
+            # fell 10 calls behind on Go (39 recorded, 49 measured) and CI printed "run --update"
+            # on a green run for as long as it took nobody to read it (cleat#4054).
+            problems.append(
+                f"{name}: coverage rose {want['covered']} -> {d['covered']}. That is good news "
+                f"and it has to be recorded, or a later fall back to {want['covered']} passes "
+                f"unnoticed. Run: scripts/sdk-host-call-coverage.py --update"
+            )
+        # THE SURFACE IS COMPARED TOO, in both directions, because `covered` alone cannot see it.
+        # A method added to an SDK and exercised by no fixture lowers the percentage and leaves
+        # `covered` untouched, so java grew 64 -> 74 methods and rust 65 -> 73 under a green check.
+        # A surface that SHRINKS also fails: the recorded denominator then names methods that no
+        # longer exist, and the percentage computed from it is wrong the same way.
+        if d["surface"] != want["surface"]:
+            problems.append(
+                f"{name}: the SDK surface is {d['surface']} methods and the baseline says "
+                f"{want['surface']}. A method that was added or removed has to be recorded. "
+                f"Run: scripts/sdk-host-call-coverage.py --update"
+            )
+    return problems
+
+
+def self_test() -> int:
+    """Known-positives for compare_to_baseline. Reads nothing from the tree.
+
+    A guard whose only evidence is that it passes on a current baseline has not shown it can fail
+    (cleat#4054: this one passed on a baseline ten calls stale). Each case below is a baseline that
+    is wrong in ONE named way, and says which message must name it, so a case cannot pass because a
+    different check happened to fire.
+    """
+    got = {"x": {"surface": 10, "covered": 8}}
+    cases = [
+        ("exact match", {"x": {"surface": 10, "covered": 8}}, None),
+        ("covered rose (baseline lower)", {"x": {"surface": 10, "covered": 6}}, "coverage rose"),
+        ("covered fell (baseline higher)", {"x": {"surface": 10, "covered": 9}}, "coverage fell"),
+        ("surface grew under it (covered equal)", {"x": {"surface": 7, "covered": 8}}, "the SDK surface is 10"),
+        ("surface shrank under it (covered equal)", {"x": {"surface": 13, "covered": 8}}, "the SDK surface is 10"),
+        ("SDK missing from the baseline", {}, "not in the baseline"),
+    ]
+    bad = 0
+    for label, base, want_text in cases:
+        problems = compare_to_baseline(got, base)
+        ok = (not problems) if want_text is None else any(want_text in m for m in problems)
+        # The surface-only cases must fire ONLY the surface message, or the case is testing the other check.
+        if want_text and want_text.startswith("the SDK surface") and any(("coverage rose" in m or "coverage fell" in m) for m in problems):
+            ok = False
+        print(f"  {'ok  ' if ok else 'FAIL'} {label}" + ("" if ok else f"  -> {problems}"))
+        bad += 0 if ok else 1
+    if bad:
+        print(f"{bad} self-test case(s) failed: --check cannot be trusted", file=sys.stderr)
+        return 1
+    print("self-test: --check fails on a stale covered (both ways) and a stale surface (both ways)")
+    return 0
 
 
 def main() -> int:
@@ -220,6 +296,9 @@ def main() -> int:
         print(f"unknown mode {mode!r}", file=sys.stderr)
         print(f"usage: {sys.argv[0]} [{' | '.join(sorted(MODES))}]", file=sys.stderr)
         return 2
+
+    if mode == "--self-test":
+        return self_test()
 
     # --executed and --check-executed are the A2 modes. They share the ratchet
     # shape of the compile modes above and a SEPARATE baseline key, because the
@@ -338,23 +417,10 @@ def main() -> int:
         print(f"no baseline at {BASELINE}; run --update", file=sys.stderr)
         return 2
     base = json.loads(BASELINE.read_text())
-    failed = False
-    for name, d in sorted(got.items()):
-        want = base.get(name)
-        if want is None:
-            print(f"FAIL {name}: not in the baseline -- add it with --update", file=sys.stderr)
-            failed = True
-            continue
-        if d["covered"] < want["covered"]:
-            print(
-                f"FAIL {name}: coverage fell {want['covered']} -> {d['covered']} of {d['surface']}. "
-                f"A host call that stopped being exercised is one nothing compiles or runs.",
-                file=sys.stderr,
-            )
-            failed = True
-        elif d["covered"] > want["covered"]:
-            print(f"  {name}: coverage rose {want['covered']} -> {d['covered']}; run --update to lock it in")
-    return 1 if failed else 0
+    problems = compare_to_baseline(got, base)
+    for p in problems:
+        print(f"FAIL {p}", file=sys.stderr)
+    return 1 if problems else 0
 
 
 # ---------------------------------------------------------------------------
