@@ -135,7 +135,7 @@ TESTONLY_BASELINE="scripts/exported-test-only-baseline.txt"
 #   pluginapi/    -- "Public re-exports for external plugin authors"
 #   crates/       -- Rust + Java SDKs, not Go
 #   python-sdk/   -- Python SDK, not Go
-#   packages/     -- AssemblyScript SDK, not Go
+#   packages/     -- TypeScript SDK (cleat-ts), not Go
 #   examples/     -- example workflows, not library code with callers to find
 #   tests/        -- integration suites; their exported helpers are consumed
 #                    by other files under tests/, which this script does not

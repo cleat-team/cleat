@@ -11,7 +11,9 @@ Two guards existed before this one and neither reaches the case above:
 `.github/workflows/plugin-harness-ci.yml`'s "Tests did not rewrite their own
 fixtures" step diffs `tests/plugin-harness/testdata` for files a TEST RUN
 changed -- it only sees drift a job's own steps introduce, in a job that
-never touches `examples/` or `packages/cleat-as` in the first place. And
+never touches `examples/` or `packages/cleat-as` in the first place (both
+since removed with the AssemblyScript SDK, cleat#4023; the mechanism below
+is unchanged and is exercised by `--self-test`'s synthetic trees). And
 nothing else reads a lockfile's `file:` entries at all.
 
 This script needs no npm and no network: it parses package.json/

@@ -521,12 +521,6 @@ linters:
         text: "G602"
         path: 'cmd/cleatctl/(debug|replay)\.go$'
 
-      # G706 log injection (taint), examples/widget-store-as: an example program logging its own listen
-      # address. Examples are not production code.
-      - linters: [gosec]
-        text: "G706"
-        path: 'widget-store-as/host/main\.go$'
-
       # ---- staticcheck, the ones that are not an ineffassign counter (cleat#2216) ----------------------
       # SA6001, wasm/component_rewrite.go x2: `k := string(key); m[k]` where the string is also used again
       # below. An allocation micro-optimisation in a one-time module rewrite, not a hot path.
