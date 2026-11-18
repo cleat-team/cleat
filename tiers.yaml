@@ -701,60 +701,6 @@ tier2:
            SDK gaps still open: no saga abstraction, JsonHelper.parse only supports
            String.class, no getQueryState, durableDefer takes a description not a closure"
 
-    - id: sdk-assemblyscript
-      decision: DECIDED 2026-08-06    # D4 -- see open_items; same shape as Java was
-      why: |
-        Moved up from tier 3 on 2026-08-06, on the same kind of measurement and with the
-        same caveat as Java. Measured that day: TestAssemblyScriptWorkflowExecute PASSES
-        on wasmtime -- inventory.Reserve -> payments.Charge -> shipping.CreateShipment ->
-        notifications.SendEmail, four calls in order -- and the SDK's own as-pect suite is
-        106/106 across three spec files.
-
-        It has since had #347's treatment (#350): the six best-effort t.Skipf sites are
-        failures, the one legitimate environmental skip goes through
-        toolchainRequired("assemblyscript"), the AssemblyScript Tests job no longer
-        carries continue-on-error, and it is first-class in e2e-cross-language.yml's
-        CLEAT_REQUIRE_TOOLCHAINS.
-
-        Making it able to fail found two real defects the same day, which is the argument
-        for tier 2 rather than tier 1 far better than any list of open items:
-
-          * No data flowed between the saga's steps. examples/as-workflow read
-            reservationID / totalCents / chargeID out of responses spelling them
-            reservation_id / total_cents / charge_id, so payments.Charge was invoked for
-            zero and the result carried an empty reservation_id. The test asserted only
-            "result non-empty" and the call sequence, so it passed throughout.
-          * The example could not be installed from a clean checkout at all.
-            package-lock.json recorded its two `file:` devDependencies in a form `npm ci`
-            refuses, and had for as long as the file has been in that shape. Invisible
-            because it reached a best-effort skip, and because node_modules is untracked
-            -- anyone who had ever run `npm install` there kept a working tree.
-
-        Both are fixed, and the e2e now asserts each value that has to survive a hop.
-        Tier 1 wants a record, not a good day; revisit after the open item below.
-      open_items:
-        - "RESOLVED 2026-08-09: isReplaying() removed rather than implemented. It was hardcoded
-           `return false` with no host call behind it in any SDK, so every 'only on first
-           execution' branch fired on every replay -- duplicate logs, metrics and
-           notifications after each worker restart, with nothing failing. A raw replay flag
-           is a determinism footgun regardless: branching workflow LOGIC on it records
-           different events on replay than on execution. sideEffect() already covers the one
-           safe use and is replay-consistent by construction. Documented in
-           docs/determinism.md and the Temporal migration guide, which had never mentioned
-           it despite Temporal's own IsReplaying() being a well-known footgun"
-        - "RESOLVED 2026-09-02 (§3.73): HostCalls.defer registered a DESCRIPTION and nothing
-           else -- the host recorded that a defer existed and no code anywhere could run it,
-           while the doc comment said it registers 'cleanup to run on workflow exit'. Same
-           defect as Go's §3.70, in the fourth and last SDK. deferFunc(h, description, fn,
-           payload) now carries a body, drained LIFO by the generated wrapper. State is
-           passed rather than captured because --runtime stub has no closures, which is this
-           SDK's existing idiom (saga.ts). The guard that matters is the suspend one: unlike
-           the other three SDKs, AssemblyScript does not suspend by unwinding, so the drain
-           is only correct because it sits after an explicit isWorkflowSuspended() check --
-           pinned by TestAssemblyScriptDefersDoNotRunOnSuspension, verified by moving the
-           drain one line earlier. __cleat_run_deferred is emitted too, so §3.35 phase 4's
-           kill-path cleanup reaches AssemblyScript guests"
-
     - id: sdk-typescript
       decision: DECIDED 2026-11-17    # owner: tier 2 in the PR after the cleat#3898 fix, once no SILENT divergence remains
       why: |
@@ -962,7 +908,7 @@ tier2:
            a hole -- but it is the file a reader checks first"
 
     - id: workflow-callable-cron
-      status: SUPPORTED in go, assemblyscript and python
+      status: SUPPORTED in go and python
       why: |
         Added 2026-08-08. A workflow can register, remove and list recurring triggers for
         other workflows: cleat_schedule_cron / cleat_delete_cron / cleat_list_crons, on
@@ -1567,7 +1513,7 @@ tier2:
 #
 #     WHAT CHANGED with cleat#3692, and it is wider than the race detector. The Tier 1
 #     Gate no longer runs ALL of ./tests/crash/...: the tier-2 agent clients (rust,
-#     java, assemblyscript) are
+#     java, and assemblyscript until cleat#4023 removed it) are
 #     TestCrashMidAgentLoopInATierTwoLanguageResumesWithoutReaskingTheModel, which
 #     tier1.exclude_tests removes, so this unrequired job is the only one that runs
 #     them. A failure there is red and visible and does not stop a merge. That is what
@@ -1747,7 +1693,8 @@ required_contexts:
       job: test-java
       covers: tier2
       why_required: |
-        tier2.components sdk-java, and the same parity argument as AssemblyScript.
+        tier2.components sdk-java, and the same parity argument that made the AssemblyScript
+        Tests job required until cleat#4023 removed it.
         Note gradle's own trap, recorded because it cost a session: `gradle test` prints
         green with every task UP-TO-DATE and zero tests executed.
     - context: Test Rust
@@ -1881,6 +1828,9 @@ tier3:
 
   components:
     # sdk-java and sdk-assemblyscript were here. Both moved to tier 2 on 2026-08-06.
+    # sdk-assemblyscript is no longer in tier 2 either: it was REMOVED, not parked (cleat#4023,
+    # 2026-11-18). Nothing is built, shipped or claimed for it, and the engine refuses a module
+    # built with it, naming the removal. sdk-java is unaffected.
     #
     # Worth recording why they were ever here, because the mistake is repeatable: both
     # were parked on the output of their own e2e tests, and both of those tests degraded
@@ -1948,6 +1898,8 @@ tier3:
 #       this makes authentication a feature to build, not a header to add.
 #   D4  DECIDED 2026-08-06. Java and AssemblyScript are tier 2, not parked. Both were
 #       parked on the output of tests that could not fail; see the note in tier 3.
+#       SUPERSEDED FOR ASSEMBLYSCRIPT 2026-11-18: it was removed from the repository
+#       (cleat#4023). The decision for Java stands.
 #   D5  DECIDED 2026-08-06. The tier-1 gate filters lower-tier tests out; it does not
 #       provision their toolchains. Recorded inline above tier1.rules.
 #   D6  DECIDED 2026-09-02, IMPLEMENTED 2026-09-04 for TerminateWorkflow.
