@@ -1060,9 +1060,13 @@ control-plane database, on SQL Server `dbo.tenant_settings`.) The table's CHECK
 only requires the value to be positive, so a direct SQL write can still store a
 low one.
 
-Not covered, and still reaching the cliff as ABI.md documents: the engine option
-a library user sets directly, a context deadline, the epoch tick, and a per-run
-`wasm_instance_timeout_ms` on the start request.
+A run's own `wasm_instance_timeout_ms` on the start request (`POST /api/workflows/<name>/start`) is
+held to the same floor: a value above 0 and under 250 is a `400`. See "Per-run limit overrides on a
+start request" in `docs/reference/workflow-lifecycle.md`.
+
+Not covered, and still reaching the cliff as ABI.md documents: a direct SQL write to
+`tenant_settings` or `workflow_instances`, the engine option a library user sets directly, a context
+deadline, and the epoch tick.
 
 ---
 

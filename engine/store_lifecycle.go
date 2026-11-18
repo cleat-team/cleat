@@ -1644,6 +1644,9 @@ func (s *PostgresStore) StartNewRunWithConcurrencyKey(ctx context.Context, runID
 // INSERT that creates the run. See StartOptions for why the two suffixed
 // methods collapsed into one.
 func (s *PostgresStore) StartNewRunWithOptions(ctx context.Context, runID, defName string, defVersion int, input json.RawMessage, idempotencyKey string, tenantID string, priority int, opts StartOptions) (string, bool, error) {
+	if err := opts.Validate(); err != nil {
+		return "", false, err
+	}
 	return s.startNewRun(ctx, runID, defName, defVersion, input, idempotencyKey, tenantID, priority, opts)
 }
 

@@ -7,7 +7,7 @@ import (
 )
 
 // MinWasmInstanceTimeout is the smallest non-zero guest-execution time bound cleat accepts from an operator or a tenant
-// administrator: the worker's --wasm-instance-timeout flag and a tenant's wasm_instance_timeout_ms setting.
+// administrator or a caller: the worker's --wasm-instance-timeout flag, a tenant's wasm_instance_timeout_ms setting, and a run's own wasm_instance_timeout_ms on its start request.
 //
 // WHY A FLOOR. ABI.md ("There is a cliff below about 200 ms") records the measurement: at an instance timeout of 100ms the soft
 // kill reached the guest 0 times in 20 runs, at 150ms 18 of 20, and at 200ms and 240ms 20 of 20 (cleat#3922 review, 2026-11-18).
@@ -15,7 +15,7 @@ import (
 // not reliably run. 250ms leaves headroom over the measured 200ms and equals DefaultWasmtimeInterruptMarginTime, but it is written
 // out rather than aliased: the floor is operator-facing policy, and it should not move because an engine tuning constant did.
 //
-// ONE CONSTANT, ONE MESSAGE. The worker flag and the tenant setting share this value and the wording below, so the two refusals
+// ONE CONSTANT, ONE MESSAGE. The worker flag, the tenant setting and the per-run override share this value and the wording below, so the two refusals
 // cannot drift apart.
 const MinWasmInstanceTimeout = 250 * time.Millisecond
 
