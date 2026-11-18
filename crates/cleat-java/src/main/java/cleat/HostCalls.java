@@ -2912,15 +2912,45 @@ public class HostCalls {
 
         Memory.throwIfStopped(result);
 
-        int errCode = Memory.decodeCallErrCode(result);
-        int responseLen = Memory.decodeCallResponseLen(result);
+        return fetchResult(result, HostCalls::readOutput);
+    }
 
-        if (errCode != 0) {
-            String errMsg = readOutput(responseLen);
-            return CleatResult.err(errMsg);
+    /**
+     * Decode the {@code long} the host returns from {@code cleat_fetch}.
+     *
+     * <p>The host packs it with {@code packSimpleResult} (engine/memory.go): the
+     * length is bits 32-63 and the error code bits 0-7. It is NOT the
+     * {@code cleat_call} layout, whose length is bits 40-63, and this method
+     * used to decode it as that one -- so the length read as {@code written >> 8},
+     * which is 0 for any answer under 256 bytes and a truncation above, and every
+     * fetch failed with an empty-JSON parse error (cleat#4039).
+     *
+     * <p>Package-private and static, taking the output reader as a parameter, so
+     * a test can hand it the value the engine really packs and observe which
+     * length it asks for. The native import underneath cannot be called from a
+     * unit test.
+     */
+    static CleatResult<FetchResult> fetchResult(long result, java.util.function.IntFunction<String> read) {
+        CleatResult<String> text = simpleTextResult(result, read);
+        if (text.isErr()) {
+            return CleatResult.err(text.getError());
         }
+        return parseFetchResponse(text.getValue());
+    }
 
-        return parseFetchResponse(readOutput(responseLen));
+    /**
+     * Decode a host call that returns text through {@code packSimpleResult}:
+     * error code in bits 0-7, output length in bits 32-63. Used by
+     * {@code cleat_fetch}, {@code cleat_json_parse} and
+     * {@code cleat_json_stringify}. The durable-call family ({@code cleat_call},
+     * {@code cleat_call_retry}, the plugin calls, ...) uses a different layout
+     * and its own decoders in {@link Memory}.
+     */
+    static CleatResult<String> simpleTextResult(long result, java.util.function.IntFunction<String> read) {
+        int errCode = Memory.decodeSimpleErrCode(result);
+        int len = Memory.decodeSimpleExtra(result);
+        String text = read.apply(len);
+        return errCode != 0 ? CleatResult.err(text) : CleatResult.ok(text);
     }
 
     /**
@@ -3115,16 +3145,8 @@ public class HostCalls {
             p[0], p[1],
             Memory.OUTPUT_OFFSET, Memory.OUT_BUF_SIZE);
 
-        int errCode = Memory.decodeCallErrCode(result);
-        int outLen = Memory.decodeCallResponseLen(result);
-
-        if (errCode != 0) {
-            String errMsg = readOutput(outLen);
-            return CleatResult.err(errMsg);
-        }
-
-        String normalized = readOutput(outLen);
-        return CleatResult.ok(normalized);
+        // packSimpleResult, NOT the cleat_call layout (cleat#4039).
+        return simpleTextResult(result, HostCalls::readOutput);
     }
 
     /**
@@ -3145,16 +3167,8 @@ public class HostCalls {
             p[0], p[1],
             Memory.OUTPUT_OFFSET, Memory.OUT_BUF_SIZE);
 
-        int errCode = Memory.decodeCallErrCode(result);
-        int outLen = Memory.decodeCallResponseLen(result);
-
-        if (errCode != 0) {
-            String errMsg = readOutput(outLen);
-            return CleatResult.err(errMsg);
-        }
-
-        String canonical = readOutput(outLen);
-        return CleatResult.ok(canonical);
+        // packSimpleResult, NOT the cleat_call layout (cleat#4039).
+        return simpleTextResult(result, HostCalls::readOutput);
     }
 
     // ========================================================================
