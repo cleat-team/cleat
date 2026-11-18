@@ -5,8 +5,10 @@
 //   - "go"           — Standard Go wasip1 (go build with GOOS=wasip1 GOARCH=wasm)
 //   - "rust"         — Rust via cargo + wasm32-wasip1
 //   - "java"         — Java via Gradle + TeaVM
-//   - "assemblyscript" — AssemblyScript via asc
 //   - "python"       — Python via componentize-py
+//
+// "assemblyscript" was a target until cleat#4023 removed it. DetectLanguage still recognises an AssemblyScript module, so that the engine
+// can refuse it by name (engine.removedGuestLanguages) instead of running it as Go.
 package wasm
 
 import (

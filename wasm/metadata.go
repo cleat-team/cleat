@@ -592,7 +592,9 @@ func detectLanguageFromImports(wasmBytes []byte) string {
 		if imp.module == "teavm" {
 			return "java"
 		}
-		// AssemblyScript modules import env.abort for runtime error handling.
+		// AssemblyScript modules import env.abort for runtime error handling. AssemblyScript was removed (cleat#4023) and this is
+		// KEPT on purpose: the engine refuses what it recognises here by name (engine.removedGuestLanguages), whereas forgetting the
+		// shape would make a module with no metadata detect as "go" and run as one.
 		if imp.module == "env" && imp.field == "abort" {
 			return "assemblyscript"
 		}

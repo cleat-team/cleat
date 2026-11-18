@@ -70,11 +70,19 @@ func (e *Engine) backendForWasm(wasmBytes []byte) WasmBackend {
 //	          two never got.
 //
 // tiers.yaml grants no language outside WasmtimeLanguages (tier 1 is
-// [go, python], tier 2 adds rust, java, assemblyscript), so failing closed here
+// [go, python], tier 2 adds rust, java), so failing closed here
 // can only reject what was never claimed to work.
 func (e *Engine) resolveBackend(wasmBytes []byte) (WasmBackend, error) {
 	e.warnIfModuleWantsANewerABI(wasmBytes)
 	e.warnIfModuleCarriesAnUnknownJSEnginePin(wasmBytes)
+	// BEFORE the "no backends registered" return below, deliberately: see removedGuestLanguages for why an engine with no backends
+	// must refuse too.
+	if lang := wasm.DetectLanguage(wasmBytes); removedGuestLanguages[lang] != "" {
+		return nil, fmt.Errorf(
+			"host: refusing a module built with %s: the guest language %q was removed and cannot be run. %s. "+
+				"Rebuild the workflow in a supported guest language (see tiers.yaml) and deploy it again",
+			guestLanguageDisplayName(lang), lang, removedGuestLanguages[lang])
+	}
 	if backend := e.backendForWasm(wasmBytes); backend != nil {
 		return backend, nil
 	}
@@ -1081,4 +1089,13 @@ func (e *Engine) withResolvedWorkflowDeadline(ctx context.Context) (context.Cont
 		return context.WithTimeout(ctx, limit)
 	}
 	return ctx, func() {}
+}
+
+// guestLanguageDisplayName is the name an operator knows a removed language by. The label is lower-case metadata ("assemblyscript");
+// the refusal leads with the name people use, and keeps the label too so the two can be matched.
+func guestLanguageDisplayName(lang string) string {
+	if lang == "assemblyscript" {
+		return "AssemblyScript"
+	}
+	return lang
 }

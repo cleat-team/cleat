@@ -369,12 +369,11 @@ func TestDeferSegmentLanguagesIsExactlyWhatHasBeenVerified(t *testing.T) {
 		// control, on the SAME entry point, that records the body's call when the defer phase is off. The segment only
 		// records the defers because the module exports __cleat_run_deferred for the host to call; without it the segment
 		// suspends correctly and records nothing.
-		"javascript":     true,
-		"go":             true,
-		"java":           true,
-		"assemblyscript": true,
-		"rust":           true,
-		"python":         true,
+		"javascript": true,
+		"go":         true,
+		"java":       true,
+		"rust":       true,
+		"python":     true,
 	}
 	if len(deferSegmentLanguages) != len(want) {
 		t.Fatalf("deferSegmentLanguages = %v, want %v.\n\n"+
