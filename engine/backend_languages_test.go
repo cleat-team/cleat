@@ -18,8 +18,8 @@ func TestWasmtimeLanguages(t *testing.T) {
 	// justification is the comment on WasmtimeLanguages, which says what was and was
 	// not verified on this branch. The exact-match assertion stays exact.
 	//
-	// "csharp" (cleat#4080) is the same kind of addition: a label ahead of the build chain, justified in the same comment,
-	// and NOT in deferSegmentLanguages (C# PR 3).
+	// "csharp" (cleat#4080) is the same kind of addition: a label ahead of the build chain, justified in the same comment.
+	// Whether it is a defer-segment language is a separate decision, pinned by its own test (C# PR 3).
 	want := []string{"go", "java", "rust", "python", "javascript", "csharp"}
 	if !reflect.DeepEqual(WasmtimeLanguages, want) {
 		t.Errorf("WasmtimeLanguages = %v, want %v", WasmtimeLanguages, want)

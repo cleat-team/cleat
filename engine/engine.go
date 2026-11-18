@@ -850,8 +850,8 @@ func WithBackend(language string, backend WasmBackend) EngineOption {
 // else. The language is IN DEVELOPMENT and tiers.yaml grants it no support claim. It is a component, not a core module, so it
 // reaches the component path (like python); the spike measured that a C# component that carries a cleat.metadata section naming
 // "csharp" ran as csharp once this label existed, and that one WITHOUT the section is detected as "python" and routed as a Python
-// guest, which is why the build chain's stamp is mandatory (C# PR 2). It is deliberately OUT of deferSegmentLanguages below: the
-// guest has no SDK yet, and C# PR 3 adds it there with the test that earns it.
+// guest, which is why the build chain's stamp is mandatory (C# PR 2). Whether it is a defer-segment language is decided at
+// deferSegmentLanguages below, with the test that earns it (C# PR 3), not by this label.
 var WasmtimeLanguages = []string{"go", "java", "rust", "python", "javascript", "csharp"}
 
 // removedGuestLanguages are guest languages cleat once built for and no longer does, mapped to what an operator is told. A module

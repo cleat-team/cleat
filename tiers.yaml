@@ -817,10 +817,12 @@ tier2:
         another, so DateTime.UtcNow, Random and Guid differ on every replay (a measured
         defect); and a kill gives a component no defer drain (cleat#4079).
 
-        What exists on develop: the label "csharp" in engine.WasmtimeLanguages (routes a
-        module that declares it to the wasmtime backend and does nothing else; it is NOT in
-        deferSegmentLanguages), the Go test package tests/csharp/, and the guard below. What
-        does not: a build chain, a stamper, an SDK, a host-call binding, a CI job.
+        What exists on develop as of the PR that added this entry (2026-11-18; re-derive from
+        the tree, do not trust this sentence): the label "csharp" in engine.WasmtimeLanguages
+        (routes a module that declares it to the wasmtime backend and does nothing else;
+        defer-segment membership is C# PR 3's decision), the Go test package tests/csharp/,
+        and the guard below. What did not exist then: a build chain, a stamper, an SDK, a
+        host-call binding, a CI job.
 
         Where its tests live, and why it matters (the exclusion is structural, not a list):
         every Go-side C# test is named TestCSharp* and lives in tests/csharp/, a package in

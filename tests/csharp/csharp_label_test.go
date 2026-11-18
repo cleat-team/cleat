@@ -14,7 +14,7 @@ import (
 	"github.com/cleat-team/cleat/engine"
 )
 
-// TestCSharpLabelIsRoutedToWasmtimeButNotADeferSegmentLanguage pins the engine-side fact C# PR 1 adds: a module that declares
+// TestCSharpLabelIsRoutedToWasmtime pins the engine-side fact C# PR 1 adds: a module that declares
 // the language "csharp" is served by the wasmtime backend.
 //
 // It needs no toolchain and could run anywhere; it lives here because the label exists for this guest and the guard that keeps C#

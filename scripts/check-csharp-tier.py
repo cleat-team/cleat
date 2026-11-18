@@ -41,11 +41,20 @@ CS_PKG = "tests/csharp"
 CS_PATTERN = "./tests/csharp/..."
 
 NAME_PREFIX = re.compile(r"^func (Test(?:CSharp|DotNet|Dotnet)\w*)\(", re.M)
-TOOLCHAIN = re.compile(r"componentize-?dotnet|ilcompiler|dotnet-experimental|\bnuget\b|mcr\.microsoft\.com/dotnet", re.I)
+TOOLCHAIN = re.compile(r"componentize[-._]?dotnet|ilcompiler|dotnet-experimental|\bnuget\b|mcr\.microsoft\.com/dotnet", re.I)
 
-# Paths allowed to name the C# toolchain outside tests/csharp/, with the reason. A path->reason map rather than a looser
-# regex: it makes a person state why, once, where the next reader can find it. Empty today.
-TOOLCHAIN_EXEMPT = {}
+# Paths allowed to sit outside tests/csharp/ although they are about C#, with the reason. It applies to BOTH checks (a TestCSharp*
+# name outside the package, and a mention of the toolchain outside it). A path->reason map rather than a looser regex: it makes a
+# person state why, once, where the next reader can find it.
+#
+# The reason that fits is a test that needs NO toolchain and CANNOT skip: it reads a checked-in prebuilt fixture (a .wasm in
+# testdata/), so it runs in Tier 1 on every machine. The rule exists to keep tests that SKIP for want of a toolchain out of Tier 1,
+# where a skip is a failure; such a test does not need it. State in the reason which file it reads, so the claim can be checked.
+#
+# Empty at the time this guard was written (2026-11-18), because every C# test on develop was in tests/csharp/. C# PR 3 (engine)
+# adds tests of the prebuilt-fixture kind and is where its entries belong: a stale or missing path is UNMEASURED
+# (check_exemptions), so an entry cannot be written before its file exists.
+EXEMPT = {}
 
 
 class Unmeasured(Exception):
@@ -57,7 +66,7 @@ def check_exemptions(test_files, exempt):
     path, which is worse than no exemption."""
     missing = [q for q in exempt if q not in test_files]
     if missing:
-        raise Unmeasured("TOOLCHAIN_EXEMPT names path(s) the scan did not see: " + ", ".join(sorted(missing)))
+        raise Unmeasured("EXEMPT names path(s) the scan did not see: " + ", ".join(sorted(missing)))
 
 
 def check_placement(tiers, test_files, resolve, cs_pkg_path, exempt=None):
@@ -84,13 +93,13 @@ def check_placement(tiers, test_files, resolve, cs_pkg_path, exempt=None):
         findings.append(f"tier1.packages selects the C# package (via {via}); its tests would run in the Tier 1 gate, where a "
                         f"skip is a failure")
     inside = 0
-    ex = TOOLCHAIN_EXEMPT if exempt is None else exempt
+    ex = EXEMPT if exempt is None else exempt
     for path, src in sorted(test_files.items()):
         in_pkg = path.startswith(CS_PKG + "/")
         for m in NAME_PREFIX.finditer(src):
             if in_pkg:
                 inside += 1
-            else:
+            elif path not in ex:
                 findings.append(f"{path}: {m.group(1)} is outside {CS_PKG}/ (a C# test in another package can run in Tier 1, "
                                 f"where a skip is a failure)")
         if not in_pkg and TOOLCHAIN.search(src) and path not in ex:
@@ -203,13 +212,21 @@ def self_test():
     for nm in ("TestCSharpThing", "TestDotNetThing", "TestDotnetThing"):
         f = dict(_TESTS); f["engine/zz_test.go"] = f"package engine\nfunc {nm}(t *testing.T) {{}}\n"
         expect(f"known-positive: {nm} outside tests/csharp/", place(f=f), "engine/zz_test.go")
-    for word in ("componentize-dotnet", "componentizedotnet", "ILCompiler", "dotnet-experimental", "NuGet",
+    for word in ("componentize-dotnet", "componentizedotnet", "Componentize.DotNet", "BytecodeAlliance.Componentize.DotNet.Wasm.SDK",
+                 "componentize_dotnet", "ILCompiler", "dotnet-experimental", "NuGet",
                  "mcr.microsoft.com/dotnet/sdk:10.0"):
         f = dict(_TESTS); f["engine/zz_test.go"] = f"package engine\n// builds with {word}\nfunc TestBuilds(t *testing.T) {{}}\n"
         expect(f"known-positive: an unprefixed test that names the toolchain ('{word}')", place(f=f), "names the C# toolchain")
     f = dict(_TESTS); f["engine/unexempted_test.go"] = "package engine\n// names componentize-dotnet\nfunc TestX(t *testing.T) {}\n"
     expect("known-positive: the SAME text at a path with no exemption is refused", place(f=f), "names the C# toolchain")
     expect("negative control: the same text at an exempted path passes", place(f=f, exempt={"engine/unexempted_test.go": "r"}), None)
+    f = dict(_TESTS); f["engine/prebuilt_test.go"] = "package engine\nfunc TestCSharpReadsAPrebuiltFixture(t *testing.T) {}\n"
+    expect("known-positive: a TestCSharp* name outside tests/csharp/ with no exemption", place(f=f), "engine/prebuilt_test.go")
+    expect("negative control: the same name at a path exempted FOR THE NAME check passes",
+           place(f=f, exempt={"engine/prebuilt_test.go": "reads a checked-in .wasm; cannot skip"}), None)
+    f2 = dict(f); f2["engine/other_test.go"] = "package engine\nfunc TestCSharpAnother(t *testing.T) {}\n"
+    expect("known-positive: exempting one path does not exempt its neighbour", place(f=f2, exempt={"engine/prebuilt_test.go": "r"}),
+           "engine/other_test.go")
     expect_unmeasured("UNMEASURED: an exemption names a path the scan did not see",
                       lambda: check_exemptions(_TESTS, {"engine/gone_test.go": "stale"}))
     f = dict(_TESTS); f["internal/other/dotnet_test.go"] = "package other\n// dotnet is a word here\nfunc TestParsesRuntimeNames(t *testing.T) {}\n"
@@ -247,7 +264,7 @@ def main():
     try:
         tiers, files = repo_inputs(root)
         resolve, cs_pkg_path = go_resolver(root)
-        check_exemptions(files, TOOLCHAIN_EXEMPT)
+        check_exemptions(files, EXEMPT)
         findings = check_placement(tiers, files, resolve, cs_pkg_path)
     except Unmeasured as e:
         print(f"UNMEASURED: {e}\n(this is a failure of the check, not a finding about the tree)", file=sys.stderr)
