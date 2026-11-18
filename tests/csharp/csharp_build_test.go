@@ -63,6 +63,65 @@ func needDocker(t *testing.T) {
 	t.Skip(why + " (the C# build runs in a pinned container; only the C# tier-2 job provides it)")
 }
 
+// execFormatError reports whether docker's output says the host cannot execute the container's architecture: no binfmt/QEMU handler
+// registered for it. It is the one failure that is a fact about the RUNNER and not about the lock, so it is the only one a platform leg
+// may skip on. The wording is the kernel's (ENOEXEC), which docker passes through verbatim.
+func execFormatError(out string) bool {
+	return strings.Contains(out, "exec format error")
+}
+
+// needPlatform skips a platform leg when this host cannot execute that platform's image, and FAILS when anything else is wrong or when
+// the job declared csharp-<arch> in CLEAT_REQUIRE_TOOLCHAINS (a job that promises the emulator cannot silently skip the leg).
+// Probing with `true` keeps "cannot run this architecture" apart from "the lock does not resolve": build.sh reports both as exit 2
+// (UNMEASURED), and a test that counted the first as a finding about the lock would be red on every runner without emulation.
+func needPlatform(t *testing.T, root, plat string) {
+	t.Helper()
+	image := ""
+	b, err := os.ReadFile(filepath.Join(root, "packages", "cleat-csharp", "toolchain.env"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, l := range strings.Split(string(b), "\n") {
+		if v, ok := strings.CutPrefix(l, "CLEAT_CS_SDK_IMAGE="); ok {
+			image = strings.TrimSpace(v)
+		}
+	}
+	if image == "" {
+		t.Fatal("toolchain.env defines no CLEAT_CS_SDK_IMAGE")
+	}
+	out, err := exec.Command("docker", "run", "--rm", "--platform", plat, "--entrypoint", "true", image).CombinedOutput()
+	if err == nil {
+		return
+	}
+	arch := plat[strings.LastIndex(plat, "/")+1:]
+	if !execFormatError(string(out)) {
+		t.Fatalf("%s: could not even start the SDK image to probe it (%v), which is not a missing emulator:\n%s", plat, err, out)
+	}
+	if toolchainRequired("csharp-" + arch) {
+		t.Fatalf("%s cannot be executed on this host (exec format error), but %s declares csharp-%s, so this job promises the emulator: the setup step is broken, not the test\n%s", plat, requireToolchainEnv, arch, out)
+	}
+	t.Skipf("%s cannot be executed on this host (exec format error: no binfmt/QEMU handler); the lock row for it is NOT verified here. A job that provides the emulator declares csharp-%s in %s", plat, arch, requireToolchainEnv)
+}
+
+// TestExecFormatErrorIsRecognisedAndNothingElseIs is the known-positive and the negative control for the one string the platform skip
+// hangs on. The positive is the line a CI runner printed on #4096 (x86_64, no binfmt, linux/arm64 image); the negatives are failures
+// that must NOT be skipped, because each says something about the lock or the setup.
+func TestExecFormatErrorIsRecognisedAndNothingElseIs(t *testing.T) {
+	if !execFormatError("exec /usr/bin/bash: exec format error") {
+		t.Error("the runner's actual message is not recognised, so a runner without binfmt would FAIL the arm64 leg")
+	}
+	for _, other := range []string{
+		"",
+		"Unable to find image 'x' locally\ndocker: Error response from daemon: no matching manifest for linux/riscv64",
+		"UNMEASURED: the restored packages are not the pinned ones",
+		"Cannot connect to the Docker daemon",
+	} {
+		if execFormatError(other) {
+			t.Errorf("%q is read as a missing emulator; a leg would be skipped over a real failure", other)
+		}
+	}
+}
+
 func cleatBinary(t *testing.T, root string) string {
 	t.Helper()
 	bin := filepath.Join(t.TempDir(), "cleat")
@@ -266,6 +325,7 @@ func TestCSharpLockResolvesOnEveryPlatform(t *testing.T) {
 	}
 	for _, plat := range platforms {
 		t.Run(strings.ReplaceAll(plat, "/", "_"), func(t *testing.T) {
+			needPlatform(t, root, plat)
 			cmd := exec.Command("bash", filepath.Join(root, "packages", "cleat-csharp", "build.sh"), root, "tests/csharp/testdata/hello", t.TempDir())
 			cmd.Env = append(os.Environ(), "CLEAT_CS_PLATFORM="+plat, "CLEAT_CS_RESTORE_ONLY=1")
 			out, err := cmd.CombinedOutput()

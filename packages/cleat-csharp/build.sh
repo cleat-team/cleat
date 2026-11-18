@@ -169,5 +169,5 @@ docker run --rm --platform "$CLEAT_CS_PLATFORM" \
 rc=$?
 case "$rc" in
   0|1|2) exit "$rc" ;;
-  *) echo "UNMEASURED: the container did not run to the end (docker run exited $rc): the image could not be pulled, the daemon stopped, or the build was killed. A failure of the setup, not a finding about the project." >&2; exit 2 ;;
+  *) echo "UNMEASURED: the container did not run to the end (docker run exited $rc): the image could not be pulled, the daemon stopped, the build was killed, or this host cannot execute $CLEAT_CS_PLATFORM (\"exec format error\" above: no binfmt/QEMU handler for it). A failure of the setup, not a finding about the project." >&2; exit 2 ;;
 esac
