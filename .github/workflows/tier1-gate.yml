@@ -106,7 +106,7 @@
 #
 # That used to have one exception. The rest shards set up a JDK 17 and Rust with
 # wasm32-unknown-unknown because tests/crash's agent-loop acceptance built its
-# /java, /rust and /assemblyscript clients in tier 1 (cleat#3499, cleat#2978).
+# /java and /rust clients in tier 1 (cleat#3499, cleat#2978; /assemblyscript was a third until cleat#4023).
 # Those clients are now a top-level test of their own, excluded in tiers.yaml and
 # run by ci.yml's test-go "crash" leg, and both steps are gone (cleat#3692). Every
 # tier-2 toolchain test in a tier-1 package is excluded the same way, and

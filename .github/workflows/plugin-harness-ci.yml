@@ -356,18 +356,6 @@ jobs:
       - name: Setup Gradle
         if: ${{ needs.edit-gate.outputs.skip != 'true' }}
         uses: gradle/actions/setup-gradle@v6
-      # Explicit, for the same reason Java 17 is pinned two steps up: the
-      # AssemblyScript host-call fixture needs npx, ubuntu-latest happens to
-      # ship Node, and "happens to" is what changes without us. buildASHostCallWasm
-      # SKIPS on a missing npx rather than failing, so an image that dropped Node
-      # would retire the whole AssemblyScript half of the harness quietly -- the
-      # skip budget below is what would catch it, and only because this step
-      # makes the toolchain this job's own promise rather than the runner's.
-      - name: Setup Node
-        if: ${{ needs.edit-gate.outputs.skip != 'true' }}
-        uses: actions/setup-node@v7
-        with:
-          node-version: "20"
       # -json into a report, and a skip budget over it. Without that, this step
       # ran `go test` with no -v, so a skipped language and a passing one looked
       # identical in the log -- which is how TestPluginCalls_Wasm_Go sat
@@ -416,12 +404,14 @@ jobs:
           #   go test ./... -list 'TestPluginCalls_Wasm|TestHostCalls|HostCallTableCovers'
           #     -> the harness, its table guard, and the five plugin tests
           #
-          # The count is now SIX, not two: C2 added Rust and AssemblyScript
-          # fixtures, so the pattern selects TestHostCalls{Go,Rust,AS} and
-          # TestHostCallTableCovers.../TestRust.../TestAS... -- three harnesses
-          # and the three drift guards that keep their tables honest.
-          #   cd tests/plugin-harness && go test -list 'TestHostCalls|HostCallTableCovers' ./...
-          # must list 6. If it lists 3, the guards have come unselected again.
+          # The count is SIX, not two, because the pattern selects one harness and one
+          # drift guard per language fixture -- TestHostCalls{Go,Rust,Java} and their
+          # TestHostCallTableCovers... guards. (C2 added the Rust and AssemblyScript
+          # fixtures; cleat#4023 removed the AssemblyScript one and Java had since been
+          # added, so the figure did not move.) Re-derive it, do not trust this sentence:
+          #   cd tests/plugin-harness && go test -list 'TestHostCalls|HostCallTableCovers' ./... | grep -c '^Test'
+          # printed 6 on 2026-11-18. If it lists half that, the guards have come
+          # unselected again.
           #
           # EverySDK is named separately because it matches none of the other
           # terms -- these are not TestHostCalls* and not TableCovers*. Added
@@ -446,12 +436,13 @@ jobs:
           # trapped. Confirm with
           #   go test -list 'TestGoAwaitCallsUnwind' ./...    -> 1
           #   (the CI test-selection guard names it if this term goes missing)
-          # TestASAwaitCallsHonour and TestJavaAwaitCallsHonour (cleat#3430) are the
-          # same check for AssemblyScript and Java, where the wrapper has to act on
-          # the sentinel rather than panic; neither is TestHostCalls* either.
-          #   go test -list 'TestASAwaitCallsHonour|TestJavaAwaitCallsHonour' ./...    -> 2
+          # TestJavaAwaitCallsHonour (cleat#3430) is the same check for Java, where the
+          # wrapper has to act on the sentinel rather than panic; it is not
+          # TestHostCalls* either. (AssemblyScript had a twin, TestASAwaitCallsHonour,
+          # removed by cleat#4023.)
+          #   go test -list 'TestJavaAwaitCallsHonour' ./...    -> 1 on 2026-11-18
           go test -count=1 -timeout=600s -json \
-            ./... -run 'TestPluginCalls_Wasm|TestHostCalls|HostCallTableCovers|EverySDK|TestACompiledGoWorkflow|TestAnIntParameterIsDecoded|TestCallOptionsTimeoutAtTheWasmBoundary|TestDurableCallWithOptionsAloneIsBound|TestASBindingContract|TestGoAwaitCallsUnwind|TestASAwaitCallsHonour|TestJavaAwaitCallsHonour' \
+            ./... -run 'TestPluginCalls_Wasm|TestHostCalls|HostCallTableCovers|EverySDK|TestACompiledGoWorkflow|TestAnIntParameterIsDecoded|TestCallOptionsTimeoutAtTheWasmBoundary|TestDurableCallWithOptionsAloneIsBound|TestGoAwaitCallsUnwind|TestJavaAwaitCallsHonour' \
             2>&1 | tee ../../wasm-integration-report.json
         env:
           # Explicit, not left to the default: Go defaults CGO_ENABLED to 1 only
@@ -474,7 +465,7 @@ jobs:
       #
       # Scoped to testdata rather than to pythonworkflow alone, deliberately.
       # The same defect in another language is the thing most worth catching,
-      # and #726 already found and fixed one in the AssemblyScript fixture.
+      # and #726 already found and fixed one in the AssemblyScript fixture (removed since, cleat#4023).
       - name: Tests did not rewrite their own fixtures
         if: always() && (needs.edit-gate.outputs.skip != 'true')
         run: |

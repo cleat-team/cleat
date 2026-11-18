@@ -3,17 +3,17 @@
 #
 # Workstream 2 — Cross-cutting CI (Task C2)
 #
-# Compiles workflow examples in Rust, Python, AssemblyScript, and Java to
+# Compiles workflow examples in Rust, Python and Java to
 # WASM, then runs them through the Go host runtime to verify the full
 # compilation-to-execution pipeline for each non-Go language.
 #
 # Key design decisions:
-#   - All four are first-class: build/execute failures block the CI. Java and
-#     AssemblyScript joined Rust and Python on 2026-08-06. This job had always
-#     installed Node, Java 17 and Gradle and always ran their tests -- but both
-#     Go tests degraded every failure into a skip, so "best-effort" described
-#     the tests' behaviour rather than any property of the SDKs. With the skips
-#     removed, both pass.
+#   - All three are first-class: build/execute failures block the CI. Java
+#     joined Rust and Python on 2026-08-06 (so did AssemblyScript, which cleat#4023
+#     removed). This job had always installed Java 17 and Gradle and always ran their
+#     tests -- but the Go tests degraded every failure into a skip, so "best-effort"
+#     described the tests' behaviour rather than any property of the SDKs. With the
+#     skips removed, they pass.
 #   - Each Go test handles its own WASM compilation; the CI only provides
 #     the toolchains and dependencies, avoiding redundant double-builds.
 #   - The push trigger covers main and develop only. It carried "feature/**"
@@ -143,16 +143,14 @@ env:
   # which is exactly how DURABLE_TEST_DB was renamed with nothing noticing
   # (IMPROVEMENT-PLAN.md 2.9). A CLEAT_REQUIRE_* variable reads as
   # load-bearing and greps to its consumers.
-  # java and assemblyscript joined rust and python on 2026-08-06, and for the
-  # same reason in both cases. This job has installed Java 17, Gradle and Node
-  # since it was written, and runs TestJava* and TestAssemblyScript* in the -run
-  # regex below -- so it was already paying for both toolchains. But
-  # engine/java_workflow_e2e_test.go and engine/as_workflow_e2e_test.go each
-  # skipped on a missing one unconditionally, and that skip is invisible here:
-  # this step's output is -v text, not the -json a skip budget reads. So in this
-  # job a missing JDK or a missing Node is a failed setup step, not an absent
-  # prerequisite, and must read as a failure.
-  CLEAT_REQUIRE_TOOLCHAINS: "rust,python,java,assemblyscript"
+  # java joined rust and python on 2026-08-06 (as did assemblyscript, removed by
+  # cleat#4023), and for the same reason. This job has installed Java 17 and Gradle
+  # since it was written, and runs TestJava* in the -run regex below -- so it was
+  # already paying for the toolchain. But engine/java_workflow_e2e_test.go skipped on
+  # a missing one unconditionally, and that skip is invisible here: this step's output
+  # is -v text, not the -json a skip budget reads. So in this job a missing JDK is a
+  # failed setup step, not an absent prerequisite, and must read as a failure.
+  CLEAT_REQUIRE_TOOLCHAINS: "rust,python,java"
 
   # THE ONE PLACE THE E2E TEST SELECTOR IS WRITTEN.
   #
@@ -162,12 +160,12 @@ env:
   # with no other edit -- see "Select this shard's tests".
   #
   # It is longer than it looks like it should be, and the extra alternatives
-  # are not decoration. This job is the ONLY one that installs Rust, Node,
+  # are not decoration. This job is the ONLY one that installs Rust,
   # a JDK and Gradle, so a toolchain-building test this regex does not match
   # runs nowhere at all -- it skips in every other job, silently, because a
   # skip and a pass print the same thing.
   #
-  # `TestRust|TestPython|TestAssemblyScript|TestJava` selects by language
+  # `TestRust|TestPython|TestJava` selects by language
   # PREFIX, and ten tests build a toolchain while being named for what they
   # do instead. Three of them -- TestARustGuestSuspendsCleanly,
   # TestARustGuestReachesTheHostRetryLoop and
@@ -180,7 +178,7 @@ env:
   # from the source and fails if an alternative is missing -- it reads THIS
   # variable, and it also fails if the variable stops being what the shard
   # split is computed from (IMPROVEMENT-PLAN 3.109).
-  E2E_SELECTOR: "TestRust|TestARust|TestPython|TestAssemblyScript|TestJava|TestADeferBody|TestAMissingDeferExport|TestTheBackendLogsToTheConfiguredLogger|TestTheHostRunsDefersOfAKilled|TestTheWazeroPathRunsDefers"
+  E2E_SELECTOR: "TestRust|TestARust|TestPython|TestJava|TestTheHostRunsDefersOfAKilled"
 
 permissions:
   contents: read
@@ -383,11 +381,6 @@ jobs:
         uses: actions/setup-python@v7
         with:
           python-version: "3.12"
-
-      - name: Setup Node
-        uses: actions/setup-node@v7
-        with:
-          node-version: "20"
 
       - name: Setup Java
         uses: actions/setup-java@v6
