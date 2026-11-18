@@ -236,7 +236,8 @@ test("without a workflow store a valid cron call is refused by name, and a bad a
   const b = bad.result as Record<string, string>;
   assert.match(b.badExpr, /has 3 field\(s\), want 5/);
   assert.match(b.badZone, /Mars\/Olympus_Mons/);
-  assert.match(b.noName, /refused a parameter and gave no reason/);
+  // cleat#4035: the SDK, not a plugin workaround, now supplies this -- it names the call and the code.
+  assert.match(b.noName, /host error code 1/);
   assert.doesNotMatch(b.noName, /\u0000/, "the empty-name rejection carries NUL bytes");
   assert.match(b.badInput, /unsupported value: NaN/);
 
