@@ -3,10 +3,12 @@
 > **Status, corrected 2026-08-09.** This document originally analyzed
 > extending cleat to languages beyond Go, and estimated costs for Java
 > ("~4-8 weeks"), AssemblyScript/TypeScript ("weeks 6-10"), and Python
-> ("~4-5 weeks to MVP") as future work. All three have since shipped and are
-> tier-ranked in `tiers.yaml`, the source of truth for support status:
+> ("~4-5 weeks to MVP") as future work. Java and Python have since shipped,
+> TypeScript shipped via Javy, and AssemblyScript shipped and was later
+> removed (cleat#4023). The supported ones are tier-ranked in `tiers.yaml`,
+> the source of truth for support status:
 > **Python is tier 1** (D2, DECIDED 2026-08-06 — same record-bearing bar as
-> Go); **Java and AssemblyScript are tier 2** (D4, DECIDED 2026-08-06 —
+> Go); **Java is tier 2** (D4, DECIDED 2026-08-06 —
 > proven working with named open items, not yet at the tier-1 bar). Treat
 > the language-by-language sections below as historical design rationale for
 > *why* each approach was chosen, not as a statement of what remains to be
@@ -133,50 +135,14 @@ provisioned.
 
 **Binary size:** ~324 KB measured (TeaVM includes a minimal class library + GC).
 
-### AssemblyScript — Shipped, tier 2 (real TypeScript remains unbuilt)
+### TypeScript options — AssemblyScript removed, TypeScript shipped via Javy (tier 2)
 
-> Corrected 2026-08-09: this section described AssemblyScript/TypeScript
-> support as a "~6-12 weeks" future build and treated AssemblyScript purely
-> as a stepping-stone option. AssemblyScript shipped and was promoted to
-> tier 2 on 2026-08-06 (D4 in `tiers.yaml`). Real TypeScript (via Javy or
-> Static Hermes, options B/C below) remains unbuilt and is not tracked in
-> `tiers.yaml` at any tier — the analysis for those two is left as-is
-> below since it is still forward-looking, not a status claim.
-
-**A) AssemblyScript** (a TypeScript-like language that compiles directly to WASM):
-- Mature compiler, produces small WASM binaries
-- Subset of TypeScript (no closures, no `any`, manual memory management)
-- SDK: `packages/cleat-as`, with a `HostCalls` class and `@cleatEntry` decorator
-- Transformer: AssemblyScript transformer plugin that generates exports
-- Still true and worth keeping in mind: AssemblyScript is NOT TypeScript. It's
-  a different language that looks like TypeScript. Existing TS code will not
-  compile as-is.
-- Workflows must import the SDK as `@cleat/sdk`, not by relative path. Both
-  resolve to the same files, but `asc` treats them as two distinct modules with
-  two distinct `HostCalls` types — and, since §3.73, two distinct defer
-  registries, so a defer registered through one would be drained from the
-  other and silently never run. The generated wrapper calls `runDeferred(h)`,
-  which makes that case a compile error rather than a silent one.
-
-**Measured 2026-08-06** (per `tiers.yaml`'s `sdk-assemblyscript` entry):
-`TestAssemblyScriptWorkflowExecute` passes on wasmtime —
-`inventory.Reserve -> payments.Charge -> shipping.CreateShipment ->
-notifications.SendEmail`, four calls in order — and the SDK's own as-pect
-suite is 113/113 across four spec files (re-derive with
-`cd packages/cleat-as && npm test`; measured 2026-09-02, was 106/106 across
-three before §3.73 added `defer.spec.ts`). Making the test suite able to fail
-(rather than degrading every failure to `t.Skipf`, as it did before #350)
-found two real defects the same day: no data flowed between the saga's
-steps (a field-naming mismatch, `reservationID` vs `reservation_id` etc.,
-that the test never asserted on), and the example could not be installed
-from a clean checkout (`package-lock.json` recorded its `file:`
-devDependencies in a form `npm ci` refuses). Both are fixed.
-
-**Resolved 2026-08-09:** `isReplaying()` was hardcoded `return false` with no
-host call behind it, so every "only on first execution" branch fired on
-every replay. Removed rather than implemented — `sideEffect()` already
-covers the one safe use case. See `tiers.yaml`'s `sdk-assemblyscript`
-open_items and `docs/determinism.md`.
+> Corrected 2026-11-18: this section analysed three ways to run TypeScript.
+> **A) AssemblyScript** shipped at tier 2 and was removed (cleat#4023); its
+> analysis is not kept. **B) Javy / QuickJS-in-WASM** is what shipped as
+> TypeScript, at tier 2 (`tiers.yaml`, `sdk-typescript`). **C) Static Hermes**
+> has not been attempted. B and C are left as the original analysis below, which
+> is design rationale, not a status claim.
 
 **B) Javy / QuickJS-in-WASM** (Shopify's approach):
 - Embeds the QuickJS JavaScript engine compiled to WASM
@@ -199,12 +165,11 @@ open_items and `docs/determinism.md`.
 - Could produce smaller binaries than QuickJS-in-WASM
 - **Showstopper:** Not production-ready. Would be betting on an experimental compiler.
 
-**Verdict:** Real TypeScript remains the highest-value unbuilt language (largest
-developer community), and the technical path for it is still the roughest of
-the three options above — neither has been attempted. AssemblyScript shipped
-as the practical "TypeScript-flavored" option instead (tier 2, see above);
-whether a real-TypeScript path is worth pursuing on top of it is an open
-product question, not an engineering one at this point.
+**Verdict:** Real TypeScript has the largest developer community of the three
+options, and the technical path was the roughest. Option B (Javy) is the one
+that shipped, at tier 2, with its known differences from Node tracked in
+`packages/cleat-ts/DIVERGENCES.md`; option C (Static Hermes) has not been
+attempted.
 
 ### Python — Shipped, tier 1
 
@@ -280,7 +245,7 @@ crates/cleat-macro/src/*.rs`) — grown substantially from the original
 > Corrected 2026-08-09: "SDK effort"/"Transformer effort" below are the
 > original pre-build estimates, kept for languages that are still unbuilt
 > (C, Zig, real TypeScript, C#). For the four that have since shipped
-> (Go, Rust, Python, Java, AssemblyScript), those columns are replaced with
+> (Go, Rust, Python, Java), those columns are replaced with
 > actual status per `tiers.yaml`.
 
 | Language | WASM compiler | Status | Binary size (measured where shipped) | Tier |
@@ -289,7 +254,6 @@ crates/cleat-macro/src/*.rs`) — grown substantially from the original
 | **Python** | componentize-py | Shipped, proven end-to-end in CI | 18.3 MB (measured 2026-08-06) | 1 |
 | **Rust** | cargo build (built-in) | Shipped | ~50-200 KB | 2 |
 | **Java/Kotlin** | TeaVM (mature) | Shipped | 324 KB (measured 2026-08-06) | 2 |
-| **AssemblyScript** | asc (mature) | Shipped | 10-50 KB (design estimate) | 2 |
 | **C** | clang (mature) | Not built | 10-50 KB (design estimate) | — |
 | **Zig** | zig build-exe (mature) | Not built | 5-30 KB (design estimate) | — |
 | **TypeScript** (real) | Javy/QuickJS | Shipped (tier 2; known differences from Node in `packages/cleat-ts/DIVERGENCES.md`) | ~1.45 MB (measured 2026-11-17, the example module; see below) | 2 |
@@ -334,7 +298,6 @@ that completely — which is why this section states the mechanism rather than a
 |---|---|---|---|
 | **Go** | whole-program analysis (`analyze()` in `cmd/cleat`) | the durable closure, computed from the type-checked call graph | — |
 | **Python** | AST call-graph and closure analysis (`python-sdk/cleat_sdk/vet.py`) | what the entry point reaches, across functions | a forbidden call spelled so the `(module, function)` table does not match it |
-| **AssemblyScript** | AST analysis **inside the compiler** (`packages/cleat-as/transform`) | what the entry point reaches, across functions | a call site with no dotted member access |
 | **Java** | import and fully-qualified-name resolution over source with comments, strings, text blocks and character literals blanked first (`cmd/cleat/vet_java.go`) | a path expression **resolving** to a listed class, member or package -- so static imports, wildcard imports (against a known class list) and fully-qualified calls are all seen | java.nio, which is on no list at all; reflection with a computed argument, which no resolver can evaluate |
 | **Rust** | `use`-declaration resolution over source with comments, strings and `#[cfg(test)]` items blanked first (`cmd/cleat/vet_rust.go`); plus, since cleat#1864, per-function syntactic binding tracking for one usage pattern (HashMap/HashSet iteration order, R008) | a path expression **resolving** to a listed module — so grouped imports, nested groups and `as` aliases are all seen; **and** a HashMap/HashSet whose type is declared on a function parameter or a `let` binding, when it is later enumerated (`for x in m`, `m.iter()`, `.keys()`, `.values()`, `.into_iter()`, `.drain()`) |a method call whose receiver is not a bare tracked identifier -- a struct field (`self.counts.iter()`), a value returned from a call, or a map produced inline by `.collect::<HashMap<_, _>>()` and iterated without ever being bound to a name; any module not on the path list; a glob import, which names nothing locally |
 
@@ -343,13 +306,6 @@ Re-derive the shape of each, rather than trusting the row:
     grep -c '^\s*{"' cmd/cleat/vet_rust.go cmd/cleat/vet_java.go   # resolved-path table entries
     grep -oE '"PY[0-9]{3}"' python-sdk/cleat_sdk/vet.py | sort -u | wc -l
     grep -ln 'runVet' cmd/cleat/build_*.go                          # which builds gate
-
-### AssemblyScript's arrangement is the strongest and is worth copying
-
-Its checks run as part of `asc`, not beside it: `runBuildAssemblyScript` passes
-`--transform @cleat/transform`, and the transform throws from `afterParse`. A separate gate can be
-removed, reordered, or skipped while the build still succeeds; a check inside the compiler cannot
-drift out of sync with it, because there is only one invocation.
 
 ### A longer list is not a stronger check, and neither is a resolver over the wrong list
 
@@ -396,7 +352,7 @@ walking the call graph the wrong way (cleat#1789, #1799, #1813):
   flags the test harness that *supplies* `h`, and the forward closure flags pure helpers that need
   none.
 
-Fixed for Python in #1816. The AssemblyScript equivalent is #1818. Rust and Java have no closure
+Fixed for Python in #1816. Rust and Java have no closure
 analysis at all, so they do not have this specific problem — their scope is "every source file in
 the tree, including tests" (cleat#1789).
 
@@ -413,7 +369,7 @@ Cleat stores WASM blobs in `workflow_defs.wasm_bytes`. Each deploy creates a
 new row. With 10 versions of a workflow, you're storing 10× the binary size.
 This drives the ranking:
 
-- **Good** (< 500 KB): C, Zig, Rust, AssemblyScript, Java/TeaVM
+- **Good** (< 500 KB): C, Zig, Rust, Java/TeaVM
 - **OK** (500 KB - 2 MB): Go (standard), TypeScript/Javy (worst-case, unbuilt)
 - **Problematic** (> 2 MB): Python/CPython — measured at 18.3 MB per
   component (2026-08-06), which makes the "deploy is an INSERT" model
@@ -430,7 +386,7 @@ If binary size at scale becomes a real constraint, consider:
 
 ## Recommended Order
 
-> Stale as of 2026-08-09: Java and AssemblyScript have already shipped (see
+> Stale as of 2026-08-09: Java has already shipped (see
 > above), out of order relative to this original plan, which assumed C/Zig
 > would come first. Kept for the reasoning behind C/Zig/TypeScript, which are
 > still unbuilt.
@@ -439,18 +395,15 @@ If binary size at scale becomes a real constraint, consider:
    header is < 200 lines and validates that no host changes are needed. Still
    not started as of 2026-08-09.
 2. ~~Java~~ — shipped, tier 2. See the Java section above.
-3. ~~AssemblyScript~~ — shipped, tier 2. See the AssemblyScript section
-   above. Real TypeScript remains a separate, unbuilt effort; it could follow
-   once Javy or Static Hermes stabilizes.
+3. ~~AssemblyScript~~ — shipped at tier 2, then removed (cleat#4023). TypeScript
+   shipped separately, via Javy; see the TypeScript sections.
 4. ~~Python WASM FFI~~ — shipped, tier 1, proven end-to-end in CI. See the
    Python section above.
-5. **TypeScript via Javy**: The only entry on this list still meaningfully
-   "next" — genuinely unbuilt, and would follow AssemblyScript's adoption
-   data if pursued. Focus areas unchanged: reducing binary size
-   (tree-shaking the JS runtime) and improving debugging.
+5. ~~TypeScript via Javy~~ — shipped, tier 2. Focus areas unchanged: reducing
+   binary size (tree-shaking the JS runtime) and improving debugging.
 
 No shipped language hit a hard showstopper — Python via CPython-wasm works
 in production CI today, with binary size the main operational cost to
 manage (object storage for large blobs, if it becomes a problem at scale).
 The WASM boundary design has held up across five shipped languages
-(Go, Rust, Python, Java, AssemblyScript).
+(Go, Rust, Python, Java, TypeScript).
