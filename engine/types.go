@@ -643,6 +643,12 @@ const (
 	sleepStatusSuspend   = 1
 )
 
+// unflushedEvent is an event the engine held back because per-step flush is off, with the checksum it chains from.
+type unflushedEvent struct {
+	rec  EventRecord
+	prev string
+}
+
 // execSession implements HostHandler for a single execution or replay.
 type execSession struct {
 	engine        *Engine
@@ -655,11 +661,17 @@ type execSession struct {
 	deferrals     map[string]string // registered defer callbacks (deferID -> description)
 	inDeferPhase  bool              // true while the guest is draining its defer table (cleat#1155)
 	awaitRejected bool              // the last AwaitPromise ended in a rejection (cleat#3425)
-	workflowID    string            // parent workflow instance ID (for child workflows)
-	defName       string            // workflow definition name (for metrics labels)
-	execRunID     string            // current execution run ID
-	queryState    map[string]string // key-value state set via SetQueryState
-	tenantID      string            // tenant ID injected into plugin function context
+	// unflushed is every event this execution recorded that the engine did NOT write because per-step flush is off, in the order
+	// recorded, each with the predecessor checksum it was chained from. A successful or suspended segment hands these to the
+	// worker, which writes them at finalization. A FAILED one has no finalization: nothing wrote them, and the worker's
+	// terminal-failure write carries no events, so a killed run lost its whole history. flushUnflushedEvents writes them
+	// before Execute returns. cleat#4079.
+	unflushed  []unflushedEvent
+	workflowID string            // parent workflow instance ID (for child workflows)
+	defName    string            // workflow definition name (for metrics labels)
+	execRunID  string            // current execution run ID
+	queryState map[string]string // key-value state set via SetQueryState
+	tenantID   string            // tenant ID injected into plugin function context
 
 	// callerPluginName is read by pluginCallGuard.Check at both call_plugin
 	// sites in plugins.go, but nothing outside a _test.go file assigns it.

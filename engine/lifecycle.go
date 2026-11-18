@@ -283,6 +283,12 @@ func (s *execSession) recordEvent(rec EventRecord) eventPersistence {
 			// retry returns nil rather than mistaking its own earlier success
 			// for a lost fence. TestARetryOfAnAlreadyCommittedFlushIsNotAFenceLoss
 			// measures that rather than trusting this paragraph.
+			// With per-step flush OFF the call below writes nothing and returns nil. Keep the event and the checksum it chains
+			// from, so a run that FAILS can write what it recorded (flushUnflushedEvents); one that completes or suspends
+			// hands the same events to the worker's finalization instead and this slice is never read.
+			if s.engine.noPerStepFlush {
+				s.unflushed = append(s.unflushed, unflushedEvent{rec: rec, prev: s.lastChecksum})
+			}
 			flushErr := retryFlushUntilDeadline(context.Background(), s.engine.flushRetryWindow, "direct flush", func() error {
 				return s.engine.flushEvent(context.Background(), s.workflowID, rec, s.lastChecksum)
 			})
