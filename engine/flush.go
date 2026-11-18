@@ -785,6 +785,28 @@ func (e *Engine) runDefers(ctx context.Context, wasmBytes []byte, deferrals map[
 	ctx, cancel := context.WithTimeout(ctx, budget)
 	defer cancel()
 
+	// NOT FOR A COMPONENT. This pass is the legacy per-defer convention: ask the backend to execute the entry point
+	// "cleat_defer_<id>". For a component that is not a drain, it is a second, fresh instance: the defer's closure lives in
+	// the instance the run was killed in, and a trapped component instance cannot be re-entered ("cannot enter component
+	// instance", measured), so the fresh one holds nothing to run. What it does do is start CPython again (about 1.7 s for
+	// Python on top of the kill), call `run` with an entry name no component honours, and -- for a guest that ignores the
+	// entry key -- execute the workflow body from the top. The host dispatchers return early when there is no handler.
+	// Two of runDefers' three callers (executor.go, the deadline and trap paths) pass context.Background(), which carries
+	// none; the third, executeCompiled, passes a handler but is the wazero path, which cannot hold a component. That is a
+	// property of the callers, not of this path, and a handler added to either of the first two would make it live. cleat#4079.
+	//
+	// The defers of a killed component run are therefore NOT run, and this says so instead of attempting something that
+	// cannot work and logging nothing but a type mismatch. A core module is unaffected: its defers are drained in place
+	// (runGuestDefersAfterKill) before this is reached, and this pass remains for the guest that exports per-defer functions.
+	if wasmBytes != nil && isComponentWasm(wasmBytes) {
+		if len(deferrals) > 0 {
+			e.log().WarnContext(ctx, "the defers of a killed component workflow were not run: a component instance cannot be "+
+				"re-entered after a trap, and a fresh instance does not hold the closures",
+				"workflow_id", e.workflowID, "defers_registered", len(deferrals))
+		}
+		return
+	}
+
 	type defEntry struct {
 		id     string
 		desc   string
