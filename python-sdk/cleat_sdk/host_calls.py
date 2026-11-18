@@ -52,16 +52,13 @@ from typing import Any, TypeVar
 
 from .memory import (
     CALL_SUSPEND_SENTINEL,
-    OUT_BUF_SIZE,
     OUTPUT_OFFSET,
-    SCRATCH_BASE,
     SLEEP_STATUS_SUSPEND,
     SUSPEND_SENTINEL,
     decode_await_promise_result,
     decode_simple_result,
     decode_sleep_result,
     read_string,
-    write_string,
 )
 from .signal_envelope import decode_signal_envelope, encode_signal_envelope
 
