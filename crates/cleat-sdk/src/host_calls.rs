@@ -482,7 +482,7 @@ impl HostCalls {
 
         let (response_len, _call_error_code, err_code) = memory::decode_cleat_call_result(result);
         if err_code != 0 {
-            let err_msg = memory::read_result(&resp_buf, response_len);
+            let err_msg = memory::host_message_or(&resp_buf, response_len, format!("cleat_call(service=\"{}\", operation=\"{}\") failed: host error code {}.", service, operation, err_code));
             return (String::new(), Some(err_msg));
         }
         let resp = memory::read_result(&resp_buf, response_len);
@@ -1032,7 +1032,7 @@ impl HostCalls {
 
         let (response_len, _call_error_code, err_code) = memory::decode_cleat_call_result(result);
         if err_code != 0 {
-            let err_msg = memory::read_result(&resp_buf, response_len);
+            let err_msg = memory::host_message_or(&resp_buf, response_len, format!("plugin_call(plugin=\"{}\", function=\"{}\") failed: host error code {}.", plugin_name, function_name, err_code));
             return (String::new(), Some(err_msg));
         }
         let resp = memory::read_result(&resp_buf, response_len);
@@ -1518,14 +1518,16 @@ impl HostCalls {
             // cleat_fetch, plugin_call and plugin_call_streaming. Following the
             // majority would have been the easy call and the wrong one; the
             // remaining 15 are tracked separately.
-            let msg = memory::read_result(&buf, result_len);
-            if msg.is_empty() {
-                return Err(format!(
-                    "schedule_cron(workflow_name=\"{}\", cron_expr=\"{}\") failed: host error code {}.",
-                    workflow_name, cron_expr, err_code
-                ));
-            }
-            return Err(msg);
+            // host_message_or, NOT read_result plus an is_empty() check: on a
+            // bad-parameter refusal the host writes nothing, yet the sentinel
+            // still decodes to a length of 4294967295, so read_result clamps it
+            // to the (zero-filled) buffer and returns 64 KiB of NULs -- which is
+            // non-empty, so the fallback below it was unreachable on exactly the
+            // path it existed for. cleat#4035.
+            return Err(memory::host_message_or(&buf, result_len, format!(
+                "schedule_cron(workflow_name=\"{}\", cron_expr=\"{}\") failed: host error code {}.",
+                workflow_name, cron_expr, err_code
+            )));
         }
         Ok(memory::read_result(&buf, result_len))
     }
@@ -1561,12 +1563,14 @@ impl HostCalls {
         };
         let (result_len, err_code) = memory::decode_simple_result(result);
         if err_code != 0 {
-            // The host's message, not the code -- see schedule_cron above.
-            let msg = memory::read_result(&buf, result_len);
-            if msg.is_empty() {
-                return Err(format!("list_crons() failed: host error code {}.", err_code));
-            }
-            return Err(msg);
+            // The host's message, not the code -- and host_message_or rather
+            // than read_result, for the reason spelled out in schedule_cron:
+            // an unwritten buffer decodes to a bogus length and reads back as
+            // 64 KiB of NULs. cleat#4035.
+            return Err(memory::host_message_or(&buf, result_len, format!(
+                "list_crons() failed: host error code {}.",
+                err_code
+            )));
         }
         Ok(memory::read_result(&buf, result_len))
     }
@@ -1821,7 +1825,7 @@ impl HostCalls {
             if call_error_code == CALL_ERROR_RETRY_POLICY_TOO_LONG {
                 return Err(CallError::RetryPolicyTooLong);
             }
-            let err_msg = memory::read_result(&resp_buf, response_len);
+            let err_msg = memory::host_message_or(&resp_buf, response_len, format!("cleat_call_with_retry(service=\"{}\", operation=\"{}\") failed: host error code {}.", service, operation, err_code));
             return Err(CallError::Failed(err_msg));
         }
         let resp = memory::read_result(&resp_buf, response_len);
@@ -1926,7 +1930,7 @@ impl HostCalls {
         // six wrappers that use the durable decoder call hosts that really do pack durably; this one did not.
         let (response_len, err_code) = memory::decode_simple_result(result);
         if err_code != 0 {
-            let err_msg = memory::read_result(&resp_buf, response_len);
+            let err_msg = memory::host_message_or(&resp_buf, response_len, format!("cleat_fetch(method=\"{}\", url=\"{}\") failed: host error code {}.", method, url, err_code));
             return Err(err_msg);
         }
         let resp = memory::read_result(&resp_buf, response_len);
@@ -2035,7 +2039,7 @@ impl HostCalls {
 
         let (response_len, _call_error_code, err_code) = memory::decode_cleat_call_result(result);
         if err_code != 0 {
-            let err_msg = memory::read_result(&resp_buf, response_len);
+            let err_msg = memory::host_message_or(&resp_buf, response_len, format!("cleat_call_heartbeat(service=\"{}\", operation=\"{}\") failed: host error code {}.", service, operation, err_code));
             return (String::new(), Some(err_msg));
         }
         let resp = memory::read_result(&resp_buf, response_len);
@@ -2113,7 +2117,7 @@ impl HostCalls {
 
         let (response_len, _call_error_code, err_code) = memory::decode_cleat_call_result(result);
         if err_code != 0 {
-            let err_msg = memory::read_result(&resp_buf, response_len);
+            let err_msg = memory::host_message_or(&resp_buf, response_len, format!("plugin_call_streaming(plugin=\"{}\", function=\"{}\") failed: host error code {}.", plugin_name, function_name, err_code));
             return (String::new(), Some(err_msg));
         }
         let resp = memory::read_result(&resp_buf, response_len);
@@ -2475,5 +2479,60 @@ mod quorum_conformance {
                 assert_eq!(signal_names, caller_set, "{}: the caller's set was edited", name);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod refused_parameter_tests {
+    //! cleat#4035. A host-side stub for the extern lets the REAL wrapper run in a
+    //! unit test, which is the only way this regression can be asserted: the bug is
+    //! in how the wrapper decodes an error, so a test over a helper would stay green
+    //! while the call site reverted.
+    //!
+    //! The stub writes NOTHING into the caller's buffer and returns errBadParam
+    //! (0xFFFFFFFF_00000001) -- exactly what engine/imports.go returns when
+    //! readServiceName refuses an empty workflow name before the handler runs.
+
+    use super::*;
+    use std::sync::atomic::{AtomicI64, Ordering};
+
+    const ERR_BAD_PARAM: i64 = 0xFFFFFFFF_00000001u64 as i64;
+
+    static SCHEDULE_CRON_RESULT: AtomicI64 = AtomicI64::new(0);
+
+    #[no_mangle]
+    pub extern "C" fn cleat_schedule_cron(
+        _wf_ptr: *const u8, _wf_len: u32,
+        _cron_ptr: *const u8, _cron_len: u32,
+        _tz_ptr: *const u8, _tz_len: u32,
+        _input_ptr: *const u8, _input_len: u32,
+        _id_ptr: *mut u8, _id_max_len: u32,
+    ) -> i64 {
+        // Deliberately does not touch _id_ptr: the host writes nothing when it
+        // refuses a parameter, which is the whole defect.
+        SCHEDULE_CRON_RESULT.load(Ordering::SeqCst)
+    }
+
+    #[test]
+    fn a_refused_schedule_cron_reports_the_hosts_absence_not_64k_of_nuls() {
+        SCHEDULE_CRON_RESULT.store(ERR_BAD_PARAM, Ordering::SeqCst);
+
+        let err = HostCalls
+            .schedule_cron("", "0 0 1 1 *", "", "{}")
+            .expect_err("an empty workflow name must be refused");
+
+        assert!(
+            !err.contains('\0'),
+            "the error is {:#?} bytes and {} of them are NUL: the wrapper read an unwritten buffer \
+             because the sentinel's length field decodes to 4294967295 and read_result clamps it to \
+             the buffer. cleat#4035.",
+            err.len(),
+            err.chars().filter(|c| *c == '\0').count()
+        );
+        assert!(
+            err.contains("schedule_cron") && err.contains("host error code 1"),
+            "the error must name the call and the code when the host wrote no message, got: {:?}",
+            err
+        );
     }
 }
