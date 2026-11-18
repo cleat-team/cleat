@@ -1,0 +1,24 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- A Roslyn source generator: it runs inside the compiler, so it targets netstandard2.0 and must not depend on
+       anything the compiler does not already load. It never references the SDK's own types (the generated code
+       does, by name), which is what lets it be a separate project. -->
+  <PropertyGroup>
+    <TargetFramework>netstandard2.0</TargetFramework>
+    <LangVersion>12.0</LangVersion>
+    <Nullable>enable</Nullable>
+    <IsRoslynComponent>true</IsRoslynComponent>
+    <!-- Off on purpose: the generator writes the entry-point list (see WriteEntryList), which the extended rules
+         (RS1035) forbid. That is the only file it touches. -->
+    <EnforceExtendedAnalyzerRules>false</EnforceExtendedAnalyzerRules>
+    <!-- Release tracking is for published analyzers; this generator ships inside the SDK. -->
+    <NoWarn>$(NoWarn);RS2008</NoWarn>
+    <RootNamespace>Cleat.Generator</RootNamespace>
+    <AssemblyName>Cleat.Generator</AssemblyName>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.CodeAnalysis.CSharp" Version="4.11.0" PrivateAssets="all" />
+  </ItemGroup>
+
+</Project>
