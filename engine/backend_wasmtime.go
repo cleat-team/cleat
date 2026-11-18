@@ -82,8 +82,8 @@ type wasmtimeBackend struct {
 	interruptFenced bool
 
 	// interruptMarginTime is the epoch arm's reserve for this execution: the smaller of
-	// DefaultWasmtimeInterruptMarginTime and a tenth of the budget the guest was given, so a short
-	// deadline is not killed on its first poll. Zero when no epoch fence is armed.
+	// DefaultWasmtimeInterruptMarginTime, a tenth of the budget and half of it, floored at
+	// interruptMinMarginTime unless half the budget is smaller. Zero when no epoch fence is armed.
 	interruptMarginTime time.Duration
 
 	// interruptUnwindGranted records that the unwind grant has been given, so a second poll — or a
@@ -197,11 +197,9 @@ func NewWasmtimeBackend(ctx context.Context, opts ...WasmtimeOption) (*wasmtimeB
 	if lim.interruptMargin <= 0 {
 		lim.interruptMargin = DefaultWasmtimeInterruptMarginFuel
 	}
-	// A reserve at or above the whole budget would interrupt on the first poll, killing every
-	// workflow immediately; a quarter of the budget keeps the soft kill useful whatever an operator
-	// sets the limit to.
-	// Capped at a tenth of the budget for the same reason as the time margin: a reserve larger than
-	// the budget it protects would stop every workflow on its first poll.
+	// The fuel arm is capped at a tenth of the instruction limit and has NO floor: fuel is spent in
+	// counted increments, so the epoch's tick rounding -- the reason the time margin needs one -- does
+	// not apply, and a floor would only stop small-budget workflows earlier than it must.
 	if lim.instructionLimit > 0 && lim.interruptMargin > lim.instructionLimit/10 {
 		lim.interruptMargin = lim.instructionLimit / 10
 	}

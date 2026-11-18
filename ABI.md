@@ -621,11 +621,21 @@ from its own loop can stop through its runtime's own unwinding instead, and the 
 the defers — which is the difference between "the cleanup happened" and "the cleanup was lost".
 
 **Polling frequency and the stop policy.** The host answers `1` only when the budget is nearly
-spent: within an interrupt margin of the remaining fuel when fuel is metered
-(`--wasm-instruction-limit`), or of the remaining instance timeout otherwise (the default
-configuration). Each margin is capped at a tenth of the budget it protects. **The kill can therefore
-arrive up to that margin EARLY** — the workflow is stopped with a small part of its budget unspent.
-That is the price of stopping while the guest can still clean up.
+spent. The two arms have different rules:
+
+- **Epoch arm** (the remaining instance timeout — always armed, and the only arm a default operator
+  has): margin = the smaller of **250 ms**, **a tenth of the budget**, and **half the budget**, but
+  never below **120 ms** (two 50 ms epoch ticks plus a poll gap) unless half the budget is smaller
+  still. The floor exists because the epoch deadline is armed in whole ticks and a reserve under two
+  ticks can be overtaken by the hard trap before any poll sees it.
+- **Fuel arm** (`--wasm-instruction-limit` set): margin = the smaller of **32 MiB** and **a tenth
+  of the instruction limit**. There is no floor and no half-cap: fuel is spent in counted
+  increments, so the tick rounding that forces the epoch floor does not apply.
+
+**The kill can therefore arrive EARLY** — the workflow is stopped with part of its budget unspent.
+That is up to the epoch margin for a budget above about a second, and **up to HALF the budget** on
+a sub-second one, where the floor is what binds. It is the price of stopping while the guest can
+still clean up.
 
 **It is best-effort, and the host does not promise it will be asked.** The margin is sized from the
 longest gap measured between two consecutive polls, but a single operation that burns more budget

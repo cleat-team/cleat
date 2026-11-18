@@ -6,7 +6,7 @@ package typescript
 //     soft-kills too, because the epoch arm is the one an ordinary operator has;
 //  2. a workflow that spends most of its time in a HOST CALL is not killed early -- the arm reads
 //     the guest-execution budget the fence uses, not wall clock;
-//  3. a small budget keeps its margin proportional (a tenth of it), so a workflow with a short
+//  3. a small budget still runs: its margin is capped proportionally, so a workflow with a short
 //     instruction limit or a short deadline is not stopped at its first poll;
 //  4. the residue: a guest whose work never returns to the QuickJS bytecode loop is still reached by
 //     the hard trap, and its defers still do not run. That is measured, not assumed, and it is the
@@ -68,10 +68,10 @@ var errStopped = errors.New("stopped")
 // TestTypeScriptSoftKillsWithASubSecondBudget: no instruction limit at all, and an 800ms instance
 // timeout so the test is quick. The kill is the epoch fence, and it must still run the defers.
 //
-// THE SUB-SECOND BUDGET IS THE POINT, not an accident of test speed: at 800ms the budget/10 cap
-// puts the reserve at 80ms, which is under the two-tick floor the epoch's rounding needs, and
-// before that floor existed this test lost its defers 7 times in 20 (`-count=20` at cleat#3922's
-// review). It is the configuration that exercises the floor.
+// THE SUB-SECOND BUDGET IS THE POINT, not an accident of test speed. Before the floor existed, the
+// budget/10 cap put this reserve at 80ms -- under the two ticks the epoch's rounding needs -- and
+// this test lost its defers 7 times in 20 (`-count=20`, cleat#3922's review). It is the
+// configuration that exercises the floor, and 0 of 20 after.
 func TestTypeScriptSoftKillsWithASubSecondBudget(t *testing.T) {
 	wasmBytes := buildEntry(t, "tests/typescript/testdata/workflows/defer_then_spin.ts", "defer_then_spin")
 
@@ -157,7 +157,7 @@ func TestTypeScriptSoftKillDoesNotChargeTheGuestForHostTime(t *testing.T) {
 }
 
 // TestTypeScriptASmallBudgetKeepsAProportionalMargin: with a tiny instruction limit the reserve is a
-// tenth of it, so an ordinary workflow still finishes.
+// capped proportionally, so an ordinary workflow still finishes.
 func TestTypeScriptASmallBudgetKeepsAProportionalMargin(t *testing.T) {
 	wasmBytes := buildEntry(t, "tests/typescript/testdata/workflows/answer.ts", "answer")
 

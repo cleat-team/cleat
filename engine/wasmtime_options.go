@@ -95,8 +95,11 @@ const DefaultWasmtimeInterruptMarginFuel = 32 * 1024 * 1024
 // can pass the deadline before the handler is asked again) and the longest time measured between
 // two consecutive handler calls; see TestMeasureInterruptMargin.
 //
-// Capped at a tenth of the budget it is applied to: a fixed reserve cannot be larger than the
-// budget it protects, or a workflow with a short deadline is killed on its first poll.
+// The effective reserve is the smaller of this, a tenth of the budget and half of it, with a floor
+// of interruptMinMarginTime (two epoch ticks plus a poll gap): a reserve under two ticks can be
+// overtaken by the hard trap before any poll sees it, and one above half the budget stops a
+// workflow almost at once. On a sub-second budget the floor is what binds, so the kill can arrive up
+// to half the budget early.
 const DefaultWasmtimeInterruptMarginTime = 250 * time.Millisecond
 
 // interruptUnwindGrant is how much budget the soft kill gives back before the guest unwinds
@@ -110,14 +113,12 @@ const DefaultWasmtimeInterruptMarginTime = 250 * time.Millisecond
 // the moment of the stop: that arms ONE tick, whose expiry is a uniform 0-50ms away, and a 0.15ms
 // unwind loses that race about once in 330 stops.
 //
-// WHERE THAT CASE ACTUALLY ARISES, because it is not the ordinary default. With
-// --wasm-instance-timeout at its 30s default the margin is 250ms and the bracket arms 5 ticks at
-// the stop, so the guest has 200-250ms to unwind and no race exists. A budget under 100ms at the
-// stop needs the budget/10 cap to be binding, i.e. an instance timeout under about 1s -- which is
-// how the one observed failure happened: TestTypeScriptDefaultConfigurationSoftKills uses an 800ms
-// timeout so the test is quick, which caps the margin at 80ms and arms one tick. It was seen once
-// and not reproduced in five re-runs of that same test; 100ms is two ticks, and about 75x the
-// longest measured unwind.
+// WHERE THAT CASE ARISES. With --wasm-instance-timeout at its 30s default the margin is 250ms and
+// the bracket arms 5 ticks at the stop, so the guest has 200-250ms to unwind and no race exists.
+// A budget under 100ms at the stop needs the reserve to be under two ticks, which the review of this
+// PR measured at an 800ms budget -- TestTypeScriptSoftKillsWithASubSecondBudget -- and which lost 7
+// drains in 20 before the floor above existed. The floor removes the race there; the grant remains
+// for the case where a poll gap or a short ctx deadline still lands the stop inside one tick.
 const interruptUnwindGrant = 100 * time.Millisecond
 
 // interruptMinMarginTime is the floor under the epoch reserve. Two epoch ticks plus a poll gap:
