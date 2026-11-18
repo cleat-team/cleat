@@ -5,7 +5,9 @@ local npm package has drifted from that package's own package.json.
 cleat#2455 / cleat#2506: `examples/widget-store-as/package-lock.json` pinned
 `@cleat/sdk@0.1.0` with `peerDependencies.assemblyscript ^0.27.0` while
 `packages/cleat-as/package.json` had moved to `0.3.2` / `^0.28.19`, and
-`npm ci` refused. Nothing in CI ran `npm ci` there, so nothing noticed.
+`npm ci` refused. Nothing in CI ran `npm ci` there, so nothing noticed. (Both directories were removed
+with the AssemblyScript SDK, cleat#4023; the guard stays for every other `file:` link, and this is the case
+it was written for.)
 
 Two guards existed before this one and neither reaches the case above:
 `.github/workflows/plugin-harness-ci.yml`'s "Tests did not rewrite their own

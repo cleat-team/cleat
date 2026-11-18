@@ -399,7 +399,7 @@ jobs:
           scripts/fetch-wasm-tools.sh --self-test
           LINT_GUARD_EOF
 
-      # Four SDK stampers (AssemblyScript, Java, Python, Rust) each carry the
+      # Three SDK stampers (Java, Python, Rust; AssemblyScript was a fourth until cleat#4023) each carry the
       # version in their own manifest and their own injection script, with no
       # single source of truth -- so a release bump that touches one site and
       # misses another ships silently stale. cleat#3183 was exactly that: an

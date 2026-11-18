@@ -53,6 +53,7 @@ import (
 //
 //	widget-store (AssemblyScript)      9,496 ->     86,400   9.1x
 //	as-workflow (AssemblyScript)      26,367 ->    141,904   5.4x
+//	(the two AssemblyScript rows are artifacts removed with the SDK, cleat#4023; kept as measured)
 //	rust-workflow (release)          149,027 ->    457,952   3.1x
 //	hostcallsrust (release)          252,411 ->    679,152   2.7x
 //	java-workflow                    299,189 ->    694,184   2.3x
