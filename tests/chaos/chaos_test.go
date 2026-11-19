@@ -396,8 +396,18 @@ func goldenOf(t *testing.T, e *env, sc scenario) goldenRecord {
 }
 
 func runBoundaries(t *testing.T, then string, verify func(scenario, goldenRecord, *fault, request, outcome) []string, flags ...string) {
-	e := newEnv(t)
 	only := os.Getenv("CLEAT_CHAOS_SCENARIO")
+	if only != "" {
+		found := false
+		for _, sc := range scenarios {
+			found = found || sc.Name == only
+		}
+		if !found {
+			// A misspelt name must not select nothing and pass: `go test` is silent about a selection that matched nothing.
+			t.Fatalf("CLEAT_CHAOS_SCENARIO=%q names no scenario", only)
+		}
+	}
+	e := newEnv(t)
 	for _, sc := range scenarios {
 		if only != "" && only != sc.Name {
 			continue
