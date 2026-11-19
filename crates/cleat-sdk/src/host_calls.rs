@@ -20,6 +20,18 @@ fn suspend() -> CallError {
     CallError::Suspended
 }
 
+/// A wait's `Duration` as the milliseconds the host is given (cleat#4144).
+///
+/// `d.as_millis() as i64` did two wrong things. It TRUNCATED, so a positive sub-millisecond wait became 0, which the host
+/// reads as "do not wait" and some SDKs read as "wait for ever"; a positive wait now rounds UP, so it is at least 1 ms.
+/// And it WRAPPED: `as_millis` is a `u128`, and `as i64` keeps the low 64 bits, so a very long wait such as
+/// `Duration::MAX` came out as an arbitrary, often negative, number. It now saturates at `i64::MAX`, which the host clamps
+/// (cleat#4105). A zero `Duration` stays 0.
+pub(crate) fn wait_ms(d: Duration) -> i64 {
+    let ms = d.as_nanos().div_ceil(1_000_000);
+    i64::try_from(ms).unwrap_or(i64::MAX)
+}
+
 /// Reports whether the host refused this call because the workflow is running
 /// as a defer segment, marking the segment as suspending if so.
 ///
@@ -739,7 +751,7 @@ impl HostCalls {
 
     /// Await external signals for a duration. Preferred over await_signals_ms.
     pub fn await_signals(&self, signal_names: &[&str], timeout: Duration) -> Result<AwaitedSignal, CallError> {
-        self.await_signals_ms(signal_names, timeout.as_millis() as i64)
+        self.await_signals_ms(signal_names, wait_ms(timeout))
     }
 
     /// Await external signals in milliseconds. Mirrors Go's AwaitSignals.
@@ -910,7 +922,7 @@ impl HostCalls {
 
     /// Await a durable promise for a duration. Preferred over await_promise_ms.
     pub fn await_promise(&self, promise_id: &str, timeout: Duration) -> (String, bool, Option<String>) {
-        self.await_promise_ms(promise_id, timeout.as_millis() as i64)
+        self.await_promise_ms(promise_id, wait_ms(timeout))
     }
 
     /// Await a durable promise in milliseconds. Mirrors Go's AwaitPromise (ABI 2.21).
@@ -2647,5 +2659,33 @@ mod refused_parameter_tests {
             failures.len(),
             failures.join("\n  ")
         );
+    }
+}
+
+#[cfg(test)]
+mod wait_ms_tests {
+    use super::wait_ms;
+    use std::time::Duration;
+
+    // cleat#4144: a positive wait is never 0 and a huge one never wraps.
+    #[test]
+    fn a_positive_wait_rounds_up_and_is_never_zero() {
+        assert_eq!(wait_ms(Duration::from_nanos(1)), 1);
+        assert_eq!(wait_ms(Duration::from_micros(400)), 1);
+        assert_eq!(wait_ms(Duration::from_millis(1)), 1);
+        assert_eq!(wait_ms(Duration::from_nanos(1_000_001)), 2);
+        assert_eq!(wait_ms(Duration::from_millis(1500)), 1500);
+    }
+
+    #[test]
+    fn zero_stays_zero() {
+        assert_eq!(wait_ms(Duration::ZERO), 0);
+    }
+
+    #[test]
+    fn a_wait_too_long_for_the_host_saturates_instead_of_wrapping() {
+        assert_eq!(wait_ms(Duration::MAX), i64::MAX);
+        // The old expression, for the record: its low 64 bits are not i64::MAX, and are not even positive for this value.
+        assert_ne!(Duration::MAX.as_millis() as i64, i64::MAX);
     }
 }

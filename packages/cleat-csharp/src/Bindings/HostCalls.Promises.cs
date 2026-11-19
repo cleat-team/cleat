@@ -27,7 +27,7 @@ public sealed partial class HostCalls
     /// <see cref="CleatSuspendException"/>; on replay the wait has already ended and it returns the outcome.
     /// </summary>
     public PromiseResult AwaitPromise(string id, TimeSpan timeout)
-        => AwaitPromiseMs(id, timeout <= TimeSpan.Zero ? 0UL : (ulong)timeout.TotalMilliseconds);
+        => AwaitPromiseMs(id, WaitDuration.Ms(timeout));
 
     /// <summary><see cref="AwaitPromise(string, TimeSpan)"/> in milliseconds.</summary>
     public PromiseResult AwaitPromiseMs(string id, ulong timeoutMs)

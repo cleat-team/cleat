@@ -123,6 +123,15 @@ func (s *execSession) AwaitPromise(ctx context.Context, m api.Module, promiseID 
 				if !s.advanceReplayStep(ctx, &rec) {
 					return 0
 				}
+				// A recorded NO-WAIT await replays as the timeout it was, from the record alone (cleat#4144). The fresh path below
+				// records an await with a timeout of 0 or less and returns timed out. Consulting the store here returned RESOLVED to a
+				// replay that ran after the promise settled, where the original run had been told it timed out, so a poll loop took a
+				// different branch on its first resume; and it did so with history still unread. The guest's own argument must also be
+				// non-positive, so a recorded 0 that meant "unknown" (written before the timeout was persisted) and is resumed with a
+				// positive argument still takes the resuming path below.
+				if rec.TimeoutMs <= 0 && timeoutMs <= 0 {
+					return packAwaitPromiseResult(0, true, 0)
+				}
 				// Promise was pending in original execution. Check if resolved
 				// now -- and carry the ORIGINAL await's anchor and timeout
 				// forward, because this wake has to be measured against when
@@ -173,6 +182,37 @@ func (s *execSession) AwaitPromise(ctx context.Context, m api.Module, promiseID 
 			s.setAwaitRejected(true)
 			return packAwaitPromiseResult(written, false, 1)
 		}
+	}
+
+	// A timeout of 0 (or less) has no deadline to expire, so it must not suspend: cleat#4144, the cleat#1331 loop that await_signals
+	// guards against in signaller.go. Placed AFTER the settled checks above, so an already-settled promise is still reported and a
+	// 0 ms await degrades to a poll rather than to nothing.
+	//
+	// The suspensions below set Until = now + 0, a deadline of NOW. The run is immediately re-claimable, wakes, replays to the recorded
+	// await, takes the resuming branch (whose awaitTimeoutMs <= 0 arm used to keep waiting with the same deadline of now) and suspends
+	// again, forever, each cycle a legitimate claim that changes nothing.
+	//
+	// Timed out rather than an error, matching await_signals and a durable sleep, where 0 ms means "do not wait". It RECORDS the await,
+	// with the timeout it was given, because a replay must return the same answer without asking the store: recording nothing let a
+	// replay that ran after the promise settled return RESOLVED where the original run was told it timed out (measured by
+	// cleat-review), and left a later event at this step for the replay to trip over. The replay branch above returns the timeout from
+	// this record alone. A poll loop therefore records one event per iteration, which counts toward the event cap.
+	//
+	// Not for a resume that carries a POSITIVE recorded timeout: that deadline belongs to the original await and wins, as it always did.
+	// (A recorded timeout of 0 or less with a non-positive argument never arrives here: it returned from the replay branch.)
+	if timeoutMs <= 0 && !(resumingAwait && awaitTimeoutMs > 0) {
+		// A poll is an event like any other, so it counts toward the event cap and stops at it (cleat#4153). Without this a poll loop
+		// kept recording into a quota the flush refuses, retrying each refused write for the whole flush window.
+		if s.refuseAtEventCap(ctx, m) {
+			return s.suspendingAwaitResult()
+		}
+		s.recordEvent(EventRecord{
+			Step:      s.stepCount,
+			EventType: EventTypeAwaitPromise,
+			PromiseID: promiseID,
+			TimeoutMs: timeoutMs,
+		})
+		return packAwaitPromiseResult(0, true, 0)
 	}
 
 	// Still pending. Either begin an await or resume the one already recorded.

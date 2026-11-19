@@ -11,6 +11,7 @@ import { execFileSync } from "node:child_process";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { runWorkflow } from "./testing.ts";
+import { MAX_WAIT_MS, waitMs } from "./waits.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(HERE, "../..");
@@ -344,4 +345,23 @@ test("with no update scripted the same workflow receives none, and no update sto
   assert.equal(run.ok, true);
   assert.equal(run.suspended, true);
   assert.equal(run.extras?.updates, undefined, "a store nobody scripted reported something");
+});
+
+// cleat#4144. What `waitForSignal` and `awaitPromise` hand the host. No WASM module is needed: the conversion is a pure function in
+// its own file, and this test reads what it returns. Both directions, so a function that changed nothing would fail the first.
+test("a positive wait is never 0, and Infinity is the largest exact count", () => {
+  assert.equal(waitMs(0.4), 1, "a positive sub-millisecond wait truncated to 0, which the host reads as 'do not wait'");
+  assert.equal(waitMs(1), 1);
+  assert.equal(waitMs(1.2), 2);
+  assert.equal(waitMs(1500), 1500);
+  assert.equal(waitMs(Infinity), MAX_WAIT_MS, "Infinity is the explicit wait without a limit");
+  assert.equal(waitMs(Number.MAX_VALUE), MAX_WAIT_MS);
+  assert.ok(Number.isSafeInteger(waitMs(Infinity)), "the largest count must be exactly representable");
+});
+
+test("zero, a negative number and NaN are passed through unchanged", () => {
+  assert.equal(waitMs(0), 0);
+  assert.equal(waitMs(-1), -1);
+  assert.equal(waitMs(-Infinity), -Infinity);
+  assert.ok(Number.isNaN(waitMs(NaN)));
 });

@@ -743,7 +743,7 @@ Wait for one or more external signals, with a timeout.
 |---|---|---|
 | `names_ptr` | `i32` | JSON array of signal names, e.g. `["payment_received","order_cancelled"]` |
 | `names_len` | `i32` | JSON array length |
-| `timeout_ms` | `i64` | Timeout in milliseconds |
+| `timeout_ms` | `i64` | Timeout in milliseconds. Zero or negative means do not wait: an already-waiting signal is returned and otherwise `timedOut` is reported at once (cleat#1331). That outcome is recorded as one `await_signals` event and a replay returns it from the record (cleat#4153), so a loop of such polls records one event per iteration: prefer a positive timeout to a zero-timeout poll loop. |
 | `sig_name_ptr` | `i32` | Output buffer for received signal name |
 | `sig_name_max_len` | `i32` | Output buffer capacity (1048576) |
 | `payload_ptr` | `i32` | Output buffer for signal payload |
@@ -1229,7 +1229,7 @@ Wait for a promise to be resolved by an external caller. Blocks until resolved o
 |---|---|---|
 | `promise_id_ptr` | `i32` | Promise ID pointer |
 | `promise_id_len` | `i32` | Promise ID length |
-| `timeout_ms` | `i64` | Timeout in milliseconds |
+| `timeout_ms` | `i64` | Timeout in milliseconds. **Zero or negative means do not wait** (cleat#4144): a promise that is already settled is reported, and a pending one returns `timedOut` at once. It never suspends the run. The outcome is RECORDED as one `await_promise` event carrying the timeout, and a replay returns the timeout from that record without asking the store (cleat#4153), as `cleat_await_signals` now does. A loop of these records one event per iteration, so prefer a positive timeout to a zero-timeout poll loop. |
 | `result_out_ptr` | `i32` | Output buffer for result |
 | `result_out_max` | `i32` | Output buffer capacity (1048576) |
 
@@ -2021,6 +2021,7 @@ The Rust implementation at `examples/rust-workflow/src/` serves as a reference f
 | Version | Date | Changes |
 |---|---|---|
 | — | 2026-11-19 | **`cleat_signal_workflow` now reports a refused delivery** (cleat#4102). The signal store's error used to be logged and dropped and the call returned 0. It now returns `errCode` 3 (delivery failed, retryable) or 4 (target not found, terminal, identical for a foreign and a nonexistent target) in the existing result word, delivers BEFORE recording, and records the outcome so replay returns it; the authorization refusal (`errCode` 2) is recorded the same way. Delivery is at-least-once. No signature changes. |
+| — | 2026-11-19 | **`cleat_await_promise`: a `timeout_ms` of zero or less now means do not wait** (cleat#4144). It used to suspend the run with a deadline of now, so every wake suspended again (the cleat#1331 loop). An already-settled promise is still returned; a pending one reports `timedOut` at once. The outcome is recorded as one event and a replay returns it from the record, never from a fresh look at the store; the same now holds for a `cleat_await_signals` of zero or less, which used to record nothing and, on replay, ran every durable call recorded after the poll a second time (cleat#4153; both defects are in v0.5.0). No signature change. |
 | — | 2026-11-18 | **`cleat_delete_cron` now returns the stop sentinel** (cleat#4083). A defer segment's workflow body, past recorded history, deleted a schedule from a real store; `DeleteCron` now consults `stopBeforeNewWork` like `ScheduleCron`. Its layout is `errCode` only, so bit 31 is the top bit of `errCode` and a guest that decodes first reads a refused delete as an error code, or, in a one-byte decoder, as success. §2.56 is unchanged. Added to the table above; re-derived with the query below, which differed from the table by exactly this one call. |
 | — | 2026-11-18 | **`cleat_create_promise` and `cleat_set_scope` now return the stop sentinel** (cleat#4091). A defer segment's workflow body, past recorded history, wrote a promise row and took a 24-hour scope key on a real store; both now consult `stopBeforeNewWork`. Both pack `packSimpleResult` (upper field 32-63, `errCode` 0-31), so they join the second row of the table above and no layout is added. §2.34 and §2.38 are unchanged. Re-derived with the query below, which differed from the table by exactly these two calls. |
 | — | 2026-10-26 | **`cleat_await_promise` joins the stop-sentinel table in §2 (cleat#3383).** A fresh await that has to wait now returns the sentinel instead of `timedOut = 1` with `errCode = 0`, which is byte-identical to a genuine timeout and which no SDK's `await_promise` binding distinguished from one: the guest took its timeout branch and made a durable call before the run suspended. The word is unchanged for every other case, including a deadline that has really passed, so an SDK that has not added the stop check reads a suspend as it always did. The three suspend sites are the first await, a wake on an await recorded with no timeout, and an early wake; the deadline-passed return is the one genuine timeout and stays. Same shape as the `cleat_await_signals` change in cleat#3378. |

@@ -24,7 +24,7 @@ public sealed partial class HostCalls
     /// wait throws <see cref="CleatSuspendException"/>.
     /// </summary>
     public SignalResult AwaitSignals(IReadOnlyList<string> names, TimeSpan timeout)
-        => AwaitSignalsMs(names, timeout <= TimeSpan.Zero ? 0UL : (ulong)timeout.TotalMilliseconds);
+        => AwaitSignalsMs(names, WaitDuration.Ms(timeout));
 
     /// <summary><see cref="AwaitSignals(IReadOnlyList{string}, TimeSpan)"/> in milliseconds; zero waits indefinitely.</summary>
     public SignalResult AwaitSignalsMs(IReadOnlyList<string> names, ulong timeoutMs)

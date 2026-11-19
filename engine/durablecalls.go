@@ -69,6 +69,37 @@ func (s *execSession) DurableCall(ctx context.Context, m api.Module, service, op
 	return s.freshCall(ctx, m, service, operation, requestJSON, responsePtr, responseMaxLen)
 }
 
+// atEventCap reports whether this session has recorded as many durable events as --max-quota-events allows.
+func (s *execSession) atEventCap() bool {
+	return s.engine.maxEventsPerWorkflow > 0 && s.eventCount >= s.engine.maxEventsPerWorkflow
+}
+
+// triggerEventCapContinueAsNew starts the continue-as-new that the event cap asks for. freshCall and the no-wait awaits share it, so
+// the cap is one rule with one implementation (cleat#4153): a recorded event that did not pass through here wrote into a quota the
+// flush refuses ("event quota exceeded"), retried the write for the whole flush window, and carried on.
+func (s *execSession) triggerEventCapContinueAsNew(ctx context.Context, m api.Module) {
+	s.autoContinueAsNewTriggered = true
+	if s.engine.Metrics != nil {
+		s.engine.Metrics.RecordContinueAsNew(ctx, "event_cap")
+	}
+	s.engine.log().InfoContext(ctx, "auto-ContinueAsNew triggered", "workflow_id", s.workflowID, "tenant_id", s.tenantID, "event_count", s.eventCount, "max", s.engine.maxEventsPerWorkflow)
+	s.ContinueAsNew(ctx, m, s.originalInput)
+}
+
+// refuseAtEventCap is the cap check for a recorded event that does not go through freshCall (the no-wait awaits). At the cap it
+// triggers the continue-as-new once and reports true, and the caller returns the stop the continue-as-new set: every SDK reads
+// suspendingAwaitResult as a stop and unwinds. Below the cap it counts the event it is about to record and reports false.
+func (s *execSession) refuseAtEventCap(ctx context.Context, m api.Module) bool {
+	if s.atEventCap() {
+		if !s.autoContinueAsNewTriggered {
+			s.triggerEventCapContinueAsNew(ctx, m)
+		}
+		return true
+	}
+	s.eventCount++
+	return false
+}
+
 func (s *execSession) freshCall(ctx context.Context, m api.Module, service, operation, requestJSON string, responsePtr, responseMaxLen uint32) int64 {
 	// The refusal lives HERE and not in DurableCall: this function is reached from the non-replay entry AND from replayCall at the replay
 	// frontier, and a defer segment over a run that has history starts in replay, so its body's first new call arrives by the second
@@ -133,12 +164,7 @@ func (s *execSession) freshCall(ctx context.Context, m api.Module, service, oper
 	// ContinueAsNew to start a fresh run with reset event_count. Events are
 	// tracked locally in the session (no DB query per call).
 	if s.engine.maxEventsPerWorkflow > 0 && s.eventCount >= s.engine.maxEventsPerWorkflow && !s.autoContinueAsNewTriggered {
-		s.autoContinueAsNewTriggered = true
-		if s.engine.Metrics != nil {
-			s.engine.Metrics.RecordContinueAsNew(ctx, "event_cap")
-		}
-		s.engine.log().InfoContext(ctx, "auto-ContinueAsNew triggered", "workflow_id", s.workflowID, "tenant_id", s.tenantID, "event_count", s.eventCount, "max", s.engine.maxEventsPerWorkflow)
-		s.ContinueAsNew(ctx, m, s.originalInput)
+		s.triggerEventCapContinueAsNew(ctx, m)
 		// Refuse the call rather than closing the module.
 		//
 		// This branch used to call m.CloseWithExitCode to stop the guest and
