@@ -55,6 +55,12 @@ internal static class EntryJson
     internal static T Read<T>(JsonElement input, JsonSerializerContext ctx)
         => JsonSerializer.Deserialize(input, Info<T>(ctx))!;
 
+    /// <summary>Throws if <paramref name="ctx"/> does not declare <typeparamref name="T"/>, without reading anything.</summary>
+    internal static void Require<T>(JsonSerializerContext ctx) => _ = Info<T>(ctx);
+
+    internal static T ReadText<T>(string json, JsonSerializerContext ctx)
+        => JsonSerializer.Deserialize(json, Info<T>(ctx))!;
+
     internal static string Write<T>(T value, JsonSerializerContext ctx)
         => JsonSerializer.Serialize(value, Info<T>(ctx));
 
