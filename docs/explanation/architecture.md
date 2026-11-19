@@ -157,7 +157,7 @@ backend cleat has. It requires CGO. Key characteristics:
 - WASM modules are compiled once and cached in memory keyed by
   `def_name:def_version`.
 - String marshalling uses a scratch region in the module's linear memory
-  (10 MiB offset; 32 KB output buffer / 64 KB max string length by default
+  (10 MiB offset; 32 KB output buffer / 2 MiB max string length by default
   in `cleat-worker`, each configurable -- see
   `docs/reference/worker-config.md`).
 

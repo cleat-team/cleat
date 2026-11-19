@@ -530,3 +530,74 @@ func (b *wasmtimeBackend) cgotestDispatchU64(method int, argsPtr unsafe.Pointer,
 func cgotestGoComponentCallback(cbID uintptr, argsPtr unsafe.Pointer, nargs int, resultsPtr unsafe.Pointer) *C.wasmtime_error_t {
 	return C.goComponentCallback(C.cbid_as_env_test(C.uintptr_t(cbID)), nil, nil, (*C.wasmtime_component_val_t)(argsPtr), C.size_t(nargs), (*C.wasmtime_component_val_t)(resultsPtr), 1)
 }
+
+// payloadDispatchOutcome is what cgotestDispatchPayload saw: the trap text if the dispatcher trapped, else the result read as the kind the
+// dispatcher answers in.
+type payloadDispatchOutcome struct {
+	Trap     string // non-empty when the dispatcher returned a wasmtime error (a refusal of an import with no result to carry it)
+	CallKind string // "ok" | "suspended" | "failed" for a result<string, call-failure>
+	Payload  string // the call-failure message, the ok payload, or a bare string result
+	Code     uint32 // the call-failure classification
+	U64      uint64 // the word a u64-returning dispatcher answered
+}
+
+// cgotestDispatchPayload runs one component dispatcher BY NAME with mixed arguments and reads its result as `answers`: "call" for
+// result<string, call-failure>, "u64", or "string". It exists for cleat#4130's per-site bound, where the 28 dispatchers differ in argument layout
+// and answer kind and the string-only harness above reaches fewer than half of them.
+func (b *wasmtimeBackend) cgotestDispatchPayload(name, answers string, args ...any) (payloadDispatchOutcome, error) {
+	table := map[string]func(*C.wasmtime_component_val_t, C.size_t, *C.wasmtime_component_val_t, C.size_t) *C.wasmtime_error_t{
+		"dispatchDurableCallString":        b.dispatchDurableCallString,
+		"dispatchDurableCallRetry":         b.dispatchDurableCallRetry,
+		"dispatchDurableCallHeartbeat":     b.dispatchDurableCallHeartbeat,
+		"dispatchDurableLog":               b.dispatchDurableLog,
+		"dispatchDurableDefer":             b.dispatchDurableDefer,
+		"dispatchContinueAsNew":            b.dispatchContinueAsNew,
+		"dispatchAwaitSignals":             b.dispatchAwaitSignals,
+		"dispatchSignalWorkflow":           b.dispatchSignalWorkflow,
+		"dispatchChildWorkflow":            b.dispatchChildWorkflow,
+		"dispatchAwaitAnyChild":            b.dispatchAwaitAnyChild,
+		"dispatchAwaitAllChildren":         b.dispatchAwaitAllChildren,
+		"dispatchChildWorkflowWithOptions": b.dispatchChildWorkflowWithOptions,
+		"dispatchResolvePromise":           b.dispatchResolvePromise,
+		"dispatchRejectPromise":            b.dispatchRejectPromise,
+		"dispatchSetQueryState":            b.dispatchSetQueryState,
+		"dispatchCompleteUpdate":           b.dispatchCompleteUpdate,
+		"dispatchDurableSend":              b.dispatchDurableSend,
+		"dispatchScheduleInvoke":           b.dispatchScheduleInvoke,
+		"dispatchPluginCall":               b.dispatchPluginCall,
+		"dispatchPluginCallStreaming":      b.dispatchPluginCallStreaming,
+		"dispatchUUID":                     b.dispatchUUID,
+		"dispatchRunDetached":              b.dispatchRunDetached,
+		"dispatchContinueAsNewVersioned":   b.dispatchContinueAsNewVersioned,
+		"dispatchSideEffect":               b.dispatchSideEffect,
+		"dispatchFetch":                    b.dispatchFetch,
+		"dispatchScheduleCron":             b.dispatchScheduleCron,
+	}
+	dispatch := table[name]
+	if dispatch == nil {
+		return payloadDispatchOutcome{}, fmt.Errorf("cgotestDispatchPayload: no dispatcher %q", name)
+	}
+	argsPtr, nargs, free := cgotestMakeMixedArgs(args...)
+	defer free()
+	resultPtr := cgotestAllocResult()
+	var out payloadDispatchOutcome
+	if err := dispatch((*C.wasmtime_component_val_t)(argsPtr), C.size_t(nargs), (*C.wasmtime_component_val_t)(resultPtr), 1); err != nil {
+		var msg C.wasm_byte_vec_t
+		C.wasmtime_error_message(err, &msg)
+		out.Trap = C.GoStringN(msg.data, C.int(msg.size))
+		C.wasm_byte_vec_delete(&msg)
+		C.wasmtime_error_delete(err)
+		return out, nil
+	}
+	switch answers {
+	case "call":
+		out.CallKind, out.Payload, out.Code = cgotestReadCallOutcome(resultPtr)
+	case "u64":
+		out.U64 = cgotestReadResultU64(resultPtr)
+	case "string":
+		out.Payload, _ = cgotestReadResultString(resultPtr)
+	default:
+		return out, fmt.Errorf("cgotestDispatchPayload: unknown answer kind %q", answers)
+	}
+	return out, nil
+}

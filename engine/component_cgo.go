@@ -1138,6 +1138,40 @@ func invalidNameMessage(call, param string) string {
 	return "cleat: " + call + ": " + param + " is not a valid name (it must match [a-zA-Z0-9._-]+)"
 }
 
+// readPayloadArg returns the i-th string argument and whether it is within MaxWasmStringLen (cleat#4130). readStrArg copies an argument whole
+// with no bound, which let a component guest hand the host a request as large as its own memory while the core-module path refused anything over
+// the limit. Names already had the bound (readNameArg); this gives every other guest-supplied string the same one, and the limit is the CONFIGURED
+// MaxWasmStringLen (--wasm-max-string-len), not a constant, so an operator who needs more can raise it.
+func readPayloadArg(args *C.wasmtime_component_val_t, i int, nargs C.size_t) (string, bool) {
+	s := readStrArg(args, i, nargs)
+	return s, uint64(len(s)) <= uint64(MaxWasmStringLen)
+}
+
+// oversizeMessage is the text a guest sees when a dispatcher refuses a payload for its size.
+func oversizeMessage(call, param string, n int) string {
+	return fmt.Sprintf("cleat: %s: %s is %d bytes, over the configured limit of %d (--wasm-max-string-len)", call, param, n, MaxWasmStringLen)
+}
+
+// refuseOversizeWithCallFailure is refuseNameWithCallFailure for a payload over the limit: err(failed) classified invalid-request, no handler
+// method runs, so no event is recorded and replay sees nothing.
+func refuseOversizeWithCallFailure(
+	results *C.wasmtime_component_val_t, nresults C.size_t, call, param string, n int,
+) *C.wasmtime_error_t {
+	setResultCallOutcome(results, nresults, callOutcome{
+		failed:  true,
+		code:    uint32(callErrorInvalidRequest),
+		payload: oversizeMessage(call, param, n),
+	})
+	return nil
+}
+
+// refuseOversizeWithoutAResult is refuseNameWithoutAResult for a payload over the limit, with the same trap-or-empty-string rule.
+func (b *wasmtimeBackend) refuseOversizeWithoutAResult(
+	call, param string, n int, results *C.wasmtime_component_val_t, nresults C.size_t,
+) *C.wasmtime_error_t {
+	return b.refuseWithoutAResult(oversizeMessage(call, param, n), results, nresults)
+}
+
 // refuseNameWithCallFailure answers a `result<_, call-failure>` import with
 // err(failed) classified callErrorInvalidRequest -- the classification
 // badParamDurableCall gives the same refusal on the core path -- and returns nil,
@@ -1173,8 +1207,15 @@ func refuseNameWithBadParam(results *C.wasmtime_component_val_t, nresults C.size
 func (b *wasmtimeBackend) refuseNameWithoutAResult(
 	call, param string, results *C.wasmtime_component_val_t, nresults C.size_t,
 ) *C.wasmtime_error_t {
+	return b.refuseWithoutAResult(invalidNameMessage(call, param), results, nresults)
+}
+
+// refuseWithoutAResult is the trap-or-empty-string refusal shared by names and oversize payloads.
+func (b *wasmtimeBackend) refuseWithoutAResult(
+	text string, results *C.wasmtime_component_val_t, nresults C.size_t,
+) *C.wasmtime_error_t {
 	if !b.deferPhase && !b.guestIsDrainingDefers() {
-		msg := C.CString(invalidNameMessage(call, param))
+		msg := C.CString(text)
 		defer C.free(unsafe.Pointer(msg))
 		return C.wasmtime_error_new(msg)
 	}

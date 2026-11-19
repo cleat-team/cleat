@@ -193,6 +193,7 @@ func (h *mockHostHandler) DurablePollUpdate(ctx context.Context, m api.Module, o
 }
 
 func (h *mockHostHandler) DurableCompleteUpdate(ctx context.Context, m api.Module, requestID, result, errMsg string) int64 {
+	h.record("DurableCompleteUpdate", requestID, result, errMsg)
 	return 0
 }
 func (h *mockHostHandler) SendSignalAndWait(ctx context.Context, m api.Module, targetRunID, signalName, payload string, timeoutMs int64, responsePtr, responseMaxLen uint32) int64 {

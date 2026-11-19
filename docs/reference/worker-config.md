@@ -1095,15 +1095,18 @@ Larger values support workflows that produce more output data.
 
 ### --wasm-max-string-len
 
-> Corrected 2026-08-09: was documented as `1048576` (1 MiB). The actual
-> `flag.Int` default in `cmd/cleat-worker/config.go:120` is `65536` (64 KB).
+> Changed with cleat#4130: the default is now `2097152` (2 MiB), the same constant as the engine package's `DefaultMaxWasmStringLen`. It was
+> `65536` (64 KB) here and 1 MiB in the engine package, and the 64 KB one is what a running worker used. A test pins the two together.
 
 | Type | Default | Description |
 |------|---------|-------------|
-| int | `65536` (64 KB) | Maximum WASM string parameter length in bytes |
+| int | `2097152` (2 MiB) | Maximum length, in bytes, of any one string a guest hands the host |
 
-Limits the length of string parameters passed to WASM guest functions.
-Strings longer than this are truncated before reaching the guest.
+Bounds every string a workflow passes to a host call (a request, a child input, a signal or log payload, a fetch body, a side-effect value),
+for **every** guest language: Go and Rust core modules and Python and C# components alike. A call over the limit is **refused**, not truncated:
+as an error classified invalid-request for a call that can return one, and as a bad-parameter result or a trap for a call that cannot. A
+refused call runs nothing on the host and records no event. Raise the flag if a workflow legitimately sends more. The limit is a per-argument
+bound on what the host will copy out of guest memory; responses are bounded separately by `--wasm-output-buffer-size`.
 
 ---
 

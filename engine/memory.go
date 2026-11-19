@@ -82,14 +82,16 @@ func scratchBaseFor(currentSize uint64, outBufSz uint32) (uint32, error) {
 	return uint32(base), nil
 }
 
-// DefaultMaxWasmStringLen is the default maximum WASM string length (1 MiB).
-const DefaultMaxWasmStringLen = 1048576
+// DefaultMaxWasmStringLen is the default maximum WASM string length (2 MiB, cleat#4130: the limit Temporal enforces per payload and the figure
+// DBOS's guidance stays under). It was 1 MiB here and 64 KiB in the worker's flag, which is the value a running worker used; both now read this
+// constant, so they cannot disagree again (TestTheWorkersStringLimitFlagDefaultsToTheEngines).
+const DefaultMaxWasmStringLen = 2097152
 
 // MaxWasmStringLen is the maximum size of any string parameter read from WASM
-// linear memory. This prevents a malicious or buggy WASM module from causing
-// the host to allocate excessive memory via a single host function call.
-// Set before creating any Runtime to configure. Default: 1 MiB.
-var MaxWasmStringLen uint32 = 1048576
+// linear memory, on every guest path: the core-module paths and, since cleat#4130, every component dispatcher. This prevents a malicious or
+// buggy WASM module from causing the host to allocate excessive memory via a single host function call.
+// Set before creating any Runtime to configure. Default: DefaultMaxWasmStringLen (2 MiB).
+var MaxWasmStringLen uint32 = DefaultMaxWasmStringLen
 
 // validServiceName checks that a name contains only allowed characters:
 // alphanumeric, dot, underscore, and hyphen. Service and operation names
