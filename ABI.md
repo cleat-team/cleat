@@ -173,7 +173,7 @@ fills its fields before testing the sentinel.
 | `cleat_child_workflow`, `cleat_child_workflow_with_options`, `cleat_side_effect`, `cleat_side_effect_recorded`, `cleat_fetch`, `cleat_schedule_cron`, `cleat_start_detached`, `cleat_create_promise`, `cleat_set_scope` | upper field 32-63, `errCode` 0-31 | `errCode` (top bit) |
 | `cleat_await_signals` | `sigNameLen` 48-63, `payloadLen` 32-47, `timedOut` 16-31, `errCode` 0-15 | `timedOut` |
 | `cleat_await_promise` | `resultLen` 32-63, `timedOut` 16-31, `errCode` 0-15 | `timedOut` |
-| `cleat_send`, `cleat_schedule_invoke`, `cleat_signal_workflow`, `cleat_run_detached`, `cleat_complete_update`, `cleat_delete_cron` | `errCode` 0-31 | `errCode` (top bit) |
+| `cleat_send`, `cleat_schedule_invoke`, `cleat_signal_workflow`, `cleat_run_detached`, `cleat_complete_update`, `cleat_delete_cron`, `cleat_continue_as_new`, `cleat_continue_as_new_versioned` | `errCode` 0-31 | `errCode` (top bit) |
 | `cleat_poll_update` | `written` 32-63, `found` bit 8, `errCode` 0-7 | no field |
 | `cleat_acquire_lock` | `acquired` bit 8, `errCode` 0-7 | no field |
 
@@ -842,6 +842,8 @@ Start a new workflow run with fresh input (history compaction).
 |---|---|
 | 0-31 | `errCode` — 0 = success |
 
+The stop sentinel (bit 31) is returned in a defer segment, where the workflow's body must not continue as new (cleat#4159); check it first, as for every other call. Read as an error code it is a failure, and a guest that ignores it goes on into its own defer drain, where the cleanup's call is refused and the defer table consumed.
+
 After this call, the workflow should return the suspension sentinel.
 
 #### 2.18 `cleat_continue_as_new_versioned`
@@ -865,6 +867,8 @@ Start a new workflow run with fresh input and a new version (history compaction 
 | Bits | Meaning |
 |---|---|
 | 0-31 | `errCode` — 0 = success |
+
+The stop sentinel (bit 31) is returned in a defer segment, where the workflow's body must not continue as new (cleat#4159); check it first, as for every other call. Read as an error code it is a failure, and a guest that ignores it goes on into its own defer drain, where the cleanup's call is refused and the defer table consumed.
 
 After this call, the workflow should return the suspension sentinel.
 

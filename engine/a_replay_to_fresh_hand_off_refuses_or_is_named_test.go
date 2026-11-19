@@ -49,11 +49,8 @@ var handOffsThatNeedNoRefusal = map[string]string{
 		"these three child waits are not stop sites, which stopSiteNotStoppable records.",
 	"AwaitAnyChild":          "see AwaitChild.",
 	"replayAwaitAllChildren": "see AwaitChild.",
-	"ContinueAsNew": "records one continue_as_new event and sets a continue_as_new suspension. A defer segment starts no run from it: " +
-		"cmd/cleat-worker/setup.go applies the first phase's outcome (finishDeferPhase) BEFORE it reads a continue_as_new suspension.",
-	"ContinueAsNewWithVersion": "see ContinueAsNew.",
-	"ListCrons":                "a read of the schedule table, recorded as one event. It performs nothing outside the workflow.",
-	"RegisterUpdateHandler":    "registers a handler in the session and records the registration. It performs nothing outside the workflow.",
+	"ListCrons":              "a read of the schedule table, recorded as one event. It performs nothing outside the workflow.",
+	"RegisterUpdateHandler":  "registers a handler in the session and records the registration. It performs nothing outside the workflow.",
 }
 
 var (

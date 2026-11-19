@@ -425,13 +425,16 @@ var adapterDefs = map[string]adapterDef{
 			`	return _cleatErrInDeferPhase("ContinueAsNew")`,
 			"}",
 		},
-		ResultStmts: []string{
+		// withSuspendCheck since cleat#4159: the host refuses a continuation in a defer segment. Without the check a stop
+		// reads as error 2147483648 and the guest goes on into its own defer drain, where the cleanup's call is refused
+		// and the whole table consumed.
+		ResultStmts: withSuspendCheck(
 			"errCode := uint32(result)",
 			"if errCode != 0 {",
 			`	return fmt.Errorf("cleat_continue_as_new: error %d", errCode)`,
 			"}",
 			"return nil",
-		},
+		),
 	},
 	"ContinueAsNewWithVersion": {
 		FieldName:  "ContinueAsNewWithVersion",
@@ -450,13 +453,16 @@ var adapterDefs = map[string]adapterDef{
 			`	return _cleatErrInDeferPhase("ContinueAsNewWithVersion")`,
 			"}",
 		},
-		ResultStmts: []string{
+		// withSuspendCheck since cleat#4159: the host refuses a continuation in a defer segment. Without the check a stop
+		// reads as error 2147483648 and the guest goes on into its own defer drain, where the cleanup's call is refused
+		// and the whole table consumed.
+		ResultStmts: withSuspendCheck(
 			"errCode := uint32(result)",
 			"if errCode != 0 {",
 			`	return fmt.Errorf("cleat_continue_as_new_versioned: error %d", errCode)`,
 			"}",
 			"return nil",
-		},
+		),
 	},
 	"ChildWorkflow": {
 		FieldName:  "ChildWorkflow",

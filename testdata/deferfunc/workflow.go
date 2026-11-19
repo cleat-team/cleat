@@ -159,6 +159,23 @@ func DeferContinuesAsNew(h cleat.HostCalls, input string) (string, error) {
 	return `{"ok":true}`, nil
 }
 
+// DeferThenContinueAsNew registers cleanup and then, in the BODY, continues as new, with nothing that waits in between.
+//
+// cleat#4143. A defer segment replays [defer] and the body's next call, here a ContinueAsNew, arrives at the REPLAY FRONTIER. Unlike
+// DeferContinuesAsNew, whose continue-as-new is inside the defer body, this one is the workflow's own: new work for a workflow that is being
+// terminated. Its observables are the history (a continue_as_new event) and the run chain (a new run).
+func DeferThenContinueAsNew(h cleat.HostCalls, input string) (string, error) {
+	if _, err := h.DurableDeferFunc(func() {
+		h.DurableCall("cleanup", "after_defer_then_continue", `{}`)
+	}); err != nil {
+		return "", err
+	}
+	if err := h.ContinueAsNew(`{"round":2}`); err != nil {
+		return "", err
+	}
+	return `{"ok":true}`, nil
+}
+
 // DeferChildWorkflow starts a CHILD WORKFLOW as its body's new work, and
 // registers cleanup first.
 //

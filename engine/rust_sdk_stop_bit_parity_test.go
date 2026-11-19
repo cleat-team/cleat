@@ -79,6 +79,10 @@ var rustCallsTheHostCanRefuse = []sdkRefusableCall{
 	// host_calls.rs. The simple layout reads a stop as error code 0, which is a
 	// successful delete.
 	{"delete_cron", "DeleteCron"},
+	// continue_as_new and continue_as_new_versioned joined in cleat#4159, with the stop_requested guards in host_calls.rs. The simple layout
+	// reads a stop as error code 0, a success, so the continuation went on and the defer segment's cleanup was consumed.
+	{"continue_as_new", "ContinueAsNew"},
+	{"continue_as_new_versioned", "ContinueAsNewWithVersion"},
 	// create_promise and set_scope joined in the cleat#4079 audit, with the
 	// stop_requested guards in host_calls.rs. Both layouts read a refusal as
 	// error code 0, a success.
