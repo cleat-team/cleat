@@ -127,7 +127,7 @@ var stopSurfaces = map[string]stopSurface{
 		wit:      []string{"durable-reject-promise"},
 		py:       []string{"reject_promise"},
 	},
-	"AcquireLock": {
+	"freshAcquireLock": {
 		// The first stop site whose WIT function returns a SCALAR rather than
 		// result<string, call-failure>, which is why witCallOutcomeFuncs now
 		// reports a third category. §3.113 recorded the rule as wrong for

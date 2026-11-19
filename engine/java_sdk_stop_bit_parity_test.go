@@ -96,7 +96,7 @@ var javaCallsTheHostCanRefuse = []sdkRefusableCall{
 	// waitForEventMs, not waitForEvent: the latter delegates, so the stop guard
 	// lives in the _ms form -- the same shape as awaitSignalsMs above.
 	{"waitForEventMs", "WaitForEvent"},
-	{"acquireLockMs", "AcquireLock"},
+	{"acquireLockMs", "freshAcquireLock"},
 	// deleteCron joined in cleat#4083: a terminated workflow's defer segment
 	// could delete a schedule the workflow never reached. The refusal reads as
 	// errCode 0 in the simple layout, which is a successful delete.
