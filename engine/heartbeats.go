@@ -14,29 +14,26 @@ func (s *execSession) DurableCallWithHeartbeat(ctx context.Context, m api.Module
 	if s.isReplay {
 		return s.replayCallWithHeartbeat(ctx, m, service, operation, requestJSON, heartbeatIntervalMs, responsePtr, responseMaxLen)
 	}
-	// The eighth fresh path, and the last one in the durable-call family --
-	// IMPROVEMENT-PLAN 3.84 guarded DurableCall and DurableCallWithRetry and
-	// did not list this one, so a defer segment could still reach a service
-	// through cleat_call_heartbeat.
-	//
-	// The ordering is DurableCall's, and both halves of it matter: replay
-	// first, because a refusal records no event and a replay that reached this
-	// would find nothing where an event should be; the stop second, because
-	// ABI.md requires bit 31 to win over any field this layout carries.
-	//
-	// This one is worse than an ordinary unguarded call rather than equal to
-	// it. freshCallWithHeartbeat starts a goroutine and a ticker, and every
-	// tick writes an EventTypeHeartbeat through recordEvent -- so an unstopped
-	// heartbeat call in a defer segment does not merely perform the side effect
-	// once, it appends history to a workflow that has already terminated, for
-	// as long as the call runs.
-	if s.stopBeforeNewWork() {
-		return callSuspendSentinel
-	}
 	return s.freshCallWithHeartbeat(ctx, m, service, operation, requestJSON, heartbeatIntervalMs, responsePtr, responseMaxLen)
 }
 
 func (s *execSession) freshCallWithHeartbeat(ctx context.Context, m api.Module, service, operation, requestJSON string, heartbeatIntervalMs int64, responsePtr, responseMaxLen uint32) int64 {
+	// A defer segment's body is refused new work (IMPROVEMENT-PLAN 3.84; the heartbeat call was the eighth fresh path and the last in the
+	// durable-call family, added in 3.111). The refusal lives HERE and not in DurableCallWithHeartbeat: this function is reached from the
+	// non-replay entry AND from replayCallWithHeartbeat at the replay frontier, and a defer segment over a run that has history starts
+	// in replay, so its body's first new call arrives by the second way. A refusal only in the entry was skipped (cleat#4143, measured
+	// on a real worker: a terminate's segment made the body's next call and never ran the registered cleanup). Same placement as
+	// freshSetScope (cleat#4091) and freshAcquireLock (cleat#4140).
+	//
+	// It is first, before the interval check below and before anything is recorded: ABI.md requires bit 31 to win over any field this
+	// layout carries, and a refusal records no event.
+	//
+	// This one is worse than an ordinary unguarded call rather than equal to it. This function starts a goroutine and a ticker, and
+	// every tick writes an EventTypeHeartbeat through recordEvent -- so an unstopped heartbeat call in a defer segment does not merely
+	// perform the side effect once, it appends history to a workflow that has already terminated, for as long as the call runs.
+	if s.stopBeforeNewWork() {
+		return callSuspendSentinel
+	}
 
 	// A NON-POSITIVE INTERVAL IS REFUSED BEFORE ANYTHING ELSE, AND THE REFUSAL RECORDS NOTHING. cleat#4105.
 	//

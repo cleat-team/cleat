@@ -124,10 +124,10 @@ func TestEverySDKCoversEveryHostStopSite(t *testing.T) {
 
 	// Vacuity, per thing rather than per total -- a floor alone is satisfied by
 	// the wrong things being present.
-	if len(sites) < 6 || !sites["DurableCall"] {
-		t.Fatalf("host stop-site scan found %d sites and DurableCall present=%v; it is "+
+	if len(sites) < 6 || !sites["freshCall"] {
+		t.Fatalf("host stop-site scan found %d sites and freshCall present=%v; it is "+
 			"reading the wrong thing and would pass whatever the tree said",
-			len(sites), sites["DurableCall"])
+			len(sites), sites["freshCall"])
 	}
 
 	for _, sdk := range []struct {

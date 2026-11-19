@@ -79,15 +79,15 @@ func TestTheJavaSDKAgreesOnTheStopBit(t *testing.T) {
 var javaCallsTheHostCanRefuse = []sdkRefusableCall{
 	{"pollUpdate", "DurablePollUpdate"},
 	{"completeUpdate", "DurableCompleteUpdate"},
-	{"cleatCall", "DurableCall"},
+	{"cleatCall", "freshCall"},
 	{"cleatCallWithRetry", "DurableCallWithRetry"},
-	{"cleatCallHeartbeat", "DurableCallWithHeartbeat"},
+	{"cleatCallHeartbeat", "freshCallWithHeartbeat"},
 	{"childWorkflow", "childWorkflowWithVersion"},
 	{"childWorkflowWithOptions", "childWorkflowWithVersion"},
-	{"pluginCall", "PluginCall"},
+	{"pluginCall", "freshPluginCall"},
 	// A second caller of the same import, so two entries share one host site.
-	{"pluginCallOutcome", "PluginCall"},
-	{"pluginCallStreaming", "PluginCallStreaming"},
+	{"pluginCallOutcome", "freshPluginCall"},
+	{"pluginCallStreaming", "freshPluginCallStreaming"},
 	{"awaitSignalsMs", "DurableAwaitSignals"},
 	// AwaitPromise is a stop site through suspendingAwaitResult rather than
 	// stopBeforeNewWork (cleat#3383): a fresh await that has to wait answers with
@@ -132,7 +132,7 @@ var javaCallsTheHostCanRefuse = []sdkRefusableCall{
 	//	  awk "/func \(s \*execSession\) $f\(/,/^}$/" engine/promises.go \
 	//	    engine/signaller.go | grep -c stopBeforeNewWork; done
 	//	# 0 0 0 1
-	{"sideEffect", "SideEffect"},
+	{"sideEffect", "freshSideEffect"},
 	{"cleatFetch", "Fetch"},
 	// Both detached entry points name the UNEXPORTED runDetached, which is
 	// where stopBeforeNewWork is consulted; RunDetached and StartDetached are

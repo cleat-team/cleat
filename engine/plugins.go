@@ -473,9 +473,6 @@ func (s *execSession) PluginCall(ctx context.Context, m api.Module,
 	if s.isReplay {
 		return s.replayPluginCall(ctx, m, pluginName, functionName, inputJSON, responsePtr, responseMaxLen)
 	}
-	if s.stopBeforeNewWork() {
-		return callSuspendSentinel
-	}
 	return s.freshPluginCall(ctx, m, pluginName, functionName, inputJSON, responsePtr, responseMaxLen)
 }
 
@@ -610,6 +607,13 @@ func (s *execSession) replayPluginCall(ctx context.Context, m api.Module,
 func (s *execSession) freshPluginCall(ctx context.Context, m api.Module,
 	pluginName, functionName, inputJSON string,
 	responsePtr, responseMaxLen uint32) int64 {
+	// The refusal lives HERE and not in PluginCall: this function is reached from the non-replay entry AND from replayPluginCall at the replay
+	// frontier, and a defer segment over a run that has history starts in replay, so its body's first new call arrives by the second
+	// way. A refusal only in the entry was skipped (cleat#4143, measured on a real worker: a terminate's segment made the body's next
+	// call and never ran the registered cleanup). Same placement as freshSetScope (cleat#4091) and freshAcquireLock (cleat#4140).
+	if s.stopBeforeNewWork() {
+		return callSuspendSentinel
+	}
 	return s.freshPluginCallInternal(ctx, m, pluginName, functionName, inputJSON, responsePtr, responseMaxLen, true)
 }
 
@@ -742,9 +746,6 @@ func (s *execSession) PluginCallStreaming(ctx context.Context, m api.Module,
 	if s.isReplay {
 		return s.replayPluginCallStreaming(ctx, m, pluginName, functionName, inputJSON, responsePtr, responseMaxLen)
 	}
-	if s.stopBeforeNewWork() {
-		return callSuspendSentinel
-	}
 	return s.freshPluginCallStreaming(ctx, m, pluginName, functionName, inputJSON, responsePtr, responseMaxLen)
 }
 
@@ -794,6 +795,13 @@ func (s *execSession) streamFailure(ctx context.Context, m api.Module,
 func (s *execSession) freshPluginCallStreaming(ctx context.Context, m api.Module,
 	pluginName, functionName, inputJSON string,
 	responsePtr, responseMaxLen uint32) int64 {
+	// The refusal lives HERE and not in PluginCallStreaming: this function is reached from the non-replay entry AND from replayPluginCallStreaming at the replay
+	// frontier, and a defer segment over a run that has history starts in replay, so its body's first new call arrives by the second
+	// way. A refusal only in the entry was skipped (cleat#4143, measured on a real worker: a terminate's segment made the body's next
+	// call and never ran the registered cleanup). Same placement as freshSetScope (cleat#4091) and freshAcquireLock (cleat#4140).
+	if s.stopBeforeNewWork() {
+		return callSuspendSentinel
+	}
 
 	// Look up the streaming plugin function.
 	if s.engine.pluginStreamRegistry == nil {

@@ -179,7 +179,7 @@ var stopSurfaces = map[string]stopSurface{
 	// signature change rather than the scalar rule §3.301 introduced. No `py`
 	// field: once the return is result<...>, the component guest cannot misread
 	// a stop, which is the guarantee `py` exists to substitute for.
-	"SideEffect": {
+	"freshSideEffect": {
 		adapters: []string{"SideEffect"},
 		wit:      []string{"side-effect"},
 	},
@@ -213,7 +213,7 @@ var stopSurfaces = map[string]stopSurface{
 		adapters: []string{"SetScope"},
 		witWhy:   reasonWitReturnsAPlainString,
 	},
-	"DurableCall": {
+	"freshCall": {
 		adapters: []string{"DurableCall"},
 		wit:      []string{"durable-call"},
 	},
@@ -221,7 +221,7 @@ var stopSurfaces = map[string]stopSurface{
 		adapters: []string{"DurableCallWithRetry"},
 		wit:      []string{"durable-call-retry"},
 	},
-	"DurableCallWithHeartbeat": {
+	"freshCallWithHeartbeat": {
 		adapters: []string{"DurableCallWithHeartbeat"},
 		wit:      []string{"durable-call-heartbeat"},
 	},
@@ -233,11 +233,11 @@ var stopSurfaces = map[string]stopSurface{
 		adapters: []string{"ChildWorkflow", "ChildWorkflowWithOptions"},
 		wit:      []string{"durable-child-workflow", "durable-child-workflow-with-options"},
 	},
-	"PluginCall": {
+	"freshPluginCall": {
 		adapters: []string{"PluginCall"},
 		wit:      []string{"plugin-call"},
 	},
-	"PluginCallStreaming": {
+	"freshPluginCallStreaming": {
 		adapters: []string{"PluginCallStreaming"},
 		wit:      []string{"plugin-call-streaming"},
 	},
@@ -559,7 +559,7 @@ func TestTheThreeStopSurfacesAgree(t *testing.T) {
 		// being too narrow is not the only one.
 		alsoIf string
 	}{
-		{"host stop sites", sites, 6, "DurableCall", ""},
+		{"host stop sites", sites, 6, "freshCall", ""},
 		// A member only the suspendingAwaitResult arm of the scan can find
 		// (cleat#3383). Without it, narrowing the scan back to
 		// stopBeforeNewWork passes this vacuity check and fails only the

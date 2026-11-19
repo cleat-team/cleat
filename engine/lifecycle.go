@@ -379,16 +379,19 @@ func (s *execSession) SideEffect(ctx context.Context, m api.Module, computedResu
 	if s.isReplay {
 		return s.replaySideEffect(ctx, m, computedResult, respPtr, respMaxLen)
 	}
-	// A fresh side_effect is new work: it records a non-deterministic value into
-	// the history of a workflow that has already terminated, and any later
-	// replay would take that value as authoritative.
-	if s.stopBeforeNewWork() {
-		return callSuspendSentinel
-	}
 	return s.freshSideEffect(ctx, m, computedResult, respPtr, respMaxLen)
 }
 
 func (s *execSession) freshSideEffect(ctx context.Context, m api.Module, computedResult string, respPtr, respMaxLen uint32) int64 {
+	// A fresh side_effect is new work: it records a non-deterministic value into the history of a workflow that has already terminated,
+	// and any later replay would take that value as authoritative.
+	// The refusal lives HERE and not in SideEffect: this function is reached from the non-replay entry AND from replaySideEffect at the replay
+	// frontier, and a defer segment over a run that has history starts in replay, so its body's first new call arrives by the second
+	// way. A refusal only in the entry was skipped (cleat#4143, measured on a real worker: a terminate's segment made the body's next
+	// call and never ran the registered cleanup). Same placement as freshSetScope (cleat#4091) and freshAcquireLock (cleat#4140).
+	if s.stopBeforeNewWork() {
+		return callSuspendSentinel
+	}
 
 	rec := EventRecord{
 		Step:             s.stepCount,

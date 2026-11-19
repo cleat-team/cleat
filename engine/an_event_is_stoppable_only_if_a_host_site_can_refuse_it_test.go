@@ -28,12 +28,12 @@ type stopEvent struct {
 // stopSiteEvents maps a host stop site to the FIRST event its call records. Every entry must be a stop point: its type in
 // stoppableFirstEvents, or its (type, op) in stoppableByOp.
 var stopSiteEvents = map[string]stopEvent{
-	"DurableCall":              {typ: EventTypeCall},
+	"freshCall":                {typ: EventTypeCall},
 	"DurableCallWithRetry":     {typ: EventTypeCall},
-	"DurableCallWithHeartbeat": {typ: EventTypeCall},
-	"PluginCall":               {typ: EventTypePluginCall},
-	"PluginCallStreaming":      {typ: EventTypePluginCall},
-	"SideEffect":               {typ: EventTypeSideEffect},
+	"freshCallWithHeartbeat":   {typ: EventTypeCall},
+	"freshPluginCall":          {typ: EventTypePluginCall},
+	"freshPluginCallStreaming": {typ: EventTypePluginCall},
+	"freshSideEffect":          {typ: EventTypeSideEffect},
 	"Fetch":                    {typ: EventTypeFetch},
 	"DurableDefer":             {typ: EventTypeDefer},
 	"DurableSend":              {typ: EventTypeDurableSend},
