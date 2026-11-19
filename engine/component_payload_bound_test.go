@@ -124,3 +124,26 @@ func TestTheComponentPayloadTableCoversEveryPayloadRead(t *testing.T) {
 		t.Errorf("component_callbacks.go has %d readPayloadArg site(s), the table covers %d: add the new site to payloadSites", reads, want)
 	}
 }
+
+// The limit the sites above are tested at is a small one chosen to keep the table cheap. This runs one site at the REAL default (2 MiB, cleat#4130):
+// exactly 2 MiB reaches the handler and one byte more is refused, so the default the docs and the worker flag state is the one enforced.
+func TestAComponentRequestIsBoundedAtTheDefaultTwoMiB(t *testing.T) {
+	if MaxWasmStringLen != DefaultMaxWasmStringLen {
+		t.Skipf("MaxWasmStringLen is %d, not the default: another test changed it", MaxWasmStringLen)
+	}
+	for _, tc := range []struct {
+		size    int
+		refused bool
+	}{{DefaultMaxWasmStringLen - 1, false}, {DefaultMaxWasmStringLen, false}, {DefaultMaxWasmStringLen + 1, true}} {
+		h := &mockHostHandler{}
+		b := &wasmtimeBackend{handler: h}
+		out, err := b.cgotestDispatchPayload("dispatchDurableCallString", "call", "svc", "op", strings.Repeat("x", tc.size))
+		if err != nil {
+			t.Fatal(err)
+		}
+		refused := out.CallKind == "failed" && strings.Contains(out.Payload, "over the configured limit")
+		if refused != tc.refused || (len(h.recorded()) == 0) != tc.refused {
+			t.Errorf("a %d-byte request: refused=%v, handler calls=%d; want refused=%v", tc.size, refused, len(h.recorded()), tc.refused)
+		}
+	}
+}
