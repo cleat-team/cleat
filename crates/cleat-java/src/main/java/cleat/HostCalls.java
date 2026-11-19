@@ -1115,7 +1115,21 @@ public class HostCalls {
      * @see #awaitPromiseMs(String, long)
      */
     public CleatResult<AwaitPromiseResult> awaitPromise(String promiseId, long timeoutSeconds) {
-        return awaitPromiseMs(promiseId, timeoutSeconds * 1000);
+        return awaitPromiseMs(promiseId, secondsToMs(timeoutSeconds));
+    }
+
+    /**
+     * A whole-second wait as the milliseconds the host is given, saturating at {@link Long#MAX_VALUE} (cleat#4144).
+     * <p>
+     * {@code timeoutSeconds * 1000} wrapped: the documented "use {@link Long#MAX_VALUE} for no timeout" computed
+     * {@code -1000}, a NEGATIVE the host reads as "do not wait". Saturating keeps the idiom meaning what the Javadoc says; the
+     * host clamps the value it receives (cleat#4105). Zero and negative values are returned as they are.
+     */
+    static long secondsToMs(long timeoutSeconds) {
+        if (timeoutSeconds > Long.MAX_VALUE / 1000) {
+            return Long.MAX_VALUE;
+        }
+        return timeoutSeconds * 1000;
     }
 
     /**
@@ -1222,7 +1236,7 @@ public class HostCalls {
      * @see #awaitSignalsMs(String[], long)
      */
     public CleatResult<AwaitSignalsResult> awaitSignals(String[] signalNames, long timeoutSeconds) {
-        return awaitSignalsMs(signalNames, timeoutSeconds * 1000);
+        return awaitSignalsMs(signalNames, secondsToMs(timeoutSeconds));
     }
 
     /**

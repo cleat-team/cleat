@@ -832,3 +832,23 @@ public class ChildDocumentTests
         Assert.Throws<CleatCallException>(() => ChildDocuments.ParsePoll("r", "garbage"));
     }
 }
+
+public class WaitDurationTests
+{
+    // cleat#4144. A positive wait must never reach the host as 0: AwaitSignalsMs reads 0 as "wait indefinitely".
+    [Theory]
+    [InlineData(5L, 1UL)]            // 5 ticks: positive and far under a millisecond
+    [InlineData(10_000L, 1UL)]       // exactly 1 ms
+    [InlineData(10_001L, 2UL)]       // just over: rounds up, not down
+    [InlineData(15_000_000L, 1500UL)]
+    public void APositiveSpanRoundsUpAndNeverToZero(long ticks, ulong want)
+        => Assert.Equal(want, WaitDuration.Ms(TimeSpan.FromTicks(ticks)));
+
+    [Fact]
+    public void ZeroAndNegativeStayZero()
+    {
+        Assert.Equal(0UL, WaitDuration.Ms(TimeSpan.Zero));
+        Assert.Equal(0UL, WaitDuration.Ms(TimeSpan.FromSeconds(-1)));
+        Assert.Equal(0UL, WaitDuration.Ms(System.Threading.Timeout.InfiniteTimeSpan));
+    }
+}

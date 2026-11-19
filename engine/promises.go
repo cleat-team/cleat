@@ -175,6 +175,24 @@ func (s *execSession) AwaitPromise(ctx context.Context, m api.Module, promiseID 
 		}
 	}
 
+	// A timeout of 0 (or less) has no deadline to expire, so it must not suspend: cleat#4144, the cleat#1331 loop that await_signals
+	// guards against in signaller.go. Placed AFTER the settled checks above, so an already-settled promise is still reported and a
+	// 0 ms await degrades to a poll rather than to nothing.
+	//
+	// The suspensions below set Until = now + 0, a deadline of NOW. The run is immediately re-claimable, wakes, replays to the recorded
+	// await, takes the resuming branch (whose awaitTimeoutMs <= 0 arm used to keep waiting with the same deadline of now) and suspends
+	// again, forever, each cycle a legitimate claim that changes nothing.
+	//
+	// Timed out rather than an error, matching await_signals and a durable sleep, where 0 ms means "do not wait". Records NO event, as
+	// await_signals records none, so a loop of these does not grow event_history.
+	//
+	// Not for a resume that carries a POSITIVE recorded timeout: that deadline belongs to the original await and wins, as it always did.
+	// A legacy recorded 0 (an await written before the timeout was persisted) resumed with a positive argument is also left alone: the
+	// recorded 0 means "unknown" there, and the guest's own argument is all there is to go on.
+	if timeoutMs <= 0 && !(resumingAwait && awaitTimeoutMs > 0) {
+		return packAwaitPromiseResult(0, true, 0)
+	}
+
 	// Still pending. Either begin an await or resume the one already recorded.
 	//
 	// Resuming is the case that was wrong. This used to record ANOTHER

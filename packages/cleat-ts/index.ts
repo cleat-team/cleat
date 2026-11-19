@@ -19,6 +19,7 @@ import { type ContinuationCtx, makeContinuation } from "./groups/continuation";
 import { type CallsCtx, makeCalls } from "./groups/calls";
 import { type PluginsCtx, makePlugins } from "./groups/plugins";
 import { type UtilitiesCtx, makeUtilities } from "./groups/utilities";
+import { waitMs } from "./waits";
 import type { Helpers } from "./groups/helpers";
 
 declare const SUSPEND_MODE: string | undefined;
@@ -128,6 +129,10 @@ export interface Ctx extends UpdatesCtx, SignalsCtx, ChildrenCtx, DetachedCtx, L
   workflowId(): string;
   call<T = unknown>(service: string, operation: string, request?: unknown): Promise<T>;
   sleep(ms: number): Promise<void>;
+  /**
+   * Wait for a signal. `timeoutMs` defaults to 24 hours; pass `Infinity` to wait without a limit. A positive fraction rounds up to a
+   * whole millisecond (cleat#4144).
+   */
   waitForSignal(name: string | string[], timeoutMs?: number): Promise<SignalResult>;
   /** Start a child workflow and wait for its result. */
   child<T = unknown>(name: string, input?: unknown): Promise<T>;
@@ -177,6 +182,7 @@ export interface Ctx extends UpdatesCtx, SignalsCtx, ChildrenCtx, DetachedCtx, L
    */
   createPromise(name: string): Promise<string>;
   /** Wait for a promise. A rejection is a `CleatError`; an expired timeout resolves with `timedOut: true`. */
+  /** `timeoutMs` defaults to 24 hours; pass `Infinity` to wait without a limit. A positive fraction rounds up (cleat#4144). */
   awaitPromise<T = unknown>(id: string, timeoutMs?: number): Promise<AwaitedPromise<T>>;
   /** Settle a promise with a value. Rejects if the id is unknown to the host. */
   resolvePromise(id: string, value: unknown): Promise<void>;
@@ -204,7 +210,7 @@ const ctx: Ctx = {
   // `dispatchThen` delivers any pending update before the call (groups/updates.ts); with none pending it is the call, unchanged.
   sleep: (ms) => dispatchThen(() => settle<null>(__cleat_sleep(ms))).then(() => undefined),
   waitForSignal: (name, timeoutMs = 24 * 60 * 60 * 1000) =>
-    dispatchThen(() => settle<{ name: string; payload: string; timedOut: boolean }>(__cleat_await_signals(JSON.stringify(Array.isArray(name) ? name : [name]), timeoutMs))).then((s) => ({
+    dispatchThen(() => settle<{ name: string; payload: string; timedOut: boolean }>(__cleat_await_signals(JSON.stringify(Array.isArray(name) ? name : [name]), waitMs(timeoutMs)))).then((s) => ({
       name: s.name,
       payload: parseJSON(s.payload),
       timedOut: s.timedOut,
@@ -231,7 +237,7 @@ const ctx: Ctx = {
   cancellation: () => JSON.parse(__cleat_poll_cancellation()) as Cancellation,
   createPromise: (name) => settle<string>(__cleat_create_promise(name)),
   awaitPromise: <T>(id: string, timeoutMs = 24 * 60 * 60 * 1000) =>
-    dispatchThen(() => settle<{ value: string; timedOut: boolean }>(__cleat_await_promise(id, timeoutMs))).then((r) => ({
+    dispatchThen(() => settle<{ value: string; timedOut: boolean }>(__cleat_await_promise(id, waitMs(timeoutMs)))).then((r) => ({
       value: parseJSON(r.value) as T,
       timedOut: r.timedOut,
     })),

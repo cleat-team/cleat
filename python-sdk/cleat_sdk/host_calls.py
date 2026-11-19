@@ -540,6 +540,23 @@ def _error_code_name(code: int) -> str:
 INFINITE_TIMEOUT_MS: int = 9223372036854775807  # i64::MAX / 2^63 - 1
 
 
+def _seconds_to_timeout_ms(seconds: float) -> int:
+    """Seconds to the milliseconds a wait is given, without letting a POSITIVE timeout become the wait-forever 0.
+
+    ``int(seconds * 1000)`` truncates: ``0.0004`` is 0 ms, and a 0 in :meth:`HostCalls.await_signals_ms` means wait without a limit, so
+    a caller who asked for a tenth of a millisecond waited for ever. A positive value that would truncate to 0 is 1 ms, so that a
+    positive timeout can never become the one value that means something else. A non-positive value is returned as it is (the
+    caller's own, unchanged), and one too large for the host saturates at :data:`INFINITE_TIMEOUT_MS` instead of raising.
+    """
+    ms = seconds * 1000
+    if ms >= INFINITE_TIMEOUT_MS:
+        return INFINITE_TIMEOUT_MS
+    ms = int(ms)
+    if ms == 0 and seconds > 0:
+        return 1
+    return ms
+
+
 # ========================================================================
 # Result dataclasses
 # ========================================================================
@@ -2073,7 +2090,7 @@ class HostCalls:
         RuntimeError
             If the host reports an error.
         """
-        return self.await_signals_ms(signal_names, int(timeout_seconds * 1000))
+        return self.await_signals_ms(signal_names, _seconds_to_timeout_ms(timeout_seconds))
 
     def await_signals_ms(self, signal_names: list[str], timeout_ms: int) -> SignalResult:
         """Wait for one or more external signals, with a timeout in milliseconds.
@@ -2506,7 +2523,7 @@ class HostCalls:
         RuntimeError
             If the host reports an error.
         """
-        return self.await_promise_ms(promise_id, int(timeout_seconds * 1000))
+        return self.await_promise_ms(promise_id, _seconds_to_timeout_ms(timeout_seconds))
 
     def await_promise_ms(self, promise_id: str, timeout_ms: int) -> PromiseResult:
         """Wait for a cleat promise to resolve, with a timeout in milliseconds.
@@ -2518,7 +2535,12 @@ class HostCalls:
         promise_id : str
             The promise ID to wait for.
         timeout_ms : int
-            Maximum wait time in milliseconds.
+            Maximum wait time in milliseconds. Zero or negative means DO NOT
+            WAIT (cleat#4144): an already-settled promise is returned, and a
+            pending one reports a timeout at once. To wait without a limit,
+            pass ``INFINITE_TIMEOUT_MS``. (:meth:`await_signals_ms` still
+            maps ``<= 0`` to "wait for ever" itself; whether the two should
+            agree is an open decision.)
 
         Returns
         -------
@@ -3322,7 +3344,7 @@ class HostCalls:
             If the host reports an error or the timeout expires.
         """
         return self.send_signal_and_wait_ms(
-            target_run_id, signal_name, payload, int(timeout_seconds * 1000)
+            target_run_id, signal_name, payload, _seconds_to_timeout_ms(timeout_seconds)
         )
 
     def send_signal_and_wait_ms(
