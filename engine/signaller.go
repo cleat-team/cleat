@@ -30,6 +30,19 @@ func (s *execSession) DurableAwaitSignals(ctx context.Context, m api.Module, sig
 				if !s.advanceReplayStep(ctx, &rec) {
 					return 0
 				}
+				// A recorded NO-WAIT await replays as the timeout it was (cleat#4144, cleat#4153). The fresh path below records an
+				// await with a timeout of 0 or less and returns timed out; nothing else is recorded for a timeout, so without this the
+				// replay fell through to the checks below. They look at the NEXT event: another await's delivery pairs with this
+				// one (the misattribution cleat#933 describes), and any other event leaves the branch at the bottom of this block,
+				// which calls exitReplay with history still unread, so the rest of the replay ran fresh and a durable call already
+				// recorded after the poll executed AGAIN. Deciding here, from the record alone, is the same rule DurableAwaitUpdate
+				// states for itself: the store is not consulted and a later arrival is not delivered at an earlier step.
+				//
+				// The guest's own argument must also be non-positive, so a recorded 0 that meant something else (a history written
+				// before the timeout was persisted, resumed with a positive argument) still reaches the code below.
+				if rec.TimeoutMs <= 0 && timeoutMs <= 0 {
+					return packAwaitSignalsResult(0, 0, true, 0)
+				}
 				// Check if there is a following signal_received event.
 				if s.stepCount < len(s.history) {
 					nextRec := s.history[s.stepCount]
@@ -305,12 +318,20 @@ func (s *execSession) DurableAwaitSignals(ctx context.Context, m api.Module, sig
 	// signal-store check above, so a 0ms await still reports a signal that is
 	// already waiting -- it degrades to PollSignals rather than to nothing.
 	//
-	// Records NO event. A loop of these would otherwise append a row per
-	// iteration, trading a livelock that writes nothing for one that grows
-	// event_history without bound. Replay is unaffected: the branch above
-	// consumes await records written before this fix, and a call that records
-	// nothing and returns a constant is reproducible by construction.
+	// RECORDS the await (cleat#4144, cleat#4153), with the timeout it was given. This used to record nothing, on the reasoning
+	// that "a call that records nothing and returns a constant is reproducible by construction". It is not: the constant is the
+	// OUTCOME OF A LOOK AT THE STORE, and a replay that reached this call after a signal had arrived returned the signal where
+	// the original run returned a timeout, so the guest took a different branch; and because the call left no event, a replay
+	// found some LATER event at this step, fell out of the replay branch above with history unread, and re-ran every call that
+	// followed (measured by cleat-review: an already-recorded durable call executed again). One event per poll is what a poll
+	// loop's own sleep already costs. The replay branch above returns the timeout from this record alone.
 	if timeoutMs <= 0 {
+		s.recordEvent(EventRecord{
+			Step:        s.stepCount,
+			EventType:   EventTypeAwaitSignals,
+			SignalNames: signalNames,
+			TimeoutMs:   timeoutMs,
+		})
 		return packAwaitSignalsResult(0, 0, true, 0)
 	}
 

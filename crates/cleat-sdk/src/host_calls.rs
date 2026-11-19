@@ -28,7 +28,7 @@ fn suspend() -> CallError {
 /// `Duration::MAX` came out as an arbitrary, often negative, number. It now saturates at `i64::MAX`, which the host clamps
 /// (cleat#4105). A zero `Duration` stays 0.
 pub(crate) fn wait_ms(d: Duration) -> i64 {
-    let ms = (d.as_nanos() + 999_999) / 1_000_000;
+    let ms = d.as_nanos().div_ceil(1_000_000);
     i64::try_from(ms).unwrap_or(i64::MAX)
 }
 

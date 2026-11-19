@@ -85,7 +85,7 @@ func roundUpWait(d time.Duration) time.Duration {
 // number, often negative, which the host reads as "do not wait". Saturating at the largest Duration keeps "a very long time"
 // meaning a very long time; the host clamps what it is given (cleat#4105). Zero and negative values are returned as they are.
 func waitMsDuration(ms int64) time.Duration {
-	const maxMs = int64(math.MaxInt64 / int64(time.Millisecond))
+	const maxMs = math.MaxInt64 / int64(time.Millisecond)
 	if ms > maxMs {
 		return time.Duration(math.MaxInt64)
 	}

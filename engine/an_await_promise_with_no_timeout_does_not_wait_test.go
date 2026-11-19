@@ -38,7 +38,9 @@ func TestAnAwaitPromiseWithNoTimeoutDoesNotWait(t *testing.T) {
 		// A promise that is already settled is reported, as await_signals reports a signal that is already waiting: a 0 ms await degrades
 		// to a poll, not to nothing.
 		{name: "fresh/0/resolved", arg: 0, status: "resolved", wantSettled: true},
-		{name: "resume/recorded 0, arg 0/resolved", recorded: ptr64(0), arg: 0, status: "resolved", wantSettled: true},
+		// A recorded no-wait await replays as the timeout it was, even though the promise has settled since: the original run was told it
+		// timed out, and the replay must agree (cleat#4153; the replay rows are in a_no_wait_await_replays_as_the_timeout_it_was_test.go).
+		{name: "resume/recorded 0, arg 0/resolved since: the recorded timeout wins", recorded: ptr64(0), arg: 0, status: "resolved"},
 
 		// CONTROLS.
 		{name: "CONTROL fresh/5s waits", arg: 5000, wantWait: true},
@@ -80,8 +82,14 @@ func TestAnAwaitPromiseWithNoTimeoutDoesNotWait(t *testing.T) {
 			if got != timedOut {
 				t.Fatalf("await_promise(%d ms) returned %#x, want the timed-out word %#x", tc.arg, got, timedOut)
 			}
-			if tc.recorded == nil && len(s.history) != before {
-				t.Fatalf("a no-wait await recorded %d event(s): a loop of them would grow event_history without bound (cleat#1331)", len(s.history)-before)
+			// The no-wait outcome is RECORDED, as exactly one await_promise event, so that a replay returns it from the record and not from
+			// a fresh look at the store (see a_no_wait_await_replays_as_the_timeout_it_was_test.go). A resume consumed its event and adds none.
+			if tc.recorded == nil {
+				if len(s.history) != before+1 || s.history[before].EventType != EventTypeAwaitPromise || s.history[before].TimeoutMs != tc.arg {
+					t.Fatalf("a fresh no-wait await recorded %+v, want exactly one await_promise event carrying the timeout %d", s.history[before:], tc.arg)
+				}
+			} else if len(s.history) != before {
+				t.Fatalf("a resumed no-wait await appended %d event(s) to a history it was replaying", len(s.history)-before)
 			}
 		})
 	}
