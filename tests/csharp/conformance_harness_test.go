@@ -130,8 +130,9 @@ type entryRun struct {
 	// Fail makes a service call fail: it is asked for every call with the 1-based count of calls to that service/operation so far, and a
 	// non-nil error is what the service "returns". A failed call is still recorded in Calls. Nil means every call succeeds.
 	Fail    func(service, operation string, nth int) error
-	Options []engine.EngineOption // stores and the like; a group that needs a store passes it here
-	Replay  []engine.EventRecord  // when non-nil the entry is REPLAYED over this history instead of executed fresh
+	Options []engine.EngineOption   // stores and the like; a group that needs a store passes it here
+	Backend []engine.WasmtimeOption // limits for the wasmtime backend (the instance timeout, say); the default backend when empty
+	Replay  []engine.EventRecord    // when non-nil the entry is REPLAYED over this history instead of executed fresh
 }
 
 type conformanceResult struct {
@@ -157,7 +158,7 @@ func runConformanceEntry(t *testing.T, entry string, r entryRun) conformanceResu
 		t.Fatalf("NewRuntime: %v", err)
 	}
 	t.Cleanup(func() { rt.Close(ctx) })
-	wt, err := engine.NewWasmtimeBackend(ctx)
+	wt, err := engine.NewWasmtimeBackend(ctx, r.Backend...)
 	if err != nil {
 		t.Fatalf("NewWasmtimeBackend: %v", err)
 	}
