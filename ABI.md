@@ -1456,7 +1456,7 @@ Ask whether the history already holds the value of the side effect at this step 
 | `1` | An error with its message in the buffer: the next record is not a `side_effect` (a replay divergence). The step is **not** consumed. |
 | `2` | Nothing is recorded (a fresh run, or a replay past the end of the history). Nothing changes: the guest computes the value and calls `cleat_side_effect`, which records it. |
 
-The stop sentinel (bit 31) is returned by a **fresh** lookup in a workflow the host has stopped, so the guest's function never runs for a value that could not be recorded; check it first, as for every other call. The function the guest runs between the two calls must make no host call: a host call consumes a step, and the `cleat_side_effect` that follows would then record at the wrong one.
+The stop sentinel (bit 31) is returned by a lookup that would be **new work** in a workflow the host has stopped: a fresh lookup, and the lookup at the replay frontier of a defer segment (a segment over a run with history starts in replay, so its body's first new side effect arrives there; cleat#4143). A lookup that finds a recorded value is answered, because reading history is not new work. The guest's function never runs for a value that could not be recorded; check it first, as for every other call. The function the guest runs between the two calls must make no host call: a host call consumes a step, and the `cleat_side_effect` that follows would then record at the wrong one.
 
 An SDK implements a side effect as `recorded = lookup(); if recorded: return it; v = fn(); return side_effect(v)`. Measured on a real worker, an SDK that does this runs `fn` exactly once across a first run and its replays.
 

@@ -342,7 +342,14 @@ func TestTheRequiredJavaGuardsCoverEveryHostStopSite(t *testing.T) {
 	//
 	// 24 since cleat#4113 (SideEffectRecorded): a fresh lookup in a stopped workflow is refused so a guest's side-effect function never runs.
 	// Java has no import for it yet, which sdkStopSiteExemptions records and checks by absence; the PR that adds one removes the exemption.
-	const stopSitesOn20260904 = 24
+	//
+	// 25 since cleat#4143 (SideEffectRecorded, a SECOND site): the lookup is refused at the replay frontier of a defer segment too, because
+	// a segment over a run with history starts in replay and an SDK that asks first runs its function between the lookup and the record.
+	// Both sides were checked rather than assumed. Java needs NO new method: this is a second site for the same host call, and Java still
+	// has no import for it (sdkStopSiteExemptions records that and checks it by absence), so there is no decoder to guard; the PR that adds
+	// the import takes on the guard for BOTH sites, since the call is refused at either. A count of sites and a list of methods are
+	// different things, as at 18.
+	const stopSitesOn20260904 = 25
 	if stopSites != stopSitesOn20260904 {
 		t.Errorf("the engine has %d `if s.stopBeforeNewWork() {` sites; this test was written "+
 			"against %d.\n\nIf a site was ADDED, the Java SDK has a call the host can now "+
