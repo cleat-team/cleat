@@ -1040,8 +1040,9 @@ tight loop inside one function never enters another.
 Bounds the time a guest spends *executing* (a fresh execution or one replay
 pass) before it is forcibly interrupted, via wasmtime epoch interruption, which
 stops even a tight loop that never calls the host. Time blocked in a host call
-is not charged; `--wasm-wall-clock-ceiling` bounds that. `0` disables the
-timeout and is not recommended.
+is not charged; `--wasm-wall-clock-ceiling` bounds that. `0` (or unset)
+uses the default: **the timeout cannot be turned off**, because the engine reads a
+value of 0 or less as the default (pinned by `TestAZeroInstanceTimeoutIsTheDefaultNotDisabled`).
 
 **A value above `0` and under `250ms` is refused: the worker prints the
 reason and exits non-zero before it serves anything.** Below about 200ms the

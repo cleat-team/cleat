@@ -22,7 +22,7 @@ import (
 // A separate function so it can be tested without running the binary.
 func validateWasmInstanceTimeout(d time.Duration) error {
 	if d < 0 {
-		return fmt.Errorf("--wasm-instance-timeout %v is negative. Use 0 to disable it (not recommended), or at least %v.", d, engine.MinWasmInstanceTimeout)
+		return fmt.Errorf("--wasm-instance-timeout %v is negative. Use 0 for the default (%v), or at least %v.", d, engine.DefaultWasmtimeExecutionTimeout, engine.MinWasmInstanceTimeout)
 	}
-	return engine.CheckWasmInstanceTimeoutFloor(d, "--wasm-instance-timeout", "set it to 0 to disable it (not recommended)")
+	return engine.CheckWasmInstanceTimeoutFloor(d, "--wasm-instance-timeout", "set it to 0 to use the default")
 }
