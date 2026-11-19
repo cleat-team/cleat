@@ -1075,8 +1075,9 @@ public class HostCalls {
      * this millisecond variant.
      *
      * @param promiseId the promise ID to wait for
-     * @param timeoutMs maximum wait time in milliseconds (use
-     *                  {@link Long#MAX_VALUE} for no timeout)
+     * @param timeoutMs maximum wait time in milliseconds. Zero or negative does NOT
+     *                  wait (the result is a timeout at once; cleat#4144); use
+     *                  {@link Long#MAX_VALUE} for no timeout
      * @return a result containing an {@link AwaitPromiseResult} with the
      *         resolved value and timeout indicator
      */
@@ -1114,8 +1115,9 @@ public class HostCalls {
      * {@link #awaitPromiseMs(String, long)}.
      *
      * @param promiseId      the promise ID to wait for
-     * @param timeoutSeconds maximum wait time in seconds (use
-     *                       {@link Long#MAX_VALUE} for no timeout)
+     * @param timeoutSeconds maximum wait time in seconds. Zero or negative does NOT
+     *                       wait (the result is a timeout at once; cleat#4144); use
+     *                       {@link Long#MAX_VALUE} for no timeout
      * @return a result containing an {@link AwaitPromiseResult} with the
      *         resolved value and timeout indicator
      * @see #awaitPromiseMs(String, long)
@@ -1153,8 +1155,9 @@ public class HostCalls {
      * over this millisecond variant.
      *
      * @param signalNames the signal names to wait for
-     * @param timeoutMs   maximum wait time in milliseconds (use
-     *                    {@link Long#MAX_VALUE} for no timeout)
+     * @param timeoutMs   maximum wait time in milliseconds. Zero or negative does NOT
+     *                    wait (the result is a timeout at once; cleat#4144); use
+     *                    {@link Long#MAX_VALUE} for no timeout
      * @return a result containing an {@link AwaitSignalsResult} with the
      *         received signal name, payload, and timeout indicator
      */
@@ -1235,8 +1238,9 @@ public class HostCalls {
      * {@link #awaitSignalsMs(String[], long)}.
      *
      * @param signalNames   the signal names to wait for
-     * @param timeoutSeconds maximum wait time in seconds (use
-     *                       {@link Long#MAX_VALUE} for no timeout)
+     * @param timeoutSeconds maximum wait time in seconds. Zero or negative does NOT
+     *                       wait (the result is a timeout at once; cleat#4144); use
+     *                       {@link Long#MAX_VALUE} for no timeout
      * @return a result containing an {@link AwaitSignalsResult} with the
      *         received signal name, payload, and timeout indicator
      * @see #awaitSignalsMs(String[], long)

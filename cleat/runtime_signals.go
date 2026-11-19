@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"time"
 )
 
@@ -216,6 +217,14 @@ func (h *HostCallsImpl) SignalWorkflow(targetRunID, signalName, payload string) 
 	}
 	return h.signalWorkflow(targetRunID, signalName, payload)
 }
+
+// WaitForever is the explicit wait without a limit, for AwaitSignals and AwaitPromise (cleat#4144). It is the largest Duration; it
+// reaches the host as a very large count of milliseconds, which the host clamps (cleat#4105).
+//
+// A timeout of zero or less is the opposite, in every SDK: it does not wait. AwaitSignals reports it as TimedOut with an error rather
+// than waiting or hanging, because in Go the usual way to get a zero is arithmetic (a deadline minus now), and "wait for ever" is the
+// wrong answer for an accident (cleat#1331).
+const WaitForever = time.Duration(math.MaxInt64)
 
 func (h *HostCallsImpl) AwaitSignals(signalNames []string, timeout time.Duration) SignalResult {
 	h.DispatchUpdates() // dispatch point; see DispatchUpdates

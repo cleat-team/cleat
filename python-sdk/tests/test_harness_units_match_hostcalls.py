@@ -76,12 +76,14 @@ def test_await_promise_takes_seconds():
     assert h.now_ms - before == 3000
 
 
-def test_zero_still_waits_forever_for_a_signal():
-    """The real await_signals converts 0 s to 0 ms, which the host reads as no timeout."""
+def test_zero_does_not_wait_and_none_waits_for_ever_for_a_signal():
+    """cleat#4144: the real await_signals hands the host 0 for 0 s, which the host reads as do not wait;
+    waiting without a limit is None."""
     from cleat_sdk import SuspendSentinel
 
+    assert fresh().await_signals(["anything"], 0).timed_out
     with pytest.raises(SuspendSentinel):
-        fresh().await_signals(["anything"], 0)
+        fresh().await_signals(["anything"], None)
 
 
 def test_a_call_that_passes_timeout_ms_runs_under_the_harness():
