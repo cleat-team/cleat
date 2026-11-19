@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"testing"
@@ -457,7 +458,7 @@ func TestCSharpAnUnpinnedPackageFromOneProjectDoesNotFailAnother(t *testing.T) {
 	}
 }
 
-// TestCSharpResolvedPackagesReader runs the assets reader inside the SDK image (where build.sh runs it: perl and core JSON::PP are
+// TestCSharpResolvedPackagesReader runs the two readers inside the SDK image (where build.sh runs them: perl and core JSON::PP are
 // there, jq and python are not) against small fixtures. The failure cases matter as much as the success: a reader that printed nothing
 // and exited 0 for a file it could not understand would make the pin check examine nothing and pass.
 func TestCSharpResolvedPackagesReader(t *testing.T) {
@@ -487,9 +488,18 @@ func TestCSharpResolvedPackagesReader(t *testing.T) {
 	write("projectonly.json", `{"libraries":{"MyProj/1.0.0":{"type":"project","path":"../MyProj/MyProj.csproj"}}}`)
 	write("nolibraries.json", `{"version":3}`)
 	write("notjson.json", `this is not json`)
-	run := func(file string) (int, string) {
+	// What `dotnet msbuild -getProperty:ProjectAssetsFile -getItem:ProjectReference` prints, shortened.
+	write("graph-two.json", `{"Properties":{"ProjectAssetsFile":"/mnt/a/obj/project.assets.json"},"Items":{"ProjectReference":[
+	  {"Identity":"../g/G.csproj","FullPath":"/mnt/g/G.csproj","ReferenceOutputAssembly":"false"},
+	  {"Identity":"../h/H.csproj","FullPath":"/mnt/h/H.csproj"},
+	  {"Identity":"../g/G.csproj","FullPath":"/mnt/g/G.csproj"}]}}`)
+	write("graph-none.json", `{"Properties":{"ProjectAssetsFile":"/mnt/a/obj/project.assets.json"},"Items":{"ProjectReference":[]}}`)
+	write("graph-noassets.json", `{"Properties":{},"Items":{"ProjectReference":[]}}`)
+	write("graph-emptyassets.json", `{"Properties":{"ProjectAssetsFile":""},"Items":{"ProjectReference":[]}}`)
+	write("graph-nofullpath.json", `{"Properties":{"ProjectAssetsFile":"/x"},"Items":{"ProjectReference":[{"Identity":"../g/G.csproj"}]}}`)
+	run := func(mode, file string) (int, string) {
 		cmd := exec.Command("docker", "run", "--rm", "-v", filepath.Join(root, "packages", "cleat-csharp")+":/pkg:ro", "-v", dir+":/f:ro",
-			"--entrypoint", "perl", image, "/pkg/resolved-packages.pl", "/f/"+file)
+			"--entrypoint", "perl", image, "/pkg/resolved-packages.pl", mode, "/f/"+file)
 		out, err := cmd.CombinedOutput()
 		if err == nil {
 			return 0, string(out)
@@ -500,17 +510,138 @@ func TestCSharpResolvedPackagesReader(t *testing.T) {
 		t.Fatalf("could not run docker: %v", err)
 		return -1, ""
 	}
-	code, out := run("ok.json")
+	code, out := run("packages", "ok.json")
 	want := "baz\t2.0.0-rc.1\tbaz/2.0.0-rc.1\nfoo.bar\t1.2.3\tfoo.bar/1.2.3\nsome.pack\t10.0.1\tsome.pack/10.0.1\n"
 	if code != 0 || out != want {
-		t.Errorf("a normal assets file: exit %d, got %q, want %q (packages and downloadDependencies, the project library skipped, ids lower-cased)", code, out, want)
+		t.Errorf("packages, a normal assets file: exit %d, got %q, want %q (packages and downloadDependencies, the project library skipped, ids lower-cased)", code, out, want)
 	}
-	if code, out := run("projectonly.json"); code != 0 || out != "" {
-		t.Errorf("an assets file with no package: exit %d, output %q; it must print nothing and exit 0 so build.sh's own guard names the empty list", code, out)
+	if code, out := run("packages", "projectonly.json"); code != 0 || out != "" {
+		t.Errorf("packages, a file with no package: exit %d, output %q; it must print nothing and exit 0 so build.sh's own guard names the empty list", code, out)
 	}
 	for _, bad := range []string{"nolibraries.json", "notjson.json", "missing.json"} {
-		if code, out := run(bad); code != 2 {
-			t.Errorf("%s: exit %d (output %q), want 2: a file it cannot read must never read as 'nothing resolved'", bad, code, out)
+		if code, out := run("packages", bad); code != 2 {
+			t.Errorf("packages %s: exit %d (output %q), want 2: a file it cannot read must never read as 'nothing resolved'", bad, code, out)
 		}
+	}
+	code, out = run("graph", "graph-two.json")
+	wantGraph := "ASSETS\t/mnt/a/obj/project.assets.json\nREF\t/mnt/g/G.csproj\nREF\t/mnt/h/H.csproj\n"
+	if code != 0 || out != wantGraph {
+		t.Errorf("graph, two references (one listed twice): exit %d, got %q, want %q", code, out, wantGraph)
+	}
+	if code, out := run("graph", "graph-none.json"); code != 0 || out != "ASSETS\t/mnt/a/obj/project.assets.json\n" {
+		t.Errorf("graph, no references: exit %d, got %q", code, out)
+	}
+	for _, bad := range []string{"graph-noassets.json", "graph-emptyassets.json", "graph-nofullpath.json", "notjson.json", "missing.json"} {
+		if code, out := run("graph", bad); code != 2 {
+			t.Errorf("graph %s: exit %d (output %q), want 2: a project it cannot name the files of must never be skipped", bad, code, out)
+		}
+	}
+	if code, _ := run("bogus", "ok.json"); code != 2 {
+		t.Errorf("an unknown mode must be a usage error (exit 2), got %d", code)
+	}
+}
+
+// TestCSharpBuildChecksThePackagesOfAReferencedProject is the regression for cleat-review's finding on #4104. Every SDK project
+// references its source generator as OutputItemType="Analyzer" ReferenceOutputAssembly="false", and a reference of that shape does not
+// put the generator's packages in the referencing project's assets file, so a pin check that read only the top project compiled the
+// generator against packages nothing had checked. The fixture (testdata/withref -> testdata/refgen) has the same shape and a package
+// the lock does not pin in the REFERENCED project only.
+//
+// Four steps, because "refused" alone cannot tell "the referenced project is examined" from "something else refuses":
+//  1. the unpinned package of the referenced project is refused (exit 2) and named, with the project it came from;
+//  2. the same build with those packages pinned at their REAL hashes is accepted: they are examined and pass;
+//  3. the same pins with one hash corrupted are refused as "does not match its pinned sha512": the HASH of a referenced project's
+//     package is checked too, which is the case cleat-review measured (a corrupted pin for a generator package built, exit 0);
+//  4. nothing in the referenced project, nothing unexamined: an unreferenced-project build (hello) is still accepted from this volume.
+func TestCSharpBuildChecksThePackagesOfAReferencedProject(t *testing.T) {
+	needDocker(t)
+	root := repoRoot(t)
+	vol := throwawayNugetVolume(t)
+	image := ""
+	b, err := os.ReadFile(filepath.Join(root, "packages", "cleat-csharp", "toolchain.env"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, l := range strings.Split(string(b), "\n") {
+		if v, ok := strings.CutPrefix(l, "CLEAT_CS_SDK_IMAGE="); ok {
+			image = strings.TrimSpace(v)
+		}
+	}
+	runBuild := func(script, project string, env ...string) (int, string) {
+		cmd := exec.Command("bash", script, root, project, t.TempDir())
+		cmd.Env = append(os.Environ(), append([]string{"CLEAT_CS_NUGET_VOLUME=" + vol, "CLEAT_CS_RESTORE_ONLY=1"}, env...)...)
+		out, err := cmd.CombinedOutput()
+		if err == nil {
+			return 0, string(out)
+		}
+		if ee, ok := err.(*exec.ExitError); ok {
+			return ee.ExitCode(), string(out)
+		}
+		t.Fatalf("could not run build.sh: %v", err)
+		return -1, ""
+	}
+	real := filepath.Join(root, "packages", "cleat-csharp", "build.sh")
+
+	code, log := runBuild(real, "tests/csharp/testdata/withref")
+	if code != 2 || !strings.Contains(log, "unpinned package") || !strings.Contains(log, "newtonsoft.json") || !strings.Contains(log, "Refgen.csproj") {
+		t.Fatalf("1. a package that only the REFERENCED project uses: exit %d, want 2 naming newtonsoft.json and Refgen.csproj:\n%s", code, log)
+	}
+
+	// The packages the build said were unpinned, with the hashes NuGet recorded for them in the cache.
+	re := regexp.MustCompile(`unpinned package used by the build: (\S+) (\S+) \(`)
+	var rows []string
+	for _, m := range re.FindAllStringSubmatch(log, -1) {
+		id, ver := m[1], m[2]
+		sum, err := exec.Command("docker", "run", "--rm", "-v", vol+":/n:ro", "--entrypoint", "cat", image,
+			"/n/packages/"+id+"/"+ver+"/"+id+"."+ver+".nupkg.sha512").Output()
+		if err != nil || len(strings.TrimSpace(string(sum))) < 20 {
+			t.Fatalf("no recorded hash for %s %s in the cache (%v): the pinned run below would pin nothing", id, ver, err)
+		}
+		rows = append(rows, id+"\t"+ver+"\t"+strings.TrimSpace(string(sum)))
+	}
+	if len(rows) == 0 {
+		t.Fatal("step 1 named no package, so there is nothing to pin")
+	}
+
+	// A copy of the toolchain whose lock pins those rows. Its lock hash differs, so name the (shared, verified) wasi-sdk volume of the real
+	// lock explicitly instead of downloading it again; the nuget volume is already this test's own.
+	copyWith := func(rows []string) string {
+		cp := t.TempDir()
+		for _, f := range toolchainFiles {
+			body, err := os.ReadFile(filepath.Join(root, "packages", "cleat-csharp", f))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if f == "toolchain.packages.tsv" {
+				body = append(bytes.TrimRight(body, "\n"), []byte("\n"+strings.Join(rows, "\n")+"\n")...)
+			}
+			if err := os.WriteFile(filepath.Join(cp, f), body, 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return filepath.Join(cp, "build.sh")
+	}
+	wasi := strings.Replace(realVolume(t, root), "cleat-cs-nuget-", "cleat-cs-wasisdk-", 1)
+	code, log = runBuild(copyWith(rows), "tests/csharp/testdata/withref", "CLEAT_CS_WASISDK_VOLUME="+wasi)
+	if code != 0 {
+		t.Fatalf("2. the referenced project's packages pinned at their real hashes: exit %d, want 0 (they are examined and pass):\n%s", code, log)
+	}
+
+	bad := append([]string(nil), rows...)
+	for i, r := range bad {
+		if strings.HasPrefix(r, "newtonsoft.json\t") {
+			cols := strings.Split(r, "\t")
+			cols[2] = "AAAA" + cols[2][4:]
+			bad[i] = strings.Join(cols, "\t")
+		}
+	}
+	code, log = runBuild(copyWith(bad), "tests/csharp/testdata/withref", "CLEAT_CS_WASISDK_VOLUME="+wasi)
+	if code != 2 || !strings.Contains(log, "newtonsoft.json") || !strings.Contains(log, "does not match its pinned sha512") {
+		t.Fatalf("3. a corrupted pin for a REFERENCED project's package: exit %d, want 2 'does not match its pinned sha512' (cleat-review measured exit 0):\n%s", code, log)
+	}
+
+	code, log = runBuild(real, "tests/csharp/testdata/hello")
+	if code != 0 {
+		t.Fatalf("4. a project with no references, from the cache the referenced-project build left packages in: exit %d, want 0:\n%s", code, log)
 	}
 }

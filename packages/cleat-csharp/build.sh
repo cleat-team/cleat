@@ -112,26 +112,48 @@ if ! dotnet restore --configfile /pkg/nuget.config >/tmp/restore.log 2>&1; then
   fail 2 "UNMEASURED: dotnet restore failed (see above); nothing was built. A failure of the setup or the pins, not a finding about the project."
 fi
 
-# 3. every package this project RESOLVED is pinned, and its hash is the pinned one. The list comes from the assets file of the project, not from the
-# cache directory: the cache volume is shared by every build with this lock, so a package another project left in it (including one
-# a failed build restored before this check could refuse it) is not part of what THIS build links, and must not fail it (cleat#4099).
-# The assets file is found by asking MSBuild, because a project may move its intermediate directory.
-assets=$(dotnet msbuild -getProperty:ProjectAssetsFile 2>/dev/null | tr -d "\r")
-[ -n "$assets" ] && [ -f "$assets" ] || fail 2 "UNMEASURED: the restore wrote no project.assets.json (looked for: ${assets:-nothing named}), so there is no list of what this project resolved to check against the pins."
-resolved=$(perl /pkg/resolved-packages.pl "$assets") || fail 2 "UNMEASURED: could not read $assets (see above); nothing was built."
-# A check over nothing passes for any project: refuse it rather than report it clean.
-[ -n "$resolved" ] || fail 2 "UNMEASURED: $assets lists no package at all, so the pin check would have examined nothing."
-bad=0
+# 3. every package the build will use is pinned, and its hash is the pinned one. "The build" is the project AND every project it
+# references: a ProjectReference written OutputItemType="Analyzer" ReferenceOutputAssembly="false" (how an SDK project references its
+# source generator) does not put the referenced project packages in the referencing project assets file, so the walk is over MSBuild
+# ProjectReference items, each project contributing its own assets file (cleat#4099, cleat-review on #4104). The list is NOT the cache
+# directory: the cache volume is shared by every build with this lock, so a package another project left in it (including one a failed
+# build restored before this check could refuse it) is not part of what THIS build uses, and must not fail it.
+# A project with no assets file, or one MSBuild cannot evaluate, is UNMEASURED: it is compiled, so it must be checked.
+declare -A visited=()
+todo=("$PWD/$(basename "$(ls -1 ./*.csproj)")")
+: > /tmp/resolved.tsv
 tab=$(printf "\t")
-while IFS="$tab" read -r id v path; do
+while [ "${#todo[@]}" -gt 0 ]; do
+  proj="${todo[0]}"; todo=("${todo[@]:1}")
+  [ -z "${visited[$proj]+x}" ] || continue
+  visited[$proj]=1
+  [ "${#visited[@]}" -le 64 ] || fail 2 "UNMEASURED: more than 64 projects in the reference graph; refusing to walk further (a reference cycle, or not a workflow project)."
+  dotnet msbuild "$proj" -getProperty:ProjectAssetsFile -getItem:ProjectReference > /tmp/eval.json 2>/tmp/eval.err \
+    || { head -5 /tmp/eval.err >&2; fail 2 "UNMEASURED: MSBuild could not evaluate $proj, so the packages it uses cannot be listed; nothing was built."; }
+  graph=$(perl /pkg/resolved-packages.pl graph /tmp/eval.json) || fail 2 "UNMEASURED: could not read the project graph of $proj (see above); nothing was built."
+  assets=""
+  while IFS="$tab" read -r kind val; do
+    case "$kind" in ASSETS) assets="$val" ;; REF) todo+=("$val") ;; esac
+  done <<EOF_GRAPH
+$graph
+EOF_GRAPH
+  [ -f "$assets" ] || fail 2 "UNMEASURED: $proj has no project.assets.json (looked for: ${assets:-nothing named}) after the restore, so there is no list of what it uses to check against the pins."
+  perl /pkg/resolved-packages.pl packages "$assets" | awk -v p="$proj" -F"\t" "{print \$0 \"\t\" p}" >> /tmp/resolved.tsv \
+    || fail 2 "UNMEASURED: could not read $assets (see above); nothing was built."
+done
+# A check over nothing passes for any project: refuse it rather than report it clean.
+[ -s /tmp/resolved.tsv ] || fail 2 "UNMEASURED: no project in the reference graph resolved any package, so the pin check would have examined nothing."
+bad=0
+declare -A checked=()
+while IFS="$tab" read -r id v path from; do
+  [ -z "${checked[$path]+x}" ] || continue
+  checked[$path]=1
   got=$(cat "/root/.nuget/packages/$path/$id.$v.nupkg.sha512" 2>/dev/null || true)
   want=$(awk -F"\t" -v i="$id" -v v="$v" "NR>1 && tolower(\$1)==i && \$2==v {print \$3}" /pkg/toolchain.packages.tsv)
-  if [ -z "$want" ]; then echo "unpinned package resolved by the project: $id $v (not in toolchain.packages.tsv)" >&2; bad=1
-  elif [ "$got" != "$want" ]; then echo "package $id $v does not match its pinned sha512" >&2; bad=1; fi
-done <<EOF_RESOLVED
-$resolved
-EOF_RESOLVED
-[ "$bad" -eq 0 ] || fail 2 "UNMEASURED: the packages this project resolved are not all the pinned ones (see above). To use a new package, add it to toolchain.packages.tsv deliberately, with the hash from a download you have checked; the cache volume is not the problem and removing it will not help."
+  if [ -z "$want" ]; then echo "unpinned package used by the build: $id $v (resolved by ${from#/mnt/}; not in toolchain.packages.tsv)" >&2; bad=1
+  elif [ "$got" != "$want" ]; then echo "package $id $v (resolved by ${from#/mnt/}) does not match its pinned sha512" >&2; bad=1; fi
+done < <(sort -u /tmp/resolved.tsv)
+[ "$bad" -eq 0 ] || fail 2 "UNMEASURED: the packages this build uses are not all the pinned ones (see above). To use a new package, add it to toolchain.packages.tsv deliberately, with the hash from a download you have checked; the cache volume is not the problem and removing it will not help."
 # This platform'"'"'s host pack must have been among them: a project that names no ILCompiler host pack for this platform restores
 # nothing to check and then fails to compile for a reason that has nothing to do with the project.
 [ -d "/root/.nuget/packages/runtime.$HOST_RID.microsoft.dotnet.ilcompiler.llvm" ] \
