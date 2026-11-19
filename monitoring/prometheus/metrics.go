@@ -80,6 +80,7 @@ type Metrics struct {
 	encryptionErrors        metric.Int64Counter
 	decryptionErrors        metric.Int64Counter
 	continueAsNew           metric.Int64Counter
+	eventWriteFailures      metric.Int64Counter
 	wasmFuelExhausted       metric.Int64Counter
 	workflowsDeadLettered   metric.Int64Counter
 	workflowsClaimed        metric.Int64Counter
@@ -330,6 +331,14 @@ func New(cfg Config) (*Metrics, error) {
 	)
 	if err != nil {
 		return nil, fmt.Errorf("cleat_continue_as_new_total: %w", err)
+	}
+
+	m.eventWriteFailures, err = meter.Int64Counter(
+		"cleat_event_write_failures_total",
+		metric.WithDescription("Recorded events whose durable write failed and stopped the run, by reason (quota or error); a run that keeps failing counts once per segment"),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("cleat_event_write_failures_total: %w", err)
 	}
 
 	m.wasmFuelExhausted, err = meter.Int64Counter(
@@ -1080,6 +1089,14 @@ func (m *Metrics) RecordContinueAsNew(ctx context.Context, reason string, extraA
 		attribute.String("reason", reason),
 	}, extraAttrs...)...)
 	m.continueAsNew.Add(ctx, 1, metric.WithAttributes(attrs...))
+}
+
+// RecordEventWriteFailure increments the failed-event-write counter by reason ("quota" or "error").
+func (m *Metrics) RecordEventWriteFailure(ctx context.Context, reason string, extraAttrs ...attribute.KeyValue) {
+	attrs := m.mergeAttrs(append([]attribute.KeyValue{
+		attribute.String("reason", reason),
+	}, extraAttrs...)...)
+	m.eventWriteFailures.Add(ctx, 1, metric.WithAttributes(attrs...))
 }
 
 // RecordWasmFuelExhausted increments the wasm-fuel-exhausted counter.

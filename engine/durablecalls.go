@@ -54,6 +54,10 @@ func (s *execSession) stopBeforeNewWork() bool {
 	if s.engine.deferPhase && !s.inDeferDrain {
 		return true
 	}
+	// A recorded event that could not be written is a hole in the durable record; no further work goes on top of it (cleat#4160).
+	if s.eventWriteFailure != nil {
+		return true
+	}
 	return s.engine.shutdownObserved()
 }
 

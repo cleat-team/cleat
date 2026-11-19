@@ -743,6 +743,16 @@ type execSession struct {
 	// poll. Used to throttle checks to at most once per interval.
 	lastCancellationCheck time.Time
 
+	// eventWriteFailure is the first failure to persist a recorded event that is not a lost fence (cleat#4160). While it is set the
+	// session is stopping: stopBeforeNewWork answers true, so the NEXT fresh host call refuses the guest instead of doing more work
+	// on top of a hole in the durable record. It is cleared by nothing: the run suspends and is reclaimed, and the segment-end write
+	// persists the event if the database is back.
+	eventWriteFailure error
+
+	// handlingEventWriteFailure is set while stopAfterFailedEventWrite is acting on a failure, so the continue-as-new it triggers for a
+	// refused quota cannot re-enter it through its own failed write (the quota refuses that event too).
+	handlingEventWriteFailure bool
+
 	// eventCount tracks the number of durable call events in this session.
 	// Incremented per freshCall; compared against maxEventsPerWorkflow for
 	// auto-ContinueAsNew without querying the database.
