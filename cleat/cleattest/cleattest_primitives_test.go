@@ -1279,6 +1279,10 @@ func TestEveryHostCallIsWired(t *testing.T) {
 		"HandleUpdate":                "falls back to the registered handlers",
 		"PluginCallStreaming":         "guarded with != nil, so nil is a no-op path",
 		"AwaitSignalsWithQuorum":      "falls back to the plain await",
+		// cleat#4113. nil makes HostCallsImpl.SideEffect call the function every time, which is what cleattest's own replay (keyed on the
+		// computed value, not on the step) was built around. A test that replays a side effect whose function returns something different
+		// each time therefore re-runs it here, where the engine would freeze the first value. A known difference, listed on the PR.
+		"SideEffectRecorded": "nil: SideEffect always calls its function; cleattest replays by computed value, not by step",
 		// The claim/register/re-claim loop, composed in
 		// cleat/runtime_signals.go's WaitForEvent from PluginCall and
 		// DurableAwaitSignals -- both wired in this harness, so the fallback

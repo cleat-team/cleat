@@ -851,6 +851,25 @@ var adapterDefs = map[string]adapterDef{
 			"return unsafe.String(&cachedResultBuf[0], int(cachedResultLen)), nil",
 		),
 	},
+	// cleat#4113. The lookup HostCallsImpl.SideEffect makes before it runs the user's function. status is the low byte: 0 a recorded value in
+	// the buffer, 2 nothing recorded, anything else an error carrying its message. The stop sentinel comes first, as for every call the host
+	// can refuse: a fresh lookup in a stopped workflow is refused so the function never runs.
+	"SideEffectRecorded": {
+		FieldName:  "SideEffectRecorded",
+		ReturnType: "(string, bool, error)",
+		Params:     nil,
+		ResultStmts: withSuspendCheck(
+			"cachedResultLen := uint32(uint64(result) >> 32)",
+			"status := uint32(result & 0xFF)",
+			"if status == 2 {",
+			`    return "", false, nil`,
+			"}",
+			"if status != 0 {",
+			`    return "", false, fmt.Errorf("cleat_side_effect_recorded: %s", hostErrMessage(cachedResultBuf[:], cachedResultLen))`,
+			"}",
+			"return unsafe.String(&cachedResultBuf[0], int(cachedResultLen)), true, nil",
+		),
+	},
 	"ScheduleCron": {
 		FieldName:  "ScheduleCron",
 		ReturnType: "(string, error)",

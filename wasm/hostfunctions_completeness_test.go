@@ -20,11 +20,6 @@ var notDeclaredForGo = map[string]string{
 	"cleat_poll_work": "worker handshake; a guest never calls it",
 	"cleat_complete":  "worker handshake; a guest never calls it",
 
-	// cleat#4113: the lookup that lets an SDK skip running a side effect's function on replay. Not declared YET, which is a gap and not a
-	// design: the Go SDK PR that makes SideEffect ask first adds the hostFunctions row and deletes this entry, which is the signal this
-	// test exists to produce.
-	"cleat_side_effect_recorded": "cleat#4113; the Go SDK PR declares it",
-
 	// Registered but deliberately unbindable. CLAUDE.md names this one.
 	"cleat_register_query_handler": "deliberately unbindable from a guest",
 

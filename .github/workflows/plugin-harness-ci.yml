@@ -436,13 +436,16 @@ jobs:
           # trapped. Confirm with
           #   go test -list 'TestGoAwaitCallsUnwind' ./...    -> 1
           #   (the CI test-selection guard names it if this term goes missing)
+          # TestSideEffectGoFunctionRunsOnceAcrossFirstRunAndReplay (cleat#4113) is its own term: a Go guest's side-effect function must run
+          # once across a first run and its replay. Confirm with
+          #   go test -list 'TestSideEffectGo' ./...    -> 1
           # TestJavaAwaitCallsHonour (cleat#3430) is the same check for Java, where the
           # wrapper has to act on the sentinel rather than panic; it is not
           # TestHostCalls* either. (AssemblyScript had a twin, TestASAwaitCallsHonour,
           # removed by cleat#4023.)
           #   go test -list 'TestJavaAwaitCallsHonour' ./...    -> 1 on 2026-11-18
           go test -count=1 -timeout=600s -json \
-            ./... -run 'TestPluginCalls_Wasm|TestHostCalls|HostCallTableCovers|EverySDK|TestACompiledGoWorkflow|TestAnIntParameterIsDecoded|TestCallOptionsTimeoutAtTheWasmBoundary|TestDurableCallWithOptionsAloneIsBound|TestGoAwaitCallsUnwind|TestJavaAwaitCallsHonour' \
+            ./... -run 'TestPluginCalls_Wasm|TestHostCalls|HostCallTableCovers|EverySDK|TestACompiledGoWorkflow|TestAnIntParameterIsDecoded|TestCallOptionsTimeoutAtTheWasmBoundary|TestDurableCallWithOptionsAloneIsBound|TestGoAwaitCallsUnwind|TestSideEffectGo|TestJavaAwaitCallsHonour' \
             2>&1 | tee ../../wasm-integration-report.json
         env:
           # Explicit, not left to the default: Go defaults CGO_ENABLED to 1 only
