@@ -11,6 +11,15 @@ func (s *execSession) AcquireLock(ctx context.Context, m api.Module, key string,
 	if s.isReplay {
 		return s.replayAcquireLock(ctx, m, key, ttlMs)
 	}
+	return s.freshAcquireLock(ctx, m, key, ttlMs)
+}
+
+// freshAcquireLock holds the refusal, so that BOTH ways in reach it: AcquireLock when the session is not replaying, and
+// replayAcquireLock at the replay frontier. A defer segment replays its recorded history and so starts in replay; its body's first
+// new call arrives through replayAcquireLock, and the refusal used to be only in AcquireLock's non-replay branch, which that call
+// never reaches (cleat#4101, measured against a real store: the segment body took the lock). freshSetScope has the same shape for the
+// same reason (cleat#4091).
+func (s *execSession) freshAcquireLock(ctx context.Context, m api.Module, key string, ttlMs int64) int64 {
 	// A fresh acquire is new work: it takes a distributed lock with a TTL, on
 	// behalf of a workflow that has already terminated and will never reach the
 	// release. A defer segment that got past here would leave the key held
@@ -19,10 +28,6 @@ func (s *execSession) AcquireLock(ctx context.Context, m api.Module, key string,
 	if s.stopBeforeNewWork() {
 		return callSuspendSentinel
 	}
-	return s.freshAcquireLock(ctx, m, key, ttlMs)
-}
-
-func (s *execSession) freshAcquireLock(ctx context.Context, m api.Module, key string, ttlMs int64) int64 {
 	var acquired bool
 	if s.engine.concurrencyKeyStore != nil {
 		// Check concurrency key quota before acquiring.
