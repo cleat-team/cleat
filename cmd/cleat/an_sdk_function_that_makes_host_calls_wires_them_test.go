@@ -43,7 +43,7 @@ var sdkFixtures = []struct {
 	{"calltyped", []string{"cleat_call"}, []string{"Run"}},
 	{"polluntil", []string{"cleat_now", "cleat_sleep"}, []string{"Run"}},
 	{"awaitcondition", []string{"cleat_await_signals", "cleat_now"}, []string{"Run"}},
-	{"sideeffecttyped", []string{"cleat_side_effect"}, []string{"Run"}},
+	{"sideeffecttyped", []string{"cleat_side_effect", "cleat_side_effect_recorded"}, []string{"Run"}},
 	{"typedupdate", []string{"cleat_register_update_handler"}, []string{"Run"}},
 	{"plugincalltyped", []string{"plugin_call"}, []string{"Run"}},
 	{"pluginfunc", []string{"plugin_call"}, []string{"Run"}},

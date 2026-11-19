@@ -40,9 +40,15 @@ def _files(globs: list[str]) -> list[Path]:
     return out
 
 
+# Adapter fields that are not a method a workflow calls: the SDK method that needs one calls it on the workflow's behalf, and the usage scan
+# wires it through compositeRequires (wasm/usage.go). Counting them here would put a call nobody can write in the denominator, permanently
+# "uncovered". SideEffectRecorded (cleat#4113) is the lookup HostCallsImpl.SideEffect makes first; SideEffect is the covered method.
+COMPOSITE_ONLY_ADAPTER_FIELDS = {"SideEffectRecorded"}
+
+
 def go_surface() -> set[str]:
     src = _read(ROOT / "wasm" / "adapter_metadata.go")
-    return set(re.findall(r'FieldName:\s*"(\w+)"', src))
+    return set(re.findall(r'FieldName:\s*"(\w+)"', src)) - COMPOSITE_ONLY_ADAPTER_FIELDS
 
 
 def python_surface() -> set[str]:

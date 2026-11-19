@@ -374,6 +374,12 @@ var importDefs = map[string]importDef{
 			{"cachedResult", kindOutString},
 		},
 	},
+	"cleat_side_effect_recorded": {
+		ImportName: "cleat_side_effect_recorded",
+		Params: []paramSpec{
+			{"cachedResult", kindOutString},
+		},
+	},
 	"cleat_release_lock": {
 		ImportName: "cleat_release_lock",
 		Params: []paramSpec{

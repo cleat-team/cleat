@@ -117,11 +117,21 @@ type Caller interface {
 	// ScheduleInvoke schedules a one-way message to be delivered after a delay.
 	ScheduleInvoke(service, operation, requestJSON string, delayMs int64) error
 
-	// SideEffect executes a non-deterministic function, records its result
-	// in event history on first execution, and returns the cached result on
-	// replay. The fn is always called on first execution; on replay, the
-	// cached result from history is returned and fn is NOT called (the
-	// computed result from fn is ignored on replay).
+	// SideEffect FREEZES a value (cleat#4113). On first execution it calls fn
+	// once and records the result in event history; on every replay it returns
+	// the recorded value and does NOT call fn, so a value that is not
+	// reproducible (a uuid, a clock read, an API answer) is the same on every
+	// replay and an API call inside fn is made once.
+	//
+	// fn must not make host calls: each consumes a step, and the record this
+	// call writes would land at the wrong one. fn is also the one place a
+	// side effect is safe to take, so it is the only code that may read the
+	// outside world non-deterministically.
+	//
+	// Under a runtime with no lookup (the in-process dev runners), fn is called every time and the runtime hands back the recorded value if
+	// it has one. A GUEST built with this SDK does not run on a worker that predates cleat#4113 at all: it imports cleat_side_effect_recorded,
+	// which an older wasmtime host does not register, so the module fails to instantiate ("unknown import"; measured in cleat#4146 review).
+	// Upgrade the workers before deploying a rebuilt Go workflow.
 	SideEffect(fn func() (string, error)) (string, error)
 }
 
@@ -876,7 +886,8 @@ type HostCallsImpl struct {
 	releaseLock    func(key string) error
 	awaitCondition func(predicate func() bool, pollInterval, timeout time.Duration) (bool, error)
 
-	sideEffect func(computedResult string) (string, error)
+	sideEffect         func(computedResult string) (string, error)
+	sideEffectRecorded func() (string, bool, error)
 
 	updateHandlers map[string]updateHandlerEntry
 
@@ -955,6 +966,7 @@ func NewHostCalls(opts HostCallsOptions) HostCalls {
 		releaseLock:                   opts.ReleaseLock,
 		awaitCondition:                opts.AwaitCondition,
 		sideEffect:                    opts.SideEffect,
+		sideEffectRecorded:            opts.SideEffectRecorded,
 	}}
 }
 
@@ -1059,8 +1071,18 @@ type HostCallsOptions struct {
 
 	// SideEffect records the result of a non-deterministic function in event
 	// history. On first execution, computedResult comes from calling fn; on
-	// replay the host returns the cached result.
+	// replay the host returns the recorded result, whatever computedResult is.
 	SideEffect func(computedResult string) (string, error)
+
+	// SideEffectRecorded asks the host whether the history already holds the
+	// value for this side effect (cleat#4113). recorded is true when it does:
+	// the value is returned, the step is consumed, and HostCalls.SideEffect
+	// must NOT call fn. When it is false nothing has changed and SideEffect
+	// computes the value and records it through SideEffect above.
+	//
+	// nil is allowed (every runtime without a replay, and a build for a host
+	// without the import): SideEffect then always calls fn.
+	SideEffectRecorded func() (value string, recorded bool, err error)
 }
 
 // ---- Interface method implementations ----
@@ -1416,6 +1438,16 @@ func (h *HostCallsImpl) AwaitCondition(predicate func() bool, pollInterval, time
 func (h *HostCallsImpl) SideEffect(fn func() (string, error)) (string, error) {
 	if h.sideEffect == nil {
 		return "", errors.New("durable: SideEffect can only be called from within a workflow function (the HostCalls runtime was not initialized). Ensure this call is inside a cleat_entry / #[cleat_entry] / @CleatEntry / @cleatEntry function.")
+	}
+	// Ask first: on a replay the host holds the value, and fn must not run at all (cleat#4113).
+	if h.sideEffectRecorded != nil {
+		recorded, ok, err := h.sideEffectRecorded()
+		if err != nil {
+			return "", err
+		}
+		if ok {
+			return recorded, nil
+		}
 	}
 	computedResult, err := fn()
 	if err != nil {

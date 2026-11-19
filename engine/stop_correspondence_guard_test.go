@@ -188,12 +188,10 @@ var stopSurfaces = map[string]stopSurface{
 		wit:      []string{"durable-schedule-cron"},
 	},
 	// cleat#4113: the lookup that lets an SDK skip running a side effect's function on replay. A FRESH lookup in a stopped workflow is
-	// refused so the function, which may call an API, never runs. No Go adapter YET: no Go SDK calls it, and the PR that makes the Go
-	// SDK ask first replaces this reason with the adapter.
+	// refused so the function, which may call an API, never runs.
 	"SideEffectRecorded": {
-		adapters:   nil,
-		adapterWhy: reasonNoGoAdapter,
-		wit:        []string{"side-effect-recorded"},
+		adapters: []string{"SideEffectRecorded"},
+		wit:      []string{"side-effect-recorded"},
 	},
 	// cleat#4159: a defer segment's body must not continue as new. Both calls return a packed u64 (a scalar), so the stop rides in bit 31
 	// and every SDK has to test it: Go's adapters are guarded, Java and Rust carry the check, C# tests it first in Packed.CheckHostResult,
