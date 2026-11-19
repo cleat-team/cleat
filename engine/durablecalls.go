@@ -460,6 +460,27 @@ func (s *execSession) DurableCallWithRetry(ctx context.Context, m api.Module,
 	if maxAttempts > int64(ceiling) {
 		maxAttempts = int64(ceiling)
 	}
+	// A CALL AT THE REPLAY FRONTIER IS A FRESH CALL AND GETS ITS WHOLE POLICY. cleat#4152.
+	//
+	// A session over a run with history starts in replay (executor.go: isReplay = len(history) > 0), and it stays there until something leaves
+	// it. Nothing leaves it between the last replayed event and a retried call that follows it directly -- a run lost, reclaimed or shut down
+	// after a recorded step, with no wait between that step and the call. (A wait does leave it: the update poll the SDK makes before a sleep
+	// or an await does, at updater.go. Measured: a run that called, slept and then made a retried call got its policy; one lost right after
+	// the call did not.)
+	//
+	// So the retried call arrived here on a replaying session with nothing left to replay. The replay branch below asks
+	// replayRetryAttempts for attempts to resume, finds none, and sends the call to replayCall, whose frontier is exitReplay and then ONE
+	// plain freshCall. The policy was dropped: the service saw a single attempt and the run failed on its first failure, where the same
+	// call in the run's first segment, or after a wait, retried to success. It did not stop at the retry: the budget check below sits on
+	// the fresh branch only, so a policy too long for the budget was never judged either.
+	//
+	// Leaving replay here, before either, is what makes the frontier an ordinary fresh call. It is the same hand-off the mid-retry resume
+	// below makes after replayRetryAttempts, and replayCall makes for a plain call. A recorded event at this step is left to the replay
+	// branch, which still reads it: a terminal call, a refusal, or attempts to resume.
+	if s.isReplay && s.stepCount >= len(s.history) {
+		s.exitReplay()
+	}
+
 	// REFUSE A POLICY TOO LONG TO RUN IN ONE SEGMENT, AND RECORD THE REFUSAL. cleat#4032.
 	//
 	// This check used to sit AFTER the replay return, on the reasoning that "a refusal records no event, so
