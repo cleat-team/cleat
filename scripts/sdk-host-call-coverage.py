@@ -264,10 +264,31 @@ def self_test() -> int:
             ok = False
         print(f"  {'ok  ' if ok else 'FAIL'} {label}" + ("" if ok else f"  -> {problems}"))
         bad += 0 if ok else 1
+    # The -run pattern reader (cleat#4103). Each case names the pattern, the top-level test it is asked about, and what go test does. The
+    # known-positives are the ones the one-regex reading got WRONG; the negative controls show it still says "selects nothing" when that
+    # is true, so the fix cannot have made the guard unable to fail.
+    run_cases = [
+        ("a subtest part is not part of the name", r"^(TestA|TestB)$/^sub$", "TestA", True),
+        ("...for the other alternative", r"^(TestA|TestB)$/^sub$", "TestB", True),
+        ("negative control: a name that does not exist", r"^NoSuchTest$/^sub$", "TestA", False),
+        ("negative control: the right name, anchored away", r"^TestA$/^sub$", "TestAB", False),
+        ("a / inside a character class does not split", r"^Test[a/b]$", "Testa", True),
+        ("a / inside a group does not split", r"^(Test/A)$", "Test/A", True),
+        ("an escaped / does not split", r"^Test\/A$", "Test/A", True),
+        ("a top-level | is a separate alternative with its own elements", r"^TestA$/^x$|^TestB$", "TestB", True),
+        ("...and the first alternative still selects its own", r"^TestA$/^x$|^TestB$", "TestA", True),
+        ("no slash: the whole pattern is the name regex", r"TestA|TestB", "TestB", True),
+        ("negative control: an unmatched name with no slash", r"TestA|TestB", "TestC", False),
+    ]
+    for label, pattern, name, want in run_cases:
+        got = _top_level_selects(pattern, name)
+        ok = got == want
+        print(f"  {'ok  ' if ok else 'FAIL'} -run {label}" + ("" if ok else f"  -> selects({pattern!r}, {name!r}) = {got}, go test says {want}"))
+        bad += 0 if ok else 1
     if bad:
         print(f"{bad} self-test case(s) failed: --check cannot be trusted", file=sys.stderr)
         return 1
-    print("self-test: --check fails on a stale covered (both ways) and a stale surface (both ways)")
+    print("self-test: --check fails on a stale covered (both ways) and a stale surface (both ways); -run patterns are split the way go test splits them")
     return 0
 
 
@@ -629,6 +650,52 @@ def _invocations() -> list[tuple[str, str, str | None]]:
     return out
 
 
+def _top_level_patterns(pattern: str) -> list[str]:
+    """The regexes a `go test -run` pattern applies to TOP-LEVEL test names.
+
+    `go test` does not read -run as one regex. It splits it on `/` into one element per level of subtest, ignoring a `/` inside `[]` or
+    `()` and skipping the character after a backslash, and it splits a top-level `|` into separate alternatives, each with its own
+    elements (`splitRegexp` in the standard library's testing/match.go). Only element 0 of each alternative is matched against a top-level
+    name, so `^(TestA|TestB)$/^sub$` selects TestA and TestB, and the `$/^sub$` is the subtest filter and never part of the name's regex.
+
+    Reading the whole string as one regex reported that valid pattern as selecting nothing (cleat#4103), which made this guard unusable
+    for any job that selects a subtest. The subtest part is not checked: subtests cannot be listed statically.
+    """
+    firsts: list[str] = []
+    cur: str | None = None  # the first element of the alternative being read, once it is known
+    start = 0
+    cs = cp = 0
+    i = 0
+    while i < len(pattern):
+        c = pattern[i]
+        if c == "[":
+            cs += 1
+        elif c == "]":
+            cs = max(cs - 1, 0)  # an unmatched ']' is legal
+        elif c == "(" and cs == 0:
+            cp += 1
+        elif c == ")" and cs == 0:
+            cp -= 1
+        elif c == "\\":
+            i += 1
+        elif c == "/" and cs == 0 and cp == 0:
+            if cur is None:
+                cur = pattern[start:i]
+            start = i + 1
+        elif c == "|" and cs == 0 and cp == 0:
+            firsts.append(cur if cur is not None else pattern[start:i])
+            cur = None
+            start = i + 1
+        i += 1
+    firsts.append(cur if cur is not None else pattern[start:])
+    return firsts
+
+
+def _top_level_selects(pattern: str, name: str) -> bool:
+    """Does `go test -run <pattern>` select the top-level test `name`? Raises re.error for an invalid regex."""
+    return any(re.search(p, name) for p in _top_level_patterns(pattern))
+
+
 def _selects(module: str, test: str, invs) -> bool:
     """Is `test`, in Go module `module`, selected by some CI invocation?
 
@@ -662,7 +729,7 @@ def _selects(module: str, test: str, invs) -> bool:
         if pattern is None:
             return True
         try:
-            if re.search(pattern, test):
+            if _top_level_selects(pattern, test):
                 return True
         except re.error:
             continue
@@ -708,7 +775,7 @@ def check_run_patterns_select_something() -> list[str]:
         if pattern is None:
             continue
         try:
-            if any(re.search(pattern, n) for n in names):
+            if any(_top_level_selects(pattern, n) for n in names):
                 continue
         except re.error:
             problems.append(f"{wf}: -run '{pattern}' is not a valid regex")
