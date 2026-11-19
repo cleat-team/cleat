@@ -88,10 +88,12 @@ public sealed partial class HostCalls
     /// so this returns when the stream has ended: it is not incremental. A stream with no chunks is an empty list.
     /// </summary>
     /// <remarks>
-    /// <b>A stream of exactly one finished chunk fails on replay</b> (cleat#4117, measured): the host's replay reads one chunk with
-    /// <c>Finish</c> set as its own stream-level error record, so a plugin that answers with a single final chunk succeeds on the first run
-    /// and raises a <see cref="CleatCallException"/> carrying the chunk's text when the run is replayed. Until that is fixed, have the plugin
-    /// end a stream with a chunk after at least one other, or use <see cref="PluginCall(string, string, string)"/> for one-shot answers.
+    /// <b>A stream of exactly one finished chunk used to fail on replay</b> (cleat#4117, measured, fixed in the host): replay read one chunk
+    /// with <c>Finish</c> set as its own stream-level error record, so a plugin that answered with a single final chunk succeeded on the first
+    /// run and raised a <see cref="CleatCallException"/> carrying the chunk's text when the run was replayed. A chunk recorded by a host with
+    /// the fix replays as the success it was. A run whose single-chunk stream was recorded by an older host still replays as the failure
+    /// (nothing recorded then tells the two apart), so against such a host have the plugin end a stream with a chunk after at least one other,
+    /// or use <see cref="PluginCall(string, string, string)"/> for one-shot answers.
     /// </remarks>
     /// <exception cref="CleatCallException">The stream function is not registered, was refused, or failed (classified by the host).</exception>
     public IReadOnlyList<StreamChunk> PluginCallStreaming(string pluginName, string functionName, string inputJson)

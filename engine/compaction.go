@@ -301,6 +301,10 @@ type CompactedEvent struct {
 	// TimestampMs note above.
 	StreamErrCode int `json:"sec,omitempty"`
 
+	// StreamData mirrors EventRecord.StreamData (cleat#4117). Without it a compacted one-chunk stream that succeeded replays as the failure
+	// whose message is the chunk, which is the defect that field exists to prevent.
+	StreamData bool `json:"sd,omitempty"`
+
 	// StateKeys mirrors EventRecord.StateKeys for a state_mutation event with
 	// StateOp=="list" (ListState). lifecycle.go's ListState replay path reads
 	// it back verbatim; the other state_mutation ops (set/increment/has)
@@ -718,6 +722,7 @@ func extractCompactionStateFrom(prev *CompactionState, events []EventRecord) (*C
 			ce.StreamChunkIndex = ev.StreamChunkIndex
 			ce.StreamFinish = ev.StreamFinish
 			ce.StreamErrCode = ev.StreamErrCode
+			ce.StreamData = ev.StreamData
 		case EventTypeDurableSend:
 			ce.Service = ev.Service
 			ce.Op = ev.Op
@@ -915,6 +920,7 @@ func buildFullHistoryFromCompaction(tail []EventRecord, cs *CompactionState) []E
 			rec.StreamChunkIndex = ce.StreamChunkIndex
 			rec.StreamFinish = ce.StreamFinish
 			rec.StreamErrCode = ce.StreamErrCode
+			rec.StreamData = ce.StreamData
 		case EventCodeDurableSend:
 			// extractCompactionState has captured Service/Op/Request for this
 			// type since it was added; this reconstruction case was simply

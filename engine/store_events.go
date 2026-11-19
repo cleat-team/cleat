@@ -503,6 +503,11 @@ func eventRecordToPayload(rec EventRecord) ([]byte, error) {
 		if rec.StreamErrCode != 0 {
 			payload["stream_err_code"] = rec.StreamErrCode
 		}
+		// Plugin output rather than the synthetic failure chunk (cleat#4117). Only when set, so every chunk written before this field keeps
+		// its exact payload and its stored checksum still verifies.
+		if rec.StreamData {
+			payload["stream_data"] = true
+		}
 	case "scope_acquired":
 		if rec.ScopeKey != "" {
 			payload["scope_key"] = rec.ScopeKey
@@ -957,6 +962,9 @@ func populateFromPayload(rec *EventRecord, payload []byte) {
 		}
 		if v, ok := m["stream_err_code"].(float64); ok {
 			rec.StreamErrCode = int(v)
+		}
+		if v, ok := m["stream_data"].(bool); ok {
+			rec.StreamData = v
 		}
 	case "scope_acquired":
 		if v, ok := m["scope_key"].(string); ok {
