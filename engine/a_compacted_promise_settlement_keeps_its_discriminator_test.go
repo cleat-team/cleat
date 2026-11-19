@@ -6,10 +6,14 @@ import (
 
 // cleat#4079 part 3 puts Service="promise" and Op="resolve"|"reject" on promise_resolved and promise_rejected, because an await of an
 // already-settled promise records the same event type and only the settlements are effects a defer segment's stop point may sit at.
-// The event checksum covers Service and Op. Compaction copies fields PER EVENT TYPE, and for these two it kept only the promise id and
-// the result or error, so an expanded history had lost the discriminator. Two consequences, both silent: the settlement stopped being
-// a stop point (the safe direction, but the guarantee that a killed run's cleanup sees every effect then failed for exactly the old,
-// compacted runs), and the checksum chain recomputed over the expanded history no longer matched the one that was recorded.
+// Compaction copies fields PER EVENT TYPE, and for these two it kept only the promise id and the result or error, so an expanded history
+// had lost the discriminator and the settlement stopped being a stop point (the safe direction, but the guarantee that a killed run's
+// cleanup sees every effect then failed for exactly the old, compacted runs).
+//
+// The checksum is NOT affected, and this header said it was until review corrected it: eventRecordToPayload hashes a promise event's
+// promise_id and its result or error only (the Service/Op formula in computeEventChecksum is the fallback for a payload that fails to
+// encode), so the chain over an expanded history matches whether or not the fields survive. The chain assertion below is therefore a
+// CONTROL, not a second failure mode: it shows that nothing else about the expansion changed.
 //
 // This test goes through the real compaction functions, with the chain computed the way the store computes it, and reads the
 // discriminator back through the predicate that chooses the stop point rather than comparing fields alone.

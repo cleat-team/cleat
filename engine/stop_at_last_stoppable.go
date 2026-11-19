@@ -20,9 +20,10 @@ import "context"
 // A stop point at an event the guest cannot be stopped at is the unsafe error. Leaving an event out is the safe one: the stop
 // lands at an earlier event, and what trails it is recorded and skipped rather than replayed.
 //
-// Absent on purpose, each with its reason in that test: set_query_state, create_promise and set_scope (no refusing site
-// today); delete_cron, update_completed (no typed outcome in the component world; resolve_promise and reject_promise ARE
-// stop points but only by Op, see stoppableByOp); signal_received and update_received (the
+// Absent on purpose, each with its reason in that test: set_query_state (no refusing site); create_promise and set_scope (the host
+// refuses both in a segment, cleat#4091, but their component WIT functions return a plain string, so a component guest cannot be
+// told to stop at them); delete_cron, update_completed (no typed outcome in the component world; resolve_promise and reject_promise
+// ARE stop points but only by Op, see stoppableByOp); signal_received and update_received (the
 // same event types record DELIVERY, which no call of the guest refuses); await_promise, which only reads, so a cleanup has no
 // effect of it to see. await_child, await_all_children and continue_as_new were listed here before that test existed and have
 // no refusing site, so they are not.

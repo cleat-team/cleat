@@ -11,6 +11,9 @@ import (
 func TestLastStoppableIndex(t *testing.T) {
 	ev := func(t EventType) EventRecord { return EventRecord{EventType: t} }
 	drain := func(t EventType) EventRecord { return EventRecord{EventType: t, InDeferPhase: true} }
+	// An event a defer SEGMENT recorded itself (cleat#4079), marked by the host and never by the guest. A re-run over such a history must not
+	// stop at the segment's own calls: they are not the original run's last effect.
+	seg := func(t EventType) EventRecord { return EventRecord{EventType: t, InDeferSegment: true} }
 	// What resolve_promise and reject_promise record (cleat#4079): the promise event types WITH the Op that marks them as the effect.
 	settle := func(t EventType, op string) EventRecord {
 		return EventRecord{EventType: t, Service: PromiseEventService, Op: op, PromiseID: "p"}
@@ -28,6 +31,7 @@ func TestLastStoppableIndex(t *testing.T) {
 		{"a defer registration is a stop point", []EventRecord{ev(EventTypeCall), ev(EventTypeDefer), ev(EventTypeDurableLog)}, 1},
 		{"a retried call is reported at its FIRST attempt, not between its attempts", []EventRecord{ev(EventTypeDefer), ev(EventTypeCallAttemptFailed), ev(EventTypeCallAttemptFailed), ev(EventTypeCall)}, 1},
 		{"a call interrupted mid-retry is not a stop point; the one before it is", []EventRecord{ev(EventTypeCall), ev(EventTypeCallAttemptFailed)}, 0},
+		{"a segment's own events are never a stop point", []EventRecord{ev(EventTypeDefer), ev(EventTypeCall), seg(EventTypeCall), seg(EventTypeDefer)}, 1},
 		{"a defer drain's own calls are never a stop point", []EventRecord{ev(EventTypeDefer), drain(EventTypeCall)}, 0},
 		{"resolve_promise is a stop point", []EventRecord{ev(EventTypeDefer), settle(EventTypePromiseResolved, PromiseOpResolve)}, 1},
 		{"reject_promise is a stop point", []EventRecord{ev(EventTypeDefer), settle(EventTypePromiseRejected, PromiseOpReject)}, 1},
