@@ -376,6 +376,11 @@ public class HostCalls {
         int resultPtr, int resultLen,
         int outPtr, int outMaxLen);
 
+    // cleat#4113, ABI 2.43a: is the value of this side effect already recorded? Asked BEFORE the function runs.
+    @Import(module = "env", name = "cleat_side_effect_recorded")
+    private static native long cleatSideEffectRecordedRaw(
+        int outPtr, int outMaxLen);
+
     @Import(module = "env", name = "cleat_set_scope")
     private static native long cleatSetScopeRaw(
         int objTypePtr, int objTypeLen,
@@ -2422,6 +2427,11 @@ public class HostCalls {
      * in the workflow event history.  On replay, the recorded result is
      * returned instead of re-executing the side effect.
      *
+     * <p>
+     * The value was computed BEFORE the host could be asked, so this cannot stop the computation running again on replay; the
+     * host returns the recorded value rather than failing the replay when the two differ (cleat#4113). To freeze a value, use
+     * {@link #sideEffectOnce(java.util.function.Supplier)}.
+     *
      * @param computedResult the result of the side effect computation
      * @return a result containing the side effect output on success, or an
      *         error description on failure
@@ -2447,6 +2457,35 @@ public class HostCalls {
 
         String output = readOutput(outLen);
         return CleatResult.ok(output);
+    }
+
+    /**
+     * Freeze a value (cleat#4113): call {@code compute} once, on first execution, and record its result; on every replay
+     * return the recorded value WITHOUT calling {@code compute}.
+     * <p>
+     * {@link #sideEffect(String)} takes a value that was computed before the host could be asked, so it cannot stop the
+     * computation running again on replay (the host now returns the recorded value instead of failing the replay). This
+     * method asks first. {@code compute} must not make host calls: each consumes a step of the history.
+     *
+     * @param compute computes the value, on first execution only
+     * @return the recorded value, or an error description (a refused lookup unwinds instead, see {@link Memory#throwIfStopped})
+     */
+    public CleatResult<String> sideEffectOnce(java.util.function.Supplier<String> compute) {
+        long result = cleatSideEffectRecordedRaw(Memory.OUTPUT_OFFSET, Memory.OUT_BUF_SIZE);
+
+        // Bit 31 before any field: a fresh lookup in a stopped workflow is refused so the function never runs.
+        Memory.throwIfStopped(result);
+
+        int status = Memory.decodeSimpleErrCode(result);
+        int outLen = Memory.decodeSimpleExtra(result);
+        if (status == 0) {
+            return CleatResult.ok(readOutput(outLen));
+        }
+        if (status != 2) {
+            return CleatResult.err(hostMessageOr(outLen, "sideEffect(...) lookup failed: host status " + status + "."));
+        }
+        // 2: nothing is recorded, nothing changed. Compute, then record.
+        return sideEffect(compute.get());
     }
 
 
