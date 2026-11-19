@@ -674,6 +674,7 @@ func extractCompactionStateFrom(prev *CompactionState, events []EventRecord) (*C
 			ce.ChildName = ev.DetachedName
 			ce.ChildInput = ev.DetachedInput
 			ce.RunID = ev.DetachedRunID
+			ce.Error = ev.Err
 		case EventTypeDurableLog:
 			ce.Response = ev.Message
 			ce.Service = ev.LogLevel
@@ -867,6 +868,7 @@ func buildFullHistoryFromCompaction(tail []EventRecord, cs *CompactionState) []E
 			rec.DetachedName = ce.ChildName
 			rec.DetachedInput = ce.ChildInput
 			rec.DetachedRunID = ce.RunID
+			rec.Err = ce.Error
 		case EventCodeDurableLog:
 			rec.Message = ce.Response
 			rec.LogLevel = ce.Service
