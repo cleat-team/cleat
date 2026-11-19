@@ -127,6 +127,25 @@ const errSignalAuthRequired uint64 = 0xFFFFFFFF_00000002
 // execSession methods that return int64.
 const errSignalAuthRequiredInt int64 = -4294967294
 
+// errSignalDeliveryFailedInt and errSignalTargetNotFoundInt are returned by cleat_signal_workflow when the signal store refused the delivery
+// (cleat#4102). Before them the call returned 0 whatever the store said, so a workflow told "recorded" about a signal that was
+// never sent could wait forever for the reply.
+//
+// They follow errBadParam and errSignalAuthRequired: the low bits are the code, the high 32 bits are all ones, and every SDK
+// already reads any non-zero code in this word as a failed call, so a guest that has not been taught the names still sees the call
+// fail rather than succeed.
+//
+//   - errSignalDeliveryFailedInt (3): the store returned an error. Retryable: nothing was delivered, and a later attempt may succeed.
+//   - errSignalTargetNotFoundInt (4): the store reported ErrWorkflowNotFound. Terminal, and IDENTICAL for a target that does not exist
+//     and one that belongs to another tenant: cleat#2218 and #2227 made the two indistinguishable on purpose, so a guest cannot
+//     enumerate other tenants' run ids, and this code must not reopen that by saying which it was.
+//
+// Only the int64 forms exist, because the one caller is an execSession method that returns int64 (see errSignalAuthRequiredInt for why the
+// unsigned form cannot be used there): errSignalDeliveryFailedInt is 0xFFFFFFFF_00000003 and errSignalTargetNotFoundInt is
+// 0xFFFFFFFF_00000004. An unsigned twin nothing but a test referenced would be dead code to scripts/check-test-only-code.sh.
+const errSignalDeliveryFailedInt int64 = -4294967293
+const errSignalTargetNotFoundInt int64 = -4294967292
+
 // readWasmString reads a Go string from WASM linear memory at (ptr, length).
 func readWasmString(mem api.Memory, ptr, length uint32) string {
 	if length == 0 {

@@ -795,6 +795,31 @@ Send a fire-and-forget signal to another workflow.
 |---|---|
 | 0-31 | `errCode` — 0 = success |
 
+**Return values.** Every non-zero value is a failure and every SDK reads it as one; the named values below are the ones the engine
+returns. The high 32 bits of a named value are all ones (the same convention as `errBadParam`), so a value is `0xFFFFFFFF_0000000N`.
+
+| `errCode` | Meaning | Retry? |
+|---|---|---|
+| 0 | The signal was handed to the signal store. | n/a |
+| 2 | Signal authorization refused the target (`requireSignalAuth`). | No |
+| 3 | The signal store returned an error: nothing was delivered. | Yes. Nothing was delivered, and a later attempt may succeed. |
+| 4 | The target does not exist **or belongs to another tenant**. | No. The engine reports one outcome for both, on purpose (cleat#2218, cleat#2227): a guest cannot tell which, so it cannot enumerate other tenants' run ids. |
+
+Before cleat#4102 the call returned 0 whatever the store said, so codes 3 and 4 are new to a guest and a workflow that ignored the
+result keeps running, but the call now fails where it used to report success. **v0.5.0 behaves the old way.** A guest that must keep
+the old behaviour has to catch the failure.
+
+**Delivery is at-least-once.** The engine delivers the signal first and records the outcome after. A crash between the two replays the
+call, which delivers again: the target can receive the same signal twice. The other order loses the signal on a crash with the event
+saying it was sent, and that is the defect cleat#4102 fixed. Effectively-once delivery needs an idempotency key on the delivery
+(sender run and step) and a unique index behind it; it is not built.
+
+**The outcome is recorded and replayed.** The event is a `signal_received` carrying `Service = "signal"`, `Op = "send"` and the outcome in
+`Response` (empty for a delivered signal), which is also what tells a send from the delivery of a signal the workflow awaits. Replay
+returns the recorded outcome without delivering again or checking authorization again, so a guest that handled a failure sees the same
+failure on replay. The outcome is inside the event checksum and survives compaction. A send recorded before cleat#4102 has no `Op` and
+replays as the success it was reported as.
+
 ### Workflow continuation and children
 
 #### 2.17 `cleat_continue_as_new`
@@ -1992,6 +2017,7 @@ The Rust implementation at `examples/rust-workflow/src/` serves as a reference f
 
 | Version | Date | Changes |
 |---|---|---|
+| — | 2026-11-19 | **`cleat_signal_workflow` now reports a refused delivery** (cleat#4102). The signal store's error used to be logged and dropped and the call returned 0. It now returns `errCode` 3 (delivery failed, retryable) or 4 (target not found, terminal, identical for a foreign and a nonexistent target) in the existing result word, delivers BEFORE recording, and records the outcome so replay returns it; the authorization refusal (`errCode` 2) is recorded the same way. Delivery is at-least-once. No signature changes. |
 | — | 2026-11-18 | **`cleat_delete_cron` now returns the stop sentinel** (cleat#4083). A defer segment's workflow body, past recorded history, deleted a schedule from a real store; `DeleteCron` now consults `stopBeforeNewWork` like `ScheduleCron`. Its layout is `errCode` only, so bit 31 is the top bit of `errCode` and a guest that decodes first reads a refused delete as an error code, or, in a one-byte decoder, as success. §2.56 is unchanged. Added to the table above; re-derived with the query below, which differed from the table by exactly this one call. |
 | — | 2026-11-18 | **`cleat_create_promise` and `cleat_set_scope` now return the stop sentinel** (cleat#4091). A defer segment's workflow body, past recorded history, wrote a promise row and took a 24-hour scope key on a real store; both now consult `stopBeforeNewWork`. Both pack `packSimpleResult` (upper field 32-63, `errCode` 0-31), so they join the second row of the table above and no layout is added. §2.34 and §2.38 are unchanged. Re-derived with the query below, which differed from the table by exactly these two calls. |
 | — | 2026-10-26 | **`cleat_await_promise` joins the stop-sentinel table in §2 (cleat#3383).** A fresh await that has to wait now returns the sentinel instead of `timedOut = 1` with `errCode = 0`, which is byte-identical to a genuine timeout and which no SDK's `await_promise` binding distinguished from one: the guest took its timeout branch and made a durable call before the run suspended. The word is unchanged for every other case, including a deadline that has really passed, so an SDK that has not added the stop check reads a suspend as it always did. The three suspend sites are the first await, a wake on an await recorded with no timeout, and an early wake; the deadline-passed return is the one genuine timeout and stays. Same shape as the `cleat_await_signals` change in cleat#3378. |

@@ -257,6 +257,16 @@ func eventRecordToPayload(rec EventRecord) ([]byte, error) {
 		if rec.SignalPayload != "" {
 			payload["signal_payload"] = rec.SignalPayload
 		}
+		// A SEND (cleat#4102) records its outcome in Response and replay RETURNS it to the guest, so it is replay-relevant and has to be
+		// inside the checksum: an edited outcome must break the chain. Only when Op is set, so a delivery and every send recorded before
+		// the outcome existed hash exactly as they always did; adding the keys unconditionally would invalidate every stored chain.
+		if rec.Op != "" {
+			payload["service"] = rec.Service
+			payload["op"] = rec.Op
+			if rec.Response != "" {
+				payload["outcome"] = rec.Response
+			}
+		}
 	case "defer":
 		if rec.DeferDescription != "" {
 			payload["defer_description"] = rec.DeferDescription
@@ -757,6 +767,15 @@ func populateFromPayload(rec *EventRecord, payload []byte) {
 		}
 		if v, ok := m["signal_payload"].(string); ok {
 			rec.SignalPayload = v
+		}
+		if v, ok := m["service"].(string); ok {
+			rec.Service = v
+		}
+		if v, ok := m["op"].(string); ok {
+			rec.Op = v
+		}
+		if v, ok := m["outcome"].(string); ok {
+			rec.Response = v
 		}
 	case "defer":
 		if v, ok := m["defer_description"].(string); ok {
