@@ -852,6 +852,7 @@ jobs:
           PR_BODY: ${{ github.event.pull_request.body }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          QUEUE_REF: ${{ github.event.merge_group.head_ref }}
           EVENT_NAME: ${{ github.event_name }}
         run: |
           bash -e <<'LINT_GUARD_EOF' || echo "Changelog fragment guard" >> "$LINT_FAILURES_FILE"
@@ -860,8 +861,14 @@ jobs:
           if [ "$EVENT_NAME" = "pull_request" ]; then
             gh api --paginate "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/files?per_page=100" --jq '.[] | [.status, .filename] | @tsv' > /tmp/changed-files.tsv
             printf '%s' "$PR_BODY" > /tmp/pr-body.txt
-            python3 scripts/check-changelog-fragments.py --files-file /tmp/changed-files.tsv --body-file /tmp/pr-body.txt --branch "$HEAD_REF"
+            python3 scripts/check-changelog-fragments.py --files-file /tmp/changed-files.tsv --body-file /tmp/pr-body.txt --branch "$HEAD_REF" --pr-number "$PR_NUMBER"
+          elif [ "$EVENT_NAME" = "merge_group" ] && QN=$(python3 -c 'import sys; sys.path.insert(0, "scripts"); import importlib.util as u; s=u.spec_from_file_location("g", "scripts/check-changelog-fragments.py"); m=u.module_from_spec(s); s.loader.exec_module(m); print(m.pr_number_from_queue_ref(sys.argv[1]) or "")' "$QUEUE_REF") && [ -n "$QN" ]; then
+            # The queue's run has no pull_request payload and no body, but its ref names the PR: read its files the same way and apply rules 1 and 2
+            # (and the grandfather cutoff); rule 3 was checked on the pull request.
+            gh api --paginate "repos/${GITHUB_REPOSITORY}/pulls/${QN}/files?per_page=100" --jq '.[] | [.status, .filename] | @tsv' > /tmp/changed-files.tsv
+            python3 scripts/check-changelog-fragments.py --files-file /tmp/changed-files.tsv --no-body --branch "" --pr-number "$QN"
           else
+            echo "note: no pull request number to read (a push, or a queue ref that did not parse): fragments only"
             python3 scripts/check-changelog-fragments.py --fragments-only
           fi
           LINT_GUARD_EOF

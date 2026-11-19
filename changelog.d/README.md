@@ -54,6 +54,13 @@ The one other exception is correcting an entry that already exists (a typo, a du
 
 In a merge-queue run the PR body is not available, so rules 1 and 2 run and rule 3 is reported as `checked on the pull request`.
 
+## Grandfathered PRs (temporary)
+
+A pull request numbered **below #4191** was opened before this scheme and may still edit `CHANGELOG.md` directly without a fragment (the guard prints
+`GRANDFATHERED`). New PRs, and old ones that rebase anyway, use fragments. The cutoff is `GRANDFATHER_BELOW` in `scripts/check-changelog-fragments.py`;
+**remove it, and its self-test cases, once those PRs have merged, at the 0.6.0 release fold at the latest.** A merge-queue run reads the PR number from its
+head ref (`gh-readonly-queue/<base>/pr-<N>-<sha>`); a PR whose number cannot be established is NOT grandfathered.
+
 ## Folding at release prep
 
     scripts/fold-changelog.py --dry-run                 # print what would be folded; change nothing

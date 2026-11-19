@@ -41,15 +41,33 @@ NO_CHANGELOG_RE = re.compile(r"(?m)^[ \t]*no-changelog:[ \t]*(\S.*?)[ \t]*$")
 CHANGELOG_EDIT_RE = re.compile(r"(?m)^[ \t]*changelog-edit:[ \t]*(\S.*?)[ \t]*$")
 
 
+# GRANDFATHERED PRs. A pull request numbered BELOW this was opened before the fragment scheme existed and edits CHANGELOG.md directly; making each of
+# them rebase and be re-reviewed is the exact cost the scheme removes (about a dozen open PRs on 2026-11-19, several with a FINAL OK already posted).
+# Such a PR may edit CHANGELOG.md and needs no fragment. New PRs, and grandfathered ones that rebase anyway, use fragments.
+# REMOVE this constant (and its two self-test cases) once those PRs have merged, at the 0.6.0 release fold at the latest: it is a debt with a date,
+# not a rule. Rule 1 (a malformed fragment) still applies to everyone.
+GRANDFATHER_BELOW = 4191
+MERGE_QUEUE_REF_RE = re.compile(r"(?:^|/)pr-(\d+)-")
+
+
+def pr_number_from_queue_ref(ref):
+    """A merge-queue run has no pull_request payload; its head ref is `gh-readonly-queue/<base>/pr-<N>-<sha>`. None when it does not parse."""
+    m = MERGE_QUEUE_REF_RE.search(ref or "")
+    return int(m.group(1)) if m else None
+
+
 def is_shipped(path):
     if any(r.search(path) for r in NOT_SHIPPED):
         return False
     return path in SHIPPED_FILES or path.startswith(SHIPPED_PREFIXES)
 
 
-def evaluate(changes, body, branch):
+def evaluate(changes, body, branch, pr_number=None):
     """changes: [(status, path)]; body: str or None (None = merge queue). Returns (findings, notes)."""
     findings, notes = [], []
+    if pr_number is not None and pr_number < GRANDFATHER_BELOW:
+        return findings, ["PR #%d is GRANDFATHERED (opened before the fragment scheme: below #%d): a direct CHANGELOG.md edit is accepted and no fragment is "
+                          "required. Use a fragment if you rebase." % (pr_number, GRANDFATHER_BELOW)]
     added = [p for s, p in changes if s in ("A", "added", "renamed", "R", "C", "copied") and p.startswith("changelog.d/") and p != "changelog.d/README.md"]
     # `modified` on an existing fragment counts as touching one; a deleted one is a fold
     deleted = [p for s, p in changes if s in ("D", "removed") and p.startswith("changelog.d/") and p != "changelog.d/README.md"]
@@ -141,6 +159,20 @@ def self_test():
     f, n = run([("M", "engine/x.go")], body=None)
     if f or not any("checked on the pull request" in x for x in n):
         bad.append("a merge-queue run (no body) did not report rule 3 as checked on the pull request: %r %r" % (f, n))
+    # the grandfather cutoff, BOTH sides of it, and the merge-queue number parse
+    f, n = evaluate([("M", "CHANGELOG.md"), ("M", "engine/x.go")], "", "feature/x", GRANDFATHER_BELOW - 1)
+    if f or not any("GRANDFATHERED" in x for x in n):
+        bad.append("a PR just below the cutoff was not grandfathered: %r %r" % (f, n))
+    f, _ = evaluate([("M", "CHANGELOG.md"), ("M", "engine/x.go")], "", "feature/x", GRANDFATHER_BELOW)
+    if len(f) != 2:
+        bad.append("a PR AT the cutoff was grandfathered (it must not be): %r" % f)
+    f, _ = evaluate([("M", "CHANGELOG.md"), ("M", "engine/x.go")], "", "feature/x", None)
+    if len(f) != 2:
+        bad.append("a PR whose number is unknown was grandfathered (unknown must not be a pass): %r" % f)
+    if pr_number_from_queue_ref("gh-readonly-queue/develop/pr-4155-0a2e0b52752a20e1d08fb9c295592302d3144474") != 4155:
+        bad.append("the merge-queue ref did not parse to its PR number")
+    if pr_number_from_queue_ref("refs/heads/feature/x") is not None or pr_number_from_queue_ref("") is not None:
+        bad.append("a ref that is not a merge-queue ref parsed to a number")
     # the fragment reader is part of the guard: a bad file is a finding
     with tempfile.TemporaryDirectory() as d:
         cwd = os.getcwd()
@@ -167,6 +199,8 @@ def main(argv):
     ap.add_argument("--body-file")
     ap.add_argument("--no-body", action="store_true")
     ap.add_argument("--branch", default=os.environ.get("HEAD_REF", ""))
+    ap.add_argument("--pr-number", type=int, help="the pull request's number (a pull_request run)")
+    ap.add_argument("--merge-queue-ref", help="a merge-queue run's head ref, gh-readonly-queue/<base>/pr-<N>-<sha>, from which the number is read")
     ap.add_argument("--fragments-only", action="store_true", help="rule 1 only: validate every fragment (a merge-queue or push run, with no pull request to read)")
     ap.add_argument("--self-test", action="store_true")
     a = ap.parse_args(argv)
@@ -202,7 +236,8 @@ def main(argv):
             print("UNMEASURED: could not read the PR body (%s)." % e)
             return 2
     _, problems = cf.read_all()
-    findings, notes = evaluate(changes, body, a.branch)
+    pr_number = a.pr_number if a.pr_number is not None else pr_number_from_queue_ref(a.merge_queue_ref)
+    findings, notes = evaluate(changes, body, a.branch, pr_number)
     findings = problems + findings
     for n in notes:
         print("note: " + n)
