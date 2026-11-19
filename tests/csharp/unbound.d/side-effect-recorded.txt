@@ -1,0 +1,7 @@
+# The side-effect lookup (cleat#4113; owner WS-cleat1).
+# WIT functions the C# SDK has not wired yet. Delete a line in the PR that wires it, and delete this file
+# when it is empty. tests/csharp/unbound_drift_test.go fails if a function is neither wired nor listed.
+#
+# Its own file rather than a line in g.txt: group G's PR deletes g.txt whole when it wires its three functions, and an edit here would
+# conflict with that deletion. The C# half of cleat#4113 (HostCalls.SideEffect asking first) wires this and deletes this file.
+side-effect-recorded
