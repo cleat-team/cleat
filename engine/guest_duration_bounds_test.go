@@ -319,10 +319,16 @@ func TestReplayedAwaitPromiseWithAnEnormousRecordedTimeoutKeepsWaiting(t *testin
 	}
 }
 
-// boundedBackoffMs replaced `initialIntervalMs * int64(math.Pow(coefficient, attempt-1))`. These rows are what that expression gave for
-// every ordinary input, so the replacement changes nothing there, and then what it gave for the inputs where it overflowed or converted an
-// out-of-range float (implementation-defined in Go: amd64 yields MinInt64, arm64 saturates).
-func TestBoundedBackoffMatchesTheOldArithmeticWhereThatWasDefinedAndIsBoundedWhereItWasNot(t *testing.T) {
+// boundedBackoffMs replaced `initialIntervalMs * int64(math.Pow(coefficient, attempt-1))`. The first rows are what that expression gave for a
+// set of ORDINARY inputs, so the replacement changes nothing there (a grid of eight, not a proof about every input: cleat-review's
+// 222-input grid found 73 that differ, in exactly the two classes below). Then what it gave where it overflowed or converted an
+// out-of-range float (implementation-defined in Go: amd64 yields MinInt64, arm64 saturates), and the two classes where the new value
+// DIFFERS ON PURPOSE even though the old one was defined:
+//
+//   - an old product above the 100-year clamp but inside int64 (it was a wait of millennia; it is now the clamp);
+//   - a negative interval times a negative factor (the old product was positive and large; a negative factor is no backoff at all, so
+//     the new value is 0, which the loop floors to 1 ms).
+func TestBoundedBackoffMatchesTheOldArithmeticOnTheOrdinaryRowsAndSaysWhereItDeliberatelyDiffers(t *testing.T) {
 	old := func(initial int64, factor float64) int64 { return initial * int64(factor) }
 	for _, tc := range []struct {
 		initial int64
@@ -349,6 +355,13 @@ func TestBoundedBackoffMatchesTheOldArithmeticWhereThatWasDefinedAndIsBoundedWhe
 		if got := boundedBackoffMs(tc.initial, tc.factor); got != maxGuestWaitMs {
 			t.Errorf("%s: boundedBackoffMs = %d, want the clamp %d", tc.name, got, maxGuestWaitMs)
 		}
+	}
+	// The two classes where the old arithmetic was defined and the new value differs by design.
+	if old, got := int64(1_000_000_000_000)*int64(1000.0), boundedBackoffMs(1_000_000_000_000, 1000); old <= maxGuestWaitMs || got != maxGuestWaitMs {
+		t.Errorf("old product above the clamp but inside int64: old %d (clamp %d), new %d, want the clamp", old, maxGuestWaitMs, got)
+	}
+	if old, got := int64(-1000)*int64(-2.0), boundedBackoffMs(-1000, -2); old != 2000 || got != 0 {
+		t.Errorf("negative interval times negative factor: old %d, new %d, want 2000 and 0", old, got)
 	}
 	for _, f := range []float64{math.NaN(), -3, math.Inf(-1)} {
 		if got := boundedBackoffMs(1000, f); got != 0 {
