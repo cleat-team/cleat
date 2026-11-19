@@ -101,9 +101,6 @@ DELIBERATELY_UNBOUND = {
     # Removed from every SDK on 2026-08-09; see the AssemblyScript twin recorded
     # in CLAUDE.md. The WIT interface still declares it.
     "durable-register-query-handler",
-    # Added by cleat#4113 (side_effect freezes a value). The engine ships first and the Python SDK binds it in
-    # its own PR, which deletes this line: the stale-exemption check below fails the moment both exist.
-    "side-effect-recorded",
 }
 
 

@@ -71,7 +71,7 @@ The decorator generates a WASM export wrapper conforming to the Cleat ABI (`(arg
 
 ## HostCalls overview
 
-The `HostCalls` class binds 48 WASM host function imports, grouped by category below.
+The `HostCalls` class binds 49 WASM host function imports, grouped by category below.
 The number is derived, not counted by hand -- see "Deriving the surface" at the end
 of this file, because it was 36 here for long enough to be copied into three more
 places.
@@ -751,7 +751,7 @@ Decorator similar to `@cleat_entry` but for entity workflows (virtual objects). 
 
 ### `HostCalls`
 
-Core class binding the 48 WASM host function imports (derived -- see "Deriving the
+Core class binding the 49 WASM host function imports (derived -- see "Deriving the
 surface"). Each method handles the pointer+length string protocol and bit-packed `i64` result decoding per the Cleat ABI. The host runtime guarantees deterministic replay — all side effects are recorded in the event history.
 
 ### Result types
@@ -872,6 +872,6 @@ names inside comments stating the import does **not** exist:
 
 A text search cannot tell a binding from a sentence denying one.
 
-The WIT world in `wit/cleat.wit` declares **49** functions across 17 imported
-interfaces. The SDK binds 48 of them; the unbound one is
+The WIT world in `wit/cleat.wit` declares **50** functions across 17 imported
+interfaces. The SDK binds 49 of them; the unbound one is
 `durable-register-query-handler`, matching the removal note above.

@@ -131,6 +131,9 @@ try:
         durable_schedule_cron as _import_cleat_schedule_cron,
     )
     from wit_world.imports.durable_extended_lifecycle import (
+        SideEffectLookup_Recorded as _SideEffectLookupRecorded,
+    )
+    from wit_world.imports.durable_extended_lifecycle import (
         continue_as_new_versioned as _import_continue_as_new_versioned,
     )
     from wit_world.imports.durable_extended_lifecycle import (
@@ -138,6 +141,9 @@ try:
     )
     from wit_world.imports.durable_extended_lifecycle import (
         side_effect as _import_side_effect,
+    )
+    from wit_world.imports.durable_extended_lifecycle import (
+        side_effect_recorded as _import_side_effect_recorded,
     )
     from wit_world.imports.durable_fetch import (
         fetch as _import_fetch,
@@ -287,6 +293,11 @@ except ImportError:
 
     class _AwaitOutcomeTimedOut:  # type: ignore[no-redef]
         """Stand-in for ``await-outcome.timed-out`` outside the WASM runtime."""
+
+    class _SideEffectLookupRecorded:  # type: ignore[no-redef]
+        """Stand-in for ``side-effect-lookup.recorded`` outside the WASM runtime."""
+
+        value: str = ""
 
     class _SignalOutcomeReceived:  # type: ignore[no-redef]
         """Stand-in for ``signal-outcome.received`` outside the WASM runtime.
@@ -3083,31 +3094,60 @@ class HostCalls:
     # 27d. side_effect — record non-deterministic computation result
     # --------------------------------------------------------------------
 
-    def side_effect(self, result: str) -> str:
-        """Record a non-deterministic computation result in event history.
+    def side_effect(self, fn: Callable[[], str] | str) -> str:
+        """Freeze a non-deterministic value in the event history (cleat#4113).
 
-        Calls the host ``durable-extended-lifecycle.side-effect`` import.
-        This allows the workflow to capture the result of a non-deterministic
-        operation (e.g. reading a random value, calling an external API
-        directly) so it can be replayed deterministically.
+        Pass a **function**: on first execution it is called once and its
+        result is recorded; on every replay the recorded value is returned and
+        the function is **not called**. So a value that is not reproducible (a
+        uuid, a clock read, an API answer) is the same on every replay, and an
+        API call made inside the function is made once.
+
+        The function must not make host calls: each consumes a step of the
+        history, and the record this call writes would land at the wrong one.
+
+        Passing a **string** (the form this method had before cleat#4113) still
+        works, but the value was computed *before* the host could be asked, so
+        the computation runs on every replay; the host now hands back the
+        recorded value rather than failing the replay when the two differ. Use
+        the function form.
 
         Parameters
         ----------
-        result : str
-            The result of the non-deterministic computation (JSON string).
+        fn : Callable[[], str] | str
+            The function that computes the value (a JSON string, or a value
+            that is marshalled to one), or the already computed value.
 
         Returns
         -------
         str
-            The recorded side-effect identifier or value from the host.
+            The recorded value: the function's result on first execution, the
+            history's on replay.
 
         Raises
         ------
-        RuntimeError
-            If the host reports an error.
+        CleatCallError
+            If the host reports an error, including a replay divergence at
+            this step.
         """
+        if callable(fn):
+            # Ask first. On a host that predates cleat#4113 the import does not
+            # exist and the component would not have instantiated, so there is
+            # no fallback to write here.
+            try:
+                lookup = _import_side_effect_recorded()
+            except _WitErr as err:
+                _raise_call_failure("lifecycle", "side_effect", err.value)
+                raise  # unreachable; _raise_call_failure always raises
+            if isinstance(lookup, _SideEffectLookupRecorded):
+                return lookup.value
+            value = fn()
+        else:
+            value = fn
+        if not isinstance(value, str):
+            value = self._marshal(value)
         # result<string, call-failure> since IMPROVEMENT-PLAN 3.300.
-        return _call_or_raise("lifecycle", "side_effect", _import_side_effect, result)
+        return _call_or_raise("lifecycle", "side_effect", _import_side_effect, value)
 
     # --------------------------------------------------------------------
     # 28. run_detached — execute detached from cancellation
@@ -3941,6 +3981,18 @@ if not _USING_WASM:
 
     def _import_side_effect(result: str) -> str:
         """Stub for WASM import ``(import "env" "cleat_side_effect")``."""
+        raise NotImplementedError(
+            "side_effect can only be called within a cleat WASM runtime."
+        )
+
+
+# -- durable-extended-lifecycle.side-effect-recorded (cleat#4113) --------------
+
+
+if not _USING_WASM:
+
+    def _import_side_effect_recorded() -> Any:
+        """Stub for WASM import ``(import "env" "cleat_side_effect_recorded")``."""
         raise NotImplementedError(
             "side_effect can only be called within a cleat WASM runtime."
         )
