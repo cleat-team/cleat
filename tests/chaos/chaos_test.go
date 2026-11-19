@@ -431,8 +431,10 @@ func runBoundaries(t *testing.T, then string, verify func(scenario, goldenRecord
 	}
 }
 
-// beforeThePollsBranch reports whether boundary b is at or before the first call named for a signal poll's outcome in the golden run.
-func beforeThePollsBranch(sc scenario, g goldenRecord, b request) bool {
+// pollNotYetDecided reports whether a fault at boundary b (in `mode`) lands before the poll's outcome has been acted on: a `before` boundary at or
+// before the first call named for the poll's outcome in the golden run, or an `after` boundary strictly before it. (after:<that call> and later
+// stay in scope: the outcome was acted on, so a replay must repeat it.)
+func pollNotYetDecided(sc scenario, g goldenRecord, b request, mode string) bool {
 	branch := map[string]bool{}
 	for _, o := range sc.Ops {
 		if o.Op == "await0" || o.Op == "await_promise" {
@@ -448,6 +450,9 @@ func beforeThePollsBranch(sc scenario, g goldenRecord, b request) bool {
 			pi = i
 		}
 	}
+	if mode == "after" {
+		return bi >= 0 && pi >= 0 && bi < pi
+	}
 	return bi >= 0 && pi >= 0 && bi <= pi
 }
 
@@ -456,7 +461,7 @@ func applies(then, mode string, b request, sc scenario, g goldenRecord) bool {
 	switch {
 	case then == "terminate" && strings.HasPrefix(b.Op, "defer_"):
 		return false // a kill during a run's own defer drain is a different scenario from terminating a body mid-flight
-	case then == "signal" && mode == "before" && beforeThePollsBranch(sc, g, b):
+	case then == "signal" && pollNotYetDecided(sc, g, b, mode):
 		// Until the poll's branch call has been performed nothing of the poll's outcome has been acted on, so a signal that lands while the worker
 		// is dead may legitimately be SEEN by the replayed poll (a HIT is then correct). The poll can be anywhere in a generated script, so this is
 		// derived from the golden order, not from the first request (cleat-review3, #4188, seed 4188).
