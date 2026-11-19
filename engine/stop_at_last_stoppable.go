@@ -52,6 +52,13 @@ var stoppableByOp = map[EventType]map[string]bool{
 }
 
 // isStoppableEvent reports whether rec is the first event of a call a defer segment can stop at.
+//
+// The Service and Op it reads are NOT in the event checksum: eventRecordToPayload hashes a promise event's promise_id and its result or
+// error only (the Service/Op formula in computeEventChecksum is the fallback for a payload that fails to encode, not the normal path).
+// That is acceptable here and it is worth saying why, because it is not true of every discriminator. Replay never reads Op, so editing
+// it cannot change what a replayed guest sees, only where a killed run's segment stops, and the worst outcome is the safe one: an
+// earlier stop, skipping an effect. Changing it needs write access to the event store, which can rewrite any row anyway. A
+// discriminator whose value a replay RETURNS to the guest would be a different case and would need to be in the checksum.
 func isStoppableEvent(rec EventRecord) bool {
 	if stoppableFirstEvents[rec.EventType] {
 		return true

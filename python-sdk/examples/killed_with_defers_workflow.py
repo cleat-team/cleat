@@ -17,6 +17,10 @@ Each entry is one shape of "killed with cleanup owed", so a test can say which s
                         reply_to_signal), then the loop. The cleanup reports what the guest knew when it ran ("saw-charged" only if
                         the replay got past the call, which it does only when the settlement is a stop point), so a stop placed
                         BEFORE the settlement is told apart from a stop AT it.
+* ``resolve_then_promises`` like ``resolve_then_spin`` but with three ``create_promise`` calls after the settlement. They are recorded in
+                        the history and are not stop points (a log call is not recorded at all, which an earlier version of this entry
+                        assumed and the test's own precondition caught). A test compacts the history between the kill and the segment so
+                        that the settlement lands in the compacted PREFIX, which is where compaction once dropped what marks it as one.
 * ``charge_then_await_settled`` the control. The promise is settled FIRST, then a call, then an await of that already-settled promise
                         (a read: it records promise_resolved with no Op), then the loop. The await must NOT be the stop point.
 """
@@ -145,5 +149,20 @@ def charge_then_await_settled(h: HostCalls, request: dict) -> str:
     h.call("work", "charge", {})  # the last STOPPABLE event
     effects.append("charged")
     h.await_promise_ms(p, 1000)  # already settled: a read, recorded as promise_resolved with no Op
+    _spin()
+    return ""
+
+
+@cleat_entry("resolve_then_promises")
+def resolve_then_promises(h: HostCalls, request: dict) -> str:
+    effects: list[str] = []
+    h.defer_func(lambda: _report(h, effects))
+    p = h.create_promise("order")
+    h.call("work", "charge", {})
+    effects.append("charged")
+    h.resolve_promise(p, '"done"')
+    effects.append("resolved")
+    for n in range(3):
+        h.create_promise(f"after-{n}")  # recorded, not a stop point
     _spin()
     return ""

@@ -327,6 +327,55 @@ func TestAKilledPythonComponentRunsItsDefersThroughTheWorker(t *testing.T) {
 		})
 	}
 
+	// The same kill with the history COMPACTED between the kill and the segment, so that the settlement is in the compacted prefix and
+	// not in the retained tail. Compaction copies fields per event type and once kept only the promise id and the result or error for
+	// the two settlement events, so the rebuilt prefix had lost Service and Op, the settlement stopped being a stop point, the stop
+	// landed on the call before it, and the cleanup of exactly the old, compacted runs missed the settlement (cleat#4079). The expanded
+	// history is what the segment replays, so this is the only test of the property that goes through a real worker.
+	t.Run("a kill after a settlement that compaction folded into the prefix still stops at the settlement", func(t *testing.T) {
+		sawCharged, charged := count("cleanup/saw-charged"), count("work/charge")
+		id, step := run(t, "resolve_then_promises")
+		step() // the kill
+		if st := get(t, id).Status; st != "terminating" {
+			t.Fatalf("status after the kill = %q, want terminating", st)
+		}
+		if n := len(history(t, id)); n != 7 {
+			t.Fatalf("the killed run recorded %d events, want 7 (defer, create_promise, call, resolve, 3 create_promise): the threshold below "+
+				"was chosen for exactly this history", n)
+		}
+		// threshold 4: 7 events (defer, create_promise, call, resolve, 3 create_promise) > 4, so the last 4/2 = 2 are kept and the first 5,
+		// which hold the settlement, are folded into the compaction state.
+		if err := engine.CompactWorkflowHistory(ctx, store, id, 4, nil); err != nil {
+			t.Fatalf("CompactWorkflowHistory: %v", err)
+		}
+		// THE PRECONDITION, read back rather than assumed: the settlement is in the compaction state and NOT among the rows that
+		// remain, or this would be the uncompacted test again with an extra step.
+		cs, err := store.LoadCompactionState(ctx, id)
+		if err != nil || cs == nil {
+			t.Fatalf("LoadCompactionState = %v, %v: the history was not compacted, so this test measures nothing", cs, err)
+		}
+		for _, ev := range history(t, id) {
+			if ev.EventType == "promise_resolved" {
+				t.Fatalf("the settlement is still among the retained rows %v: it was not folded into the prefix", ev)
+			}
+		}
+		start := time.Now()
+		step() // the segment, over a history rebuilt from the compaction state
+		if st := get(t, id).Status; st != "failed" {
+			t.Fatalf("status after the segment = %q, want failed (logs:\n%s)", st, logs.String())
+		}
+		if elapsed := time.Since(start); elapsed > 20*time.Second {
+			t.Fatalf("the segment took %v: it was killed again", elapsed)
+		}
+		if n := count("cleanup/saw-charged") - sawCharged; n != 1 {
+			t.Fatalf("the cleanup saw the charge %d time(s), want exactly 1: the stop must land at the compacted settlement so the guest "+
+				"sees the call before it (service saw %v)", n, calls.all())
+		}
+		if n := count("work/charge") - charged; n != 1 {
+			t.Fatalf("the charge ran %d time(s), want exactly 1", n)
+		}
+	})
+
 	t.Run("CONTROL: an await of an already-settled promise is a read, so it is NOT the stop point", func(t *testing.T) {
 		sawSettled, charged := count("cleanup/saw-settled"), count("work/charge")
 		id, step := run(t, "charge_then_await_settled")
