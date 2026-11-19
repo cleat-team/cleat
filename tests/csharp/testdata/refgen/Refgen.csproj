@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!--
+    Stands in for the Cleat SDK's source generator (cleat#4099): a separate project, referenced by a workflow project with
+    OutputItemType="Analyzer" ReferenceOutputAssembly="false" exactly as packages/cleat-csharp/fixture/ does, whose OWN dependency is a
+    package the lock does not pin. That reference shape is why its packages are NOT in the referencing project's assets file, so a pin
+    check that reads only the top project never sees them. Never built to anything.
+  -->
+  <PropertyGroup>
+    <TargetFramework>netstandard2.0</TargetFramework>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
+  </ItemGroup>
+</Project>
