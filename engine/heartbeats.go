@@ -38,6 +38,24 @@ func (s *execSession) DurableCallWithHeartbeat(ctx context.Context, m api.Module
 
 func (s *execSession) freshCallWithHeartbeat(ctx context.Context, m api.Module, service, operation, requestJSON string, heartbeatIntervalMs int64, responsePtr, responseMaxLen uint32) int64 {
 
+	// A NON-POSITIVE INTERVAL IS REFUSED BEFORE ANYTHING ELSE, AND THE REFUSAL RECORDS NOTHING. cleat#4105.
+	//
+	// time.NewTicker panics on an interval of zero or less, and the guest chooses this number: `heartbeat-interval-ms` is a u64 on the
+	// WIT function, so 0 is one value away and anything from 2^63 up arrives here negative. Nothing between the guest and the ticker
+	// checked it, and the component path has no recover, so the panic took down whatever was executing the workflow. Measured through
+	// the engine, 2026-11-19: `panic: non-positive interval for NewTicker`.
+	//
+	// Refused rather than clamped to a minimum, because there is no honest minimum to pick: the interval is how often the claim is
+	// renewed, and the guest that sent 0 has a bug the call cannot repair. No event is recorded, so a replay never meets a refusal it
+	// did not record, and no service call is made. A value too LARGE is a different case and is not refused: it is clamped below, and
+	// a heartbeat that never ticks inside a hundred years is a legitimate request.
+	if heartbeatIntervalMs <= 0 {
+		written, _ := s.writeResult(ctx, m, responsePtr,
+			fmt.Sprintf("cleat: heartbeat interval must be at least 1 ms, got %d (the host cannot tick at a non-positive interval)", heartbeatIntervalMs),
+			responseMaxLen)
+		return packDurableCallResult(int(written), callErrorInvalidRequest, 1)
+	}
+
 	step := s.stepCount
 	ctx, eventSpan := telemetry.EventSpan(ctx, step, "call_heartbeat", service, operation)
 	defer eventSpan.End()
@@ -72,7 +90,7 @@ func (s *execSession) freshCallWithHeartbeat(ctx context.Context, m api.Module, 
 		resultCh <- callResult{resp: resp, err: err}
 	}()
 
-	ticker := time.NewTicker(time.Duration(heartbeatIntervalMs) * time.Millisecond)
+	ticker := time.NewTicker(guestMsDuration(heartbeatIntervalMs))
 	defer ticker.Stop()
 
 	for {

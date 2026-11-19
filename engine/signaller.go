@@ -190,7 +190,9 @@ func (s *execSession) DurableAwaitSignals(ctx context.Context, m api.Module, sig
 				// rather than a live case; it is here because the failure mode
 				// it prevents is the one being removed. Found by a fixture that
 				// omitted TimestampMs, which is how the shape reached me.
-				deadline := rec.TimestampMs + rec.TimeoutMs
+				// clampGuestMs: a recorded timeout of i64::MAX (the SDKs' "wait indefinitely") wrapped this sum negative, and the replay then
+				// reported a timeout that had not happened (cleat#4105). The record keeps what the guest asked for; the clamp is on its use.
+				deadline := rec.TimestampMs + clampGuestMs(rec.TimeoutMs)
 				expired := rec.TimestampMs > 0 && rec.TimeoutMs > 0 &&
 					s.engine.realNowMs() >= deadline
 				if expired {
@@ -199,7 +201,7 @@ func (s *execSession) DurableAwaitSignals(ctx context.Context, m api.Module, sig
 				if rec.TimestampMs == 0 || rec.TimeoutMs <= 0 {
 					// No usable deadline: suspend without one and let the
 					// worker's own scheduling decide when to look again.
-					deadline = s.engine.realNowMs() + rec.TimeoutMs
+					deadline = s.engine.realNowMs() + clampGuestMs(rec.TimeoutMs)
 				}
 				s.suspendErr = &SuspendError{
 					Reason: fmt.Sprintf("await_signals(%s, %dms) [replayed]",
@@ -322,7 +324,7 @@ func (s *execSession) DurableAwaitSignals(ctx context.Context, m api.Module, sig
 
 	s.suspendErr = &SuspendError{
 		Reason: fmt.Sprintf("await_signals(%s, %dms)", signalNames, timeoutMs),
-		Until:  time.UnixMilli(s.nowMs).Add(time.Duration(timeoutMs) * time.Millisecond),
+		Until:  time.UnixMilli(s.nowMs).Add(guestMsDuration(timeoutMs)),
 	}
 
 	return s.suspendingAwaitResult()
