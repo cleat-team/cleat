@@ -151,6 +151,19 @@ func csharpBuild(spec, outDir string, workflowVersion int, stderr io.Writer) int
 		fmt.Fprintf(stderr, "Error: %v\n", err)
 		return 1
 	}
+	// Determinism gate (cleat#4080, PR 6). Placed AFTER the project is found and BEFORE the toolchain is looked for, like the Java and Rust
+	// gates, because runVetCSharp is pure Go and needs no toolchain: a project that reaches something a component cannot run or cannot
+	// replay is refused on a machine that could not have built it, and without a container start. Its three statuses are this build's:
+	// 1 a finding, 2 UNMEASURED (the vet could not read the project), and neither writes an artifact.
+	if code := runVetCSharp(projectDir, false, stderr, stderr); code != 0 {
+		if code == 1 {
+			fmt.Fprintf(stderr, "\nError: determinism check failed for %s -- no artifact was emitted.\n", spec)
+			fmt.Fprintf(stderr, "Fix the errors above, or run 'cleat vet --lang csharp %s' to see them again.\n", spec)
+		} else {
+			fmt.Fprintf(stderr, "\nNo artifact was emitted: the determinism check could not run (this is a failure of the check, not a finding about %s).\n", spec)
+		}
+		return code
+	}
 	dir, err := findCSharpToolchain()
 	if err != nil {
 		fmt.Fprintf(stderr, "UNMEASURED: %v.\nThis is a failure of the environment, not a finding about %s.\n", err, spec)
