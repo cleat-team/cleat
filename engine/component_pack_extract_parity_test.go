@@ -144,7 +144,9 @@ func parseDispatchers(t *testing.T) map[string]dispatcherFacts {
 		// as a plain Ident rather than a call -- pick those up too.
 		ast.Inspect(fn.Body, func(n ast.Node) bool {
 			id, ok := n.(*ast.Ident)
-			if ok && strings.HasPrefix(id.Name, "extractStringFrom") {
+			// A hostWordLayout (cleat#4107) names the extractor AND the failure-code rule together; it is measured below through its own
+			// extractString method, not assumed to be the extractor its name suggests.
+			if ok && (strings.HasPrefix(id.Name, "extractStringFrom") || id.Name == "durableCallLayout" || id.Name == "simpleLayout") {
 				facts.extractors = append(facts.extractors, id.Name)
 			}
 			return true
@@ -226,6 +228,9 @@ func TestEveryComponentDispatcherReadsTheFieldItsHandlerWrote(t *testing.T) {
 	extractorShift := map[string]int{
 		"extractStringFromPacked":       lengthShiftOfExtractor(t, extractStringFromPacked),
 		"extractStringFromSimplePacked": lengthShiftOfExtractor(t, extractStringFromSimplePacked),
+		// The layouts decodeCallOutcome takes, measured through the method that picks the extractor.
+		"durableCallLayout": lengthShiftOfExtractor(t, durableCallLayout.extractString),
+		"simpleLayout":      lengthShiftOfExtractor(t, simpleLayout.extractString),
 	}
 	packerShift := map[string]int{
 		"packDurableCallResult":  lengthShiftOfPacker(t, "packDurableCallResult", func(n int) int64 { return packDurableCallResult(n, 0, 0) }),

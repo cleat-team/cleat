@@ -987,7 +987,7 @@ type callOutcome struct {
 //
 // extractString differs per layout -- packDurableCallResult puts the length at
 // bits 40-63 and packSimpleResult at bits 32-63 -- so the caller passes the
-// extractor that matches the handler it called. Getting that wrong returns ""
+// layout of the handler it called, which also decides how the failure code is read. Getting that wrong returns ""
 // for any response under 256 bytes rather than failing, which is why the two
 // are not merged.
 //
@@ -1005,7 +1005,7 @@ type callOutcome struct {
 // timed-out field. A decoder that read its fields first would read a stop as an
 // ordinary result and carry on, which is the whole defect deferSegmentLanguages
 // exists to prevent.
-func decodeCallOutcome(packed int64, buf []byte, extractString func(int64, []byte) string) callOutcome {
+func decodeCallOutcome(packed int64, buf []byte, layout hostWordLayout) callOutcome {
 	if uint64(packed)&uint64(callSuspendSentinel) != 0 {
 		return callOutcome{suspended: true}
 	}
@@ -1013,11 +1013,39 @@ func decodeCallOutcome(packed int64, buf []byte, extractString func(int64, []byt
 	if byte(u&0xFF) != 0 {
 		return callOutcome{
 			failed:  true,
-			code:    uint32((u >> 8) & 0xFFFFFFFF),
-			payload: extractString(packed, buf),
+			code:    layout.failureCode(u),
+			payload: layout.extractString(packed, buf),
 		}
 	}
-	return callOutcome{payload: extractString(packed, buf)}
+	return callOutcome{payload: layout.extractString(packed, buf)}
+}
+
+// hostWordLayout is which packed layout a handler returned. It replaces a parameter that was only the string extractor, because the
+// extractor and the way the failure CODE is read must agree, and passing one without the other was the defect in cleat#4107: a simple
+// word's bits 8-39 are 24 zero bits and the LOW BYTE OF THE MESSAGE LENGTH, so reading them as a code gave the guest
+// (len(message) & 0xFF) << 24. With one value choosing both, the mismatched pair cannot be written.
+type hostWordLayout int
+
+const (
+	// durableCallLayout is packDurableCallResult: responseLen<<40 | callErrorCode<<8 | errCode. The code is a classification.
+	durableCallLayout hostWordLayout = iota
+	// simpleLayout is packSimpleResult: extra<<32 | errCode. A failure carries no classification, so its code is 0 (unclassified); the
+	// errCode byte is a different taxonomy (4 is "quota", where call error 4 is "invalid request") and is not mapped onto it.
+	simpleLayout
+)
+
+func (l hostWordLayout) extractString(packed int64, buf []byte) string {
+	if l == simpleLayout {
+		return extractStringFromSimplePacked(packed, buf)
+	}
+	return extractStringFromPacked(packed, buf)
+}
+
+func (l hostWordLayout) failureCode(u uint64) uint32 {
+	if l == simpleLayout {
+		return 0
+	}
+	return uint32((u >> 8) & 0xFFFFFFFF)
 }
 
 // setResultCallOutcome writes a callOutcome into the first result slot as a
