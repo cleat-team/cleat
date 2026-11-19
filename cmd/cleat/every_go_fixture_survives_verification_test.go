@@ -30,6 +30,8 @@ var goFixtureExpectations = map[string]string{
 	// cleat#3383: CreatePromise -> AwaitPromise -> DurableCall on timeout, one
 	// entry point taking one struct. Must verify cleanly.
 	"awaitpromisebranch": "",
+	// cleat#4169: the fault-injection harness's script guest -- one entry point that interprets a list of operations. Must verify cleanly.
+	"chaosscript": "",
 	// cleat#3378: AwaitSignals -> PluginCall on timeout -> AwaitSignals, one
 	// entry point taking one struct. Must verify cleanly.
 	"awaittimeoutbranch": "",
