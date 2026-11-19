@@ -2152,6 +2152,11 @@ public class HostCalls {
 
         long result = cleatResolvePromiseRaw(idOff, idLen, valOff, valLen);
 
+        // The host refuses this call in a defer segment (cleat#4079): settling a promise is an effect another run may be waiting
+        // on. The refusal is bit 31, and decodeSimpleErrCode reads the low byte, where a stop is 0 -- an ordinary success, so
+        // the guest would report the promise settled. Ask BEFORE decoding.
+        Memory.throwIfStopped(result);
+
         int errCode = Memory.decodeSimpleErrCode(result);
         if (errCode != 0) {
             return CleatResult.err("resolvePromise(id=\"" + id + "\") failed: host returned error code " + errCode + ". Check that the promise ID is valid.");
@@ -2173,6 +2178,11 @@ public class HostCalls {
         int idLen = p[2], errLen = p[3];
 
         long result = cleatRejectPromiseRaw(idOff, idLen, errOff, errLen);
+
+        // The host refuses this call in a defer segment (cleat#4079): settling a promise is an effect another run may be waiting
+        // on. The refusal is bit 31, and decodeSimpleErrCode reads the low byte, where a stop is 0 -- an ordinary success, so
+        // the guest would report the promise settled. Ask BEFORE decoding.
+        Memory.throwIfStopped(result);
 
         int errCode = Memory.decodeSimpleErrCode(result);
         if (errCode != 0) {

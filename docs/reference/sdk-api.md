@@ -527,6 +527,16 @@ DurableDefer(description string) (deferID string, err error)
 Registers a deferred cleanup action (LIFO order). The deferred action runs
 when the workflow exits, even on error.
 
+A workflow killed by the execution fence still runs its defers (Python and C#,
+cleat#4079): the engine replays the run on a fresh instance and stops it at the
+last host call it can refuse. **The cleanup must not assume that last call
+failed.** It is stopped at a call whose effect happened, and the call's result is
+withheld, so make a cleanup idempotent or have it check the world.
+
+The component `durable-defer` returns `result<string, call-failure>`, and a
+component built before cleat#4079 is refused on its first call with a message to
+rebuild (BREAKING, see the CHANGELOG).
+
 ```go
 h.DurableDefer("release inventory reservation")
 ```

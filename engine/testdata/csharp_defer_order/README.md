@@ -14,4 +14,11 @@ by outcome, never by digest):
       -v "$PWD":/work -w /work mcr.microsoft.com/dotnet/sdk:10.0 dotnet build -c Release
     cp bin/Release/net10.0/wasi-wasm/native/defer_order.wasm .
 
-`wit/cleat.wit` is a copy of `python-sdk/wit/cleat.wit` at 9cf95d35; the world is shared by every component language.
+`wit/cleat.wit` is a copy of `python-sdk/wit/cleat.wit`; the world is shared by every component language. It was refreshed for
+cleat#4079, where `durable-defer` became `result<string, call-failure>`, and `defer_order.wasm` was rebuilt against it. The guest
+now registers a defer the way an SDK must: the body goes into the table BEFORE the host call, because the call can answer
+`err(suspended)`.
+
+`defer_order_pre4079.wasm` is the PREVIOUS build, against the old `-> string` signature, kept on purpose as a real stale component:
+`engine/a_component_built_before_the_typed_defer_is_refused_before_the_host_runs_test.go` runs it and expects the refusal. Do not
+rebuild it.

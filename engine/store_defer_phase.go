@@ -86,6 +86,20 @@ func (s *PostgresStore) FinalizeDeferPhase(ctx context.Context, runID, workerID 
 		return fmt.Errorf("finalize defer phase: payload: %w", err)
 	}
 
+	// A run started under an idempotency key reports a non-done outcome through that key too (FailWorkflow and
+	// MoveToDeadLetterQueue both write it). The two-phase path wrote only the lease and payload rows, so a keyed run that
+	// ended through it -- terminated, cancelled, force-failed, or (cleat#4079) a killed run that ran its defers -- kept an
+	// empty error on its key. The message was recorded at mark time, so this copies the value already stored, sealed or not.
+	if appliedStatus != statusDone {
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE idempotency_keys
+			SET error_msg = (SELECT error_msg FROM workflow_payloads WHERE id = $1)
+			WHERE workflow_id = $1 AND tenant_id = $2
+		`, runID, s.tenantID); err != nil {
+			s.log().WarnContext(ctx, "idempotency update failed", "error", err)
+		}
+	}
+
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("finalize defer phase commit: %w", err)
 	}

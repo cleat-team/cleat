@@ -261,6 +261,15 @@ func (s *execSession) AwaitPromise(ctx context.Context, m api.Module, promiseID 
 	return s.suspendingAwaitResult()
 }
 
+// The discriminator values ResolvePromise and RejectPromise stamp on the events they record (cleat#4079). They are exported
+// constants, not literals, because a stop point is chosen by reading them back (isStoppableEvent) and two spellings of one
+// word would make the stop silently skip every effect.
+const (
+	PromiseEventService = "promise"
+	PromiseOpResolve    = "resolve"
+	PromiseOpReject     = "reject"
+)
+
 func (s *execSession) ResolvePromise(ctx context.Context, m api.Module, promiseID, value string) int64 {
 	if s.isReplay {
 		if s.stepCount < len(s.history) {
@@ -275,10 +284,23 @@ func (s *execSession) ResolvePromise(ctx context.Context, m api.Module, promiseI
 		s.exitReplay()
 	}
 
+	// A defer segment's body must not settle a promise: that is an effect another run may be waiting on, and a segment exists to
+	// run cleanup, not to make new calls (cleat#4079, the same refusal DeleteCron got in cleat#4083). Tested before anything
+	// is recorded, so a refused call leaves no event.
+	if s.stopBeforeNewWork() {
+		return callSuspendSentinel
+	}
+
 	// Fresh execution: record and dispatch.
 	rec := EventRecord{
-		Step:          s.stepCount,
-		EventType:     EventTypePromiseResolved,
+		Step:      s.stepCount,
+		EventType: EventTypePromiseResolved,
+		// Service and Op are the discriminator that tells this event from the one AwaitPromise records for a promise that was
+		// already resolved: the two have the same event type and the same PromiseID and PromiseResult, and only this one is an
+		// effect. A stop point for a defer segment may be placed at this one and never at that one (stoppableFirstEvents).
+		// Histories written before cleat#4079 lack it, which is the safe direction: such an event is not a stop point.
+		Service:       PromiseEventService,
+		Op:            PromiseOpResolve,
 		PromiseID:     promiseID,
 		PromiseResult: value,
 	}
@@ -314,10 +336,17 @@ func (s *execSession) RejectPromise(ctx context.Context, m api.Module, promiseID
 		s.exitReplay()
 	}
 
-	// Fresh execution: record and dispatch.
+	// Refused in a defer segment's body, for the reason ResolvePromise gives.
+	if s.stopBeforeNewWork() {
+		return callSuspendSentinel
+	}
+
+	// Fresh execution: record and dispatch. Service and Op: see ResolvePromise.
 	rec := EventRecord{
 		Step:         s.stepCount,
 		EventType:    EventTypePromiseRejected,
+		Service:      PromiseEventService,
+		Op:           PromiseOpReject,
 		PromiseID:    promiseID,
 		PromiseError: errMsg,
 	}

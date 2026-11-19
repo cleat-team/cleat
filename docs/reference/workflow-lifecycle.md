@@ -34,7 +34,7 @@ seventh, `terminating`, gained its writer on 2026-09-04 (see the defer phase bel
 | `terminated` | **yes** | Force-terminated by an operator through the admin API, or closed by its parent's `TERMINATE` close policy (cleat#1978 — before this the TERMINATE arm wrote `failed`, with a fixed `error_msg` regardless of why the parent closed; it now writes `terminated`, `error_op='parent_close'`, and an `error_msg` naming the parent's actual outcome, e.g. "parent workflow completed"/"parent workflow failed"/"parent workflow was terminated" — see `parentOutcomeMessage`, `engine/store_lifecycle.go`). |
 | `cancelled` | **yes** | Stopped pre-emptively by an operator, through `POST /api/workflows/:id/cancel` with `{"preemptive": true}`. **Distinct from `done` deliberately** — cleat#1153: cancellation used to be cooperative and unobservable, so a run that honoured a cancellation and one that simply finished were both `done`, and nobody could tell which had happened. Like `terminated`, it runs the workflow's registered defers first, through the same two-phase transition. |
 | `dead_lettered` | **yes** | Retries exhausted. On the Go SDK this is reachable only through a retry policy short enough to have run on the host — see `IMPROVEMENT-PLAN.md` §3.88. |
-| `terminating` | no | The defer phase's window: a terminal outcome has been decided and the workflow is running its cleanup before it is applied. Claimable, non-terminal. Written by `TerminateWorkflow`, by `enforceParentClosePolicy`'s TERMINATE arm, and since 2026-09-13 by force-complete and force-fail — in each case only when the workflow has registered defers; cleared by `FinalizeDeferPhase` or by the deadline sweep. Schema in `migrations/postgres/038`, `mysql/037`, `mssql/041`. |
+| `terminating` | no | The defer phase's window: a terminal outcome has been decided and the workflow is running its cleanup before it is applied. Claimable, non-terminal. Written by `TerminateWorkflow`, by `enforceParentClosePolicy`'s TERMINATE arm, and since 2026-09-13 by force-complete and force-fail — in each case only when the workflow has registered defers; and, since cleat#4079, by the worker for a COMPONENT run that was killed (the execution fence, an instruction limit, a trap) with defers still owed, carrying the failed or dead-lettered outcome and its error, which are written at the kill. Cleared by `FinalizeDeferPhase` or by the deadline sweep. Schema in `migrations/postgres/038`, `mysql/037`, `mssql/041`. |
 
 **The five `terminal? yes` rows above are a run's outcomes**, and each carries a contract — what it
 keeps and for how long, which redrive verbs apply to it, what a parent awaiting it sees, and which
@@ -480,21 +480,23 @@ what the run's history still holds.
 | **reprocess** | `POST /api/dead-letters/{id}/reprocess` | `dead_lettered` | a **new** run, from the definition and input — not from history |
 
 **A redrive replays the history position by position, and a defer segment writes its events after the last
-event the body recorded.** When a run is terminated while it is running or sleeping, the engine runs its
-defers in a segment before the run settles, and those events end the history. A redrive replays the body,
-reaches that point and makes a fresh call at a step the segment already filled, so it fails with
-`replay divergence at step N: workflow called X but history has <the cleanup's call>`. Measured on PostgreSQL,
-MySQL and SQL Server (cleat#4094).
+event the body recorded.** When a run is terminated while it is running or sleeping, or a component run is killed
+with defers owed (below), the engine runs its defers in a segment before the run settles, and those events end the
+history. A redrive replays the body, reaches that point and makes a fresh call at a step the segment already
+filled, so it fails with `replay divergence at step N: workflow called X but history has <the cleanup's call>`.
+Measured on PostgreSQL, MySQL and SQL Server (cleat#4094).
 
-- **`terminated` and `cancelled` runs:** `re-replay` refuses a run whose history holds defer-phase events, with
-  a conflict that says so. Start a new run instead. This also refuses a dead-lettered run that was terminated
-  off the queue after an ordinary failure's own cleanup, which would in fact replay; the two cannot be told
-  apart without a marker, and there is none.
-- **`failed` runs:** not refused, and this is a known limit. A run that was killed (for example by the
-  execution fence) and then ran its defers in a segment can diverge on `re-replay` or `retry` the same way,
-  because nothing marks its segment events as different from an ordinary failure's own cleanup. If a redrive of
-  a failed run reports `replay divergence` at the step after its last recorded call, this is the cause, and
-  the run should be reprocessed as a new run.
+Every event a segment records carries a marker, `in_defer_segment`, set by the engine and never by the guest, so
+a guest's own cleanup after an ordinary failure is not marked and replays deterministically (cleat#4079).
+
+- **A run with a marked event is refused by `re-replay` (any status) and by `retry` (a dead-lettered run), with a
+  conflict that says why.** Start a new run instead; a dead-lettered run can be reprocessed from the dead-letter
+  queue. An ordinary dead-lettered or failed run whose only defer-phase events are its own drain still redrives.
+- **Runs recorded before the marker existed have no marked events.** For those, `re-replay` keeps the earlier
+  scan: a `terminated` or `cancelled` run with a defer-phase event is refused. **Known residual:** nothing in a
+  history says which engine wrote it, so a dead-lettered run terminated off the queue after an ordinary
+  failure's own cleanup is refused too, although it would replay. An old `failed` run that ran a segment is not
+  refused and can still diverge; reprocess it as a new run.
 
 The re-replay and retry endpoints are gated by `--enable-admin-api` for the admin routes and by
 tenant ownership for the rest; while the admin API is off, its routes answer 404.
@@ -537,9 +539,11 @@ stateDiagram-v2
 
     ready --> terminating: outcome decided, defers registered
     running --> terminating: outcome decided, defers registered
+    running --> terminating: a component run killed with defers owed (MarkFailureForDeferPhase)
     terminating --> terminated: FinalizeDeferPhase
     terminating --> cancelled: FinalizeDeferPhase
     terminating --> failed: FinalizeDeferPhase / ExpireDeferPhases
+    terminating --> dead_lettered: FinalizeDeferPhase (a killed component run that exhausted a call)
     terminating --> done: FinalizeDeferPhase (force-complete)
 
     done --> [*]
@@ -548,6 +552,41 @@ stateDiagram-v2
     cancelled --> [*]
     dead_lettered --> [*]
 ```
+
+**A killed component run runs its cleanup.** A trapped component instance cannot be re-entered, so a Python or C#
+run killed by the execution fence used to lose the defers it had registered. Now the worker marks it `terminating`
+carrying the outcome the failure would have had (`failed`, or `dead_lettered` when its last durable act exhausted a
+call) and its error, the next claim replays its history on a fresh instance and stops at the last host call the
+engine can refuse, the guest's defers run, and `FinalizeDeferPhase` applies the recorded outcome. Three things follow:
+
+- **What a client sees.** The run reads `terminating` for the length of the replay plus the cleanup, plus the claim
+  latency (12 to 295 ms for the replay and drain over 10 to 10,000 recorded calls, measured on Python); the bound if
+  the worker vanishes is the 5-minute defer-phase deadline, after which it fails without its cleanup. Then it reads the
+  same failure it would have had. A killed run that registered no defer goes straight to `failed` as before.
+  Anything that treats `terminating` as "someone terminated this" would mislabel a timeout.
+- **A defer after a kill must not assume the last call failed.** The guest is stopped at a call whose effect happened;
+  the call's result is withheld, so the cleanup sees the last effect as indeterminate, exactly as after a kill during
+  that call. Make the cleanup idempotent, or check the world.
+- **Only calls the engine can refuse, and a guest can be told about, are stop points:** calls, retried calls, sends,
+  side effects, fetches, plugin calls, child workflows, detached runs, signal awaits, lock acquisition, cron scheduling
+  and schedule invocation, promise settlements (`resolve_promise`, `reject_promise`, and `reply_to_signal`, which is
+  `resolve_promise`), and defer registrations. A kill after `set_query_state`, `create_promise`, `set_scope`, `poll_update`
+  or `delete_cron` stops at the previous stop point and skips those events (they are recorded, not replayed).
+  `delete_cron` is refused by the host in a segment, but its component function returns nothing, so a component guest
+  cannot be told to stop at it: it would carry on past the refused call and back into the loop the kill interrupted.
+  `TestEveryHostStopSiteIsClassifiedForTheStoppableSet` keeps this list in step with the host.
+- **Settling a promise is refused in a segment's body for every guest, not only for a killed run's segment.** It is an effect
+  another run may be waiting on, so a terminated workflow's cleanup body past its recorded history can no longer resolve or
+  reject a promise it never reached, as it already could not delete a schedule (cleat#4083). The refusal rides in bit 31 of the
+  packed `u64` the two imports already return, so no WIT signature changes for them; the Rust and Java SDKs now test that bit
+  before decoding, the Go adapters panic with `ErrSuspend`, and Python raises `SuspendSentinel`. Their events carry
+  `Service = "promise"` and `Op = "resolve"` or `"reject"`: `await_promise` of an already-settled promise records the same
+  event type with the same fields, and only the settlements are effects, so a stop point at an event with no `Op` would let that
+  await return normally and the guest run on. Histories written before this change have no `Op`, so their settlements are not
+  stop points and the stop lands earlier, which only skips events.
+- **A cleanup that never returns is cut off.** The drain has its own 30-second budget (measured 30.2 s for a defer
+  body that loops forever); the run then still ends with its recorded outcome, not at the 5-minute deadline, and
+  that cleanup is lost.
 
 `terminating` was absent from this diagram until 2026-09-19, while the status table above has
 described it since 2026-09-04. It is the only non-terminal state a workflow can be in that a

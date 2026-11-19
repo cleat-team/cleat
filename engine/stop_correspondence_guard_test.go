@@ -106,6 +106,27 @@ type stopSurface struct {
 }
 
 var stopSurfaces = map[string]stopSurface{
+	// The host stops a defer registration only in a segment over a KILLED run (WithStopAtLastStoppable, cleat#4079), where
+	// the registration can be the last stoppable event. WIT durable-defer returns result<string, call-failure> for that;
+	// both Go adapters carry the sentinel test even though no core module is given this stop today, because the host cannot
+	// know which language reads it and bit 31 is free in the layout.
+	"DurableDefer": {
+		adapters: []string{"DurableDefer", "DurableDeferFunc"},
+		wit:      []string{"durable-defer"},
+	},
+	// resolve_promise and reject_promise (cleat#4079): effects another run may be waiting on, so a defer segment's body must not make
+	// them. Both return a packed u64, so the stop rides in bit 31 like send's and run_detached's, decoded by every SDK
+	// (py names the Python methods; reply_to_signal is an SDK method over resolve_promise and needs no entry of its own).
+	"ResolvePromise": {
+		adapters: []string{"ResolvePromise"},
+		wit:      []string{"durable-resolve-promise"},
+		py:       []string{"resolve_promise"},
+	},
+	"RejectPromise": {
+		adapters: []string{"RejectPromise"},
+		wit:      []string{"durable-reject-promise"},
+		py:       []string{"reject_promise"},
+	},
 	"AcquireLock": {
 		// The first stop site whose WIT function returns a SCALAR rather than
 		// result<string, call-failure>, which is why witCallOutcomeFuncs now

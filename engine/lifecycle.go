@@ -186,6 +186,11 @@ func (s *execSession) recordEvent(rec EventRecord) eventPersistence {
 	if s.inDeferPhase {
 		rec.InDeferPhase = true
 	}
+	// Host-observed, unlike the line above: this engine IS a defer segment, so everything it records fresh was written by
+	// the segment. cleat#4079.
+	if s.engine != nil && s.engine.deferPhase {
+		rec.InDeferSegment = true
+	}
 	// The durable clock must not go backwards (cleat#944).
 	//
 	// Two clock domains feed Now(). Before any event is recorded it is the

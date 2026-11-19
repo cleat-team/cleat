@@ -627,6 +627,10 @@ func eventRecordToPayload(rec EventRecord) ([]byte, error) {
 	if rec.InDeferPhase {
 		payload["in_defer_phase"] = true
 	}
+	// Same convention, and the same reason: only when true, so no event written before cleat#4079 reverifies differently.
+	if rec.InDeferSegment {
+		payload["in_defer_segment"] = true
+	}
 	return sortedJSONMarshal(payload)
 }
 
@@ -1079,5 +1083,8 @@ func populateFromPayload(rec *EventRecord, payload []byte) {
 	// retries_exhausted.
 	if v, ok := m["in_defer_phase"].(bool); ok {
 		rec.InDeferPhase = v
+	}
+	if v, ok := m["in_defer_segment"].(bool); ok {
+		rec.InDeferSegment = v
 	}
 }

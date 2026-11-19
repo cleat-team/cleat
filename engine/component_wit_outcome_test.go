@@ -41,19 +41,19 @@ func TestEveryWitCallOutcomeHasADispatcherThatBuildsOne(t *testing.T) {
 	// Vacuity guards. Every one of these has been the shape of a test that
 	// checked nothing in this repo: a parser that quietly matched zero
 	// functions reports perfect agreement.
-	if len(outcome) < 8 {
+	if len(outcome) < 9 {
 		t.Fatalf("parsed only %d WIT functions returning result<string, call-failure>: %v.\n\n"+
-			"There are eight -- the three durable-call variants, two child-workflow "+
-			"starts, two plugin calls and fetch. Fewer means the parser stopped "+
-			"matching and every assertion below is vacuous.", len(outcome), sortedWitNames(outcome))
+			"There are nine -- the three durable-call variants, two child-workflow "+
+			"starts, two plugin calls, fetch and durable-defer (cleat#4079). Fewer means the "+
+			"parser stopped matching and every assertion below is vacuous.", len(outcome), sortedWitNames(outcome))
 	}
-	if !outcome["durable-call"] || !outcome["plugin-call"] {
-		t.Fatalf("durable-call and plugin-call are the anchors and both must parse "+
-			"as returning the outcome type; got %v", sortedWitNames(outcome))
+	if !outcome["durable-call"] || !outcome["plugin-call"] || !outcome["durable-defer"] {
+		t.Fatalf("durable-call, plugin-call and durable-defer are the anchors and all three must "+
+			"parse as returning the outcome type; got %v", sortedWitNames(outcome))
 	}
-	if !plain["durable-poll-signal"] || !plain["durable-defer"] {
-		t.Fatalf("durable-poll-signal and durable-defer are the anchors for the "+
-			"plain-string side; got %v", sortedWitNames(plain))
+	if !plain["durable-poll-signal"] {
+		t.Fatalf("durable-poll-signal is the anchor for the plain-string side; got %v",
+			sortedWitNames(plain))
 	}
 
 	witToCB := parseWitTypeMap(t)

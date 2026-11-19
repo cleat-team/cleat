@@ -233,7 +233,15 @@ func (b *wasmtimeBackend) dispatchMinVersion(
 // durable-lifecycle interface
 // ---------------------------------------------------------------------------
 
-// dispatchDurableDefer handles (string) -> string.
+// dispatchDurableDefer handles (string) -> result<string, call-failure>.
+//
+// This was (string) -> string, and a lifted string has no bits to carry a stop,
+// so a defer registration could never say "the engine stopped this workflow
+// here". The result type gives it somewhere to (cleat#4079): ok carries the
+// defer id, err(suspended) is the stop, and err(failed) is a host failure.
+// Nothing returns a stop from DurableDefer yet; that is the next change, and
+// this one exists so a guest built against the final signature can already be
+// served.
 func (b *wasmtimeBackend) dispatchDurableDefer(
 	args *C.wasmtime_component_val_t, nargs C.size_t,
 	results *C.wasmtime_component_val_t, nresults C.size_t,
@@ -245,9 +253,9 @@ func (b *wasmtimeBackend) dispatchDurableDefer(
 
 	buf := make([]byte, 65536)
 	packed := b.handler.DurableDefer(ctxWithMem(context.Background(), buf), nil, desc, 0, 65536)
-	response := extractStringFromSimplePacked(packed, buf)
 
-	setResultString(results, nresults, response)
+	setResultCallOutcome(results, nresults,
+		decodeCallOutcome(packed, buf, extractStringFromSimplePacked))
 	return nil
 }
 

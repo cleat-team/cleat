@@ -739,7 +739,7 @@ const (
 	cbTypeMinVersion // () -> u64
 
 	// durable-lifecycle interface
-	cbTypeDurableDefer     // (string) -> string
+	cbTypeDurableDefer     // (string) -> result<string, call-failure>
 	cbTypeContinueAsNew    // (string) -> u64
 	cbTypePollCancellation // () -> string
 	cbTypeDeferPhase       // (bool) -> ()
@@ -1211,6 +1211,31 @@ func refuseStaleSignalScope(typ cbType, ty *C.wasmtime_component_func_type_t) *C
 	return C.wasmtime_error_new(msg)
 }
 
+// staleDurableDeferMessage is what a component built before cleat#4079 gets when
+// it calls durable-defer. That import returned a bare string, which has no bits
+// to carry a stop, so the engine could not cut a killed run short at a defer
+// registration; it now returns result<string, call-failure>.
+//
+// It is refused on the call, BEFORE the host runs, for the reason the signal and
+// scope refusal above is: wasmtime checks a dynamically-typed host function
+// against its caller only when it RETURNS, after the host has recorded the
+// registration. Refusing first leaves the history untouched.
+const staleDurableDeferMessage = "cleat: this component was built against a cleat SDK whose durable-defer " +
+	"import returned a bare string, which cannot carry a stop (cleat#4079); it now returns " +
+	"result<string, call-failure>. Rebuild the workflow against cleat >= 0.6.0."
+
+// refuseStaleDurableDefer returns a trap for a component whose durable-defer
+// import does not declare `result<...>`, nil otherwise. The declared type is the
+// guest's (see component_func_result_is_result).
+func refuseStaleDurableDefer(ty *C.wasmtime_component_func_type_t) *C.wasmtime_error_t {
+	if C.component_func_result_is_result(ty) == 1 {
+		return nil
+	}
+	msg := C.CString(staleDurableDeferMessage)
+	defer C.free(unsafe.Pointer(msg))
+	return C.wasmtime_error_new(msg)
+}
+
 // setResultSignalReceived writes `ok(signal-outcome.received({name, payload}))`
 // into the first result slot.
 func setResultSignalReceived(results *C.wasmtime_component_val_t, nresults C.size_t, name, payload string) {
@@ -1275,6 +1300,11 @@ func goComponentCallback(
 	}
 	if entry.typ == cbTypeAwaitSignals || entry.typ == cbTypeGetScope {
 		if err := refuseStaleSignalScope(entry.typ, ty); err != nil {
+			return err
+		}
+	}
+	if entry.typ == cbTypeDurableDefer {
+		if err := refuseStaleDurableDefer(ty); err != nil {
 			return err
 		}
 	}

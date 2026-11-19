@@ -257,6 +257,23 @@ type EventRecord struct {
 	// eventRecordToPayload), so every event ever written keeps its checksum.
 	InDeferPhase bool `json:"in_defer_phase,omitempty"`
 
+	// InDeferSegment records that this event was recorded by a DEFER SEGMENT: a later execution of the run whose only job
+	// is to run its cleanup after the run was stopped (terminated, cancelled, or killed with defers owed). cleat#4079.
+	//
+	// HOST-OBSERVED, which is the difference from InDeferPhase above. That one is the guest's own claim that it was draining
+	// its table, and an ordinary failure does the same, so it cannot tell a segment from a run that simply cleaned up after
+	// itself. This one is set by the engine when its execution is a segment (WithDeferPhase) and the event is recorded
+	// fresh, so it is true for every event a segment writes, drain or not, and never for the guest's own ordinary drain.
+	//
+	// WHY IT EXISTS: a segment's events are appended after the last event the body recorded, so a redrive of the run
+	// (RetryWorkflow, ReReplay) replays the body into a step the segment already filled and fails with a replay divergence.
+	// Refusing that redrive up front needs to know which runs ran a segment, and no existing field says (cleat#4094).
+	//
+	// Emitted into the checksum payload only when true, so every event ever written keeps its checksum, and carried in the
+	// event's JSON like InDeferPhase, so there is no column and no migration. Absent on every event written before this
+	// field, which reads back false: an old segment's events are not marked, and that is a known limit, not a guess.
+	InDeferSegment bool `json:"in_defer_segment,omitempty"`
+
 	// Promise fields.
 	PromiseName   string `json:"promise_name,omitempty"`
 	PromiseID     string `json:"promise_id,omitempty"`
@@ -700,6 +717,12 @@ type execSession struct {
 	// the durable calls its cleanup needs while the workflow body's own calls
 	// are stopped -- see stopBeforeNewWork.
 	inDeferDrain bool
+
+	// stopIdx is the history index replay stops at in a stop-at-last-stoppable segment, or -1. See stop_at_last_stoppable.go.
+	stopIdx int
+
+	// stopArmed is true when this session is a stop-at-last-stoppable segment over a component guest.
+	stopArmed bool
 
 	// autoContinueAsNewTriggered is set to true after the event cap is hit
 	// to prevent repeated triggers during the same execution segment.

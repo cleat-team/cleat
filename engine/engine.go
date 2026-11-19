@@ -122,10 +122,12 @@ type Engine struct {
 	runLimitsLoaded      bool
 	runLimitsValue       TenantSettings
 
-	deferPassBudget time.Duration // total for one runDefers pass; see WithDeferPassBudget
-	deferPhase      bool          // this execution is a defer segment; see WithDeferPhase
-	nowFn           func() int64  // wall clock for sleep-deadline decisions; see WithClock
-	workflowStartMs int64         // workflow row's created_at; anchors an empty history, see WithWorkflowStartTime
+	deferPassBudget      time.Duration // total for one runDefers pass; see WithDeferPassBudget
+	deferPhase           bool          // this execution is a defer segment; see WithDeferPhase
+	stopAtLastStoppable  bool          // a defer segment over a killed run; see WithStopAtLastStoppable
+	killedWithDefersOwed atomic.Bool   // a component guest was stopped before its wrapper ran its defers; see KilledWithDefersOwed
+	nowFn                func() int64  // wall clock for sleep-deadline decisions; see WithClock
+	workflowStartMs      int64         // workflow row's created_at; anchors an empty history, see WithWorkflowStartTime
 
 	continueAsNewHandler func(ctx context.Context, currentRunID, workerID string, generation int64, defName string, defVersion int, newInput string, newEvents []EventRecord, result string, queryState map[string]string, priority int) (newRunID string, err error)
 
@@ -747,6 +749,29 @@ func WithDeferPassBudget(d time.Duration) EngineOption {
 // The engine fails the execution rather than proceeding if the backend cannot
 // honour it. A defer segment that silently skipped the drain would report the
 // workflow's cleanup as done, which is the failure mode 3.81 exists to record.
+// WithStopAtLastStoppable makes a defer segment replay a KILLED run only as far as the last host call the engine can
+// refuse, and stop there (cleat#4079). It has no effect without WithDeferPhase.
+//
+// A killed run's history ends where its last call returned, not where the body was cut off, so an ordinary segment would
+// replay the whole history and then let the body carry on from there. Carrying on is the problem: a body killed in a loop
+// that makes no further call never reaches a fresh call to refuse, and runs until it is killed again. Stopping at the last
+// stoppable event instead makes the guest unwind at a call, where the defers can run.
+//
+// Only a component guest can be stopped this way: a core module drains its defers in place after a kill, so the worker
+// does not set this for one.
+func WithStopAtLastStoppable() EngineOption {
+	return func(e *Engine) { e.stopAtLastStoppable = true }
+}
+
+// KilledWithDefersOwed reports whether the last execution stopped a COMPONENT guest (a trap, the execution fence, an
+// instruction limit, a timeout) before the guest's own wrapper could run the defers it had registered (cleat#4079).
+//
+// It is false for a guest that failed through its own entry point, because that wrapper drains the defer table on the error
+// path, and false for a core module, which the engine drains in place. When it is true the cleanup has NOT happened and
+// cannot happen in this process: a trapped component instance cannot be re-entered. The worker routes such a run through a
+// defer segment on a fresh instance.
+func (e *Engine) KilledWithDefersOwed() bool { return e.killedWithDefersOwed.Load() }
+
 func WithDeferPhase() EngineOption {
 	return func(e *Engine) { e.deferPhase = true }
 }

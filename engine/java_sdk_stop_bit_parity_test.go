@@ -108,6 +108,10 @@ var javaCallsTheHostCanRefuse = []sdkRefusableCall{
 	// The host site is freshSetScope, the unexported method that holds the check:
 	// SetScope and replaySetScope both reach it, as RunDetached does runDetached.
 	{"setScope", "freshSetScope"},
+	// resolvePromise and rejectPromise joined in cleat#4079, for the same reason: the simple layout reads a stop as error code 0,
+	// which is a successful settlement. replyToSignal is a composite over resolvePromise and needs no entry of its own.
+	{"resolvePromise", "ResolvePromise"},
+	{"rejectPromise", "RejectPromise"},
 	{"signalWorkflow", "SignalWorkflow"},
 	{"cleatSend", "DurableSend"},
 	{"scheduleInvokeMs", "DurableScheduleInvoke"},
@@ -329,7 +333,13 @@ func TestTheRequiredJavaGuardsCoverEveryHostStopSite(t *testing.T) {
 	// value, and the audit's two WIT functions return a plain string, so a component guest cannot
 	// receive the refusal (the refused call has no effect); see reasonWitReturnsNothing and
 	// reasonWitReturnsAPlainString.
-	const stopSitesOn20260904 = 21
+	//
+	// 23 since cleat#4079 (this change): ResolvePromise and RejectPromise consult it, because a defer segment's body settling a promise is an
+	// effect another run may be waiting on. Checked on the other side as for DeleteCron: Java's resolvePromise and rejectPromise went
+	// straight to Memory.decodeSimpleErrCode, where a stop reads as errCode 0, a SUCCESSFUL settlement, so both list entries above
+	// and the Memory.throwIfStopped guards in HostCalls.java were added. Rust got the matching stop_requested guards. Python,
+	// TypeScript and the Go adapters already decode bit 31 (_check_host_result, withSuspendCheck).
+	const stopSitesOn20260904 = 23
 	if stopSites != stopSitesOn20260904 {
 		t.Errorf("the engine has %d `if s.stopBeforeNewWork() {` sites; this test was written "+
 			"against %d.\n\nIf a site was ADDED, the Java SDK has a call the host can now "+

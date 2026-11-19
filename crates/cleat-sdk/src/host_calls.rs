@@ -1408,6 +1408,12 @@ impl HostCalls {
                 value.as_ptr(), value.len() as u32,
             )
         };
+        // The host refuses this call in a defer segment (cleat#4079): settling a promise is an effect another run may be
+        // waiting on. Ask BEFORE decoding: decode_simple_result reads errCode from the low byte, where a stop is 0, an
+        // ordinary success, so the guest would report the promise settled.
+        if stop_requested(result) {
+            return Err("cleat: host refused this call -- the workflow is running its defer phase".to_string());
+        }
         let (_extra, err_code) = memory::decode_simple_result(result);
         if err_code != 0 {
             return Err(format!("resolve_promise(promise_id=\"{}\") failed: host error code {}. Check that the promise ID is valid.", promise_id, err_code));
@@ -1423,6 +1429,12 @@ impl HostCalls {
                 error.as_ptr(), error.len() as u32,
             )
         };
+        // The host refuses this call in a defer segment (cleat#4079): settling a promise is an effect another run may be
+        // waiting on. Ask BEFORE decoding: decode_simple_result reads errCode from the low byte, where a stop is 0, an
+        // ordinary success, so the guest would report the promise settled.
+        if stop_requested(result) {
+            return Err("cleat: host refused this call -- the workflow is running its defer phase".to_string());
+        }
         let (_extra, err_code) = memory::decode_simple_result(result);
         if err_code != 0 {
             return Err(format!("reject_promise(promise_id=\"{}\") failed: host error code {}. Check that the promise ID is valid.", promise_id, err_code));

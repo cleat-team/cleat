@@ -87,6 +87,62 @@ class TestTheStopSentinelIsTestedBeforeTheWordIsDecoded:
             hc.send("email", "notify", {})
 
 
+class TestSettlingAPromiseIsRefusedAsAStopInADeferSegment:
+    """cleat#4079: resolve_promise and reject_promise are effects another run may be waiting on, so the host refuses them in a
+    defer segment and carries the stop in bit 31 of the same u64. ``reply_to_signal`` is an SDK method over ``resolve_promise``
+    and gets it with no code of its own; the third test pins that."""
+
+    def test_resolve_promise_unwinds_on_a_stop(self, hc: HostCalls) -> None:
+        with mock.patch(
+            "cleat_sdk.host_calls._import_cleat_resolve_promise", return_value=CALL_SUSPEND_SENTINEL
+        ) as imp, pytest.raises(SuspendSentinel):
+            hc.resolve_promise("p-1", '"v"')
+        assert imp.called, "the import must actually be reached"
+
+    def test_reject_promise_unwinds_on_a_stop(self, hc: HostCalls) -> None:
+        with mock.patch(
+            "cleat_sdk.host_calls._import_cleat_reject_promise", return_value=CALL_SUSPEND_SENTINEL
+        ) as imp, pytest.raises(SuspendSentinel):
+            hc.reject_promise("p-1", "no")
+        assert imp.called
+
+    def test_reply_to_signal_unwinds_through_resolve_promise(self, hc: HostCalls) -> None:
+        with mock.patch(
+            "cleat_sdk.host_calls._import_cleat_resolve_promise", return_value=CALL_SUSPEND_SENTINEL
+        ) as imp, pytest.raises(SuspendSentinel):
+            hc.reply_to_signal("p-1", '"answer"')
+        assert imp.call_count == 1, "the reply is one resolve_promise call, not a second import of its own"
+
+    def test_a_stop_is_not_mistaken_for_a_successful_settlement(self, hc: HostCalls) -> None:
+        # The stop word's low byte is 0, which is what an error-code-only decode reads as success.
+        assert CALL_SUSPEND_SENTINEL & 0xFF == 0
+        with mock.patch(
+            "cleat_sdk.host_calls._import_cleat_reject_promise", return_value=CALL_SUSPEND_SENTINEL
+        ), pytest.raises(SuspendSentinel):
+            hc.reject_promise("p-1", "no")
+
+    def test_a_stop_wins_over_an_error_code_in_the_same_word(self, hc: HostCalls) -> None:
+        with mock.patch(
+            "cleat_sdk.host_calls._import_cleat_resolve_promise", return_value=CALL_SUSPEND_SENTINEL | 0x01
+        ), pytest.raises(SuspendSentinel):
+            hc.resolve_promise("p-1", '"v"')
+
+    def test_a_host_error_is_still_an_error_and_not_a_stop(self, hc: HostCalls) -> None:
+        # The control: the stop path must not have swallowed the ordinary failure (no promise store, unknown id).
+        with mock.patch(
+            "cleat_sdk.host_calls._import_cleat_resolve_promise", return_value=1
+        ), pytest.raises(RuntimeError) as excinfo:
+            hc.resolve_promise("p-1", '"v"')
+        assert not isinstance(excinfo.value, SuspendSentinel)
+        assert "resolve_promise" in str(excinfo.value)
+
+    def test_a_success_is_still_a_success(self, hc: HostCalls) -> None:
+        with mock.patch("cleat_sdk.host_calls._import_cleat_resolve_promise", return_value=0):
+            assert hc.resolve_promise("p-1", '"v"') is None
+        with mock.patch("cleat_sdk.host_calls._import_cleat_reject_promise", return_value=0):
+            assert hc.reject_promise("p-1", "no") is None
+
+
 class TestNoScalarHostCallDiscardsItsResult:
     """The structural guard. Without it this fix decays one call site at a time.
 

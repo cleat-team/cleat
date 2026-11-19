@@ -302,6 +302,8 @@ func (e *Engine) executeWithBackend(
 	// through it. It runs after every other deferred function registered below it (LIFO), and before the caller sees err.
 	defer session.flushUnflushedEvents(&err)
 
+	session.armStopAtLastStoppable(ctx, isComponentWasm(wasmBytes))
+
 	execCtx, stepCancel := context.WithCancel(ctx)
 	session.stepCancel = stepCancel
 	execCtx = withHandler(execCtx, session)
@@ -479,6 +481,13 @@ func (e *Engine) executeWithBackend(
 		// stopped before its wrapper returned, so nothing ran its defers and
 		// this pass is the only chance they have.
 		if len(session.deferrals) > 0 && !guestCompleted {
+			// A COMPONENT guest stopped here still owes its defers, and nothing in this process can run them: the instance
+			// is trapped and cannot be re-entered. Say so, so the worker can route the run through a defer segment on a
+			// fresh instance (cleat#4079). Recorded here and not in runDefers, which is also reached by a guest that
+			// returned normally past a deadline and had already drained its own table.
+			if isComponentWasm(wasmBytes) {
+				e.killedWithDefersOwed.Store(true)
+			}
 			e.runDefers(context.Background(), wasmBytes, session.deferrals)
 		}
 		session.releaseHeldScopes(context.Background())

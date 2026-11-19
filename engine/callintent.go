@@ -186,6 +186,8 @@ func (s *execSession) freshCallWithIntent(ctx context.Context, service, operatio
 		// the call has to carry it too, or a crash between the intent and its
 		// completion would resume with the flag lost. cleat#1155.
 		InDeferPhase: s.inDeferPhase,
+		// Same reason, for the host-observed marker: this record's checksum is computed before recordEvent could stamp it.
+		InDeferSegment: s.engine != nil && s.engine.deferPhase,
 	}
 	if err := st.WriteCallIntent(ctx, s.workflowID, intent, s.engine.workerID, s.engine.generation); err != nil {
 		// The call has NOT been dispatched. That is the correct outcome of a
