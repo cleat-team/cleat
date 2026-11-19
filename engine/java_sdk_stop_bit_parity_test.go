@@ -101,6 +101,13 @@ var javaCallsTheHostCanRefuse = []sdkRefusableCall{
 	// could delete a schedule the workflow never reached. The refusal reads as
 	// errCode 0 in the simple layout, which is a successful delete.
 	{"deleteCron", "DeleteCron"},
+	// createPromise and setScope joined in the cleat#4079 audit: a terminated
+	// workflow's defer segment created a promise row and took a 24-hour scope key
+	// from a real store. Both layouts read a refusal as errCode 0, a success.
+	{"createPromise", "CreatePromise"},
+	// The host site is freshSetScope, the unexported method that holds the check:
+	// SetScope and replaySetScope both reach it, as RunDetached does runDetached.
+	{"setScope", "freshSetScope"},
 	{"signalWorkflow", "SignalWorkflow"},
 	{"cleatSend", "DurableSend"},
 	{"scheduleInvokeMs", "DurableScheduleInvoke"},
@@ -312,16 +319,17 @@ func TestTheRequiredJavaGuardsCoverEveryHostStopSite(t *testing.T) {
 	// the CALL, not the site. A count of sites and a list of methods are
 	// different things, and this is the case that separates them.
 	//
-	// 19 since cleat#4083: DeleteCron consults it, because a defer segment's
-	// body past recorded history deleted a schedule from a real store (measured).
-	// The other side was checked rather than assumed, and it needed code:
-	// Java's deleteCron went straight to Memory.decodeSimpleErrCode, where a stop
-	// reads as errCode 0, a SUCCESSFUL delete. Both the list entry above and the
-	// Memory.throwIfStopped guard in HostCalls.java were added, not only this
-	// number. Python and TypeScript need nothing in code: durable-delete-cron is
-	// declared with no return value, so a component guest cannot receive the
-	// refusal at all (the call simply has no effect).
-	const stopSitesOn20260904 = 19
+	// 19 since cleat#4083 (DeleteCron), then 21 since the cleat#4079 audit (CreatePromise and
+	// SetScope), each measured against a real store. Both sides were checked rather than assumed,
+	// and both needed code. DeleteCron: Java's deleteCron went straight to
+	// Memory.decodeSimpleErrCode, where a stop reads as errCode 0, a SUCCESSFUL delete. The audit's
+	// createPromise and setScope decoded straight through the same way. Each got a list entry above
+	// AND a Memory.throwIfStopped guard in HostCalls.java, not only this number, and so did Rust and
+	// the Go adapters. Python and TypeScript need nothing in code: durable-delete-cron has no return
+	// value, and the audit's two WIT functions return a plain string, so a component guest cannot
+	// receive the refusal (the refused call has no effect); see reasonWitReturnsNothing and
+	// reasonWitReturnsAPlainString.
+	const stopSitesOn20260904 = 21
 	if stopSites != stopSitesOn20260904 {
 		t.Errorf("the engine has %d `if s.stopBeforeNewWork() {` sites; this test was written "+
 			"against %d.\n\nIf a site was ADDED, the Java SDK has a call the host can now "+

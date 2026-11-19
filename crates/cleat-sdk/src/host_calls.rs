@@ -890,6 +890,12 @@ impl HostCalls {
                 id_buf.as_mut_ptr(), memory::OUT_BUF_SIZE,
             )
         };
+        // The host refuses a promise created by a defer segment's workflow body
+        // (cleat#4079 audit). The refusal reads as error code 0 with an empty id in
+        // this layout, a SUCCESSFUL create_promise, so ask before decoding.
+        if stop_requested(result) {
+            return (String::new(), Some("cleat: host refused this call -- the workflow is running its defer phase".to_string()));
+        }
         let (id_len, err_code) = memory::decode_simple_result(result);
         if err_code != 0 {
             return (String::new(), Some(memory::host_message_or(&id_buf, id_len, format!("create_promise(name=\"{}\") failed: host error code {}. Check that the promise name is valid.", name, err_code))));
@@ -1288,6 +1294,13 @@ impl HostCalls {
                 prev_buf.as_mut_ptr(), memory::OUT_BUF_SIZE,
             )
         };
+        // The host refuses a scope taken by a defer segment's workflow body
+        // (cleat#4079 audit). This function has no error channel, so the stop goes
+        // through suspend() inside stop_requested, which is what still ends the
+        // segment when the body ignores the return.
+        if stop_requested(result) {
+            return String::new();
+        }
         let (prev_len, _err_code) = memory::decode_simple_result(result);
         if prev_len > 0 {
             memory::read_result(&prev_buf, prev_len)

@@ -156,14 +156,17 @@ var adapterDefs = map[string]adapterDef{
 			{"objectType", "string"},
 			{"instanceKey", "string"},
 		},
-		ResultStmts: []string{
+		// withSuspendCheck since the cleat#4079 audit: the host refuses a scope taken
+		// by a defer segment's body, and the errCode mask below does not cover bit 31,
+		// so without the check the refusal decodes as a successful set_scope.
+		ResultStmts: withSuspendCheck(
 			"prevLen := uint32(uint64(result) >> 32)",
 			"errCode := uint32(result & 0xFFFF)",
 			"if errCode != 0 {",
 			`	return "", fmt.Errorf("cleat_set_scope: %s", hostErrMessage(prevScopeBuf[:], prevLen))`,
 			"}",
 			"return unsafe.String(&prevScopeBuf[0], int(prevLen)), nil",
-		},
+		),
 	},
 	"GetScope": {
 		FieldName:  "GetScope",
@@ -729,14 +732,17 @@ var adapterDefs = map[string]adapterDef{
 		Params: []adapterParam{
 			{"name", "string"},
 		},
-		ResultStmts: []string{
+		// withSuspendCheck since the cleat#4079 audit: the host refuses a promise created
+		// by a defer segment's body. Without the check a Go guest reads the sentinel as an
+		// ordinary error code and runs on.
+		ResultStmts: withSuspendCheck(
 			"promiseIDLen := uint32(uint64(result) >> 32)",
 			"errCode := uint32(result)",
 			"if errCode != 0 {",
 			"return \"\", fmt.Errorf(\"cleat_create_promise: %s\", hostErrMessage(promiseIDOutBuf[:], promiseIDLen))",
 			"}",
 			"return unsafe.String(&promiseIDOutBuf[0], int(promiseIDLen)), nil",
-		},
+		),
 	},
 	"AwaitPromise": {
 		FieldName:  "AwaitPromise",
