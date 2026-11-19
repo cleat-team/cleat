@@ -8,8 +8,13 @@
 // Operations:
 //
 //	{"op":"call","name":"A"}               a durable call; the service records name and run id
+//	{"op":"call","name":"SLOW","delay":40000}   a call the service answers after 40 s, longer than the instance timeout
 //	{"op":"side_effect","name":"S"}        a frozen non-reproducible value (the clock), then a call that reports the value the guest HELD
 //	{"op":"call_retry","name":"R","attempts":5,"fail":2}   a call under a retry policy; the service fails its first `fail` requests
+//	{"op":"await0","name":"go","hit":"HIT","miss":"MISS"}   a signal wait with no wait, then a call named for the branch taken
+//	{"op":"continue_as_new","name":"POST"}   continues as a new run whose only operation is a call named POST
+//	{"op":"await_promise","name":"p","ms":1500,"hit":"RES","miss":"TIMEDOUT"}   await an unresolved promise, then a call named for the outcome
+//	{"op":"set_scope","name":"k"}   enter the virtual object ("chaos","k"): the host takes its key, or suspends while another run holds it
 //	{"op":"sleep","ms":300}                a durable sleep
 //	{"op":"defer","name":"D"}              registers a cleanup that makes a durable call named "defer_D" when the run ends
 //
@@ -30,6 +35,9 @@ type op struct {
 	Ms       int64  `json:"ms"`
 	Attempts int    `json:"attempts"`
 	Fail     int    `json:"fail"`
+	Hit      string `json:"hit"`
+	Miss     string `json:"miss"`
+	Delay    int    `json:"delay"`
 }
 
 type scriptInput struct {
@@ -39,6 +47,12 @@ type scriptInput struct {
 
 func request(run, name, held string) string {
 	b, _ := json.Marshal(map[string]string{"run": run, "name": name, "held": held})
+	return string(b)
+}
+
+// slowRequest asks the service to answer after delayMs: a host call that blocks for longer than any instance timeout.
+func slowRequest(run, name string, delayMs int) string {
+	b, _ := json.Marshal(map[string]any{"run": run, "name": name, "delay": delayMs})
 	return string(b)
 }
 
@@ -58,7 +72,11 @@ func Script(h cleat.HostCalls, input string) (string, error) {
 	for _, o := range s.Ops {
 		switch o.Op {
 		case "call":
-			resp, err := h.DurableCall("chaos", o.Name, request(s.Run, o.Name, ""))
+			req := request(s.Run, o.Name, "")
+			if o.Delay > 0 {
+				req = slowRequest(s.Run, o.Name, o.Delay)
+			}
+			resp, err := h.DurableCall("chaos", o.Name, req)
 			if err != nil {
 				return "", err
 			}
@@ -86,6 +104,50 @@ func Script(h cleat.HostCalls, input string) (string, error) {
 				return "", err
 			}
 			seen[o.Name] = resp
+		case "await0":
+			// A signal wait with NO wait (timeout 0): it returns at once, with a signal if one is already there and a timeout if not. The branch
+			// taken is made visible to the service as a call named for it, so a replay that takes the other branch performs a different effect.
+			_, _, timedOut, err := h.DurableAwaitSignals([]string{o.Name}, 0)
+			if err != nil {
+				return "", err
+			}
+			branch := o.Hit
+			if timedOut {
+				branch = o.Miss
+			}
+			if _, err := h.DurableCall("chaos", branch, request(s.Run, branch, "")); err != nil {
+				return "", err
+			}
+			seen[branch] = "1"
+		case "await_promise":
+			// Create a promise nobody resolves and await it for o.Ms. It times out; the branch call is named for it (o.Miss). A promise a
+			// harness never resolves exercises the TIMED-OUT outcome, which cleat#4177 found is not recorded as its own step.
+			pid, err := h.CreatePromise("p-" + o.Name)
+			if err != nil {
+				return "", err
+			}
+			_, timedOut, err := h.AwaitPromise(pid, time.Duration(o.Ms)*time.Millisecond)
+			if err != nil {
+				return "", err
+			}
+			branch := o.Hit
+			if timedOut {
+				branch = o.Miss
+			}
+			if _, err := h.DurableCall("chaos", branch, request(s.Run, branch, "")); err != nil {
+				return "", err
+			}
+			seen[branch] = "1"
+		case "set_scope":
+			// Enter the virtual object ("chaos", o.Name): the host takes its concurrency key, or suspends the run while another run holds it.
+			h.SetScope("chaos", o.Name)
+		case "continue_as_new":
+			// Continue as a new run that makes one call named o.Name. The service sees the same run label for both runs.
+			next, _ := json.Marshal(map[string]any{"__entry_point": "script", "run": s.Run, "ops": []map[string]string{{"op": "call", "name": o.Name}}})
+			if err := h.ContinueAsNew(string(next)); err != nil {
+				return "", err
+			}
+			return "{}", nil
 		case "sleep":
 			h.DurableSleepMs(o.Ms)
 		case "defer":

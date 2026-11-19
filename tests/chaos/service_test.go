@@ -58,6 +58,7 @@ func (s *service) handle(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Run, Name, Held string
 		Fail            int
+		Delay           int
 	}
 	_ = json.Unmarshal(raw, &body)
 	op := path.Base(r.URL.Path)
@@ -95,6 +96,13 @@ func (s *service) handle(w http.ResponseWriter, r *http.Request) {
 		case <-r.Context().Done():
 		}
 		return // performed, and the worker never saw the reply
+	}
+	if body.Delay > 0 {
+		select {
+		case <-time.After(time.Duration(body.Delay) * time.Millisecond):
+		case <-r.Context().Done():
+			return
+		}
 	}
 	if failed {
 		http.Error(w, `{"error":"transient"}`, http.StatusServiceUnavailable)
