@@ -74,7 +74,7 @@ func TestTheRustSDKAgreesOnTheStopBit(t *testing.T) {
 //
 // Eight, not nine: this SDK has no call_with_retry.
 var rustCallsTheHostCanRefuse = []sdkRefusableCall{
-	{"cleat_call", "DurableCall"},
+	{"cleat_call", "freshCall"},
 	// delete_cron joined in cleat#4083, with the stop_requested guard in
 	// host_calls.rs. The simple layout reads a stop as error code 0, which is a
 	// successful delete.
@@ -88,11 +88,11 @@ var rustCallsTheHostCanRefuse = []sdkRefusableCall{
 	// be waiting on. The simple layout reads a stop as error code 0, which is a successful settlement.
 	{"resolve_promise", "ResolvePromise"},
 	{"reject_promise", "RejectPromise"},
-	{"cleat_call_heartbeat", "DurableCallWithHeartbeat"},
+	{"cleat_call_heartbeat", "freshCallWithHeartbeat"},
 	{"child_workflow", "childWorkflowWithVersion"},
 	{"child_workflow_with_options", "childWorkflowWithVersion"},
-	{"plugin_call", "PluginCall"},
-	{"plugin_call_streaming", "PluginCallStreaming"},
+	{"plugin_call", "freshPluginCall"},
+	{"plugin_call_streaming", "freshPluginCallStreaming"},
 	{"await_signals_ms", "DurableAwaitSignals"},
 	// AwaitPromise is a stop site through suspendingAwaitResult rather than
 	// stopBeforeNewWork (cleat#3383): a fresh await that has to wait answers with
@@ -124,7 +124,7 @@ var rustCallsTheHostCanRefuse = []sdkRefusableCall{
 	//	  awk "/func \(s \*execSession\) $f\(/,/^}$/" engine/promises.go \
 	//	    engine/signaller.go | grep -c stopBeforeNewWork; done
 	//	# 0 0 0 1
-	{"side_effect", "SideEffect"},
+	{"side_effect", "freshSideEffect"},
 	{"cleat_fetch", "Fetch"},
 	// Both detached entry points name the UNEXPORTED runDetached, which is
 	// where stopBeforeNewWork is consulted; RunDetached and StartDetached are

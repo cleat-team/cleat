@@ -66,13 +66,17 @@ func (s *execSession) DurableCall(ctx context.Context, m api.Module, service, op
 	if s.isReplay {
 		return s.replayCall(ctx, m, service, operation, requestJSON, responsePtr, responseMaxLen)
 	}
-	if s.stopBeforeNewWork() {
-		return callSuspendSentinel
-	}
 	return s.freshCall(ctx, m, service, operation, requestJSON, responsePtr, responseMaxLen)
 }
 
 func (s *execSession) freshCall(ctx context.Context, m api.Module, service, operation, requestJSON string, responsePtr, responseMaxLen uint32) int64 {
+	// The refusal lives HERE and not in DurableCall: this function is reached from the non-replay entry AND from replayCall at the replay
+	// frontier, and a defer segment over a run that has history starts in replay, so its body's first new call arrives by the second
+	// way. A refusal only in the entry was skipped (cleat#4143, measured on a real worker: a terminate's segment made the body's next
+	// call and never ran the registered cleanup). Same placement as freshSetScope (cleat#4091) and freshAcquireLock (cleat#4140).
+	if s.stopBeforeNewWork() {
+		return callSuspendSentinel
+	}
 	atomic.AddInt64(&freshCallCount, 1)
 
 	if s.engine.Metrics != nil {

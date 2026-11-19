@@ -63,6 +63,28 @@ func DeferSurvivesSuspension(h cleat.HostCalls, input string) (string, error) {
 	return `{"status":"ok"}`, nil
 }
 
+// DeferThenCall registers cleanup and then makes a call of its OWN, with nothing that waits in between.
+//
+// cleat#4143. A run killed after the registration and before the call has the history [defer]. A terminate's defer segment replays that
+// and the body's next call arrives at the REPLAY FRONTIER. That call is new work for a workflow that is being terminated, and
+// work/body is its observable: a segment that performs it has broken the contract that a segment runs the defers and nothing else.
+//
+// Nothing waits between the two on purpose. A sleep or an await is also a dispatch point: the SDK polls for updates before it, and a
+// defer segment refuses that poll, which stops the body there. So a body that waits before its call never reaches the frontier with the
+// call to make (measured: a registered defer, a 200ms sleep and then a call was stopped at the sleep in a terminate's segment).
+func DeferThenCall(h cleat.HostCalls, input string) (string, error) {
+	if _, err := h.DurableDeferFunc(func() {
+		h.DurableCall("cleanup", "after_defer_then_call", `{}`)
+	}); err != nil {
+		return "", err
+	}
+
+	if _, err := h.DurableCall("work", "body", `{}`); err != nil {
+		return "", err
+	}
+	return `{"status":"ok"}`, nil
+}
+
 // DeferRegistration checks the registration contract rather than the body: the
 // ID handed back is the host's, and it is what the body is keyed by.
 func DeferRegistration(h cleat.HostCalls, input string) (string, error) {
