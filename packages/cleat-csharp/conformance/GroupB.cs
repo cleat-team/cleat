@@ -79,4 +79,27 @@ public static class GroupB
         try { h.SignalWorkflow(S(input, "target"), S(input, "name"), S(input, "payload")); return new JsonObject { ["ok"] = true }; }
         catch (CleatCallException e) { return Raised(e); }
     }
+
+    /// <summary>
+    /// A defer, a promise, a charge, a SETTLEMENT, then a call after it. tests/csharp/settle_stop_test.go cuts the history after the
+    /// settlement and replays it as a defer segment, where the settlement is the run's last stoppable event: the host answers it with
+    /// the stop (bit 31 of the packed result) instead of settling again. <c>how</c> is <c>resolve</c> or <c>reject</c>.
+    /// The defer body reports what the guest had done by naming it in the OPERATION of its call (<c>saw-charged</c>), as python-sdk's
+    /// killed_with_defers entries do: the call after the settlement is refused in a segment either way, so only a record of the guest's
+    /// own steps can tell "the settlement stopped the guest" from "the next call did".
+    /// </summary>
+    [CleatEntry("b_settle_then_call")]
+    public static JsonNode SettleThenCall(HostCalls h, JsonElement input)
+    {
+        var effects = new List<string>();
+        h.Defer("cleanup", () => { h.Call("svc", "saw-" + string.Join("-", effects), "{}"); });
+        var id = h.CreatePromise("order");
+        h.Call("svc", "charge", "{}");
+        effects.Add("charged");
+        if (S(input, "how") == "reject") h.RejectPromise(id, "declined");
+        else h.ResolvePromise(id, "\"done\"");
+        effects.Add("settled");  // unreachable in a segment that stops at the settlement
+        h.Call("svc", "after", "{}");
+        return new JsonObject { ["ok"] = true };
+    }
 }
