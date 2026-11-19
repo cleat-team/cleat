@@ -154,6 +154,35 @@ package engine
 //     return kind;
 // }
 //
+// // Reads a result<side-effect-lookup, call-failure> (cleat#4113): 0 = recorded(msg),
+// // 2 = not-recorded, 11 = err(suspended), 12 = err(failed), -1 = anything else.
+// static int cgotest_val_get_side_effect_lookup(const wasmtime_component_val_t *v,
+//                                               const char **msg, size_t *msglen,
+//                                               uint32_t *code) {
+//     *msg = NULL;
+//     *msglen = 0;
+//     *code = 0;
+//     if (v->kind != WASMTIME_COMPONENT_RESULT) { return -1; }
+//     const wasmtime_component_val_t *inner = v->of.result.val;
+//     if (inner == NULL) { return -1; }
+//     if (!v->of.result.is_ok) {
+//         int r = cgotest_val_get_call_outcome(v, msg, msglen, code);
+//         return r == 1 ? 11 : (r == 2 ? 12 : -1);
+//     }
+//     if (inner->kind != WASMTIME_COMPONENT_VARIANT) { return -1; }
+//     const char *d = inner->of.variant.discriminant.data;
+//     size_t dlen = inner->of.variant.discriminant.size;
+//     const wasmtime_component_val_t *payload = inner->of.variant.val;
+//     if (dlen == 12 && memcmp(d, "not-recorded", 12) == 0) { return payload == NULL ? 2 : -1; }
+//     if (dlen == 8 && memcmp(d, "recorded", 8) == 0) {
+//         if (payload == NULL || payload->kind != WASMTIME_COMPONENT_STRING) { return -1; }
+//         *msg = payload->of.string.data;
+//         *msglen = payload->of.string.size;
+//         return 0;
+//     }
+//     return -1;
+// }
+//
 // // Reads two string fields out of a `record{string, string}` (the shape of
 // // `scope`, and of the payload inside `signal-outcome.received`). Returns 0 and
 // // fills both, or -1 for anything else -- including a bare u64, which is what a
@@ -340,6 +369,25 @@ func cgotestReadAwaitOutcome(r unsafe.Pointer) (kind, payload string, code uint3
 	return "", "", 0
 }
 
+// cgotestReadSideEffectLookup decodes a result<side-effect-lookup, call-failure>: kind is "recorded", "not-recorded", "suspended" or
+// "failed", and "" for a value that is none of them (a dispatcher writing a bare string or a packed u64).
+func cgotestReadSideEffectLookup(r unsafe.Pointer) (kind, payload string, code uint32) {
+	var msg *C.char
+	var msgLen C.size_t
+	var cCode C.uint32_t
+	switch C.cgotest_val_get_side_effect_lookup((*C.wasmtime_component_val_t)(r), &msg, &msgLen, &cCode) {
+	case 0:
+		return "recorded", cgotestGoStr(msg, msgLen), 0
+	case 2:
+		return "not-recorded", "", 0
+	case 11:
+		return "suspended", "", 0
+	case 12:
+		return "failed", cgotestGoStr(msg, msgLen), uint32(cCode)
+	}
+	return "", "", 0
+}
+
 // cgotestReadSignalOutcome reads a `result<signal-outcome, call-failure>` out of
 // a result slot: kind is "received", "timed-out", "suspended" or "failed", and ""
 // for a value that is none of them (a dispatcher still writing its packed u64).
@@ -404,6 +452,7 @@ func (b *wasmtimeBackend) cgotestDispatchStr(method int, argsPtr unsafe.Pointer,
 		23: b.dispatchPollSignal,
 		28: b.dispatchAwaitSignals,
 		29: b.dispatchGetScope,
+		30: b.dispatchSideEffectRecorded,
 	}[method]
 	// A missing key yields a nil func value, and calling it segfaults rather
 	// than failing a test. The map has had gaps since the durable-state family

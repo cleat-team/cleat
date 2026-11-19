@@ -1200,6 +1200,35 @@ func (b *wasmtimeBackend) dispatchSideEffect(
 	return nil
 }
 
+// dispatchSideEffectRecorded handles () -> result<side-effect-lookup, call-failure> (cleat#4113).
+//
+// The status is the low byte of a simple-pack word: 0 a recorded value, 1 an error with its message, sideEffectNotRecorded nothing recorded.
+// The stop sentinel is read FIRST like everywhere else. A FRESH lookup in a stopped workflow returns it (stopBeforeNewWork: the value would
+// be new work), and so does a debugger's ReplayQuit; a lookup that finds a recorded value, or past the end of a replay, never does.
+func (b *wasmtimeBackend) dispatchSideEffectRecorded(
+	args *C.wasmtime_component_val_t, nargs C.size_t,
+	results *C.wasmtime_component_val_t, nresults C.size_t,
+) *C.wasmtime_error_t {
+	if b.handler == nil {
+		return nil
+	}
+	buf := make([]byte, 65536)
+	packed := b.handler.SideEffectRecorded(ctxWithMem(context.Background(), buf), nil, 0, 65536)
+	if uint64(packed)&uint64(callSuspendSentinel) != 0 {
+		setResultCallOutcome(results, nresults, callOutcome{suspended: true})
+		return nil
+	}
+	switch status := byte(uint64(packed) & 0xFF); status {
+	case 0:
+		setResultSideEffectLookup(results, nresults, true, extractStringFromSimplePacked(packed, buf))
+	case sideEffectNotRecorded:
+		setResultSideEffectLookup(results, nresults, false, "")
+	default:
+		setResultCallOutcome(results, nresults, callOutcome{failed: true, code: 0, payload: extractStringFromSimplePacked(packed, buf)})
+	}
+	return nil
+}
+
 // ---------------------------------------------------------------------------
 // durable-fetch interface
 // ---------------------------------------------------------------------------
@@ -1534,6 +1563,7 @@ var witTypeMap = map[string]map[string]cbType{
 	"cleat:host-calls/durable-extended-lifecycle": {
 		"continue-as-new-versioned": cbTypeContinueAsNewVersioned,
 		"side-effect":               cbTypeSideEffect,
+		"side-effect-recorded":      cbTypeSideEffectRecorded,
 		"durable-run-detached":      cbTypeRunDetached,
 	},
 	"cleat:host-calls/durable-fetch": {

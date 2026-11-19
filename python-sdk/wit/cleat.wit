@@ -456,7 +456,26 @@ interface durable-extended-lifecycle {
 
     /// Record non-deterministic computation result in event history.
     /// Returns the previously recorded result on replay.
+    ///
+    /// On replay the host returns the RECORDED value whatever `value` is
+    /// (cleat#4113, owner decision: a side effect freezes a value). A guest
+    /// that wants the function not to run at all on replay asks
+    /// `side-effect-recorded` first.
     side-effect: func(value: string) -> result<string, call-failure>;
+
+    /// Whether the history already holds the value of the side effect at this
+    /// step (cleat#4113).
+    ///
+    /// `recorded(v)`: it does, the step is consumed, and the guest must NOT run
+    /// its function or call `side-effect`. `not-recorded`: nothing is recorded
+    /// and nothing changes; the guest computes the value and calls
+    /// `side-effect`, which records it. The function must make no host call
+    /// between the two, because a host call consumes a step.
+    variant side-effect-lookup {
+        recorded(string),
+        not-recorded,
+    }
+    side-effect-recorded: func() -> result<side-effect-lookup, call-failure>;
 
     /// Start a workflow that outlives this one (fire-and-forget).
     ///

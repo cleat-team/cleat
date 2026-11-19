@@ -572,6 +572,10 @@ var pythonUnboundBaseline = []string{
 	// hard kill; when it grows a soft one, delete this entry -- shrink-only.
 	"cleat_interrupt_requested",
 
+	// cleat#4113: the lookup that lets an SDK skip running a side effect's function on replay. A real gap until the Python SDK PR binds it
+	// (that PR deletes this entry; shrink-only).
+	"cleat_side_effect_recorded",
+
 	// A real gap, and the only one here (cleat#1154). cleat_start_detached is
 	// bound by Go, Rust, Java and AssemblyScript. Python needs more than a
 	// binding: the call returns a STRING, so its WIT cannot be the `-> u64`

@@ -53,6 +53,7 @@
     "__cleat_defer_phase": "cleat_defer_phase"
   },
   "unbound": {
+    "cleat_side_effect_recorded": "pending: cleat#4113. The engine ships the question first; the TypeScript PR binds it (as __cleat_side_effect_recorded) and deletes this line.",
     "cleat_poll_work": "permanent: the worker's work handshake; a workflow does not run the queue.",
     "cleat_complete": "permanent: the worker's completion handshake, the pair of cleat_poll_work; not guest-reachable.",
     "cleat_register_query_handler": "permanent: deliberately unbindable from a guest (ABI). A workflow may answer query state, not register the handler.",

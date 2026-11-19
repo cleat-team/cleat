@@ -417,29 +417,70 @@ func (s *execSession) replaySideEffect(ctx context.Context, m api.Module, comput
 			return packSimpleResult(1, written)
 		}
 
-		// Verify that the replayed SideEffect computedResult matches the
-		// recorded value. A mismatch means the WASM module produced a
-		// different result on replay — a non-determinism bug.
-		if rec.SideEffectResult != computedResult {
-			if s.engine.Metrics != nil {
-				s.engine.Metrics.RecordReplayFailure(ctx)
-			}
-			errMsg := fmt.Sprintf(
-				"replay divergence at step %d: SideEffect produced %q but history recorded %q. "+
-					"Your workflow may have a non-determinism bug (time.Now(), random values, "+
-					"map iteration, goroutines). Run 'cleat vet' to check for common issues.",
-				rec.Step, computedResult, rec.SideEffectResult,
-			)
-			written, _ := s.writeResult(ctx, m, respPtr, errMsg, respMaxLen)
-			return packSimpleResult(1, written)
-		}
-
+		// THE RECORDED VALUE WINS, WHATEVER THE GUEST COMPUTED. cleat#4113 (owner decision: side_effect FREEZES a value).
+		//
+		// This used to compare the value the guest passed with the recorded one and fail the replay on a difference, calling it "a
+		// non-determinism bug". But a side effect exists to hold a value that is NOT reproducible (a uuid, a clock read, an API
+		// answer), so on replay the two differ by construction and the call that was meant to freeze the value was the one that failed
+		// the run. The migration guide's own `uuid.NewString()` example failed its first replay.
+		//
+		// A guest built before SideEffectRecorded still computes the value on every replay, because it cannot know better, so a
+		// side effect inside its function still re-executes; but it no longer fails, and it gets the value the history holds.
+		// SDKs that ask SideEffectRecorded first do not run the function at all.
 		written, writtenEC := s.writeOut(ctx, m, respPtr, rec.SideEffectResult, respMaxLen)
 		return packSimpleResult(writtenEC, written)
 	}
 
 	s.exitReplay()
 	return s.freshSideEffect(ctx, m, computedResult, respPtr, respMaxLen)
+}
+
+// sideEffectNotRecorded is the status SideEffectRecorded returns when the history holds no value for this step. It is not an error code: a
+// guest that gets it computes the value and calls SideEffect, which records it.
+const sideEffectNotRecorded byte = 2
+
+// SideEffectRecorded answers one question for a guest about to run a side effect: "does the history already hold the value for this step?"
+// (cleat#4113). If it does, the step is consumed and the recorded value is returned, so the guest does NOT run its function. If it does not,
+// nothing is recorded and nothing changes: the guest computes the value and calls SideEffect, which records it.
+//
+// Status, in the low byte of a simple-pack word: 0 = a recorded value, written to the output buffer; 1 = an error, with its message; 2 =
+// sideEffectNotRecorded. The stop sentinel (tested first, by mask) is returned for a FRESH lookup in a workflow the host has stopped: the
+// SideEffect that follows would be refused anyway, and refusing here means the guest's function, which may call an API, never runs.
+//
+// The three cases, which the tests pin one by one:
+//   - replaying, and the record at this step is a side_effect: consume it, return its value;
+//   - replaying, and the record is some other event: a replay divergence, reported the way every other call reports it, and the step is
+//     NOT consumed (cleat#1507 -- check before consuming, so the record that belongs to another operation is still there);
+//   - fresh, or replaying past the end of history: "not recorded", with no state change. The switch from replay to fresh stays in
+//     SideEffect, where it has always been.
+func (s *execSession) SideEffectRecorded(ctx context.Context, m api.Module, respPtr, respMaxLen uint32) int64 {
+	if !s.isReplay {
+		// A fresh lookup is the step BEFORE new work, and the guest's function (which may call an API) runs between it and the SideEffect that
+		// would be refused. Refusing here keeps that function from running at all in a workflow that has already terminated.
+		if s.stopBeforeNewWork() {
+			return callSuspendSentinel
+		}
+		return packSimpleResult(sideEffectNotRecorded)
+	}
+	if s.stepCount >= len(s.history) {
+		// The replay-to-fresh boundary. SideEffect makes the switch (and today it does not stop-check there), so the lookup only reports.
+		return packSimpleResult(sideEffectNotRecorded)
+	}
+	rec := s.history[s.stepCount]
+	if rec.EventType != EventTypeSideEffect {
+		if s.engine.Metrics != nil {
+			s.engine.Metrics.RecordReplayFailure(ctx)
+		}
+		errMsg := fmt.Sprintf("replay divergence at step %d: expected side_effect event, got %s", rec.Step, rec.EventType)
+		written, _ := s.writeResult(ctx, m, respPtr, errMsg, respMaxLen)
+		return packSimpleResult(1, written)
+	}
+	if !s.advanceReplayStep(ctx, &rec) {
+		// ReplayQuit: the debugger asked the replay to stop. Unwind rather than report a value that was not delivered.
+		return callSuspendSentinel
+	}
+	written, writtenEC := s.writeOut(ctx, m, respPtr, rec.SideEffectResult, respMaxLen)
+	return packSimpleResult(writtenEC, written)
 }
 
 func (s *execSession) WorkflowID(ctx context.Context, m api.Module, idPtr, idMaxLen uint32) int64 {

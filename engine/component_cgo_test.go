@@ -872,6 +872,33 @@ func TestDispatchSideEffect(t *testing.T) {
 	wantCallOutcome(t, resultPtr, "ok", 8, 0)
 }
 
+// cleat#4113: side-effect-recorded returns result<side-effect-lookup, call-failure>. Each status the handler can answer must reach the guest as
+// its own case, and a handler answer must never be read as another's: "recorded" and "not recorded" differ only in the low byte.
+func TestDispatchSideEffectRecorded(t *testing.T) {
+	cases := []struct {
+		name     string
+		ret      int64
+		wantKind string
+	}{
+		{"a recorded value", packSimpleResult(0, 5), "recorded"},
+		{"nothing recorded", packSimpleResult(sideEffectNotRecorded), "not-recorded"},
+		{"a divergence", packSimpleResult(1, 5), "failed"},
+		{"a stop", callSuspendSentinel, "suspended"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			b := &wasmtimeBackend{handler: &mockHostHandler{ret: tc.ret}}
+			resultPtr := cgotestAllocResult()
+			if err := b.cgotestDispatchStr(30, nil, 0, resultPtr); err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if kind, _, _ := cgotestReadSideEffectLookup(resultPtr); kind != tc.wantKind {
+				t.Errorf("kind = %q, want %q", kind, tc.wantKind)
+			}
+		})
+	}
+}
+
 func TestDispatchFetch(t *testing.T) {
 	b := &wasmtimeBackend{handler: &mockHostHandler{ret: packSimpleStrLen(10)}}
 	strPtr, _, freeArgs := cgotestMakeStrArgs("GET", "http://x", "{}", "")

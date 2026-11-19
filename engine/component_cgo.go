@@ -287,6 +287,39 @@ package engine
 //     v->of.result.val = wasmtime_component_val_new(&variant);
 // }
 //
+// // ok(side-effect-lookup): whether the history holds the value of a side effect (cleat#4113).
+// // `found` != 0 = recorded(s); otherwise not-recorded (no payload).
+// //
+// // PRECONDITION on `s`: as component_val_set_call_ok's -- C-allocator storage,
+// // ownership passes to `v`, not copied here. Ignored when `found` is 0.
+// static void component_val_set_side_effect_lookup(wasmtime_component_val_t *v,
+//                                                  int found,
+//                                                  const char *s, size_t len) {
+//     static const char recorded_name[] = "recorded";
+//     static const char not_recorded_name[] = "not-recorded";
+//
+//     wasmtime_component_val_t variant;
+//     variant.kind = WASMTIME_COMPONENT_VARIANT;
+//     if (!found) {
+//         variant.of.variant.discriminant.data =
+//             cleat_dup(not_recorded_name, sizeof(not_recorded_name) - 1);
+//         variant.of.variant.discriminant.size = sizeof(not_recorded_name) - 1;
+//         variant.of.variant.val = NULL;
+//     } else {
+//         wasmtime_component_val_t payload;
+//         payload.kind = WASMTIME_COMPONENT_STRING;
+//         payload.of.string.data = (char *)s;
+//         payload.of.string.size = len;
+//         variant.of.variant.discriminant.data =
+//             cleat_dup(recorded_name, sizeof(recorded_name) - 1);
+//         variant.of.variant.discriminant.size = sizeof(recorded_name) - 1;
+//         variant.of.variant.val = wasmtime_component_val_new(&payload);
+//     }
+//     v->kind = WASMTIME_COMPONENT_RESULT;
+//     v->of.result.is_ok = true;
+//     v->of.result.val = wasmtime_component_val_new(&variant);
+// }
+//
 // // A record of two string fields, as a value. The names are literals; the two
 // // strings follow component_val_set_call_ok's precondition (C-allocator
 // // storage, ownership passes to the record, not copied here).
@@ -803,6 +836,7 @@ const (
 	// durable-extended-lifecycle interface
 	cbTypeContinueAsNewVersioned // (string,u32) -> u64
 	cbTypeSideEffect             // (string) -> string
+	cbTypeSideEffectRecorded     // () -> result<side-effect-lookup, call-failure>
 	cbTypeRunDetached            // (string,string) -> u64
 
 	// durable-fetch interface
@@ -1264,6 +1298,20 @@ func refuseStaleDurableDefer(ty *C.wasmtime_component_func_type_t) *C.wasmtime_e
 	return C.wasmtime_error_new(msg)
 }
 
+// setResultSideEffectLookup writes `ok(side-effect-lookup.recorded(value))`, or `ok(side-effect-lookup.not-recorded)` when found is false.
+// It allocates nothing for the payload in the second case: the C helper ignores the string for it.
+func setResultSideEffectLookup(results *C.wasmtime_component_val_t, nresults C.size_t, found bool, value string) {
+	if int(nresults) < 1 {
+		return
+	}
+	r := (*C.wasmtime_component_val_t)(unsafe.Pointer(results))
+	if !found {
+		C.component_val_set_side_effect_lookup(r, 0, nil, 0)
+		return
+	}
+	C.component_val_set_side_effect_lookup(r, 1, C.CString(value), C.size_t(len(value)))
+}
+
 // setResultSignalReceived writes `ok(signal-outcome.received({name, payload}))`
 // into the first result slot.
 func setResultSignalReceived(results *C.wasmtime_component_val_t, nresults C.size_t, name, payload string) {
@@ -1431,6 +1479,8 @@ func goComponentCallback(
 		return entry.backend.dispatchContinueAsNewVersioned(args, nargs, results, nresults)
 	case cbTypeSideEffect:
 		return entry.backend.dispatchSideEffect(args, nargs, results, nresults)
+	case cbTypeSideEffectRecorded:
+		return entry.backend.dispatchSideEffectRecorded(args, nargs, results, nresults)
 	case cbTypeRunDetached:
 		return entry.backend.dispatchRunDetached(args, nargs, results, nresults)
 	case cbTypeDeferPhase:

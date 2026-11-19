@@ -170,7 +170,7 @@ fills its fields before testing the sentinel.
 | host call | result layout | bit 31 lands in |
 |---|---|---|
 | `cleat_call`, `cleat_call_retry`, `cleat_call_heartbeat`, `plugin_call`, `plugin_call_streaming`, `cleat_wait_for_event` | `responseLen` 40-63, `callErrorCode` 8-39, `errCode` 0-7 | `callErrorCode` |
-| `cleat_child_workflow`, `cleat_child_workflow_with_options`, `cleat_side_effect`, `cleat_fetch`, `cleat_schedule_cron`, `cleat_start_detached`, `cleat_create_promise`, `cleat_set_scope` | upper field 32-63, `errCode` 0-31 | `errCode` (top bit) |
+| `cleat_child_workflow`, `cleat_child_workflow_with_options`, `cleat_side_effect`, `cleat_side_effect_recorded`, `cleat_fetch`, `cleat_schedule_cron`, `cleat_start_detached`, `cleat_create_promise`, `cleat_set_scope` | upper field 32-63, `errCode` 0-31 | `errCode` (top bit) |
 | `cleat_await_signals` | `sigNameLen` 48-63, `payloadLen` 32-47, `timedOut` 16-31, `errCode` 0-15 | `timedOut` |
 | `cleat_await_promise` | `resultLen` 32-63, `timedOut` 16-31, `errCode` 0-15 | `timedOut` |
 | `cleat_send`, `cleat_schedule_invoke`, `cleat_signal_workflow`, `cleat_run_detached`, `cleat_complete_update`, `cleat_delete_cron` | `errCode` 0-31 | `errCode` (top bit) |
@@ -1385,7 +1385,9 @@ Release a previously acquired distributed lock.
 
 #### 2.43 `cleat_side_effect`
 
-Record a non-deterministic computation result. On first execution, the result is stored in event history; on replay, the cached result is returned.
+Record a non-deterministic computation result. On first execution, the result is stored in event history; on replay, **the recorded result is returned, whatever the guest passed** (cleat#4113: a side effect freezes a value). Before cleat#4113 a replay compared the two and failed the run when they differed, which made every value that is not reproducible (a uuid, a clock read, an API answer) fail its first replay.
+
+A guest that wants its function not to run at all on replay asks [`cleat_side_effect_recorded`](#243a-cleat_side_effect_recorded) first.
 
 ```
 (func (import "env" "cleat_side_effect")
@@ -1406,6 +1408,33 @@ Record a non-deterministic computation result. On first execution, the result is
 |---|---|
 | 0-31 | `errCode` — 0 = success |
 | 32-63 | `outputLen` — bytes written to output buffer |
+
+#### 2.43a `cleat_side_effect_recorded`
+
+Ask whether the history already holds the value of the side effect at this step (cleat#4113). **Additive**: no existing import changes, so a component built before it keeps running, and it now gets the recorded value on replay from `cleat_side_effect` instead of a failure.
+
+```
+(func (import "env" "cleat_side_effect_recorded")
+  (param i32 i32)
+  (result i64))
+```
+
+| Param | Type | Description |
+|---|---|---|
+| `out_ptr` | `i32` | Output buffer for the recorded value |
+| `out_max_len` | `i32` | Output buffer capacity (1048576) |
+
+**Return packing** (simple layout): the low byte is the status, bits 32-63 the number of bytes written.
+
+| Status (bits 0-7) | Meaning |
+|---|---|
+| `0` | A value is recorded: it is in the output buffer, the step is consumed, and the guest must **not** run its function or call `cleat_side_effect`. |
+| `1` | An error with its message in the buffer: the next record is not a `side_effect` (a replay divergence). The step is **not** consumed. |
+| `2` | Nothing is recorded (a fresh run, or a replay past the end of the history). Nothing changes: the guest computes the value and calls `cleat_side_effect`, which records it. |
+
+The stop sentinel (bit 31) is returned by a **fresh** lookup in a workflow the host has stopped, so the guest's function never runs for a value that could not be recorded; check it first, as for every other call. The function the guest runs between the two calls must make no host call: a host call consumes a step, and the `cleat_side_effect` that follows would then record at the wrong one.
+
+An SDK implements a side effect as `recorded = lookup(); if recorded: return it; v = fn(); return side_effect(v)`. Measured on a real worker, an SDK that does this runs `fn` exactly once across a first run and its replays.
 
 ### Workflow identity
 
@@ -1973,6 +2002,7 @@ The Rust implementation at `examples/rust-workflow/src/` serves as a reference f
 | — | 2026-08-09 | Documentation-only: added §2.53-2.59 for seven host functions (`cleat_await_any_child`, `cleat_poll_child`, `cleat_schedule_cron`, `cleat_delete_cron`, `cleat_list_crons`, `cleat_poll_work`, `cleat_complete`) that were registered in `engine/imports.go` and the wasmtime backend with no ABI entry at all. Updated documentation count from 52 to 59. As with the version-number note at the top of this file: no `CurrentABIVersion` bump, because nothing about the wire contract changed -- only what this document said about it. |
 | 5 | 2026-05-15 | Added Section 6: Cross-Language Determinism specification covering IEEE 754 floats, map iteration order, JSON canonicalization, GC timing, and RNG. Added cross-language replay guarantee. |
 | 4 | 2026-05-13 | Added `cleat_json_parse` (2.51) and `cleat_json_stringify` (2.52) host functions for JSON validation and normalization via the host runtime. Bumped ABI_VERSION to 4. |
+| — | 2026-11-19 | **Added `cleat_side_effect_recorded`** (§2.43a) and changed `cleat_side_effect` on replay to return the recorded value instead of failing when the guest computed a different one (cleat#4113, owner decision: a side effect freezes a value). Additive: no existing import changes. |
 | 3 | 2026-05-09 | Expanded from 22 to 50 documented host functions. Added all missing imports: `cleat_continue_as_new_versioned`, `cleat_child_workflow_with_options`, `cleat_child_workflow_in_schema`, `cleat_send_signal_and_wait`, `cleat_reply_to_signal`, `cleat_signal_workflow`, `cleat_set_scope`, `cleat_get_scope`, `cleat_uuid`, `cleat_acquire_lock`, `cleat_release_lock`, `cleat_side_effect`, `cleat_workflow_id`, `cleat_run_id`, `cleat_resolve_promise`, `cleat_reject_promise`, `cleat_send`, `cleat_schedule_invoke`, `cleat_register_query_handler`, `cleat_run_detached`, `cleat_set_state`, `cleat_get_state`, `cleat_delete_state`, `cleat_incr_state`, `cleat_has_state`, `cleat_list_state`, `cleat_fetch`, `plugin_call_streaming`. Reorganized into logical groups. Updated documentation count from 18 to 50. |
 | 2 | 2026-05-06 | Added `cleat_call_retry`, `cleat_call_heartbeat`, `cleat_await_all_children`, and `plugin_call` host functions. Updated documentation count. |
 | 1 | 2026-05-05 | Initial ABI specification. 15 host function imports, export convention, memory layout. |

@@ -1488,6 +1488,9 @@ func (b *wasmtimeBackend) registerAllImports(linker *wasmtime.Linker, completeRe
 	if err := b.registerCleatReleaseLock(linker); err != nil {
 		return err
 	}
+	if err := b.registerCleatSideEffectRecorded(linker); err != nil {
+		return err
+	}
 	if err := b.registerCleatSideEffect(linker); err != nil {
 		return err
 	}

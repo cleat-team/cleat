@@ -293,7 +293,7 @@ func (e *OutputTruncatedError) Error() string {
 // output buffer was too small.
 //
 // 7, which is free in both spaces this value has to live in: the simple-result
-// errCode byte (0, 1, 3, 4 and 5 are in use) and cleat.CallErrorCode, whose
+// errCode byte (0, 1, 2, 3, 4 and 5 are in use; 2 is side-effect-recorded's "not recorded") and cleat.CallErrorCode, whose
 // iota ends at 6 with CallErrorRetryPolicyTooLong. Using one number for both
 // keeps a guest from having to know which layout it is decoding in order to
 // recognise this particular failure.

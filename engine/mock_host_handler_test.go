@@ -231,6 +231,10 @@ func (h *mockHostHandler) SideEffect(ctx context.Context, m api.Module, computed
 	h.record("SideEffect", computedResult)
 	return h.ret
 }
+func (h *mockHostHandler) SideEffectRecorded(ctx context.Context, m api.Module, respPtr, respMaxLen uint32) int64 {
+	h.record("SideEffectRecorded")
+	return h.ret
+}
 func (h *mockHostHandler) WorkflowID(ctx context.Context, m api.Module, idPtr, idMaxLen uint32) int64 {
 	h.record("WorkflowID")
 	return h.ret
