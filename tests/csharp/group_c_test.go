@@ -119,6 +119,22 @@ func TestCSharpGroupCStartChildHostFailureIsACallExceptionNotAValue(t *testing.T
 	t.Logf("a refused child start surfaces as %v: %v", got["raised"], got["message"])
 }
 
+// The same refusal through the options form, which has its own catch. A host failure there must raise and hand the guest NO run id:
+// a catch that returned "" would let the guest carry on holding an id for a child that was never started.
+func TestCSharpGroupCStartWithOptionsHostFailureIsACallExceptionNotAValue(t *testing.T) {
+	store := newFakeChildStore()
+	store.startErr = errors.New("no capacity")
+	got := mustFinish(t, runConformanceEntry(t, "c_child_with_options",
+		entryRun{Input: `{"name":"charge","input":"{}","version":3,"priority":7,"policy":"terminate"}`, Options: withChildren(store)}))
+	if got["raised"] == nil || got["run_id"] != nil {
+		t.Fatalf("a refused start with options reached the guest as a value: %v", got)
+	}
+	if len(store.started) != 0 {
+		t.Errorf("the store recorded %d starts although it refused them", len(store.started))
+	}
+	t.Logf("a refused child start with options surfaces as %v: %v", got["raised"], got["message"])
+}
+
 // The policy goes over the wire in the engine's canonical spelling whichever way the caller named it: the engine matches EXACTLY and in
 // upper case, so a lower-case spelling is refused at the write boundary.
 func TestCSharpGroupCStartWithOptionsSendsVersionPriorityAndTheCanonicalPolicy(t *testing.T) {
