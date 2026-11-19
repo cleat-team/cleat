@@ -10,9 +10,9 @@
     "executed": 10
   },
   "rust": {
-    "covered": 58,
-    "surface": 73,
-    "executed": 27
+    "covered": 59,
+    "surface": 76,
+    "executed": 28
   },
   "java": {
     "covered": 65,

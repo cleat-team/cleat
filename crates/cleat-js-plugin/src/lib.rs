@@ -309,6 +309,19 @@ fn modify_runtime(runtime: Runtime) -> Runtime {
             }),
         )
         .unwrap();
+        // cleat#4113: "is the value of this side effect already recorded?", asked BEFORE the function runs so it does not run on a replay.
+        // `{"ok":{"recorded":"<value>"}}` when it is, `{"ok":null}` when nothing is, `{"err":...}` / `{"suspended":true}` otherwise.
+        g.set(
+            "__cleat_side_effect_recorded",
+            Func::from(|| -> String {
+                guarded(|| match HostCalls.side_effect_recorded() {
+                    Ok(Some(v)) => json!({ "ok": { "recorded": v } }),
+                    Ok(None) => json!({ "ok": null }),
+                    Err(e) => json!({ "err": e }),
+                })
+            }),
+        )
+        .unwrap();
         // ---- workflow metadata, scope and cancellation (cleat#3827) ------------------------------------------------
         // Reads, so unguarded: they record nothing and cannot fail, and the plugin leaves its other reads (`now`,
         // `workflow_id`, `uuid`) unguarded for the same reason.

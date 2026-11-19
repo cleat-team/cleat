@@ -316,7 +316,7 @@ var sdkUnreachedBaseline = map[string][]string{
 	// cleat_side_effect_recorded (cleat#4113) is the question a SideEffect asks the host before it runs its
 	// function. The engine ships it first; each SDK binds it in its own PR, which deletes that SDK's entry
 	// here -- the shrink-only direction this test checks.
-	"rust": {"cleat_interrupt_requested", "cleat_side_effect_recorded"},
+	"rust": {"cleat_interrupt_requested"},
 	"java": {"cleat_interrupt_requested", "cleat_side_effect_recorded"},
 
 	// rust and java: the cron trio is deliberately absent from their entries above, because both

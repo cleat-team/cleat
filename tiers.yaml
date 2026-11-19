@@ -165,6 +165,9 @@ tier1:
     # tier 2 -- rust. cleat#4132: a Rust guest receives a response over 64 KiB on the call after the one that truncated. Builds examples/rust-workflow
     # like the two entries above, and would skip in the tier-1 gate.
     - "^TestARustGuestReceivesAResponseOverSixtyFourKiBOnTheCallAfterTheTruncation$"
+    # tier 2 -- rust. cleat#4113: a Rust guest's side_effect function runs once across a first run and its replay. Builds examples/rust-workflow like
+    # the entries around it, and would skip in the tier-1 gate (no cargo there), where a skip is a failure.
+    - "^TestRustSideEffectFunctionRunsOnceAcrossFirstRunAndReplay$"
     # tier 2 -- rust. The other side of 3.88's threshold: a policy too long to hold a
     # worker for must suspend rather than reach the host loop. Same toolchain dependency
     # as the entry above -- both build examples/rust-workflow.
