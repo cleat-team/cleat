@@ -948,6 +948,7 @@ func (s *execSession) DurableDefer(ctx context.Context, m api.Module, descriptio
 				written, writtenEC := s.writeOut(ctx, m, deferIDPtr, deferID, deferIDMaxLen)
 				return packSimpleResult(writtenEC, written)
 			}
+			return s.replayDivergence(ctx, m, EventTypeDefer, deferIDPtr, deferIDMaxLen)
 		}
 		s.exitReplay()
 	}

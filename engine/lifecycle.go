@@ -27,6 +27,7 @@ func (s *execSession) ContinueAsNew(ctx context.Context, m api.Module, newInputJ
 				}
 				return 0
 			}
+			return s.replayDivergence(ctx, m, EventTypeContinueAsNew, 0, 0)
 		}
 		s.exitReplay()
 	}
@@ -69,6 +70,7 @@ func (s *execSession) ContinueAsNewWithVersion(ctx context.Context, m api.Module
 				}
 				return 0
 			}
+			return s.replayDivergence(ctx, m, EventTypeContinueAsNew, 0, 0)
 		}
 		s.exitReplay()
 	}
@@ -129,6 +131,7 @@ func (s *execSession) RegisterUpdateHandler(ctx context.Context, m api.Module, n
 				}
 				return 0
 			}
+			return s.replayDivergence(ctx, m, EventTypeUpdateHandler, 0, 0)
 		}
 		s.exitReplay()
 	}

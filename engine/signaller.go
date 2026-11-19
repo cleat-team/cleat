@@ -211,6 +211,16 @@ func (s *execSession) DurableAwaitSignals(ctx context.Context, m api.Module, sig
 				}
 				return s.suspendingAwaitResult()
 			}
+			// Neither a delivery nor this await, with history still unread. Leaving replay here ran the rest of it fresh (cleat#4157).
+			//
+			// A poll with NO wait is the one exception, and it is not a divergence. A history written before cleat#4151 recorded nothing for
+			// a no-wait poll that timed out (cleat#1331), so the event at this step is the NEXT call's. Its outcome was deterministic (had a
+			// signal been found it would be a signal_received, handled above), so the answer is the timeout, with the event left unconsumed
+			// and the session still replaying. A build that has #4151 records every such poll, so it never gets here.
+			if timeoutMs <= 0 {
+				return packAwaitSignalsResult(0, 0, true, 0)
+			}
+			return s.replayDivergence(ctx, m, EventTypeAwaitSignals, payloadPtr, payloadMaxLen)
 		}
 		s.exitReplay()
 	}
@@ -578,6 +588,7 @@ func (s *execSession) SignalWorkflow(ctx context.Context, m api.Module, targetRu
 				}
 				return signalSendOutcomeCode(rec)
 			}
+			return s.replayDivergence(ctx, m, EventTypeSignalReceived, 0, 0)
 		}
 		s.exitReplay()
 	}
