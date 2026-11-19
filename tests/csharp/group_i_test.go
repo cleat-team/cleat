@@ -14,8 +14,14 @@ import (
 // function of its own. These are the sizes at which the boundary between the guest and the host can silently lose or refuse data, measured through
 // the real engine and wasmtime backend. Nothing here claims C# is supported.
 
-// hostBuffer is the size of the buffer the component bridge gives a host call's response (component_callbacks.go: make([]byte, 65536)).
+// hostBuffer was the fixed size of the buffer the component bridge gave a host call's response (65536) until cleat#4154: it is now sized to the
+// response, up to responseCeiling, so a response that used to be refused arrives whole. hostBuffer is kept as the old edge (65536) because the
+// sizes around it are where the old defect lived.
 const hostBuffer = 65536
+
+// responseCeiling is the largest response a component guest can receive (wasm/adapter_component.go, _cleatOutBufCeiling): 2 MiB. One character
+// past it is refused with code 7 and the prefix that landed.
+const responseCeiling = 2 << 20
 
 func fnvOf(s string) string {
 	h := fnv.New64a()
@@ -29,9 +35,10 @@ func groupICallInput(requestChars int) string {
 	return fmt.Sprintf(`{"service":"svc","operation":"big","requestChars":%d}`, requestChars)
 }
 
-// A response up to the buffer arrives whole. The hash is of the full text, so a truncated or altered response cannot pass by having the right length.
-func TestCSharpGroupICallResponsesUpToTheHostBufferArriveWhole(t *testing.T) {
-	for _, n := range []int{2, 1000, 60000, hostBuffer - 1, hostBuffer} {
+// A response up to the ceiling arrives whole, including the sizes that were refused while the buffer was a fixed 64 KiB. The hash is of the full
+// text, so a truncated or altered response cannot pass by having the right length.
+func TestCSharpGroupICallResponsesUpToTheCeilingArriveWhole(t *testing.T) {
+	for _, n := range []int{2, 1000, 60000, hostBuffer - 1, hostBuffer, hostBuffer + 1, 100000, 1000000, responseCeiling} {
 		resp := bigResponse(n)
 		m := objectResult(t, runConformanceEntry(t, "i_call", entryRun{Input: groupICallInput(1000), Responses: map[string]string{"svc/big": resp}}))
 		if m["failed"] == true {
@@ -44,11 +51,11 @@ func TestCSharpGroupICallResponsesUpToTheHostBufferArriveWhole(t *testing.T) {
 	}
 }
 
-// One character past the buffer is a FAILURE, not a silent truncation: code 7 (the host's OutputTruncated), with the prefix that landed as the
+// One character past the ceiling is a FAILURE, not a silent truncation: code 7 (the host's OutputTruncated), with the prefix that landed as the
 // message. The call itself ran once and recorded its effect, so a caller that retries on this would repeat it; the engine classifies it non-retryable
 // but the C# SDK, like the Python one, leaves codes 6-8 on the base exception class, which is read here rather than assumed.
-func TestCSharpGroupICallAResponseOverTheHostBufferIsRefusedWithItsPrefixNotTruncatedSilently(t *testing.T) {
-	for _, n := range []int{hostBuffer + 1, 100000, 1000000} {
+func TestCSharpGroupICallAResponseOverTheCeilingIsRefusedWithItsPrefixNotTruncatedSilently(t *testing.T) {
+	for _, n := range []int{responseCeiling + 1} {
 		res := runConformanceEntry(t, "i_call", entryRun{Input: groupICallInput(10), Responses: map[string]string{"svc/big": bigResponse(n)}})
 		m := objectResult(t, res)
 		if m["failed"] != true {
@@ -58,8 +65,8 @@ func TestCSharpGroupICallAResponseOverTheHostBufferIsRefusedWithItsPrefixNotTrun
 		if m["code"] != float64(7) || m["type"] != "CleatCallException" {
 			t.Errorf("a %d-char response: code %v type %v, want code 7 on the base exception class", n, m["code"], m["type"])
 		}
-		if m["messageChars"] != float64(hostBuffer) {
-			t.Errorf("a %d-char response: the failure message is %v chars, want the %d-char prefix that landed", n, m["messageChars"], hostBuffer)
+		if m["messageChars"] != float64(responseCeiling) {
+			t.Errorf("a %d-char response: the failure message is %v chars, want the %d-char prefix that landed", n, m["messageChars"], responseCeiling)
 		}
 		if len(res.Calls) != 1 {
 			t.Errorf("a %d-char response: the service was asked %d time(s), want once (the effect happened; only the write-back was refused)", n, len(res.Calls))
@@ -67,7 +74,7 @@ func TestCSharpGroupICallAResponseOverTheHostBufferIsRefusedWithItsPrefixNotTrun
 	}
 }
 
-// Requests are not bounded by the 64 KiB host buffer (that bounds RESPONSES): a request up to 2 MiB, the default MaxWasmStringLen for every
+// Requests are not bounded by the response ceiling (that bounds RESPONSES, and is 2 MiB since cleat#4154): a request up to 2 MiB, the default MaxWasmStringLen for every
 // language since cleat#4130, reaches the service intact. The over-limit case is the next test.
 func TestCSharpGroupICallRequestsLargerThanTheHostBufferReachTheServiceIntact(t *testing.T) {
 	for _, n := range []int{hostBuffer, hostBuffer + 1, 200000, 1 << 20, 2 << 20} {
