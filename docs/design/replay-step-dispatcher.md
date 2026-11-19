@@ -40,6 +40,7 @@ The bug family of the last weeks is one question skipped in one host call, found
 | #4159, #4161 | (3) `ContinueAsNew` recorded in a defer segment, losing the cleanup |
 | #4160 | (4) a recorded event whose write is refused (quota) does not stop the guest: the run carries on with the step missing |
 | #4117, #4165 | (2) a one-chunk stream and a stream failure are the same row, so replay read the wrong one |
+| #4177, #4178 (open) | (1)+(4) **an outcome recorded at the wrong step**: `await_promise` records its outcome at the NEXT step and leaves the pending row, and `set_scope`'s retry does the same, so replay of the pending record left replay with history unread and every later call ran again on every later replay. The stored history read correctly (flush's immutability guard hid the duplicates), so only an effects count saw it. Found by review, not by a guard |
 
 Re-derive the size of the duplication (2026-11-19, develop `1157baf3`, non-test `engine/*.go`):
 
@@ -144,6 +145,17 @@ The five questions become five lines. The properties the bugs violated become pr
   because there is one arrival path after `leaveReplay`. #4143, #4152, #4158 and #4159 cannot recur *by construction*, which is
   stronger than a guard that scans for them.
 - **Replay never ends with history unread.** `leaveReplay` asserts it, once. #4153 and #4157 are one assertion.
+- **An outcome is recorded where replay will look for it, and replay is proven to consume exactly what fresh recorded (cleat#4177).**
+  This is the invariant #4177 broke, named because it is the one a per-call guard cannot state: a step's `Fresh` records its outcome at
+  some step, its `Decode` looks for it at some step, and nothing tied the two together, so each pair was right or wrong by reading.
+  Today a completion can be recorded OVER the pending row (`await_child`, `await_all_children`: same step, the store's conflict clause
+  reopens it) or at the NEXT step (`await_promise`, `set_scope`'s retry, `await_any_child`), and the replay has to know which. In the
+  dispatcher the spec says which (`Outcome: OverPending | AtNext`), `takeRecords` reads exactly that shape, and the dispatcher's
+  property test is a **round trip over every spec**: run `Fresh` into a real history, replay that history, and assert (a) replay ends
+  with `stepCount == len(history)` and nothing unread, (b) the effect count is 1, (c) the answer is the one the original run got, and
+  (d) a second replay changes nothing. That one test is #4153, #4157 and #4177 together, and it is not a text scan, so it cannot
+  read a denial as a confirmation. It must run against a **real event_history** and not a hand-written one: #4177's issue records that
+  the store tests hand-wrote the completing record at the same step as the pending one, which is the shape the code did not produce.
 - **A divergence has one shape**: one message, one metric, one place a replay tester hooks.
 - **A recorded event's write failing stops the guest, without a per-step check.** The first draft of this design put a
   `persistenceFailure` hook after every record. WS-cleat-2's #4166 (stacked on #4151, **in review, not on develop**) chose the
@@ -234,7 +246,7 @@ check.
 | PR | change | checked by |
 |---|---|---|
 | 0 | **Characterization fixtures, no production change.** For each host call, on current develop: run it fresh, then replay each prefix of its history, and record `(result bytes, events recorded, isReplay after, stepCount after)` as a golden table, plus the same for a defer segment and a defer body. Written once, from the *old* code. | the fixtures themselves, with a known-positive (mutate a host call, watch its row fail) |
-| 1 | The dispatcher and its spec types, with **no users**, plus property tests over a fake spec table: leave-replay asserts history is read; a non-`Pure` step is refused in a segment on both arrival paths; one message for a divergence; a session with a recorded write failure refuses the next non-`Pure` step (the #4160 policy, once #4166 is on develop). | the property tests; the existing guards untouched |
+| 1 | The dispatcher and its spec types, with **no users**, plus property tests over a fake spec table: leave-replay asserts history is read; a non-`Pure` step is refused in a segment on both arrival paths; one message for a divergence; the outcome round trip above over every spec in the fake table; a session with a recorded write failure refuses the next non-`Pure` step (the #4160 policy, once #4166 is on develop). | the property tests; the existing guards untouched |
 | 2 | `DurableCall` through the dispatcher. It is the reference: simplest shape, the event-cap counter, and the most guards already pointing at it. | PR 0's rows for `DurableCall`; `replay_fresh_parity_test`; the harness's golden run for `call` |
 | 3 | The `Single` effect calls in two or three batches, ordered by how many guards cover them: `SideEffect`+`SideEffectRecorded`, `CreatePromise`+`ResolvePromise`+`RejectPromise`, locks and scope, crons, `SignalWorkflow`, `DurableSend`, `DurableDefer`, `Fetch` | PR 0 rows; the harness's per-op kill/terminate rows |
 | 4 | `Multi`: `DurableCallWithRetry`, `DurableCallWithHeartbeat` | PR 0 rows plus #4156's and #4168's tables (the mid-retry rows are exactly this kind's hard case) |
