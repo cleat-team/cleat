@@ -52,6 +52,26 @@ public static class GroupG
         catch (CleatCallException e) { return Failure(e); }
     }
 
+    /// <summary>Input: value. Freezes a value with the function form and reports how many times the function ran: 1 on a first run, 0 on a
+    /// replay. On a failure the count is reported too, so a test can see that the function did not run for a divergent history.</summary>
+    [CleatEntry("g_side_effect_once")]
+    public static JsonNode SideEffectOnce(HostCalls h, JsonElement input)
+    {
+        var value = input.GetProperty("value").GetString()!;
+        var ran = 0;
+        try
+        {
+            var got = h.SideEffect(() => { ran++; return value; });
+            return new JsonObject { ["recorded"] = got, ["ran"] = ran };
+        }
+        catch (CleatCallException e)
+        {
+            var f = (JsonObject)Failure(e);
+            f["ran"] = ran;
+            return f;
+        }
+    }
+
     /// <summary>Input: name, input (a string of JSON).</summary>
     [CleatEntry("g_run_detached")]
     public static JsonNode RunDetached(HostCalls h, JsonElement input)

@@ -102,17 +102,45 @@ public sealed partial class HostCalls
     // ---- side-effect ------------------------------------------------------------------------------------------
 
     /// <summary>
-    /// Records <paramref name="value"/>, a result you computed, in the workflow's history, and returns what the host recorded.
+    /// Runs <paramref name="compute"/> ONCE and freezes its result: the first execution records the value, and every replay returns that
+    /// recorded value without running <paramref name="compute"/> again. This is the call for a clock read, a random number or an id from a
+    /// system you do not control.
     /// </summary>
     /// <remarks>
-    /// <b>This does not freeze a non-deterministic value.</b> The host's replay compares the value you pass with the one it recorded and
-    /// fails the replay with a divergence error when they differ; it does not hand you the recorded value in place of a new one. So a value
-    /// computed from a clock or a random source is a replay failure waiting to happen. Use it for a value you can recompute the same way
-    /// each time and want checked. (This differs from the Python docstring, which says the call lets a workflow "capture a random value";
-    /// see cleat#4113.)
+    /// The SDK asks the host first (<c>side-effect-recorded</c>) and only runs <paramref name="compute"/> when nothing is recorded, then
+    /// records what it returned. <b><paramref name="compute"/> must make no host calls</b>: it runs on the first execution only, so a host
+    /// call inside it would make the history differ between the first run and a replay. A host that stops the workflow (a killed run's
+    /// replay segment) refuses the question before <paramref name="compute"/> runs, so it never runs for a stopped workflow either.
     /// </remarks>
-    /// <exception cref="CleatCallException">On replay, the value differs from the one recorded (the message says so), or the history has a
-    /// different event at this step.</exception>
+    /// <exception cref="CleatCallException">The history has a different event at this step (a replay divergence), or the recorded value is
+    /// larger than the host can hand back (the base type, <see cref="CleatCallException.Code"/> 0).</exception>
+    public string SideEffect(Func<string> compute)
+    {
+        ArgumentNullException.ThrowIfNull(compute);
+        IDurableExtendedLifecycleImports.SideEffectLookup lookup;
+        try
+        {
+            lookup = IDurableExtendedLifecycleImports.SideEffectRecorded();
+        }
+        catch (WitException e) when (e.Value is IOutcomesImports.CallFailure f)
+        {
+            throw Translate("lifecycle", "side_effect", f);
+        }
+        if (lookup.Tag == IDurableExtendedLifecycleImports.SideEffectLookup.Tags.Recorded)
+            return lookup.AsRecorded;
+        return SideEffect(compute() ?? throw new InvalidOperationException("the side effect's function returned null"));
+    }
+
+    /// <summary>
+    /// Records <paramref name="value"/>, a result you already computed, in the workflow's history, and returns what is recorded.
+    /// </summary>
+    /// <remarks>
+    /// <b>On a replay this returns the RECORDED value, whatever you pass</b>, since the host froze it on the first execution (cleat#4113);
+    /// the value you pass on a replay is not compared with it, so a value from a clock or a random source cannot fail a replay. But you
+    /// still computed it on the replay and threw it away: use <see cref="SideEffect(Func{string})"/>, which does not run its function on
+    /// a replay.
+    /// </remarks>
+    /// <exception cref="CleatCallException">The history has a different event at this step (a replay divergence).</exception>
     public string SideEffect(string value)
     {
         ArgumentNullException.ThrowIfNull(value);

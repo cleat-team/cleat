@@ -72,6 +72,18 @@ func TestCSharpGroupGFetchSendsTheRequestAndDecodesTheReply(t *testing.T) {
 	}
 }
 
+// A reply that is valid JSON but not an object (a string, an array, a number) is an error, not an empty response (cleat-review2: removing the
+// ValueKind check left every other fetch test green). The host's own fetcher always answers an object; an embedder's may not.
+func TestCSharpGroupGFetchAReplyThatIsValidJSONButNotAnObjectIsAnError(t *testing.T) {
+	for _, reply := range []string{`"hello"`, `[1,2]`, `42`, `null`, `true`} {
+		f := &fakeFetcher{reply: func(fetchCall) (string, error) { return reply, nil }}
+		m := mustFinish(t, runConformanceEntry(t, "g_fetch", entryRun{Input: `{"url":"https://example.test/"}`, Options: withFetcher(f)}))
+		if m["failed"] != true || m["operation"] != "fetch" || !strings.Contains(fmt.Sprint(m["message"]), "not a JSON object") {
+			t.Errorf("reply %s: got %v, want an error saying the reply is not a JSON object", reply, m)
+		}
+	}
+}
+
 // Defaults: GET, no headers (an empty JSON object, which is what the worker's fetcher parses), empty body.
 func TestCSharpGroupGFetchDefaultsToAGetWithNoHeadersOrBody(t *testing.T) {
 	f := &fakeFetcher{reply: okReply("")}
@@ -191,50 +203,83 @@ func TestCSharpGroupGSideEffectReplayOfTheSameValueReturnsIt(t *testing.T) {
 	}
 }
 
-// MEASURED (cleat#4113): the host does not substitute the recorded value for a different one; it fails the replay. The C# docs say so. This
-// test pins that the SDK RAISES the host's divergence message instead of returning either value, whichever way #4113 is decided: if the
-// host changes to return the recorded value, this test and the SideEffect remarks change with it.
-func TestCSharpGroupGSideEffectReplayOfADifferentValueIsAnErrorNamingBoth(t *testing.T) {
+// cleat#4113: on a replay the host returns the RECORDED value whatever the guest passes, so a value computed from a clock cannot make a replay
+// fail. (Until #4119 this test pinned the opposite: the host failed the replay with a divergence naming both values.)
+func TestCSharpGroupGSideEffectReplayOfADifferentValueReturnsTheRecordedOne(t *testing.T) {
 	fresh := runConformanceEntry(t, "g_side_effect", entryRun{WorkflowID: "wf-g-4", Input: `{"value":"first"}`})
 	replay := runConformanceEntry(t, "g_side_effect", entryRun{WorkflowID: "wf-g-4", Input: `{"value":"second"}`, Replay: fresh.History})
 	m := mustFinish(t, replay)
-	msg := fmt.Sprint(m["message"])
-	if m["failed"] != true || m["operation"] != "side_effect" || !strings.Contains(msg, "replay divergence at step 0") ||
-		!strings.Contains(msg, "second") || !strings.Contains(msg, "first") {
-		t.Errorf("got %v, want an error whose message names both values", m)
-	}
-	if m["recorded"] != nil {
-		t.Errorf("the replay returned %v as a recorded value despite the divergence", m["recorded"])
+	if m["failed"] == true || m["recorded"] != "first" {
+		t.Errorf("got %v, want the recorded value \"first\" and no failure", m)
 	}
 }
 
-// fakeChildStore is the one method run-detached uses. The rest of the interface is the embedded nil value.
-type fakeChildStore struct {
+// The function form runs its function once, on the first execution, and never on a replay.
+func TestCSharpGroupGSideEffectFunctionRunsOnceAndNeverOnReplay(t *testing.T) {
+	fresh := runConformanceEntry(t, "g_side_effect_once", entryRun{WorkflowID: "wf-g-8", Input: `{"value":"frozen"}`})
+	if m := mustFinish(t, fresh); m["recorded"] != "frozen" || m["ran"] != float64(1) {
+		t.Fatalf("first run: got %v, want recorded=frozen after the function ran once", m)
+	}
+	if rec := groupGRecord(t, fresh, engine.EventTypeSideEffect); rec.SideEffectResult != "frozen" {
+		t.Errorf("the recorded side effect is %q, want the function's value", rec.SideEffectResult)
+	}
+	// The replay's function would compute something else; the recorded value must win and the function must not run.
+	replay := runConformanceEntry(t, "g_side_effect_once", entryRun{WorkflowID: "wf-g-8", Input: `{"value":"DIFFERENT"}`, Replay: fresh.History})
+	if m := mustFinish(t, replay); m["recorded"] != "frozen" || m["ran"] != float64(0) {
+		t.Errorf("replay: got %v, want the recorded value with the function run 0 times", m)
+	}
+}
+
+// A history whose record at this step is a different event is a divergence the SDK raises, and the function must NOT run: the lookup fails
+// before it (cleat-review2's design: step 0 is a foreign event type). This is what keeps the failure path pinned now that a changed value no
+// longer fails.
+func TestCSharpGroupGSideEffectOverAForeignEventIsADivergenceAndTheFunctionDoesNotRun(t *testing.T) {
+	st := &fakeDetachedStore{id: "run-x"}
+	foreign := runConformanceEntry(t, "g_run_detached", entryRun{WorkflowID: "wf-g-9", Input: `{"name":"audit.report","input":"{}"}`, Options: withChildStore(st)})
+	groupGRecord(t, foreign, engine.EventTypeRunDetached)
+
+	for _, entry := range []string{"g_side_effect", "g_side_effect_once"} {
+		replay := runConformanceEntry(t, entry, entryRun{WorkflowID: "wf-g-9", Input: `{"value":"v"}`, Replay: foreign.History})
+		m := mustFinish(t, replay)
+		if m["failed"] != true || m["operation"] != "side_effect" || !strings.Contains(fmt.Sprint(m["message"]), "replay divergence at step 0") {
+			t.Errorf("%s over a run_detached history: got %v, want a divergence raised for side_effect", entry, m)
+		}
+		if m["recorded"] != nil {
+			t.Errorf("%s returned %v despite the divergence", entry, m["recorded"])
+		}
+		if entry == "g_side_effect_once" && m["ran"] != float64(0) {
+			t.Errorf("the function ran %v time(s) over a foreign event, want 0", m["ran"])
+		}
+	}
+}
+
+// fakeDetachedStore is the one method run-detached uses. The rest of the interface is the embedded nil value.
+type fakeDetachedStore struct {
 	engine.ChildWorkflowStore
 	mu    sync.Mutex
 	calls []string
 	id    string
 }
 
-func (f *fakeChildStore) StartChildWorkflow(_ context.Context, parentID, defName, inputJSON string, defVersion int, _ string, _ int) (string, error) {
+func (f *fakeDetachedStore) StartChildWorkflow(_ context.Context, parentID, defName, inputJSON string, defVersion int, _ string, _ int) (string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls = append(f.calls, fmt.Sprintf("%s|%s|%s|v%d", parentID, defName, inputJSON, defVersion))
 	return f.id, nil
 }
 
-func (f *fakeChildStore) count() int {
+func (f *fakeDetachedStore) count() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return len(f.calls)
 }
 
-func withChildStore(f *fakeChildStore) []engine.EngineOption {
+func withChildStore(f *fakeDetachedStore) []engine.EngineOption {
 	return []engine.EngineOption{engine.WithChildWorkflowStore(f)}
 }
 
 func TestCSharpGroupGRunDetachedStartsTheRunAndRecordsItsId(t *testing.T) {
-	st := &fakeChildStore{id: "run-from-the-store"}
+	st := &fakeDetachedStore{id: "run-from-the-store"}
 	res := runConformanceEntry(t, "g_run_detached", entryRun{WorkflowID: "wf-g-5", Input: `{"name":"audit.report","input":"{\"k\":1}"}`, Options: withChildStore(st)})
 	if mustFinish(t, res)["started"] != true {
 		t.Fatalf("got %s", res.Result)
@@ -250,7 +295,7 @@ func TestCSharpGroupGRunDetachedStartsTheRunAndRecordsItsId(t *testing.T) {
 
 // A name that is not a valid name is refused before the store is reached, as a host status the SDK raises.
 func TestCSharpGroupGRunDetachedARefusedNameNeverReachesTheStore(t *testing.T) {
-	st := &fakeChildStore{id: "x"}
+	st := &fakeDetachedStore{id: "x"}
 	m := mustFinish(t, runConformanceEntry(t, "g_run_detached", entryRun{Input: `{"name":"bad name","input":"{}"}`, Options: withChildStore(st)}))
 	if m["failed"] != true || m["operation"] != "run-detached" {
 		t.Errorf("got %v, want a refusal for run-detached", m)
@@ -263,10 +308,10 @@ func TestCSharpGroupGRunDetachedARefusedNameNeverReachesTheStore(t *testing.T) {
 // Replay returns from the record and does not start the run a second time.
 func TestCSharpGroupGRunDetachedReplayStartsNothing(t *testing.T) {
 	in := `{"name":"audit.report","input":"{}"}`
-	st := &fakeChildStore{id: "r1"}
+	st := &fakeDetachedStore{id: "r1"}
 	fresh := runConformanceEntry(t, "g_run_detached", entryRun{WorkflowID: "wf-g-6", Input: in, Options: withChildStore(st)})
 	groupGRecord(t, fresh, engine.EventTypeRunDetached)
-	again := &fakeChildStore{id: "r2"}
+	again := &fakeDetachedStore{id: "r2"}
 	replay := runConformanceEntry(t, "g_run_detached", entryRun{WorkflowID: "wf-g-6", Input: in, Replay: fresh.History, Options: withChildStore(again)})
 	if mustFinish(t, replay)["started"] != true {
 		t.Fatal("the replay did not complete")
@@ -278,9 +323,9 @@ func TestCSharpGroupGRunDetachedReplayStartsNothing(t *testing.T) {
 
 // A history whose record at this step is a detached run of a DIFFERENT name is a divergence the SDK raises.
 func TestCSharpGroupGRunDetachedReplayOfADifferentNameIsAnError(t *testing.T) {
-	st := &fakeChildStore{id: "r1"}
+	st := &fakeDetachedStore{id: "r1"}
 	fresh := runConformanceEntry(t, "g_run_detached", entryRun{WorkflowID: "wf-g-7", Input: `{"name":"one","input":"{}"}`, Options: withChildStore(st)})
-	res := runConformanceEntry(t, "g_run_detached", entryRun{WorkflowID: "wf-g-7", Input: `{"name":"two","input":"{}"}`, Replay: fresh.History, Options: withChildStore(&fakeChildStore{id: "r2"})})
+	res := runConformanceEntry(t, "g_run_detached", entryRun{WorkflowID: "wf-g-7", Input: `{"name":"two","input":"{}"}`, Replay: fresh.History, Options: withChildStore(&fakeDetachedStore{id: "r2"})})
 	m := mustFinish(t, res)
 	if m["failed"] != true || m["operation"] != "run-detached" {
 		t.Errorf("got %v, want a divergence raised for run-detached", m)
