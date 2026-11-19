@@ -176,7 +176,7 @@ func main() {
 		}
 	case "vet":
 		fs := flag.NewFlagSet("vet", flag.ExitOnError)
-		vetLang := fs.String("lang", "", "language target: go, rust, java, as, python (auto-detected if empty)")
+		vetLang := fs.String("lang", "", "language target: go, rust, java, csharp, python (auto-detected if empty)")
 		vetJSON := fs.Bool("json", false, "output results as JSON")
 		vetCI := fs.Bool("ci", false, "output in GitHub Actions annotation format (takes precedence over --json)")
 		vetChannel := fs.String("channel", "", "child version resolution channel, as for build: only frozen changes the verdict (Go)")
@@ -205,10 +205,12 @@ func main() {
 			code = runVetRust(pattern)
 		case "java":
 			code = runVetJava(pattern)
+		case "csharp":
+			code = runVetCSharp(pattern, useJSON, os.Stdout, os.Stderr)
 		case "python":
 			code = runVetPython(pattern, useJSON)
 		default:
-			fmt.Fprintf(os.Stderr, "Error: unknown vet language %q. Valid: go, rust, java, python\n", lang)
+			fmt.Fprintf(os.Stderr, "Error: unknown vet language %q. Valid: go, rust, java, csharp, python\n", lang)
 			os.Exit(1)
 		}
 		os.Exit(code)
@@ -892,6 +894,11 @@ func detectVetLang(dir string) (string, error) {
 	}
 	if _, err := os.Stat(filepath.Join(dir, "build.gradle")); err == nil {
 		return "java", nil
+	}
+
+	// Check for a C# project: exactly one .csproj, as `cleat build --target csharp` requires.
+	if m, _ := filepath.Glob(filepath.Join(dir, "*.csproj")); len(m) == 1 {
+		return "csharp", nil
 	}
 
 	// Check for Python files.

@@ -57,8 +57,8 @@ public static class Orders
 
 **Host calls are synchronous, and `async` works over them.** There are no threads and no scheduler. A workflow can use
 `async`/`await`, `ValueTask`, `await foreach` and `Task.WhenAll` over `HostCalls`, because every task it awaits is
-already complete (measured on the real engine, cleat#4077). `Task.Delay`, `Task.Yield`, `Task.Run` and a blocking wait on
-an incomplete task throw `PlatformNotSupportedException`. **To wait, call `HostCalls.Sleep`**, which is durable. The generated
+already complete (measured on the real engine, cleat#4077). `Task.Delay`, `Task.Run` and a blocking wait on
+an incomplete task throw `PlatformNotSupportedException` (`Task.Yield` returns; measured, cleat#4080). **To wait, call `HostCalls.Sleep`**, which is durable. The generated
 entry blocks on the entry method with `GetAwaiter().GetResult()`, never `.Result`, which would wrap the exception in an
 `AggregateException`.
 
@@ -72,13 +72,30 @@ entry blocks on the entry method with `GetAwaiter().GetResult()`, never `.Result
   code between the capture and the `await` still runs.
 
 Replay reproduces the same sequence, so this is deterministic, but it is not what a Go or Rust workflow does (there the
-suspend aborts at once). Never `catch (Exception)` without rethrowing `CleatSuspendException`. The determinism vet
-(a later PR in cleat#4080) will flag it.
+suspend aborts at once). Never `catch (Exception)` without rethrowing `CleatSuspendException`. The determinism vet warns
+about a catch that can swallow it (`CV101`); it is a warning because the same catch around code that cannot suspend is
+harmless and a source check cannot tell the two apart.
 
-**Use the host's clock and entropy.** `h.Now()` and `h.Random()` are replayed. `DateTime.UtcNow`, `Random`,
-`Guid.NewGuid()` and `Environment.TickCount64` are not (the engine's shadows for them depend on the WASI minor version the
-component imports; that is cleat#4078). `Thread.Sleep` busy-waits on the monotonic clock. `File`, `Console` and
-`HttpClient` have nothing behind them.
+**The clock and entropy.** Measured on the real engine (cleat#4080), a workflow that reads `DateTime.UtcNow`, `DateTime.Now`,
+`DateTimeOffset.UtcNow`, `new Random()`, `Random.Shared` or `Guid.NewGuid()` gets the same values on replay: the engine
+pins the wall clock to the workflow's start time and seeds entropy from the workflow's identity, and a run under a
+different identity gets different values. `h.Now()` and `h.Random()` are the explicit forms and remain the clearer choice.
+This section said the opposite until cleat#4080, and it was wrong for the same reason cleat#4078 fixed: the shadows reach
+every WASI minor a C# toolchain emits. **Monotonic clocks are not pinned**: `Stopwatch` returns a different value on every run, and `Environment.TickCount64`
+(a few milliseconds since the instance started) differs from its replay in most runs and coincides in some, so the vet
+refuses both. `Thread.Sleep` really sleeps (it holds the worker and is not
+durable), `Task.Run`, `Task.Factory.StartNew`, `Task.Delay`, `.Wait()` and `new Thread` throw `PlatformNotSupportedException`, and `Task.Yield`
+is fine. `RandomNumberGenerator` throws. `File` and `Directory` have no filesystem behind them (`File.Exists` answers
+`false` without error). **`HttpClient` makes the whole component fail to instantiate**, every entry point and not only the
+one that uses it, because it imports `wasi:http`, which the engine does not provide.
+
+**The determinism vet** runs inside `cleat build --target csharp`, before the toolchain is looked for, and as
+`cleat vet --lang csharp <dir>`. It reads the `.cs` files only, resolves names rather than matching text, and refuses
+exactly the list above. Exit status 0 is clean, 1 is a finding, 2 means the vet could not read the project (UNMEASURED:
+a failure of the check, not a finding). What it cannot see: there is no type information, so a refused API reached through
+an alias it cannot resolve, a delegate, reflection or an extension method that wraps one is invisible; `.Result` and
+`GetResult()` are not judged, since on a completed task they are ordinary; the effect of the thread pool was not
+measured. A `Compile` item in the project file is not interpreted.
 
 **Failures.** A failed host call throws `CleatCallException`, in the same classes as the Python SDK
 (`CleatCallTransientException`, `CleatCallTimeoutException`, `CleatCallPermanentException`, chosen by the host's error
@@ -147,5 +164,5 @@ by hand and its output is recorded in the pull request, not enforced by CI.
 `HostCalls` holds the calls an entry point needs first: `Call`, `Sleep`/`SleepMs`, `Now`, `Random`, `Log`, `WorkflowId`,
 `RunId`, `Version`, `Defer`, `PollCancellation`. Every other function in `python-sdk/wit/cleat.wit` (retries and
 heartbeats, signals, children, promises, handlers, messaging, plugin calls, locks, scopes, fetch, cron, continue-as-new)
-is not wrapped yet; that is the host-call coverage work in cleat#4080. The determinism vet, the packed NuGet package, the
+is not wrapped yet; that is the host-call coverage work in cleat#4080. The packed NuGet package, the
 `cleat build` target and the tier-2 gate are also later items in that issue.

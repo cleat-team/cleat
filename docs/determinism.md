@@ -146,6 +146,19 @@ construction* rather than because the author remembered to check a flag, and
 the difference matters: a missed check is silent, and the corresponding missed
 `SideEffect` is a divergence the engine detects.
 
+## The C# determinism check
+
+`cleat build --target csharp` and `cleat vet --lang csharp <dir>` read a C# project's `.cs` files
+and refuse the APIs a component cannot run or cannot replay: `Task.Run`, `Task.Factory.StartNew`, `Task.Delay`, a blocking
+`.Wait()`, `new Thread`, `Thread.Sleep`, `Stopwatch`, `Environment.TickCount[64]`,
+`RandomNumberGenerator`, `File`/`Directory` and `HttpClient`. Every rule cites a measurement made
+against the real engine (`tests/csharp/determinism_probe_test.go`), and so does what it leaves
+alone: `DateTime.UtcNow`, `Random` and `Guid.NewGuid()` replay, because the engine pins the wall
+clock to the workflow's start and seeds entropy from the workflow's identity. A catch that can
+swallow `CleatSuspendException` is a warning, not an error. The reasoning and the limits (no type
+information, aliases, `.Result`) are in `docs/contributor/design/csharp-determinism-checker.md`.
+C# remains in development and is not a supported language (`tiers.yaml`).
+
 ## Why there is no `RegisterQueryHandler`
 
 Every SDK (Go, Rust, Java, Python) carried a

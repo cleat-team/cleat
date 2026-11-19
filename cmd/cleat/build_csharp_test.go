@@ -37,6 +37,11 @@ func project(t *testing.T) string {
 	if err := os.WriteFile(filepath.Join(dir, "Hello.csproj"), []byte("<Project/>"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	// A source file, because the determinism gate (cleat#4080, PR 6) reads one: a project with none is UNMEASURED, which is right and is
+	// not what these tests are about.
+	if err := os.WriteFile(filepath.Join(dir, "Hello.cs"), []byte("public static class Hello { }\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	return dir
 }
 
@@ -180,6 +185,7 @@ func TestTheCSharpScriptReceivesTheMountRootTheProjectAndAStageDirectory(t *test
 	proj := filepath.Join(repo, "tests", "x")
 	os.MkdirAll(proj, 0o755)
 	os.WriteFile(filepath.Join(proj, "X.csproj"), []byte("<Project/>"), 0o644)
+	os.WriteFile(filepath.Join(proj, "X.cs"), []byte("public static class X { }\n"), 0o644)
 	if code, msg := build(t, proj, t.TempDir(), 1); code != 0 {
 		t.Fatalf("exit %d:\n%s", code, msg)
 	}
