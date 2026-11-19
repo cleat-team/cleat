@@ -39,13 +39,25 @@ type recordedCall struct{ Service, Operation, Request string }
 type recordingCaller struct {
 	mu        sync.Mutex
 	calls     []recordedCall
+	counts    map[string]int // calls so far per "service/operation", this one included
 	responses map[string]string
+	fail      func(service, operation string, nth int) error
 }
 
 func (c *recordingCaller) Call(_ context.Context, service, operation, requestJSON string) (string, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.calls = append(c.calls, recordedCall{service, operation, requestJSON})
+	if c.counts == nil {
+		c.counts = map[string]int{}
+	}
+	c.counts[service+"/"+operation]++
+	// A failure is still a CALL: it is recorded above, so a test asserts both that the guest reached the service and what became of it.
+	if c.fail != nil {
+		if err := c.fail(service, operation, c.counts[service+"/"+operation]); err != nil {
+			return "", err
+		}
+	}
 	if r, ok := c.responses[service+"/"+operation]; ok {
 		return r, nil
 	}
@@ -115,10 +127,16 @@ type entryRun struct {
 	WorkflowID string
 	Input      string            // JSON; "{}" when empty
 	Responses  map[string]string // "service/operation" -> response JSON, for the recording caller
+	// Fail makes a service call fail: it is asked for every call with the 1-based count of calls to that service/operation so far, and a
+	// non-nil error is what the service "returns". A failed call is still recorded in Calls. Nil means every call succeeds.
+	Fail    func(service, operation string, nth int) error
+	Options []engine.EngineOption // stores and the like; a group that needs a store passes it here
+	Replay  []engine.EventRecord  // when non-nil the entry is REPLAYED over this history instead of executed fresh
 }
 
 type conformanceResult struct {
 	Result    string
+	History   []engine.EventRecord
 	Suspended *engine.SuspendResult
 	Calls     []recordedCall
 	Err       error
@@ -143,7 +161,7 @@ func runConformanceEntry(t *testing.T, entry string, r entryRun) conformanceResu
 	}
 	t.Cleanup(func() { wt.Close(ctx) })
 
-	caller := &recordingCaller{responses: r.Responses}
+	caller := &recordingCaller{responses: r.Responses, fail: r.Fail}
 	id := r.WorkflowID
 	if id == "" {
 		id = "wf-conformance-" + strings.ReplaceAll(t.Name(), "/", "-")
@@ -152,9 +170,19 @@ func runConformanceEntry(t *testing.T, entry string, r entryRun) conformanceResu
 	if input == "" {
 		input = "{}"
 	}
-	eng := engine.NewEngine(rt, caller, engine.WithBackends(engine.WasmtimeLanguages, wt), engine.WithWorkflowID(id))
-	res, _, susp, _, _, err := eng.Execute(ctx, b, entry, json.RawMessage(input))
-	return conformanceResult{Result: res, Suspended: susp, Calls: caller.recorded(), Err: err}
+	opts := append([]engine.EngineOption{engine.WithBackends(engine.WasmtimeLanguages, wt), engine.WithWorkflowID(id)}, r.Options...)
+	eng := engine.NewEngine(rt, caller, opts...)
+	var (
+		res  string
+		hist []engine.EventRecord
+		susp *engine.SuspendResult
+	)
+	if r.Replay != nil {
+		res, hist, susp, _, _, err = eng.Replay(ctx, b, entry, json.RawMessage(input), r.Replay)
+	} else {
+		res, hist, susp, _, _, err = eng.Execute(ctx, b, entry, json.RawMessage(input))
+	}
+	return conformanceResult{Result: res, History: hist, Suspended: susp, Calls: caller.recorded(), Err: err}
 }
 
 // TestCSharpConformanceSmoke is the foundation's own case: the build, the stamp, the engine, the SDK's entry wrapper and one host call that
@@ -189,8 +217,11 @@ func TestCSharpConformanceSmoke(t *testing.T) {
 // reported success for a name no guest exports would make every group's "it ran" mean nothing.
 func TestCSharpConformanceReportsAnEntryThatDoesNotExist(t *testing.T) {
 	res := runConformanceEntry(t, "no_such_entry", entryRun{})
-	if res.Err == nil && res.Suspended == nil && !strings.Contains(strings.ToLower(res.Result), "no_such_entry") {
-		t.Fatalf("an entry the component does not define was reported as a success: result %q", res.Result)
+	if res.Err == nil {
+		t.Fatalf("an entry the component does not define was reported as a success: result %q suspended=%v", res.Result, res.Suspended != nil)
+	}
+	if !strings.Contains(res.Err.Error(), "no_such_entry") {
+		t.Errorf("the error does not name the missing entry, so it could be about anything: %v", res.Err)
 	}
 	t.Logf("an unknown entry is reported as: err=%v suspended=%v result=%q", res.Err, res.Suspended != nil, res.Result)
 }

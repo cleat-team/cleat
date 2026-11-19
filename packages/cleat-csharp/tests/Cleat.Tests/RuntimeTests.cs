@@ -349,3 +349,77 @@ public class EntryJsonTests
     [Fact] public void ElementIsItsRawText() => Assert.Equal("{\"a\": 1}", EntryJson.Element(JsonDocument.Parse("{\"a\": 1}").RootElement));
     [Fact] public void NodeNullIsNull() => Assert.Equal("null", EntryJson.Node(null));
 }
+
+public class PackedHostResultTests
+{
+    private const ulong Stop = 1UL << 31;
+
+    [Fact]
+    public void ZeroIsSuccessAndTheUpperHalfIsReturned()
+    {
+        Assert.Equal(0u, Packed.CheckHostResult(0, "s", "o", "w"));
+        Assert.Equal(7u, Packed.CheckHostResult(7UL << 32, "s", "o", "w"));
+    }
+
+    [Fact]
+    public void TheStopIsTestedBeforeAnyField()
+    {
+        // The word carries an ERROR code too. If the error were read first this would be a call exception; the stop wins.
+        Assert.Throws<CleatSuspendException>(() => Packed.CheckHostResult(Stop | 3, "s", "o", "w"));
+        // And with a nonzero upper half, which a field-first decoder would return as an ordinary length.
+        Assert.Throws<CleatSuspendException>(() => Packed.CheckHostResult((9UL << 32) | Stop, "s", "o", "w"));
+    }
+
+    [Theory]
+    [InlineData(1u)]
+    [InlineData(2u)]
+    [InlineData(3u)]
+    [InlineData(77u)]
+    public void ALowByteErrorIsTheBaseExceptionWithNoClassification(uint code)
+    {
+        // Not a Timeout/Transient/Permanent subclass: the engine's code 1 here means "failed", not "timed out". A subclass
+        // would hand a caller who retries timeouts a "promise not found" to retry.
+        var e = Assert.ThrowsAny<CleatCallException>(() => Packed.CheckHostResult(code, "signal", "signal_workflow", "signal_workflow(x)"));
+        Assert.Equal(typeof(CleatCallException), e.GetType());
+        Assert.Equal(0u, e.Code);
+        Assert.Equal("signal", e.Service);
+        Assert.Contains("signal_workflow(x)", e.Message);
+        Assert.Contains($"host status code {code}", e.Message);
+        Assert.DoesNotContain("CallErrorTimeout", e.Message);
+    }
+
+    [Fact]
+    public void OnlyTheLowByteIsTheErrorCode()
+    {
+        // 0x100 is a nonzero word whose low byte is zero: a length field, not an error.
+        Assert.Equal(0u, Packed.CheckHostResult(0x100, "s", "o", "w"));
+    }
+
+    [Fact]
+    public void SleepKeepsItsOwnWholeWordTest()
+    {
+        // A sleep word whose DURATION sets bit 31 is not a stop; the general decoder would say it is. They differ on purpose.
+        var durationWithBit31 = (2UL << 31) | Stop;
+        Assert.False(Packed.SleepMustSuspend(durationWithBit31));
+        Assert.Throws<CleatSuspendException>(() => Packed.CheckHostResult(durationWithBit31, "s", "o", "w"));
+    }
+}
+
+public class StringArrayJsonTests
+{
+    [Fact]
+    public void AnEmptyListIsAnEmptyArray() => Assert.Equal("[]", EntryJson.StringArray(new string[0]));
+
+    [Fact]
+    public void ItemsKeepTheirOrderAndAreEscaped()
+        => Assert.Equal("[\"b\",\"a\\\"q\",\"line\\nbreak\"]", EntryJson.StringArray(new[] { "b", "a\"q", "line\nbreak" }));
+
+    [Fact]
+    public void ANonAsciiNameIsWrittenLiterallyAndRoundTrips()
+    {
+        var json = EntryJson.StringArray(new[] { "caf\u00e9" });
+        Assert.Contains("caf\u00e9", json);
+        using var doc = JsonDocument.Parse(json);
+        Assert.Equal("caf\u00e9", doc.RootElement[0].GetString());
+    }
+}
