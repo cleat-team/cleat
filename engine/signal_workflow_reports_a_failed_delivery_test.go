@@ -218,4 +218,11 @@ func TestACompactedSendKeepsItsOutcome(t *testing.T) {
 	if signalSendOutcomeCode(full[0]) != errSignalDeliveryFailedInt {
 		t.Fatal("the failed send must still replay as a failure after compaction, or this test compares two successes")
 	}
+	// The predicate a killed run's segment reads (cleat#4102): a send folded into a compacted prefix must still be a stop point, or a
+	// kill after it stops at the call before it and the cleanup misses the signal. The delivery beside it must still not be one.
+	for i, want := range []bool{true, true, false, true} {
+		if got := isStoppableEvent(full[i]); got != want {
+			t.Errorf("step %d: isStoppableEvent after compaction = %v, want %v", i, got, want)
+		}
+	}
 }

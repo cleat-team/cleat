@@ -327,6 +327,52 @@ func TestAKilledPythonComponentRunsItsDefersThroughTheWorker(t *testing.T) {
 		})
 	}
 
+	// cleat#4102: signal_workflow is an effect another run may be waiting on, so a kill right after one must stop AT it, and the
+	// segment must not send the signal a second time. The send records signal_received, the type a DELIVERED signal also records,
+	// so what makes it a stop point is its Service and Op. What tells a stop at the send from a stop BEFORE it is what the guest
+	// knew when the cleanup ran: it wrote "charged" only if the replay got past the call, which it does only when the send is the
+	// stop point.
+	t.Run("a kill right after signal_workflow: the send is a stop point, and the cleanup saw the call before it", func(t *testing.T) {
+		sawCharged, charged := count("cleanup/saw-charged"), count("work/charge")
+		id, step := run(t, "signal_then_spin")
+		step() // the kill
+		if st := get(t, id).Status; st != "terminating" {
+			t.Fatalf("status after the kill = %q, want terminating: a run that owes a defer is marked for its segment (logs:\n%s)", st, logs.String())
+		}
+		sends := func(inSegment bool) (n int) {
+			for _, ev := range history(t, id) {
+				if ev.EventType == "signal_received" && ev.Service == engine.SignalEventService && ev.Op == engine.SignalOpSend && ev.InDeferSegment == inSegment {
+					n++
+				}
+			}
+			return n
+		}
+		if n := sends(false); n != 1 {
+			t.Fatalf("PRECONDITION FAILED: the killed run recorded %d send event(s), want exactly 1 (history %+v)", n, history(t, id))
+		}
+		start := time.Now()
+		step() // the segment
+		if st := get(t, id).Status; st != "failed" {
+			t.Fatalf("status after the segment = %q, want failed (logs:\n%s)", st, logs.String())
+		}
+		if elapsed := time.Since(start); elapsed > 20*time.Second {
+			t.Fatalf("the segment took %v: it was killed again (the guest ran past the send), and the 30 s drain budget ended it", elapsed)
+		}
+		if n := count("cleanup/saw-charged") - sawCharged; n != 1 {
+			t.Fatalf("the cleanup saw the charge %d time(s), want exactly 1: the replay must reach the send so the guest sees the call "+
+				"before it (service saw %v)", n, calls.all())
+		}
+		if n := count("work/charge") - charged; n != 1 {
+			t.Fatalf("the charge ran %d time(s), want exactly 1: a replay consumes a recorded call, it does not repeat it", n)
+		}
+		if n := sends(false); n != 1 {
+			t.Fatalf("the history holds %d original send event(s) after the segment, want exactly 1", n)
+		}
+		if n := sends(true); n != 0 {
+			t.Fatalf("the defer segment sent a signal itself (%d send event(s) marked as the segment's): the host must refuse it", n)
+		}
+	})
+
 	// The same kill with the history COMPACTED between the kill and the segment, so that the settlement is in the compacted prefix and
 	// not in the retained tail. Compaction copies fields per event type and once kept only the promise id and the result or error for
 	// the two settlement events, so the rebuilt prefix had lost Service and Op, the settlement stopped being a stop point, the stop

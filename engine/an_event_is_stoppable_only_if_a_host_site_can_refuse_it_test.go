@@ -40,6 +40,7 @@ var stopSiteEvents = map[string]stopEvent{
 	"DurableScheduleInvoke":    {typ: EventTypeDurableScheduleInvoke},
 	"ScheduleCron":             {typ: EventTypeScheduleCron},
 	"freshAcquireLock":         {typ: EventTypeAcquireLock},
+	"SignalWorkflow":           {typ: EventTypeSignalReceived, op: SignalOpSend},
 	"ResolvePromise":           {typ: EventTypePromiseResolved, op: PromiseOpResolve},
 	"RejectPromise":            {typ: EventTypePromiseRejected, op: PromiseOpReject},
 	"childWorkflowWithVersion": {typ: EventTypeChildWorkflow},
@@ -50,10 +51,8 @@ var stopSiteEvents = map[string]stopEvent{
 // stopSiteNotStoppable lists the sites whose event cannot be a stop point, each with the reason. A reason is the mechanism, so
 // that a change to it makes the entry stale on purpose.
 var stopSiteNotStoppable = map[string]string{
-	"SignalWorkflow": "it records signal_received, the same event type signal DELIVERY records, so a stop point keyed on " +
-		"that type could land on a delivered signal, which no call of the guest refuses",
-	"DurablePollUpdate": "it records update_received, the same event type that records an update's DELIVERY, for the same " +
-		"reason as signal_received",
+	"DurablePollUpdate": "it records update_received, the same event type that records an update's DELIVERY, which no call of the " +
+		"guest refuses, and an update has no Service/Op marking its effect the way a signal send has (stoppableByOp)",
 	"DeleteCron": "the host refuses it in a segment (cleat#4083), but its WIT function returns nothing (reasonWitReturnsNothing in " +
 		"stopSurfaces), so a component guest never receives the stop and carries on past the refused call, back into the loop the kill " +
 		"interrupted",
@@ -97,7 +96,7 @@ func TestEveryHostStopSiteIsClassifiedForTheStoppableSet(t *testing.T) {
 					"(stopSurfaces[%q].wit is empty), so a component guest cannot receive the stop at it. Moving it to "+
 					"stopSiteNotStoppable is the fix; keeping it lets the guest carry on past the refused call into its loop", name, ev, name)
 			}
-			inSet := (ev.op == "" && stoppableFirstEvents[ev.typ]) || (ev.op != "" && stoppableByOp[ev.typ][ev.op])
+			inSet := (ev.op == "" && stoppableFirstEvents[ev.typ]) || (ev.op != "" && stoppableByOp[ev.typ].ops[ev.op])
 			if !inSet {
 				t.Errorf("host stop site %s refuses the call that records %q (op %q), but that is not a stop point in "+
 					"stoppableFirstEvents or stoppableByOp: a killed run whose last effect was that call stops EARLIER than "+
@@ -138,8 +137,8 @@ func TestEveryHostStopSiteIsClassifiedForTheStoppableSet(t *testing.T) {
 			stray = append(stray, string(ev))
 		}
 	}
-	for ev, ops := range stoppableByOp {
-		for op := range ops {
+	for ev, so := range stoppableByOp {
+		for op := range so.ops {
 			if !claimed[stopEvent{typ: ev, op: op}] {
 				stray = append(stray, string(ev)+"/"+op)
 			}

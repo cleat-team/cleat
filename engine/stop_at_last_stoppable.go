@@ -22,11 +22,11 @@ import "context"
 //
 // Absent on purpose, each with its reason in that test: set_query_state (no refusing site); create_promise and set_scope (the host
 // refuses both in a segment, cleat#4091, but their component WIT functions return a plain string, so a component guest cannot be
-// told to stop at them); delete_cron, update_completed (no typed outcome in the component world; resolve_promise and reject_promise
-// ARE stop points but only by Op, see stoppableByOp); signal_received and update_received (the
-// same event types record DELIVERY, which no call of the guest refuses); await_promise, which only reads, so a cleanup has no
-// effect of it to see. await_child, await_all_children and continue_as_new were listed here before that test existed and have
-// no refusing site, so they are not.
+// told to stop at them); delete_cron, update_completed (no typed outcome in the component world; resolve_promise, reject_promise
+// and signal_workflow ARE stop points but only by Service and Op, see stoppableByOp); update_received (the same event type records
+// an update's DELIVERY, which no call of the guest refuses); await_promise, which only reads, so a cleanup has no effect of it to
+// see. await_child, await_all_children and continue_as_new were listed here before that test existed and have no refusing site,
+// so they are not.
 var stoppableFirstEvents = map[EventType]bool{
 	EventTypeCall:                  true,
 	EventTypeAwaitSignals:          true,
@@ -42,29 +42,44 @@ var stoppableFirstEvents = map[EventType]bool{
 	EventTypeDurableScheduleInvoke: true,
 }
 
-// stoppableByOp lists the event types that are a stop point only when the event's Op says it was the EFFECT and not a read that
-// shares the type: promise_resolved and promise_rejected are recorded both by resolve_promise and reject_promise (effects) and by
-// await_promise (a read of an already-settled promise), with the same fields otherwise. A stop at the read would let a promise
-// that is already settled return normally and the guest run on inside the segment. Events recorded before the discriminator
-// existed have no Op and are not stop points, which is the safe direction.
-var stoppableByOp = map[EventType]map[string]bool{
-	EventTypePromiseResolved: {PromiseOpResolve: true},
-	EventTypePromiseRejected: {PromiseOpReject: true},
+// stoppableByOp lists the event types that are a stop point only when the event's Service and Op say it was the EFFECT and not a
+// read or a delivery that shares the type:
+//
+//   - promise_resolved and promise_rejected are recorded both by resolve_promise and reject_promise (effects) and by await_promise
+//     (a read of an already-settled promise), with the same fields otherwise. A stop at the read would let a promise that is
+//     already settled return normally and the guest run on inside the segment.
+//   - signal_received is recorded both by signal_workflow (an effect: another run is woken, or told it cannot be) and by the
+//     DELIVERY of a signal an await_signals was waiting for, which no call of the guest refuses (cleat#4102).
+//
+// Events recorded before the discriminator existed have no Op and are not stop points, which is the safe direction. The Service is
+// part of the key because an Op is only meaningful within one: "resolve" under another service is not a settlement.
+var stoppableByOp = map[EventType]stoppableOps{
+	EventTypePromiseResolved: {service: PromiseEventService, ops: map[string]bool{PromiseOpResolve: true}},
+	EventTypePromiseRejected: {service: PromiseEventService, ops: map[string]bool{PromiseOpReject: true}},
+	EventTypeSignalReceived:  {service: SignalEventService, ops: map[string]bool{SignalOpSend: true}},
+}
+
+// stoppableOps is the Service an event type's effect records under, and the Ops of that Service that are the effect.
+type stoppableOps struct {
+	service string
+	ops     map[string]bool
 }
 
 // isStoppableEvent reports whether rec is the first event of a call a defer segment can stop at.
 //
-// The Service and Op it reads are NOT in the event checksum: eventRecordToPayload hashes a promise event's promise_id and its result or
-// error only (the Service/Op formula in computeEventChecksum is the fallback for a payload that fails to encode, not the normal path).
-// That is acceptable here and it is worth saying why, because it is not true of every discriminator. Replay never reads Op, so editing
-// it cannot change what a replayed guest sees, only where a killed run's segment stops, and the worst outcome is the safe one: an
-// earlier stop, skipping an effect. Changing it needs write access to the event store, which can rewrite any row anyway. A
-// discriminator whose value a replay RETURNS to the guest would be a different case and would need to be in the checksum.
+// Whether the Service and Op it reads are in the event checksum differs by event type, and it is worth saying why. For a promise
+// settlement they are NOT: eventRecordToPayload hashes the promise_id and the result or error only (the Service/Op formula in
+// computeEventChecksum is the fallback for a payload that fails to encode, not the normal path). Replay never reads that Op, so
+// editing it cannot change what a replayed guest sees, only where a killed run's segment stops, and the worst outcome is the safe
+// one: an earlier stop, skipping an effect. Changing it needs write access to the event store, which can rewrite any row anyway.
+// For a signal send they ARE (cleat#4102): replay returns the recorded outcome to the guest, so the outcome and the Op that makes
+// the row a send are in the payload. A discriminator whose value a replay RETURNS to the guest is the case that needs to be there.
 func isStoppableEvent(rec EventRecord) bool {
 	if stoppableFirstEvents[rec.EventType] {
 		return true
 	}
-	return rec.Service == PromiseEventService && stoppableByOp[rec.EventType][rec.Op]
+	so, ok := stoppableByOp[rec.EventType]
+	return ok && rec.Service == so.service && so.ops[rec.Op]
 }
 
 // lastStoppableIndex returns the index in history of the first event of the last guest call the engine can stop at, or -1
