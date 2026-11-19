@@ -508,3 +508,42 @@ public class StringArrayJsonTests
         Assert.Equal("caf\u00e9", doc.RootElement[0].GetString());
     }
 }
+
+public class SignalEnvelopeTests
+{
+    private static bool Decode(string raw, out string reply, out string payload)
+        => SignalEnvelope.TryDecode(raw, out reply, out payload);
+
+    [Fact]
+    public void ADecodesTheTwoKeyShape()
+    {
+        Assert.True(Decode("{\"cleat_reply_to\":\"promise-1\",\"payload\":\"{\\\"a\\\":1}\"}", out var r, out var p));
+        Assert.Equal("promise-1", r);
+        Assert.Equal("{\"a\":1}", p);
+    }
+
+    [Theory]
+    [InlineData("{\"cleat_reply_to\":\"x\",\"payload\":\"p\",\"extra\":\"e\"}")]   // an ordinary payload that merely carries the key
+    [InlineData("{\"cleat_reply_to\":\"x\"}")]
+    [InlineData("{\"payload\":\"p\"}")]
+    [InlineData("{\"cleat_reply_to\":\"\",\"payload\":\"p\"}")]                     // empty address
+    [InlineData("{\"cleat_reply_to\":1,\"payload\":\"p\"}")]                          // not a string
+    [InlineData("{\"cleat_reply_to\":\"x\",\"payload\":{\"a\":1}}")]                 // payload not a string
+    [InlineData("{\"cleat_reply_to\":\"x\",\"cleat_reply_to\":\"y\"}")]              // a repeated key is not both keys
+    [InlineData("[\"cleat_reply_to\",\"payload\"]")]
+    [InlineData("not json")]
+    [InlineData("")]
+    public void EverythingElseIsAnOrdinaryPayload(string raw)
+    {
+        Assert.False(Decode(raw, out var r, out var p));
+        Assert.Equal("", r);
+        Assert.Equal("", p);
+    }
+
+    [Fact]
+    public void APayloadThatOnlyMentionsTheKeyInATextFieldIsNotAnEnvelope()
+    {
+        // A substring search would call this one. The shape test does not.
+        Assert.False(Decode("{\"note\":\"see cleat_reply_to\"}", out _, out _));
+    }
+}
