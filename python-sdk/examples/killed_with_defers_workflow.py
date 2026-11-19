@@ -21,6 +21,9 @@ Each entry is one shape of "killed with cleanup owed", so a test can say which s
                         the history and are not stop points (a log call is not recorded at all, which an earlier version of this entry
                         assumed and the test's own precondition caught). A test compacts the history between the kill and the segment so
                         that the settlement lands in the compacted PREFIX, which is where compaction once dropped what marks it as one.
+* ``signal_then_spin``  a defer, one durable call, then ``signal_workflow`` (to itself, so the delivery is real), then the loop. A signal send
+                        is an effect another run may be waiting on, so it is a stop point (cleat#4102): the cleanup saw "charged" only
+                        if the replay got as far as the send, and the segment must not send the signal a second time.
 * ``charge_then_await_settled`` the control. The promise is settled FIRST, then a call, then an await of that already-settled promise
                         (a read: it records promise_resolved with no Op), then the loop. The await must NOT be the stop point.
 """
@@ -135,6 +138,18 @@ def reply_then_spin(h: HostCalls, request: dict) -> str:
     effects.append("charged")
     h.reply_to_signal(p, '"answer"')  # an SDK method over resolve_promise
     effects.append("replied")
+    _spin()
+    return ""
+
+
+@cleat_entry("signal_then_spin")
+def signal_then_spin(h: HostCalls, request: dict) -> str:
+    effects: list[str] = []
+    h.defer_func(lambda: _report(h, effects))
+    h.call("work", "charge", {})
+    effects.append("charged")
+    h.signal_workflow(h.current_workflow_id(), "wake", {})  # an effect, and a stop point; refused in a segment
+    effects.append("signalled")  # unreachable in a segment: the send is refused
     _spin()
     return ""
 

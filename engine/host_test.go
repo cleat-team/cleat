@@ -2675,6 +2675,11 @@ func TestSignalWorkflowFreshWithStore(t *testing.T) {
 	}
 }
 
+// TestSignalWorkflowStoreError used to assert that a store error was "logged, not surfaced": result 0, event recorded. It came in with the
+// bulk coverage commit ac77f2c3 (#183, "add unit tests for SignalWorkflow, DurableScheduleInvoke, ...") as a description of what the code
+// did then, with no rationale in the test or the message, and it pinned the defect cleat#4102 reports: the guest was told a signal was
+// recorded that was never delivered, and replay never tried again. It now asserts the reverse. The full set of cases is in
+// signal_workflow_reports_a_failed_delivery_test.go.
 func TestSignalWorkflowStoreError(t *testing.T) {
 	mock := &mockSignalStore{deliverErr: fmt.Errorf("db down")}
 	s := newTestExecSession()
@@ -2682,13 +2687,13 @@ func TestSignalWorkflowStoreError(t *testing.T) {
 
 	result := s.SignalWorkflow(context.Background(), nil, "target-run-123", "my-signal", `{"x":1}`)
 
-	// Store error is logged, not surfaced.
-	if result != 0 {
-		t.Errorf("expected 0 (error logged, not surfaced), got %d", result)
+	// The store error reaches the guest.
+	if result != errSignalDeliveryFailedInt {
+		t.Errorf("expected errSignalDeliveryFailedInt (%d), got %d", errSignalDeliveryFailedInt, result)
 	}
-	// Event still recorded.
-	if len(s.history) != 1 || s.history[0].EventType != EventTypeSignalReceived {
-		t.Error("expected event recorded despite store error")
+	// The event is still recorded, now carrying the outcome, so replay returns the same failure.
+	if len(s.history) != 1 || s.history[0].EventType != EventTypeSignalReceived || s.history[0].Response != signalOutcomeDeliveryFailed {
+		t.Errorf("expected one signal_received event recording the failed delivery, got %+v", s.history)
 	}
 }
 
@@ -2704,9 +2709,11 @@ func TestSignalWorkflowAuthDenied(t *testing.T) {
 	if result != errSignalAuthRequiredInt {
 		t.Errorf("expected errSignalAuthRequiredInt (%d), got %d", errSignalAuthRequiredInt, result)
 	}
-	// No event should be recorded on auth failure.
-	if len(s.history) != 0 {
-		t.Errorf("expected 0 history entries on auth failure, got %d", len(s.history))
+	// The refusal is recorded (cleat#4102). This asserted that NO event was recorded, from the same bulk commit as
+	// TestSignalWorkflowStoreError, and that left the live outcome out of history: a replay re-ran the authorization check, which could
+	// answer differently from the one the guest was told about.
+	if len(s.history) != 1 || s.history[0].Response != signalOutcomeAuthRequired {
+		t.Errorf("expected one event recording the authorization refusal, got %+v", s.history)
 	}
 }
 

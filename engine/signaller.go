@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -493,8 +494,81 @@ func (s *execSession) signalIsVisibleNow(d SignalDelivery) bool {
 // the reply channel and its ID is the correlation ID, so the reply address is
 // data rather than protocol -- which is how DBOS and Temporal handle it too,
 // neither having a primitive for it.
+// The send side's event (cleat#4102). A send and a delivery are both recorded as signal_received, and the await path matches on
+// that type alone, so the send carries Service and Op to be told apart from a delivery, and its OUTCOME in Response. The outcome is
+// what replay returns to the guest, so it is inside the event checksum (eventRecordToPayload) and survives compaction. Response is
+// empty for a send that was delivered, which is also what every send recorded before cleat#4102 holds, so an old history replays
+// as the success it was reported as.
+const (
+	SignalEventService = "signal"
+	SignalOpSend       = "send"
+
+	signalOutcomeAuthRequired   = "auth_required"
+	signalOutcomeDeliveryFailed = "delivery_failed"
+	signalOutcomeNotFound       = "not_found"
+)
+
+// signalOutcomeCode is the call's result word for a recorded outcome. An outcome this build does not know is a failure and not a
+// success: a history written by a newer engine that added one must not be replayed by this one as "delivered".
+func signalOutcomeCode(outcome string) int64 {
+	switch outcome {
+	case "":
+		return 0
+	case signalOutcomeAuthRequired:
+		return errSignalAuthRequiredInt
+	case signalOutcomeNotFound:
+		return errSignalTargetNotFoundInt
+	default:
+		return errSignalDeliveryFailedInt
+	}
+}
+
+// signalSendOutcomeCode reads a replayed signal_received event as the result of a send. An event with no Op is a delivery, or a send
+// recorded before cleat#4102, and is the success it always replayed as.
+func signalSendOutcomeCode(rec EventRecord) int64 {
+	if rec.Service != SignalEventService || rec.Op != SignalOpSend {
+		return 0
+	}
+	return signalOutcomeCode(rec.Response)
+}
+
+// deliverSignal hands the signal to the store and classifies what came back. The error text is logged and not recorded: the event
+// carries a CLASS, which is all a guest can act on and all that is safe to put in a history an admin can read.
+func (s *execSession) deliverSignal(ctx context.Context, targetRunID, signalName, payload string) string {
+	if s.engine.signalStore == nil {
+		// No store is configured, so there is nowhere to deliver to. This has always reported success, and whether it should is a
+		// separate question from the one cleat#4102 asked (a store that REFUSED); engines without a store are tests and embedded
+		// development engines, listed in the pull request.
+		return ""
+	}
+	err := s.engine.signalStore.DeliverSignal(ctx, targetRunID, signalName, payload)
+	switch {
+	case err == nil:
+		return ""
+	case errors.Is(err, ErrWorkflowNotFound):
+		// The same outcome for a target that does not exist and one under another tenant (cleat#2218, cleat#2227): the store already
+		// returns one error for both, and this keeps it one outcome. Do not log the target's existence either way.
+		s.engine.log().WarnContext(ctx, "deliver_signal: target not found", "workflow_id", s.workflowID, "tenant_id", s.tenantID)
+		return signalOutcomeNotFound
+	default:
+		s.engine.log().ErrorContext(ctx, "deliver_signal failed", "workflow_id", s.workflowID, "tenant_id", s.tenantID, "error", err)
+		return signalOutcomeDeliveryFailed
+	}
+}
+
+// SignalWorkflow sends a signal to another workflow.
+//
+// ORDER IS THE CONTRACT. The signal is delivered FIRST and its outcome recorded after, which is the opposite of what this did until
+// cleat#4102, and the difference is who loses. Recording first (the old order) meant a store error AND a crash between the two
+// steps both lost the signal for good: the event said it was sent, replay returns what the event says, and nothing ever tried
+// again. Delivering first means a crash between the two re-delivers on replay, which is a DUPLICATE and not a loss. That is
+// at-least-once, the stance consumeDelivered already takes for the await side; an idempotency key on the delivery would make it
+// effectively-once and is a follow-up.
+//
+// The outcome is recorded whatever it was, and replay returns the recorded one. Not recording a failure would let the guest see an
+// error live, handle it, and carry on, while replay found no event at this step, re-ran the delivery, possibly succeeded, and
+// diverged from the history the guest's later events were recorded against.
 func (s *execSession) SignalWorkflow(ctx context.Context, m api.Module, targetRunID, signalName, payload string) int64 {
-	// Fire-and-forget: record the signal event.
 	if s.isReplay {
 		if s.stepCount < len(s.history) {
 			rec := s.history[s.stepCount]
@@ -502,7 +576,7 @@ func (s *execSession) SignalWorkflow(ctx context.Context, m api.Module, targetRu
 				if !s.advanceReplayStep(ctx, &rec) {
 					return 0
 				}
-				return 0
+				return signalSendOutcomeCode(rec)
 			}
 		}
 		s.exitReplay()
@@ -515,31 +589,31 @@ func (s *execSession) SignalWorkflow(ctx context.Context, m api.Module, targetRu
 		return callSuspendSentinel
 	}
 
+	outcome := ""
+	refused := false
 	// Check signal authorization before delivering.
 	if s.engine.requireSignalAuth && s.engine.signalAuthCheck != nil {
 		if err := s.engine.signalAuthCheck(ctx, targetRunID, s.defName); err != nil {
 			s.engine.log().ErrorContext(ctx, "signal_auth failed", "workflow_id", s.workflowID, "tenant_id", s.tenantID, "error", err)
-			return errSignalAuthRequiredInt
+			outcome = signalOutcomeAuthRequired
+			refused = true
 		}
 	}
+	if !refused {
+		outcome = s.deliverSignal(ctx, targetRunID, signalName, payload)
+	}
 
-	rec := EventRecord{
+	s.recordEvent(EventRecord{
 		Step:          s.stepCount,
 		EventType:     EventTypeSignalReceived,
+		Service:       SignalEventService,
+		Op:            SignalOpSend,
+		Response:      outcome,
 		SignalName:    signalName,
 		SignalPayload: payload,
 		RunID:         targetRunID,
-	}
-	s.recordEvent(rec)
-
-	// Deliver to target via signal store if available.
-	if s.engine.signalStore != nil {
-		if err := s.engine.signalStore.DeliverSignal(ctx, targetRunID, signalName, payload); err != nil {
-			s.engine.log().ErrorContext(ctx, "deliver_signal failed", "workflow_id", s.workflowID, "tenant_id", s.tenantID, "error", err)
-		}
-	}
-
-	return 0
+	})
+	return signalOutcomeCode(outcome)
 }
 
 // consumeDelivered removes a delivery from this workflow's queue, after the

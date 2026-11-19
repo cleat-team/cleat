@@ -583,6 +583,11 @@ func extractCompactionStateFrom(prev *CompactionState, events []EventRecord) (*C
 		case EventTypeSignalReceived:
 			ce.SignalName = ev.SignalName
 			ce.SignalPayload = ev.SignalPayload
+			// A send's outcome (cleat#4102) is what replay returns to the guest. Without these a compacted region would replay a failed
+			// send as the success every send used to be reported as. Empty for a delivery, so omitempty leaves its bytes unchanged.
+			ce.Service = ev.Service
+			ce.Op = ev.Op
+			ce.Response = ev.Response
 		case EventTypeDefer:
 			ce.DeferID = ev.DeferID
 			ce.DeferDesc = ev.DeferDescription
@@ -799,6 +804,9 @@ func buildFullHistoryFromCompaction(tail []EventRecord, cs *CompactionState) []E
 		case EventCodeSignalReceived:
 			rec.SignalName = ce.SignalName
 			rec.SignalPayload = ce.SignalPayload
+			rec.Service = ce.Service
+			rec.Op = ce.Op
+			rec.Response = ce.Response
 		case EventCodeDefer:
 			rec.DeferID = ce.DeferID
 			rec.DeferDescription = ce.DeferDesc

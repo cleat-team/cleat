@@ -3490,7 +3490,27 @@ class HostCalls:
 
         Unlike :meth:`send_signal_and_wait`, this method does not wait for a
         response.  The signal is enqueued and the workflow continues
-        immediately.  This is a recorded (journaled) operation.
+        immediately.  This is a recorded (journaled) operation, and what is
+        recorded is the OUTCOME: a replay returns the same result, success or
+        failure, without sending again.
+
+        Raises
+        ------
+        RuntimeError
+            If the host refuses the signal. The message carries the host's
+            error code: 2 = signal authorization refused the target; 3 = the
+            signal store returned an error and NOTHING was delivered (a later
+            attempt may succeed); 4 = the target does not exist or belongs to
+            another tenant (the host reports one outcome for both, on purpose).
+            Before cleat#4102 a failed delivery returned normally, so a workflow
+            that ignored the result and carried on now fails here unless it
+            catches the error.
+
+        Notes
+        -----
+        Delivery is at-least-once: the host sends first and records after, so a
+        crash between the two replays the call and the target can receive the
+        signal twice.
 
         Parameters
         ----------

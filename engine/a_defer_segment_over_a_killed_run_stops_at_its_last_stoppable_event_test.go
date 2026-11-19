@@ -18,6 +18,11 @@ func TestLastStoppableIndex(t *testing.T) {
 	settle := func(t EventType, op string) EventRecord {
 		return EventRecord{EventType: t, Service: PromiseEventService, Op: op, PromiseID: "p"}
 	}
+	// What signal_workflow records (cleat#4102): signal_received, the type a DELIVERED signal also records, with the Service and Op that
+	// mark it as a SEND. The outcome is in Response and is empty for a delivery to the target.
+	send := func(outcome string) EventRecord {
+		return EventRecord{EventType: EventTypeSignalReceived, Service: SignalEventService, Op: SignalOpSend, Response: outcome}
+	}
 	cases := []struct {
 		name string
 		hist []EventRecord
@@ -44,6 +49,20 @@ func TestLastStoppableIndex(t *testing.T) {
 		{"a resolve recorded before the discriminator existed is not a stop point", []EventRecord{ev(EventTypeDefer), ev(EventTypeCall), {EventType: EventTypePromiseResolved, Service: PromiseEventService, PromiseID: "p"}}, 1},
 		{"a promise event with an Op of the wrong kind is not a stop point", []EventRecord{ev(EventTypeDefer), ev(EventTypeCall), settle(EventTypePromiseResolved, PromiseOpReject)}, 1},
 		{"the LAST settlement wins over an earlier call", []EventRecord{ev(EventTypeCall), settle(EventTypePromiseResolved, PromiseOpResolve), ev(EventTypeDurableLog)}, 1},
+		// A signal SEND is an effect the cleanup must see: another run is woken, or told it cannot be. It shares signal_received with the
+		// DELIVERY of an awaited signal, which no call of the guest refuses, so the Service and Op are what tell them apart.
+		{"signal_workflow is a stop point", []EventRecord{ev(EventTypeDefer), ev(EventTypeCall), send("")}, 2},
+		{"a send that failed is a stop point too: the guest was told, and the cleanup must see what it knew", []EventRecord{ev(EventTypeDefer), ev(EventTypeCall), send(signalOutcomeDeliveryFailed)}, 2},
+		{"trailing effect-free events are skipped past a send", []EventRecord{ev(EventTypeCall), send(""), ev(EventTypeDurableLog)}, 1},
+		// THE CONTROL. A delivered signal records the same event type with no Service or Op. A stop there would be on an event no
+		// call of the guest refuses, so the guest would run on inside the segment.
+		{"the delivery of an awaited signal is NOT a stop point", []EventRecord{ev(EventTypeDefer), ev(EventTypeCall), {EventType: EventTypeSignalReceived, SignalName: "go", Response: "{}"}}, 1},
+		// A send written before cleat#4102 has no Op and cannot be told from a delivery, so it is not a stop point: the safe direction.
+		{"a send recorded before the discriminator existed is not a stop point", []EventRecord{ev(EventTypeDefer), ev(EventTypeCall), {EventType: EventTypeSignalReceived, SignalName: "go"}}, 1},
+		// The Service is part of the key: an Op is only meaningful within its own service.
+		{"a send Op under the promise service is not a stop point", []EventRecord{ev(EventTypeDefer), ev(EventTypeCall), {EventType: EventTypeSignalReceived, Service: PromiseEventService, Op: SignalOpSend}}, 1},
+		{"a resolve Op under the signal service is not a stop point", []EventRecord{ev(EventTypeDefer), ev(EventTypeCall), {EventType: EventTypePromiseResolved, Service: SignalEventService, Op: PromiseOpResolve, PromiseID: "p"}}, 1},
+		{"a segment's own send is never a stop point", []EventRecord{ev(EventTypeDefer), ev(EventTypeCall), {EventType: EventTypeSignalReceived, Service: SignalEventService, Op: SignalOpSend, InDeferSegment: true}}, 1},
 		{"the first event of a two-event call, not its second", []EventRecord{ev(EventTypeDefer), ev(EventTypeAwaitSignals), ev(EventTypeSignalReceived)}, 1},
 	}
 	for _, c := range cases {
