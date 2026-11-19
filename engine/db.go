@@ -1350,7 +1350,7 @@ func (s *PostgresStore) AcquireConcurrencyKey(ctx context.Context, key, workflow
 	// expired and the next caller took it -- two workflows holding the same
 	// mutual-exclusion key, with nothing logged. Sub-second is not an exotic
 	// input here: the guest API is specified in milliseconds
-	// (engine/locking.go passes time.Duration(ttlMs)*time.Millisecond), so
+	// (engine/locking.go converts it with guestMsDuration, which also bounds it; it was time.Duration(ttlMs)*time.Millisecond before cleat#4105), so
 	// truncating to whole seconds contradicts the contract callers are
 	// written against. IMPROVEMENT-PLAN 3.34.
 	var returnedWorkflowID string
