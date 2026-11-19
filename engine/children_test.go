@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -1581,5 +1582,121 @@ func TestChildWorkflow_ReplayPastEndStillExitsReplay(t *testing.T) {
 	if s.isReplay {
 		t.Error("past the end of history, replay must be EXITED, not reported as divergence -- " +
 			"exhausting the history is how every resumed workflow reaches new work")
+	}
+}
+
+// cleat#4114: a start the child-workflow store REFUSED used to drop the error, record a made-up id (detached-<name>-<step>) and return success.
+// The guest is now told, the refusal is recorded without a run id, and a replay refuses again with the same text.
+func refusingChildStore(msg string) *mockChildStore {
+	return &mockChildStore{
+		startChildFn: func(context.Context, string, string, string, int, string, int) (string, error) {
+			return "", errors.New(msg)
+		},
+	}
+}
+
+func TestRunDetached_ARefusedStartIsAFailureNotASuccessWithAMadeUpID(t *testing.T) {
+	s := newTestExecSession()
+	s.engine.childWfStore = refusingChildStore("the child store is down")
+	s.workflowID = "parent-wf"
+	buf := make([]byte, 512)
+
+	got := s.StartDetached(ctxWithMem(context.Background(), buf), nil, "detached-wf", `{}`, 0, 512)
+
+	if byte(got) != detachedStartRefused {
+		t.Fatalf("errCode = %d, want %d: a refused start was reported to the guest as a success", byte(got), detachedStartRefused)
+	}
+	if msg := extractStringFromSimplePacked(got, buf); !strings.Contains(msg, "the child store is down") || !strings.Contains(msg, "detached-wf") {
+		t.Errorf("message = %q, want the store's text and the run's name", msg)
+	}
+	if len(s.history) != 1 {
+		t.Fatalf("history has %d events, want the one recording the refusal", len(s.history))
+	}
+	rec := s.history[0]
+	if rec.EventType != EventTypeRunDetached || rec.Err == "" || rec.DetachedRunID != "" {
+		t.Errorf("recorded %+v, want a run_detached event carrying the refusal and NO run id", rec)
+	}
+	if strings.HasPrefix(rec.DetachedRunID, "detached-") {
+		t.Errorf("a made-up run id %q was recorded", rec.DetachedRunID)
+	}
+}
+
+// RunDetached has no buffer, so its guest sees the code alone.
+func TestRunDetached_ARefusedStartReachesTheNoBufferForm(t *testing.T) {
+	s := newTestExecSession()
+	s.engine.childWfStore = refusingChildStore("the child store is down")
+	if got := s.RunDetached(context.Background(), nil, "detached-wf", `{}`); byte(got) != detachedStartRefused {
+		t.Errorf("RunDetached = %d, want errCode %d", got, detachedStartRefused)
+	}
+}
+
+func TestRunDetached_AReplayOfARefusedStartRefusesAgainWithTheRecordedText(t *testing.T) {
+	fresh := newTestExecSession()
+	fresh.engine.childWfStore = refusingChildStore("the child store is down")
+	fresh.RunDetached(context.Background(), nil, "detached-wf", `{}`)
+
+	// The replay's store would ACCEPT: the recorded refusal must win, as a recorded success does.
+	replay := newTestExecSession()
+	replay.isReplay = true
+	replay.history = fresh.history
+	replay.engine.childWfStore = &mockChildStore{startChildFn: func(context.Context, string, string, string, int, string, int) (string, error) {
+		t.Error("the store was asked again on replay")
+		return "run-x", nil
+	}}
+	buf := make([]byte, 512)
+
+	got := replay.StartDetached(ctxWithMem(context.Background(), buf), nil, "detached-wf", `{}`, 0, 512)
+
+	if byte(got) != detachedStartRefused {
+		t.Fatalf("replay errCode = %d, want %d", byte(got), detachedStartRefused)
+	}
+	if msg := extractStringFromSimplePacked(got, buf); !strings.Contains(msg, "the child store is down") {
+		t.Errorf("replayed message = %q, want the recorded text", msg)
+	}
+	if replay.stepCount != 1 {
+		t.Errorf("stepCount = %d, want the refusal consumed so the next call reads the next event", replay.stepCount)
+	}
+}
+
+// The control: an accepting store still records the id the store issued.
+func TestRunDetached_AnAcceptedStartRecordsTheStoresID(t *testing.T) {
+	s := newTestExecSession()
+	s.engine.childWfStore = &mockChildStore{startChildFn: func(context.Context, string, string, string, int, string, int) (string, error) {
+		return "run-from-the-store", nil
+	}}
+	buf := make([]byte, 512)
+
+	got := s.StartDetached(ctxWithMem(context.Background(), buf), nil, "detached-wf", `{}`, 0, 512)
+
+	if byte(got) != 0 || extractStringFromSimplePacked(got, buf) != "run-from-the-store" {
+		t.Errorf("got %#x %q, want success with the store's id", got, extractStringFromSimplePacked(got, buf))
+	}
+	if s.history[0].DetachedRunID != "run-from-the-store" || s.history[0].Err != "" {
+		t.Errorf("recorded %+v", s.history[0])
+	}
+}
+
+// A refused detached start must survive the two places an event leaves memory: the database payload and a compaction. Without them the
+// refusal would replay as a start that was never refused (the field is empty), which is the defect in the other direction (cleat#4114).
+func TestRunDetached_ARefusalSurvivesThePayloadAndCompaction(t *testing.T) {
+	rec := EventRecord{Step: 0, EventType: EventTypeRunDetached, DetachedName: "wf", DetachedInput: `{"a":1}`, Err: `detached run "wf": start failed: down`}
+
+	payload, err := eventRecordToPayload(rec)
+	if err != nil {
+		t.Fatalf("eventRecordToPayload: %v", err)
+	}
+	got := EventRecord{EventType: EventTypeRunDetached}
+	populateFromPayload(&got, payload)
+	if got.Err != rec.Err || got.DetachedRunID != "" {
+		t.Errorf("payload round trip: Err=%q DetachedRunID=%q, want the refusal and no run id (payload %s)", got.Err, got.DetachedRunID, payload)
+	}
+
+	cs, err := extractCompactionState([]EventRecord{rec})
+	if err != nil {
+		t.Fatalf("extractCompactionState: %v", err)
+	}
+	back := buildFullHistoryFromCompaction(nil, cs)
+	if len(back) != 1 || back[0].Err != rec.Err || back[0].DetachedRunID != "" {
+		t.Errorf("compaction round trip: %+v, want the refusal and no run id", back)
 	}
 }

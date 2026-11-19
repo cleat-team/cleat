@@ -398,6 +398,11 @@ func eventRecordToPayload(rec EventRecord) ([]byte, error) {
 		if rec.DetachedRunID != "" {
 			payload["detached_run_id"] = rec.DetachedRunID
 		}
+		// A start the child-workflow store REFUSED (cleat#4114): the event carries the refusal and no run id, so a replay returns the same
+		// failure instead of finding nothing where the event should be.
+		if rec.Err != "" {
+			payload["error"] = rec.Err
+		}
 	case "admin_action":
 		// Without this arm the payload is "{}", and computeEventChecksum
 		// hashes payload alone -- so who forced a workflow and what they did
@@ -877,6 +882,9 @@ func populateFromPayload(rec *EventRecord, payload []byte) {
 		}
 		if v, ok := m["detached_run_id"].(string); ok {
 			rec.DetachedRunID = v
+		}
+		if v, ok := m["error"].(string); ok {
+			rec.Err = v
 		}
 	case "admin_action":
 		if v, ok := m["service"].(string); ok {

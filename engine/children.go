@@ -884,6 +884,10 @@ func (s *execSession) replayAwaitAllChildren(ctx context.Context, m api.Module, 
 	return s.freshAwaitAllChildren(ctx, m, runIDsJSON, resultsPtr, resultsMaxLen)
 }
 
+// detachedStartRefused is the error code of a detached start the child-workflow store refused, the same code child_workflow gives for a
+// start that failed (not_found). The message is in the run-id buffer for StartDetached; RunDetached has no buffer, so its guest sees the code.
+const detachedStartRefused = 3
+
 // RunDetached starts a detached run and returns nothing but a status.
 //
 // KEPT UNCHANGED, and deliberately. StartDetached below does the same work and
@@ -959,6 +963,12 @@ func (s *execSession) runDetached(ctx context.Context, m api.Module, name, input
 			if !s.advanceReplayStep(ctx, &rec) {
 				return 0, 0
 			}
+			// A start the store refused on the original execution is refused again here, with the recorded message: the guest was told
+			// it failed, and a replay that returned success (or found no event) would be a different history (cleat#4114).
+			if rec.Err != "" {
+				n, _ := s.writeResult(ctx, m, runIDPtr, rec.Err, runIDMaxLen)
+				return n, int64(uint64(n)<<32 | detachedStartRefused)
+			}
 			// The id comes back from the RECORD on replay, not from a fresh
 			// StartChildWorkflow: the run was started on the original
 			// execution and starting it again would be a second run.
@@ -990,10 +1000,29 @@ func (s *execSession) runDetached(ctx context.Context, m api.Module, name, input
 	var runID string
 	if s.engine.childWfStore != nil {
 		rid, err := s.engine.childWfStore.StartChildWorkflow(ctx, s.workflowID, name, inputJSON, childVersion, "", 0)
-		if err == nil {
-			runID = rid
+		if err != nil {
+			// THE STORE REFUSED, AND THE GUEST IS TOLD (cleat#4114). This used to drop err, record a made-up id and return success: the guest
+			// believed a run had started that no store ever issued, and the recorded id looked real to anything reading the history.
+			// "Fire and forget" is about not waiting for the run to finish, not about not learning whether it started.
+			//
+			// The refusal is RECORDED (an event carrying the message and no run id) so a replay refuses again with the same text; recording
+			// nothing would leave a guest that handled the error and went on with its next call reading a different event on replay.
+			errMsg := fmt.Sprintf("detached run %q: start failed: %v", name, err)
+			s.engine.log().ErrorContext(ctx, errMsg, "workflow_id", s.workflowID, "tenant_id", s.tenantID)
+			s.recordEvent(EventRecord{
+				Step:          s.stepCount,
+				EventType:     EventTypeRunDetached,
+				DetachedName:  name,
+				DetachedInput: inputJSON,
+				Err:           errMsg,
+			})
+			n, _ := s.writeResult(ctx, m, runIDPtr, errMsg, runIDMaxLen)
+			return n, int64(uint64(n)<<32 | detachedStartRefused)
 		}
+		runID = rid
 	}
+	// No child-workflow store configured: an embedding that has none (dev runners, unit tests) cannot start anything, and child_workflow
+	// without a store does the same -- a synthesised id, recorded. Left as it was; whether that should be an error is a separate decision.
 	if runID == "" {
 		runID = fmt.Sprintf("detached-%s-%d", name, s.stepCount)
 	}
