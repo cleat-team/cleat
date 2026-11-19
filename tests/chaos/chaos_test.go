@@ -58,6 +58,10 @@ var scenarios = []scenario{
 	// The promise calls (cleat#4207): no service request of their own, so the faults land on the calls around them and the oracle reads the
 	// promise rows. A kill after the three have run and before B replays them: a replay that ran any of them fresh would leave a second row.
 	{"promises", []op{{Op: "call", Name: "A"}, {Op: "promise_resolve", Name: "R"}, {Op: "promise_reject", Name: "J"}, {Op: "promise_create", Name: "C"}, {Op: "call", Name: "B"}}, nil},
+	// A cleanup registered BEFORE a wait. The sleep suspends the run (still alive, still waiting), so the cleanup must not run then; before the fix
+	// (cleat#4194) every Python and C# suspension drained the defer table, the cleanup ran early and the resumed run diverged. The fault-free run
+	// is what sees it: no fault is needed, which is why this is the golden-run precondition's own test.
+	{"defer_sleep", []op{{Op: "defer", Name: "D"}, {Op: "call", Name: "A"}, {Op: "sleep", Ms: 300}, {Op: "call", Name: "B"}}, nil},
 	{"retry", []op{{Op: "call", Name: "A"}, {Op: "call_retry", Name: "R", Attempts: 5, Fail: 2}, {Op: "call", Name: "B"}}, nil},
 }
 
