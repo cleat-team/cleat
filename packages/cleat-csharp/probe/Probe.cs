@@ -49,7 +49,15 @@ public static class Probe
 
     [CleatEntry("probe_monotonic")]
     public static JsonNode Monotonic(HostCalls h, JsonElement input) => Report(
-        ("Environment.TickCount64", Try(() => Environment.TickCount64)),
+        // Five readings, 7 ms apart (Thread.Sleep really sleeps, measured). A single millisecond reading is small and relative to the instance, so
+        // a run and its replay can read the SAME value by coincidence: that happened once and flipped this row to "replays". Five spaced readings
+        // are equal across runs only if the engine pins the clock, which is the question.
+        ("Environment.TickCount64", Try(() =>
+        {
+            var reads = new long[5];
+            for (var i = 0; i < reads.Length; i++) { reads[i] = Environment.TickCount64; Thread.Sleep(7); }
+            return string.Join(",", reads);
+        })),
         ("Stopwatch.GetTimestamp", Try(() => Stopwatch.GetTimestamp())));
 
     [CleatEntry("probe_thread_sleep")]
@@ -63,6 +71,7 @@ public static class Probe
     [CleatEntry("probe_tasks")]
     public static JsonNode Tasks(HostCalls h, JsonElement input) => Report(
         ("Task.Run", Try(() => Task.Run(() => 1).GetAwaiter().GetResult())),
+        ("Task.Factory.StartNew", Try(() => Task.Factory.StartNew(() => 1).GetAwaiter().GetResult())),
         ("Task.Delay", Try(() => { Task.Delay(10).GetAwaiter().GetResult(); return "returned"; })),
         ("Task.Yield", Try(() => { Task.Yield().GetAwaiter().GetResult(); return "returned"; })),
         ("Task.Wait on an incomplete task", Try(() => { new TaskCompletionSource<int>().Task.Wait(); return "returned"; })),

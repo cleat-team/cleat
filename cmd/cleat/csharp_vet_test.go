@@ -112,6 +112,17 @@ func TestCSharpVetReadsCodeNotProse(t *testing.T) {
 	if got := codesOf(vetCS(`var s = $"value {Task.Run(() => 1).Result} and {{literal Thread.Sleep(1)}}";`)); got != "CV001" {
 		t.Errorf("a call inside an interpolation hole gave %q, want CV001 (and not the escaped-brace text)", got)
 	}
+	// A raw interpolated string's holes are code; its literal text, including single braces, is not.
+	for src, want := range map[string]string{
+		"var s = $$\"\"\"\n  {{Task.Run(() => 1)}} and {Thread.Sleep(1)} and Stopwatch\n  \"\"\";": "CV001",
+		"var s = $$\"\"\"{{ nested(\"}}\") + Thread.Sleep(1) }}\"\"\"; var t = 2;":                 "CV005",
+		"var s = $\"\"\"a {Thread.Sleep(1)} hole: one $ means one brace opens it\"\"\";":           "CV005",
+		"var s = $\"\"\"literal text only, no hole\"\"\"; Thread.Sleep(2);":                        "CV005",
+	} {
+		if got := codesOf(vetCS(src)); got != want {
+			t.Errorf("raw interpolated %q gave %q, want %q", src, got, want)
+		}
+	}
 	// A string that follows a comment on the same line still opens: the blanker must not stay inside the comment.
 	if got := codesOf(vetCS("var a = 1; /* c */ Thread.Sleep(1); var s = \"x\";")); got != "CV005" {
 		t.Errorf("code after a block comment gave %q, want CV005", got)
@@ -153,6 +164,13 @@ func TestCSharpVetResolvesNames(t *testing.T) {
 		{"a bare Thread is not a refusal", `Thread t = null;`, ""},
 		{"new Thread qualified", `var t = new System.Threading.Thread(Work);`, "CV004"},
 		{"new Thread of another namespace", `var t = new My.Thread(Work);`, ""},
+		{"Task.Factory.StartNew", "var t = Task.Factory.StartNew(() => 1);", "CV001"},
+		{"Task.Factory on a value", "var t = this.Task.Factory.StartNew(1);", ""},
+		{"a namespace alias", "using IO = System.IO;\nvar s = IO.File.ReadAllText(p);", "CV009"},
+		{"an alias of System itself", "using S = System;\nvar s = S.IO.File.ReadAllText(p);\nS.Threading.Thread.Sleep(1);", "CV005,CV009"},
+		{"a namespace alias of another namespace", "using IO = My.IO;\nvar s = IO.File.ReadAllText(p);", ""},
+		{"nameof names a refused API and calls nothing", "var n = nameof(Thread.Sleep) + nameof(System.IO.File.Exists);", ""},
+		{"a call next to a nameof is still seen", "var n = nameof(Thread.Sleep); Thread.Sleep(1);", "CV005"},
 		{"Task.Wait with a timeout", `pending.Wait(TimeSpan.FromSeconds(1));`, "CV003"},
 		{"WaitAsync is not Wait", `await pending.WaitAsync(ct);`, ""},
 	}

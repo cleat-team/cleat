@@ -129,6 +129,86 @@ func runProbe(t *testing.T, b []byte, entry, wfID string, startMs int64, replay 
 	return out
 }
 
+// probeWant is the measurement table, asserted. TestCSharpDeterminismProbeMeasurements fails when any row, or the SET of rows, differs.
+// The vet's PERMITTED half (DateTime, Random, Guid, hash codes, Task.Yield, ThreadPool) rests on these rows being what they are: a toolchain or
+// engine change that broke replay for one of them would otherwise leave the vet allowing it with every test green (cleat-review2, #4164).
+// Verdicts are the first word(s) of the report column: THREW, NOT REPLAYED, REPLAYS (follows the identity), constant.
+// A value may name alternatives with "|" where the measurement itself is not stable. Environment.TickCount64 is the one: it is a few milliseconds
+// since the instance started, so a run and its replay read the same number whenever the two instance start-ups take the same time. Over nine
+// recorded probe runs seven differed and two coincided, and spacing five readings 7 ms apart made no difference (the offset is what coincides).
+// It is NOT pinned by the engine: the other clock in the same entry, Stopwatch.GetTimestamp (nanoseconds), differs on every run.
+var probeWant = map[string]map[string]string{
+	"probe_async": {
+		"both":   "constant",
+		"first":  "constant",
+		"second": "constant",
+		"third":  "constant",
+	},
+	"probe_clock": {
+		"DateTime.Now":          "REPLAYS, and follows the identity",
+		"DateTime.UtcNow":       "REPLAYS, and follows the identity",
+		"DateTimeOffset.UtcNow": "REPLAYS, and follows the identity",
+		"TimeZoneInfo.Local":    "constant",
+		"h.Now":                 "REPLAYS, and follows the identity",
+	},
+	"probe_entropy": {
+		"Guid.NewGuid":               "REPLAYS, and follows the identity",
+		"Random.Shared":              "REPLAYS, and follows the identity",
+		"RandomNumberGenerator":      "THREW",
+		"RuntimeHelpers.GetHashCode": "REPLAYS, and follows the identity",
+		"h.Random":                   "REPLAYS, and follows the identity",
+		"new Random()":               "REPLAYS, and follows the identity",
+		"new Random(42)":             "constant",
+		"string.GetHashCode":         "REPLAYS, and follows the identity",
+	},
+	"probe_environment": {
+		"CurrentDirectory":             "constant",
+		"GetEnvironmentVariable(PATH)": "constant",
+		"MachineName":                  "constant",
+		"OSVersion":                    "constant",
+		"ProcessId":                    "constant",
+		"UserName":                     "constant",
+	},
+	"probe_io": {
+		"Console.ReadLine":              "constant",
+		"Console.WriteLine":             "constant",
+		"Directory.GetCurrentDirectory": "constant",
+		"File.Exists":                   "constant",
+		"File.ReadAllText":              "THREW",
+		"File.WriteAllText":             "THREW",
+	},
+	"probe_monotonic": {
+		"Environment.TickCount64": "NOT REPLAYED|REPLAYS, and follows the identity", // coincides by chance: see the comment on probeWant
+		"Stopwatch.GetTimestamp":  "NOT REPLAYED",
+	},
+	"probe_tasks": {
+		"Task.Delay":                      "THREW",
+		"Task.Factory.StartNew":           "THREW",
+		"Task.Run":                        "THREW",
+		"Task.Wait on an incomplete task": "THREW",
+		"Task.Yield":                      "constant",
+		"ThreadPool.QueueUserWorkItem":    "constant",
+		"new Thread":                      "THREW",
+	},
+	"probe_thread_sleep": {
+		"Thread.Sleep(50)": "constant",
+		"elapsed-ms>=45":   "constant",
+	},
+}
+
+// probeSwallowWant is the swallowing-catch half of the table: how many host calls the SERVICE received from each entry, which sleeps a minute
+// inside the catch under test and then calls the host once AFTER it, and whether the engine saw the suspension. The first two let that call
+// reach the service (1); the filtered and rethrown forms did not (0). CV101 rests on this.
+var probeSwallowWant = map[string]struct {
+	calls int
+	susp  bool
+}{
+	"probe_swallow_bare":      {1, true},
+	"probe_swallow_exception": {1, true},
+	"probe_swallow_filtered":  {0, true},
+	"probe_swallow_rethrown":  {0, true},
+}
+
 func TestCSharpDeterminismProbeMeasurements(t *testing.T) {
 	b := probeComponent(t)
 	if got := wasm.DetectLanguage(b); got != "csharp" {
@@ -141,6 +221,11 @@ func TestCSharpDeterminismProbeMeasurements(t *testing.T) {
 	entries := append([]string(nil), meta.EntryPoints...)
 	sort.Strings(entries)
 	var report strings.Builder
+	got := map[string]map[string]string{}
+	swallowGot := map[string]struct {
+		calls int
+		susp  bool
+	}{}
 	for _, entry := range entries {
 		wf := "wf-probe-" + entry
 		const start = int64(1_700_000_000_000)
@@ -153,6 +238,15 @@ func TestCSharpDeterminismProbeMeasurements(t *testing.T) {
 		var r probeRun
 		if a.err == nil {
 			r = runProbe(t, b, entry, wf, start, a.history)
+		}
+		if strings.HasPrefix(entry, "probe_swallow_") {
+			swallowGot[entry] = struct {
+				calls int
+				susp  bool
+			}{a.calls, a.susp}
+		}
+		if a.err != nil || bb.err != nil || r.err != nil {
+			t.Errorf("%s: a run failed outright (A=%v B=%v replay=%v), so its rows measure nothing", entry, a.err, bb.err, r.err)
 		}
 		fmt.Fprintf(&report, "\n== %s  (A err=%v, B err=%v, replay err=%v, history=%d events, engine saw a suspension: %v, service calls received: %d)\n", entry, a.err, bb.err, r.err, len(a.history), a.susp, a.calls)
 		keys := map[string]bool{}
@@ -167,6 +261,9 @@ func TestCSharpDeterminismProbeMeasurements(t *testing.T) {
 			ks = append(ks, k)
 		}
 		sort.Strings(ks)
+		if len(ks) > 0 {
+			got[entry] = map[string]string{}
+		}
 		for _, k := range ks {
 			var verdict string
 			switch {
@@ -181,13 +278,52 @@ func TestCSharpDeterminismProbeMeasurements(t *testing.T) {
 			default:
 				verdict = "constant (A=B=C=R: not shown to come from anywhere)"
 			}
+			got[entry][k] = verdict
 			fmt.Fprintf(&report, "  %-34s %-50s | A=%q B=%q C=%q R=%q\n", k, verdict, trunc(a.result[k]), trunc(bb.result[k]), trunc(c.result[k]), trunc(r.result[k]))
 		}
 	}
 	t.Log(report.String())
+	for entry, rows := range probeWant {
+		for k, want := range rows {
+			g, ok := got[entry][k]
+			if !ok {
+				t.Errorf("%s / %s: no measurement (the probe no longer reports this row)", entry, k)
+			} else if !probeVerdictMatches(g, want) {
+				t.Errorf("%s / %s: measured %q, the vet is written against %q", entry, k, g, want)
+			}
+		}
+		for k := range got[entry] {
+			if _, ok := rows[k]; !ok {
+				t.Errorf("%s / %s: a measured row nobody wrote a verdict for; add it to probeWant (and decide what the vet does with it)", entry, k)
+			}
+		}
+	}
+	for entry := range got {
+		if _, ok := probeWant[entry]; !ok {
+			t.Errorf("%s: an entry with measured rows and no row in probeWant", entry)
+		}
+	}
+	for entry, w := range probeSwallowWant {
+		g, ok := swallowGot[entry]
+		if !ok {
+			t.Errorf("%s: not measured", entry)
+		} else if g != w {
+			t.Errorf("%s: service calls=%d, engine saw suspension=%v; the vet's CV101 is written against calls=%d suspension=%v", entry, g.calls, g.susp, w.calls, w.susp)
+		}
+	}
 	if os.Getenv("CLEAT_PROBE_REPORT") != "" {
 		_ = os.WriteFile(os.Getenv("CLEAT_PROBE_REPORT"), []byte(report.String()), 0o644)
 	}
+}
+
+// probeVerdictMatches reports whether the measured verdict starts with one of the "|"-separated alternatives in want.
+func probeVerdictMatches(got, want string) bool {
+	for _, alt := range strings.Split(want, "|") {
+		if strings.HasPrefix(got, alt) {
+			return true
+		}
+	}
+	return false
 }
 
 func trunc(s string) string {

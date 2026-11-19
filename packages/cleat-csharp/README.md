@@ -81,9 +81,10 @@ harmless and a source check cannot tell the two apart.
 pins the wall clock to the workflow's start time and seeds entropy from the workflow's identity, and a run under a
 different identity gets different values. `h.Now()` and `h.Random()` are the explicit forms and remain the clearer choice.
 This section said the opposite until cleat#4080, and it was wrong for the same reason cleat#4078 fixed: the shadows reach
-every WASI minor a C# toolchain emits. **Monotonic clocks are not replayed**: `Stopwatch` and `Environment.TickCount64`
-return a different value on replay, so the vet refuses them. `Thread.Sleep` really sleeps (it holds the worker and is not
-durable), `Task.Run`, `Task.Delay`, `.Wait()` and `new Thread` throw `PlatformNotSupportedException`, and `Task.Yield`
+every WASI minor a C# toolchain emits. **Monotonic clocks are not pinned**: `Stopwatch` returns a different value on every run, and `Environment.TickCount64`
+(a few milliseconds since the instance started) differs from its replay in most runs and coincides in some, so the vet
+refuses both. `Thread.Sleep` really sleeps (it holds the worker and is not
+durable), `Task.Run`, `Task.Factory.StartNew`, `Task.Delay`, `.Wait()` and `new Thread` throw `PlatformNotSupportedException`, and `Task.Yield`
 is fine. `RandomNumberGenerator` throws. `File` and `Directory` have no filesystem behind them (`File.Exists` answers
 `false` without error). **`HttpClient` makes the whole component fail to instantiate**, every entry point and not only the
 one that uses it, because it imports `wasi:http`, which the engine does not provide.

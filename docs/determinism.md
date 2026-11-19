@@ -149,7 +149,7 @@ the difference matters: a missed check is silent, and the corresponding missed
 ## The C# determinism check
 
 `cleat build --target csharp` and `cleat vet --lang csharp <dir>` read a C# project's `.cs` files
-and refuse the APIs a component cannot run or cannot replay: `Task.Run`, `Task.Delay`, a blocking
+and refuse the APIs a component cannot run or cannot replay: `Task.Run`, `Task.Factory.StartNew`, `Task.Delay`, a blocking
 `.Wait()`, `new Thread`, `Thread.Sleep`, `Stopwatch`, `Environment.TickCount[64]`,
 `RandomNumberGenerator`, `File`/`Directory` and `HttpClient`. Every rule cites a measurement made
 against the real engine (`tests/csharp/determinism_probe_test.go`), and so does what it leaves

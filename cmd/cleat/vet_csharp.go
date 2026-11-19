@@ -22,9 +22,10 @@ import (
 // guest never read from anywhere. What the table says, and so what this file does and does not refuse:
 //
 //	REFUSED, because the component cannot run it or cannot replay it
-//	  Task.Run, Task.Delay, .Wait(), new Thread     threw PlatformNotSupportedException on every run
+//	  Task.Run, Task.Factory.StartNew, Task.Delay, .Wait(), new Thread   threw PlatformNotSupportedException on every run
 //	  Thread.Sleep                                   returned after really sleeping: it blocks the worker and is not durable
-//	  Stopwatch, Environment.TickCount[64]           the real monotonic clock: NOT replayed (the values differ between a run and its replay)
+//	  Stopwatch, Environment.TickCount[64]           the real monotonic clock, not pinned: Stopwatch differs on every run; TickCount64 is a few ms
+//	                                                 since instance start and coincides with its replay by chance (7 of 9 runs differed)
 //	  RandomNumberGenerator                          threw PlatformNotSupportedException
 //	  File, Directory                                no filesystem: File.ReadAllText and WriteAllText threw DirectoryNotFoundException,
 //	                                                 and File.Exists answered False without error, which is the quiet kind of wrong
@@ -60,8 +61,8 @@ type csRule struct {
 }
 
 var csharpRules = []csRule{
-	{"CV001", "Task", "System.Threading.Tasks", []string{"Run"},
-		"Task.Run throws PlatformNotSupportedException in a component: there are no threads to run it on (measured)",
+	{"CV001", "Task", "System.Threading.Tasks", []string{"Run", "Factory"},
+		"Task.Run and Task.Factory.StartNew throw PlatformNotSupportedException in a component: there are no threads to run them on (measured)",
 		"Workflow code is single-threaded. Call the host (h.Call, h.Sleep) and await it, or compute inline"},
 	{"CV002", "Task", "System.Threading.Tasks", []string{"Delay"},
 		"Task.Delay throws PlatformNotSupportedException in a component: it needs a timer (measured)",
@@ -73,7 +74,7 @@ var csharpRules = []csRule{
 		"Stopwatch reads the real monotonic clock, which is NOT replayed: the value of a run differs from its replay (measured)",
 		"Use h.Now() for the durable clock; subtract two readings for a duration"},
 	{"CV007", "Environment", "System", []string{"TickCount", "TickCount64"},
-		"Environment.TickCount reads the real monotonic clock, which is NOT replayed (measured)",
+		"Environment.TickCount reads a monotonic clock the engine does not pin: milliseconds since the instance started, so a replay reads a different value unless the two start-ups happen to take the same time (measured over 9 runs: 7 differed, 2 coincided)",
 		"Use h.Now() for the durable clock"},
 	{"CV008", "RandomNumberGenerator", "System.Security.Cryptography", nil,
 		"RandomNumberGenerator throws PlatformNotSupportedException in a component (measured)",
@@ -203,7 +204,11 @@ func csharpCodeOnly(src []byte) []byte {
 		// Raw string, with or without a leading $: a run of 3 or more quotes opens it and a run of at least as many closes it.
 		case isRawStringStart(src, i):
 			j := i
+			nd := 0 // the number of $ prefixes: a hole opens at that many braces in a row and closes at that many
 			for j < n && (src[j] == '$' || src[j] == '@') {
+				if src[j] == '$' {
+					nd++
+				}
 				blank(j)
 				j++
 			}
@@ -233,6 +238,49 @@ func csharpCodeOnly(src []byte) []byte {
 					}
 					j += run
 					continue
+				}
+				if nd > 0 && src[j] == '{' {
+					run := 0
+					for j+run < n && src[j+run] == '{' {
+						run++
+					}
+					if run >= nd {
+						// The last nd braces open a hole; any before them are literal text. The hole is CODE and is kept.
+						for k := 0; k < run; k++ {
+							blank(j + k)
+						}
+						j += run
+						depth := 0
+						for j < n {
+							switch {
+							case src[j] == '"':
+								j = scanString(j, false, false)
+							case src[j] == '\'':
+								j = scanChar(src, blank, j)
+							case src[j] == '{':
+								depth++
+								j++
+							case src[j] == '}':
+								cl := 0
+								for j+cl < n && src[j+cl] == '}' {
+									cl++
+								}
+								if depth == 0 && cl >= nd {
+									for k := 0; k < cl; k++ {
+										blank(j + k)
+									}
+									j += cl
+									goto holeDone
+								}
+								depth--
+								j++
+							default:
+								j++
+							}
+						}
+					holeDone:
+						continue
+					}
 				}
 				blank(j)
 				j++
@@ -299,6 +347,27 @@ var (
 	csGlobalPfx  = regexp.MustCompile(`^global\s*::\s*`)
 )
 
+var csNameofRe = regexp.MustCompile(`\bnameof\s*\(`)
+
+// csBlankNameof blanks the argument of every nameof(...): `nameof(Thread.Sleep)` is a string the compiler computes and calls nothing, and it
+// must not be refused as if it did. Offsets are kept.
+func csBlankNameof(src string) string {
+	b := []byte(src)
+	for _, m := range csNameofRe.FindAllStringIndex(src, -1) {
+		open := m[1] - 1
+		end := csMatchClose(src, open, '(', ')')
+		if end < 0 {
+			continue
+		}
+		for i := open + 1; i < end; i++ {
+			if b[i] != '\n' && b[i] != '\r' {
+				b[i] = ' '
+			}
+		}
+	}
+	return string(b)
+}
+
 // csDeclares returns a regexp matching a declaration of a type called name in this file, which shadows the BCL type of the same name.
 func csDeclares(name string) *regexp.Regexp {
 	return regexp.MustCompile(`\b(?:class|struct|enum|interface|record(?:\s+(?:class|struct))?|delegate\s+\S+)\s+` + regexp.QuoteMeta(name) + `\b`)
@@ -336,7 +405,7 @@ func csRuleFor(typ string) []int {
 //
 // Deduplicated by (code, resolved path, line).
 func findForbiddenCSharp(code []byte) []csFinding {
-	src := string(code)
+	src := csBlankNameof(string(code))
 	lines := strings.Split(src, "\n")
 
 	known := map[string]bool{}
@@ -367,6 +436,22 @@ func findForbiddenCSharp(code []byte) []csFinding {
 			alias[name] = resolved
 		} else if known[name] {
 			shadowed[name] = true // using File = MyLib.File;
+		}
+	}
+	// A namespace alias (`using IO = System.IO;`) makes IO.File mean System.IO.File. Only a namespace that is, or is a prefix of, one a rule
+	// names is recorded: that is all a chain can need.
+	knownNS := map[string]bool{}
+	for _, ns := range nsOf {
+		parts := strings.Split(ns, ".")
+		for i := 1; i <= len(parts); i++ {
+			knownNS[strings.Join(parts[:i], ".")] = true
+		}
+	}
+	nsAlias := map[string][]string{}
+	for _, m := range csUsingAlias.FindAllStringSubmatch(src, -1) {
+		name, target := m[1], csJoinDots(csGlobalPfx.ReplaceAllString(m[2], ""))
+		if knownNS[target] && !known[name] {
+			nsAlias[name] = strings.Split(target, ".")
 		}
 	}
 	staticOf := map[string]bool{} // BCL type whose members are imported bare
@@ -407,6 +492,9 @@ func findForbiddenCSharp(code []byte) []csFinding {
 		// 3. dotted chains.
 		for _, m := range csDottedRe.FindAllStringIndex(line, -1) {
 			parts := strings.Split(csJoinDots(line[m[0]:m[1]]), ".")
+			if exp, ok := nsAlias[parts[0]]; ok {
+				parts = append(append([]string{}, exp...), parts[1:]...)
+			}
 			// A chain that is itself a member of something before it (`foo.Bar`), where the character before the match is '.', was split
 			// by the regex's own start: skip it, it is the tail of a longer chain handled from its head.
 			if m[0] > 0 && strings.TrimSpace(line[:m[0]]) != "" && strings.HasSuffix(strings.TrimRight(line[:m[0]], " \t"), ".") {
