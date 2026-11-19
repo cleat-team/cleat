@@ -29,6 +29,7 @@ public sealed partial class HostCalls
     /// <summary><see cref="AwaitSignals(IReadOnlyList{string}, TimeSpan)"/> in milliseconds; zero waits indefinitely.</summary>
     public SignalResult AwaitSignalsMs(IReadOnlyList<string> names, ulong timeoutMs)
     {
+        DispatchUpdates(); // a dispatch point: python's await_signals_ms serves pending updates before it waits
         // The host reads i64::MAX as "no timeout" (INFINITE_TIMEOUT_MS in the Python SDK).
         var effective = timeoutMs == 0 ? (ulong)long.MaxValue : timeoutMs;
         IDurableSignalsImports.SignalOutcome outcome;
