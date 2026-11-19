@@ -1,0 +1,446 @@
+# One place for per-step replay logic: a step dispatcher
+
+**Status: DRAFT for review, 2026-11-19.** Author: WS-cleat-3. Reviewer: WS-cleat-2 (this touches defer segments, and the
+residency design in #4162 depends on it). Gate: WS-cleat-1's fault-injection harness (#4169). **Nothing here is built, and
+nothing is built until the harness exists and this design is agreed.**
+
+Owner decision (2026-11-19, via the coordinator): before 0.6.0, move the per-step replay logic into one place, because the
+bugs of the last weeks keep coming from every host call doing it separately.
+
+This is a design about *where code lives*, not about behaviour. Section 7 says how the ABI, WIT, history format and database
+schema stay unchanged. Section 6 is the migration, in small PRs.
+
+Every number below carries the command that re-derives it, and a date. Read the two derivations in section 2 as a pair: they
+are meant to disagree about detail and agree about order of magnitude.
+
+---
+
+## 1. The problem, as the bugs saw it
+
+A *step* is one host call the guest makes. For each one the engine has to answer five questions, and each host call answers
+them itself:
+
+| # | question | where it is answered today |
+|---|---|---|
+| 1 | Is this step **replayed** from history, or **fresh**? When does replay end? | `s.isReplay` plus `exitReplay()` at the end of a replay block, in every host call |
+| 2 | Is the recorded event **this call's** event? If not, report a divergence. | an `if rec.EventType != ...` ladder in every host call, each with its own message |
+| 3 | Is this call **refused** (a defer segment's body, or a shutdown)? | `stopBeforeNewWork()` in the fresh branch, in *some* host calls |
+| 4 | **Record** the outcome, and did the write **persist**? | `s.recordEvent(...)`, whose return value most callers ignore |
+| 5 | **Count** it (event cap) | `freshCall` only |
+
+The bug family of the last weeks is one question skipped in one host call, found by reading code or by luck:
+
+| issue / PR | the question that was missing, in the host call that missed it |
+|---|---|
+| #4143, #4150 | (3) `DurableCall` at the replay frontier: `replayCall` handed to `freshCall` and the refusal sat in the entry |
+| #4152, #4156 | (3) and (1) `DurableCallWithRetry` at the frontier went to `replayCall`: one plain attempt instead of the policy |
+| #4143, #4158 | (3) `SideEffectRecorded` (the lookup half of side effects) answered "not recorded" at the frontier with no refusal |
+| #4153 | (1) `await_signals(0)` was not replayed, and left replay with history unread |
+| #4157, #4163 (open) | (1)+(2) a replay block that leaves replay with history unread runs later steps fresh; the class of #4153 |
+| #4159, #4161 | (3) `ContinueAsNew` recorded in a defer segment, losing the cleanup |
+| #4160 | (4) a recorded event whose write is refused (quota) does not stop the guest: the run carries on with the step missing |
+| #4117, #4165 | (2) a one-chunk stream and a stream failure are the same row, so replay read the wrong one |
+
+Re-derive the size of the duplication (2026-11-19, develop `1157baf3`, non-test `engine/*.go`):
+
+    for f in 's\.exitReplay\(\)' 'advanceReplayStep\(' 'stopBeforeNewWork\(\)' 's\.recordEvent\(' 'replay divergence'; do
+      printf "%-24s sites=%s files=%s\n" "$f" \
+        "$(git grep -h -E "$f" -- 'engine/*.go' ':!engine/*_test.go' | grep -v '^\s*//' | wc -l | tr -d ' ')" \
+        "$(git grep -l -E "$f" -- 'engine/*.go' ':!engine/*_test.go' | wc -l | tr -d ' ')"
+    done
+    # exitReplay 40 sites/12 files; advanceReplayStep 41/12; stopBeforeNewWork 30/12; recordEvent 52/11; "replay divergence" 20/10
+
+Forty places decide when replay ends. Each is a chance to leave it with history unread, which is the whole of #4153 and #4157.
+
+---
+
+## 2. What the code does today: a machine-derived inventory
+
+`HostHandler` (`engine/imports.go`) is the one interface all three marshalling layers call: `engine/imports.go` for the wazero
+core path, `engine/wasmtime_hostfuncs*.go` for wasmtime, and `engine/component_callbacks.go` for components, which calls
+`b.handler.DurableCall(ctxWithMem(...), nil, ...)` and the like. **So there are 54 host-handler methods, not three times that,
+and a dispatcher placed at the `execSession` level reaches all three paths without touching any of them.** (Re-derive the 54
+with the script in appendix B.)
+
+Appendix A is the generated table: for each method, which of the five concerns appear in its body or in an `execSession`
+method it calls (two levels deep). **It is a text scan and it is wrong in both directions**: a helper reached through a
+function value is missed, and a match in a branch that never runs is counted. Use it as a map. The second reading is the
+site count in section 1, which counts call sites rather than methods and does not depend on how deep the scan looks.
+
+What the two readings agree on:
+
+- **34 of 54** methods record an event; **20 do not** (appendix A, "records").
+- **26** methods call `stopBeforeNewWork()` directly or through a helper. Of the 34 that record, **nine do not**:
+  `ContinueAsNew` and `ContinueAsNewWithVersion` (fixed by #4161, not yet on develop at the time of the scan),
+  `AwaitChild`, `AwaitAllChildren`, `AwaitAnyChild`, `AwaitPromise`, `RegisterUpdateHandler`, `ReleaseLock` and `ListCrons`.
+  Whether each *should* is a separate question per call (section 5): a wait that only reads a recorded outcome is not "new
+  work". The point is that nothing but a reader decides it, and a reader decided it nine different ways.
+- **35** methods advance replay and **35** mention divergence: wherever replay is consumed there is a hand-written check.
+
+### The shape every step takes today
+
+Reconstructed from `DurableCall`, `replayCall`, `freshCall`, `DurableDefer`, `CreatePromise`, `SideEffect`, `SignalWorkflow`:
+
+    HostCall(args):
+      if s.isReplay:
+        if frontier (stepCount >= len(history)):  exitReplay(); fall through to fresh      # (1)
+        else:
+          rec := history[stepCount]
+          if rec.Type != expected or rec fields mismatch:  report divergence               # (2)
+          advanceReplayStep(rec)                                                            # consumes, moves the clock, extends the checksum chain
+          return decode(rec)
+      if stopBeforeNewWork():  return callSuspendSentinel                                   # (3), in SOME of them
+      result := do the work
+      persistence := recordEvent(EventRecord{...})                                          # (4), result ignored by most
+      return encode(result)
+
+and the specific ways it has gone wrong: the refusal at (3) sits on the non-replay path, so a call that arrives through the
+frontier branch skips it (#4143); a block at (1) that returns before consuming everything leaves replay with history unread
+(#4153); a block at (2) that matches on type alone cannot tell two records of one type apart (#4117).
+
+---
+
+## 3. The proposal
+
+One method on `execSession` runs every step. A host call stops *being* the step and becomes **a description of one**.
+
+```go
+// step is the one place the five questions are answered. It is unexported and reached only from HostHandler methods.
+func (s *execSession) step(ctx context.Context, sp stepSpec) stepResult
+
+type stepSpec struct {
+    Name   string       // "durable_call", for divergence messages and the inventory
+    Kind   stepKind     // see section 4
+    Effect effectClass  // what the step does to the outside world: drives (3), see below
+
+    // Replay side. A pure function of the recorded event(s); it must not touch the world.
+    Want   func(rec *EventRecord) mismatch   // (2): nil if rec is THIS call's event; else a typed reason
+    Decode func(recs []EventRecord) stepResult
+
+    // Fresh side. Does the work and says what to record. It is only called when the dispatcher has decided fresh work is allowed.
+    Fresh  func(ctx context.Context) (stepResult, []EventRecord)
+}
+```
+
+and the dispatcher is, in full:
+
+    step(sp):
+      pos := s.position()                       # InHistory | AtFrontier | Fresh          -- (1), computed in ONE place
+      if pos == InHistory:
+        recs, why := s.takeRecords(sp.Kind)     # takeRecords reads 1..n records; it is where "consume everything this step owns" lives
+        if why != nil:  return s.divergence(sp, why)                                      -- (2), one message format, one metric
+        return sp.Decode(recs)
+      if pos == AtFrontier:  s.leaveReplay()    # the ONLY exitReplay in the engine for steps; it asserts stepCount == len(history)
+                                                #  unless stopIdx fast-forward is armed (a segment's stop)     -- the #4153/#4157 invariant
+      if sp.Effect != Pure && s.stopBeforeNewWork():  return callSuspendSentinel          -- (3), once, for every non-pure step, on both paths
+      res, recs := sp.Fresh(ctx)
+      for rec in recs:  p := s.recordEvent(rec); if p == eventFlushFailed: return s.persistenceFailure(sp, res)   -- (4), the #4160 hook
+      s.countStep()                                                                         -- (5)
+      return res
+
+The five questions become five lines. The properties the bugs violated become properties of this function, not of 54 callers:
+
+- **No refusal is skippable.** A step with `Effect != Pure` is refused in a defer segment's body whichever way it arrived,
+  because there is one arrival path after `leaveReplay`. #4143, #4152, #4158 and #4159 cannot recur *by construction*, which is
+  stronger than a guard that scans for them.
+- **Replay never ends with history unread.** `leaveReplay` asserts it, once. #4153 and #4157 are one assertion.
+- **A divergence has one shape**: one message, one metric, one place a replay tester hooks.
+- **A recorded event's write is checked.** `persistenceFailure` is where the policy for #4160 goes. This design gives that
+  policy a home; it does **not** choose it. Choosing between "fail the call", "retry", and "suspend and let the run resume
+  from its last durable event" is #4160's decision, and the dispatcher must not be where it is made by accident.
+
+### `effectClass`, and why it is not a boolean
+
+| class | meaning | refused in a segment's body? | examples (from the inventory) |
+|---|---|---|---|
+| `Pure` | derived from the session and the history; no world access, no event | no | `Now`, `Random`, `UUID`, `WorkflowID`, `RunID`, `Version`, `JsonParse` |
+| `Read` | reads recorded or live state; records an event only so replay can return the same answer | **decided per call** (section 5) | `ListCrons`, `GetScope`, `PollSignal`, `PollChild` |
+| `Effect` | reaches the outside world or mutates durable state | **yes** | `DurableCall`, `PluginCall`, `SignalWorkflow`, `ResolvePromise`, `ScheduleCron`, `AcquireLock` |
+| `Terminal` | ends the run | **yes, and records nothing** | `ContinueAsNew*` |
+
+The only thing a class decides is whether `stopBeforeNewWork` applies. The nine record-without-refusal methods in section 2 fall into `Read`, `Terminal` and `Wait` rows, or nobody decided them; the design forces each into a row, and section 5 says which are open.
+
+---
+
+## 4. What is *not* a plain step: the exceptions, named
+
+A dispatcher that takes every host call through one shape ends up special-casing the awkward ones inside itself. The design
+instead gives the awkward ones a **kind**, so the exception is in the spec and not in the dispatcher.
+
+| kind | host calls | what is different | how the dispatcher treats it |
+|---|---|---|---|
+| `Single` | `DurableCall`, `DurableSend`, `DurableDefer`, `CreatePromise`, `SideEffect`, `PluginCall`, `SignalWorkflow`, `ScheduleCron`, `DeleteCron`, `ListCrons`, `AcquireLock`, `ReleaseLock`, `SetScope`, `Fetch`, `RegisterUpdateHandler`, `ResolvePromise`, `RejectPromise`, `DurableScheduleInvoke`, `DurableCompleteUpdate` | one call, one event | the base case |
+| `Multi` | `DurableCallWithRetry`, `DurableCallWithHeartbeat` | one call, 1..n events (`call_attempt_failed`..., then `call`); a history can end **inside** the call (a run lost mid-policy), and the call then *resumes* | `takeRecords` reads a run of `call_attempt_failed` then at most one terminal; "ends inside" returns a `Resume{spent}` the spec's `Fresh` continues from (#1145, #4152) |
+| `Stream` | `PluginCallStreaming` | n chunk events for one call; the *fresh* side publishes each chunk to a live reader as it is recorded, and a failure is one synthetic chunk | `Kind = Stream` has its own `takeRecords` (read chunks until finished) and its `Fresh` records as it goes. This is the one place the dispatcher's "record after Fresh returns" is wrong, so `Stream` records inside `Fresh` and returns an empty list. #4117's marker (`StreamData`) belongs to this spec. |
+| `Wait` | `DurableAwaitSignals`, `AwaitPromise`, `AwaitChild`, `AwaitAllChildren`, `AwaitAnyChild` | the outcome depends on **time and the world** at replay: the recorded `await_*` event is followed by the delivery or by nothing, and "nothing" means *suspend again*, not "diverge". `await_signals` re-polls the store on replay when its event is the last one. | `Kind = Wait` has `Decode` return one of `Done(result)`, `StillWaiting(until)`, or `TimedOut`; the dispatcher turns `StillWaiting` into the suspension. The hand-written time arithmetic in `DurableAwaitSignals` stays in its spec; what moves is the exit-from-replay and the refusal. |
+| `Sleep` | `DurableSleep` | **records no event**: it decides from the clock (`IMPROVEMENT-PLAN 3.67`), which is why it appears in neither the replay nor the record column | stays outside the dispatcher, as a `Pure`-class function with no history access. Putting it through the dispatcher would *add* an event and change the history format. It is listed so nobody does. |
+| `Terminal` | `ContinueAsNew`, `ContinueAsNewWithVersion` | records the event that **ends** the run and sets the suspension; nothing may follow it | the dispatcher refuses it in a segment (#4159) and records nothing after it; the `Terminal` class carries that |
+| `Lookup` | `SideEffectRecorded` | the **lookup half** of a two-call protocol (lookup, then record): an SDK that asks first runs the user's function *between* the two. It records nothing; it answers "recorded value / not recorded" | its `Fresh` is "answer not-recorded", and it is refused at the frontier like an `Effect`, because answering "not recorded" is what makes the SDK run the function (#4158). This is why the class is decided by what the *caller will do next*, not by what the call itself does. |
+| `Live` | `PollSignal`, `PollChild`, `PollCancellation` | **return the world's current state with no event** | outside the dispatcher. Their determinism is a property of when the guest asks (`PollCancellation` returns 0 during replay by construction), not of the engine's history. They are listed as the exceptions the dispatcher *must not* absorb, and as the first place a future "unrecorded read" bug will be. |
+| `Spawn` | `ChildWorkflow`, `ChildWorkflowWithOptions`, `RunDetached`, `StartDetached` | the **record and the effect are one database transaction**: the child row and the event are inserted together (`StartChildWorkflowAtomic`, `children.go`, so a crash cannot leave a child with no parent event or the reverse; #777). The dispatcher's "do the work, then record" is two steps where this call has one | `Fresh` returns with the event already written by the store, and the spec says so (`RecordedBy: Store`); the dispatcher then skips its own `recordEvent` but still runs refusal, the persistence outcome and the count. The atomicity is the exception and stays where it is. |
+| `Poll` | `DurablePollUpdate` | a replay poll **legitimately finds nothing**: when the record at this step is not an `update_received`, it reports "nothing found" *without advancing and without leaving replay*, because the guest polls at every suspension and treating that as a mismatch would end replay at the first one (`updater.go`). It is the one step where a non-matching record is not a divergence | `Want` returns a third answer beyond *match* and *diverge*: *not mine, leave it*. `takeRecords` then consumes nothing. This is the reason the "replay never ends with history unread" assertion has to be "at leave-replay", not "at every step". |
+| `Update` | `RegisterUpdateHandler`, `DurableCompleteUpdate` | an update's *delivery* record (`update_received`) is written by the **API side**, not by the guest; `DurableCompleteUpdate` records the guest's answer. The `update_received` event type is shared between "delivered" and "polled", which is why `stoppableByOp` exists in the stop inventory (`engine/an_event_is_stoppable_only_if_a_host_site_can_refuse_it_test.go`) | `Single` steps; the dispatcher inherits the distinction and does not resolve it. |
+
+`Pure` host calls (`Now`, `Random`, `UUID`, `GetScope`, `Version`, `MinVersion`, `WorkflowID`, `RunID`, `JsonParse`,
+`JsonStringify`, `SetQueryState`, `RegisterQueryHandler`, `SetDeferPhase`, `DurableLog`, `ServeWasiSleep`) do not go through
+the dispatcher at all. The list is appendix A's "records" column read backwards: 20 methods record nothing.
+
+**The count of exceptions is the honest cost of this design: nine kinds beyond `Single` (`Multi`, `Stream`, `Wait`, `Sleep`, `Terminal`, `Lookup`, `Live`, `Spawn`, `Poll`), and of 54 methods 19 are `Single`, 4 are `Spawn`.** If a reviewer thinks a kind should dissolve into `Single` plus a flag, that is the argument to have, and section 9
+lists the two I am least sure of.
+
+---
+
+## 5. Decisions the dispatcher forces, per call (not made here)
+
+Moving every call through one function means the nine "records but never refuses" methods each need an explicit answer. These
+are the open questions, with my recommendation, for WS-cleat-2 to overrule:
+
+| call | recommend | why |
+|---|---|---|
+| `ContinueAsNew*` | refuse (done in #4161) | measured: the run lost its cleanup |
+| `AwaitChild`, `AwaitAllChildren`, `AwaitAnyChild` | **open**: refuse? A segment's body that stops at a child wait is plausible; one that waits for a child while its workflow is being terminated is the defect. Not measured. | filed as an optional follow-up in #4101's neighbourhood; the dispatcher makes it a one-field change |
+| `AwaitPromise` | same as the child waits | not measured |
+| `RegisterUpdateHandler` | `Read` (not refused): it registers a name, does nothing outside the run | arguable |
+| `ReleaseLock` | **refuse**? It releases a lock a *terminated* run may still hold; a segment that releases it in the body is the cleanup working. Needs the harness. | open |
+| `ListCrons` | `Read`; stays a named exemption in the hand-off guard | read of the schedule table |
+
+None of these is decided by this document. The dispatcher turns each into one `Effect:` field, which is the point.
+
+**Event cap (5).** Today only `freshCall` counts toward `maxEventsPerWorkflow` and triggers auto-ContinueAsNew
+(`grep -n 's.eventCount\|maxEventsPerWorkflow' engine/*.go`: three sites, all in `DurableCall`). Counting every recorded
+event in the dispatcher is **a behaviour change** (a workflow of plugin calls would start hitting the cap), so the migration
+does not do it silently: PR 1 keeps the count on `Single` steps of `DurableCall` only, through a spec field, and a later,
+separately-announced PR decides whether to widen it.
+
+---
+
+## 6. Migration: small PRs, each checked
+
+**Rule for every PR below: the PR changes where code lives, and nothing else.** A step's recorded events, the checksum chain,
+the guest-visible result and the suspension are byte-identical before and after. That is checkable, and the first PR builds the
+check.
+
+| PR | change | checked by |
+|---|---|---|
+| 0 | **Characterization fixtures, no production change.** For each host call, on current develop: run it fresh, then replay each prefix of its history, and record `(result bytes, events recorded, isReplay after, stepCount after)` as a golden table, plus the same for a defer segment and a defer body. Written once, from the *old* code. | the fixtures themselves, with a known-positive (mutate a host call, watch its row fail) |
+| 1 | The dispatcher and its spec types, with **no users**, plus property tests over a fake spec table: leave-replay asserts history is read; a non-`Pure` step is refused in a segment on both arrival paths; one message for a divergence; a failed write reaches `persistenceFailure`. | the property tests; the existing guards untouched |
+| 2 | `DurableCall` through the dispatcher. It is the reference: simplest shape, the event-cap counter, and the most guards already pointing at it. | PR 0's rows for `DurableCall`; `replay_fresh_parity_test`; the harness's golden run for `call` |
+| 3 | The `Single` effect calls in two or three batches, ordered by how many guards cover them: `SideEffect`+`SideEffectRecorded`, `CreatePromise`+`ResolvePromise`+`RejectPromise`, locks and scope, crons, `SignalWorkflow`, `DurableSend`, `DurableDefer`, `Fetch` | PR 0 rows; the harness's per-op kill/terminate rows |
+| 4 | `Multi`: `DurableCallWithRetry`, `DurableCallWithHeartbeat` | PR 0 rows plus #4156's and #4168's tables (the mid-retry rows are exactly this kind's hard case) |
+| 5 | `PluginCall`; then `Stream` (`PluginCallStreaming`) on its own, because it is the kind that does not fit "record after Fresh" | #4165's tests; the live-reader tests (`a_live_reader_never_stalls_a_workflow_test`, `stream_chunk_tail_test`) |
+| 6 | `Wait` and its callers, one call per PR: `DurableAwaitSignals` first (it has the re-poll and the most history), then promises, then children | the harness's signal and promise scripts; the time-dependent branch needs the harness's kill-while-waiting row |
+| 7 | `Terminal` and `Update` | #4161's real-worker test; the update dispatch tests |
+| 8 | Delete the per-call helpers that nothing calls (`replayCall`, `replayRetryAttempts`, the per-call frontier blocks) and **shrink the guards** (section 8) | the dead-exports guard; the guards that remain |
+
+Each of PRs 2 to 7 is one reviewer-sized change, and any of them can be reverted alone because the old code for the *other*
+calls is still there. **The two old shapes coexist for the length of the migration**, which is the cost: during it the
+engine has the five questions answered in two ways. The ordering puts the calls with the most shared guards first so that the
+coexisting period is the one with the most checking.
+
+---
+
+## 7. What does not change
+
+- **ABI and WIT.** `HostHandler` keeps every method and signature. The three marshalling layers (wazero imports, wasmtime
+  hostfuncs, component callbacks) call the same 54 methods and are not edited. `ABI.md` and `scripts/check-doc-consistency.sh`
+  are unaffected; the export set is untouched.
+- **History format.** The dispatcher records through the existing `recordEvent`. `EventRecord`, `eventRecordToPayload`,
+  `populateFromPayload`, the compaction state and the typed events are not edited, so the payload-carrier and
+  compaction-equivalence guards stay as they are. The checksum chain is extended by the same `advanceReplayStep` (the
+  dispatcher calls it; it does not reimplement it).
+- **Database schema.** No column, no migration. `insertEventSQL` and the flush paths are not touched.
+- **Behaviour on any recorded history.** PR 0's fixtures are the claim and PR 2 onward are held to them.
+
+The one thing the dispatcher *could* change is the event cap and the nine refusal decisions of section 5. Both are listed so
+that they are decisions, not side effects.
+
+---
+
+## 8. What shrinks
+
+Guards that exist because a host call can forget a question become properties of `step`, and are deleted once PR 8 lands.
+Guards that check a **cross-language** fact stay, because the dispatcher cannot see another language.
+
+| guard (develop, 2026-11-19) | after | why |
+|---|---|---|
+| `a_replay_to_fresh_hand_off_refuses_or_is_named_test` (the frontier-answer scan, `frontierAnswersThatNeedNoRefusal`) | **replaced by a test of `step`**: any spec with `Effect != Pure` is refused | the scan reads host-call source for a refusal; the property is now a fact about one function |
+| `a_host_call_never_leaves_replay_with_history_unread_test` (#4163, **open, not yet on develop**; it also adds `engine/replay_divergence.go`, a first shared divergence helper) | replaced by the `leaveReplay` assertion; the helper becomes `step`'s divergence path | one assertion, not a scan |
+| `engine/stop_correspondence_guard_test.go` (the engine-side half) | **stays**, shrinks | the SDK side (every SDK treats a stop as a stop) is cross-language, and so are the Java/Rust parity counts: `stopSitesOn20260904` counts engine *stop sites*, and the dispatcher turns many hand-written sites into one check per effect step, so how that guard derives its count has to be re-pointed at the specs. I have not worked out how; it is the part of this section I am least sure of. |
+| `an_event_is_stoppable_only_if_a_host_site_can_refuse_it_test` | stays, reads `Effect` instead of scanning | the inventory of "which event types can a stop point land on" is about event types, not call sites |
+| the per-call frontier tests (`replay_frontier_test`, `a_retry_policy_applies_at_the_replay_frontier_test`) | stay as behavioural tests; their *reason for existing* moves into PR 1's properties | they are the characterization that PR 0 starts from |
+
+A guard is removed only after a mutation of the dispatcher makes its replacement fail, in the same PR.
+
+---
+
+## 9. Risks, and what I am least sure of
+
+1. **The coexistence period (section 6).** Two answers to the five questions live in the engine until PR 8. The migration
+   order is the mitigation; the risk is that PR 8 never lands and the engine keeps both. *Mitigation: PR 8's deletion list is
+   written in PR 1 and its absence is a visible TODO, not an implicit one.*
+2. **`Wait` is the least likely to fit.** `DurableAwaitSignals` re-polls the signal store on replay and decides from
+   `rec.TimestampMs + TimeoutMs` against the wall clock. If `Decode` returning `Done | StillWaiting | TimedOut` cannot express
+   it without the spec reaching into the session, `Wait` stays outside the dispatcher and *only* its exit-from-replay and
+   refusal move into shared helpers. **Decide after PR 5, with `DurableAwaitSignals` as the test case, not before.**
+3. **`Stream` records inside `Fresh`.** That breaks the dispatcher's "record after" invariant for one kind; the
+   `persistenceFailure` hook must then be callable from inside a spec, which makes it a method the spec can reach. If that
+   is too much surface, `Stream` stays outside too. *The kinds I would most like a second opinion on are `Stream` and `Wait`.*
+4. **Resident workflows (#4162).** If a suspended run stays resident, `position()` can no longer be derived from "this session
+   started in replay": a resident session continues *without* replaying. `stepCount`, `history` and `isReplay` are then live
+   state of a long-lived object and `leaveReplay`'s assertion must hold across a resume that never replays. This design
+   makes that easier (the state transitions are in one function) but does not do it; it is the reason WS-cleat-2 reviews.
+   A kill-while-resident boundary is a new fault the harness needs (I said so on #4169).
+5. **Performance.** A spec built per call allocates closures. A host call is already a database round trip when it records;
+   there is **no host-call benchmark in the tree today** (`git grep -n 'func Benchmark' -- 'engine/*_test.go' 'benchmarks/*.go'` finds database, compilation and end-to-end ones only), so PR 1 adds one for `DurableCall` replayed and fresh, and PR 2 must show it unchanged within noise. If a spec allocation
+   shows up, specs are package-level values and the per-call data goes in a small struct, not in closures.
+6. **A text scan for the inventory is a loose instrument** (section 2), and the 54-method count rests on one interface read.
+   The cross-check is `go doc -all`-style: the `HostHandler` method set against the `Export` set (`scripts/check-doc-consistency.sh`
+   compares exports against `ABI.md`), which is a different denominator. They differ by the exports with no handler method.
+
+## 10. Questions
+
+**For WS-cleat-2:** (a) Does `position()` as defined survive resident workflows, or does #4162 need `Fresh | InHistory |
+AtFrontier | Resident`? (b) Is a defer segment's body on a resident session still "a body past the end of history"? (c) The
+section 5 table: which of the nine do you overrule?
+
+**For WS-cleat-1:** (a) PR 0's golden fixtures are in-process; the harness is black-box. I want both, and the harness's golden
+run to be the same table at process level: can its op-list oracle emit `(events, effects)` per op in a form PR 0 can compare
+against? (b) A counter for "steps refused in a segment" would let the harness assert that a segment ran its defers and nothing
+else, which a count of effects cannot.
+
+---
+
+## Appendix A. Inventory (generated; 2026-11-19, develop `1157baf3`)
+
+Columns: **replay-aware** the body reads `s.isReplay`; **consumes** reaches `advanceReplayStep`; **exits replay** reaches
+`exitReplay`; **refuses in segment** reaches `stopBeforeNewWork`; **records** reaches `recordEvent`; **reads persistence**
+mentions the flush outcome; **divergence** mentions a divergence report. "Reaches" means in the body or in an `execSession`
+method it calls, two levels deep. A text scan: a map, not a proof.
+
+| host call | file | replay-aware | consumes | exits replay | refuses in segment | records | reads persistence | divergence |
+|---|---|---|---|---|---|---|---|---|
+| `DurableCall` | durablecalls.go | x | x | x | x | x |  | x |
+| `DurableSleep` | durablecalls.go |  |  |  |  |  |  |  |
+| `DurableAwaitSignals` | signaller.go | x | x | x | x | x | x | x |
+| `DurableDefer` | durablecalls.go | x | x | x | x | x | x | x |
+| `SetDeferPhase` | durablecalls.go |  |  |  |  |  |  |  |
+| `DurableLog` | durablecalls.go | x |  |  |  |  |  |  |
+| `PollCancellation` | signaller.go | x |  |  |  |  |  |  |
+| `PollSignal` | signaller.go |  |  |  |  |  |  |  |
+| `ContinueAsNew` | lifecycle.go | x | x | x |  | x | x | x |
+| `ContinueAsNewWithVersion` | lifecycle.go | x | x | x |  | x | x | x |
+| `ChildWorkflow` | children.go | x | x | x | x | x | x | x |
+| `ChildWorkflowWithOptions` | children.go | x | x | x | x | x | x | x |
+| `AwaitChild` | children.go | x | x | x |  | x | x | x |
+| `AwaitAllChildren` | children.go | x | x | x |  | x |  | x |
+| `PollChild` | children.go |  |  |  |  |  |  |  |
+| `AwaitAnyChild` | children.go | x | x | x |  | x | x | x |
+| `DurableCallWithRetry` | durablecalls.go | x | x | x | x | x |  | x |
+| `DurableCallWithHeartbeat` | heartbeats.go | x | x | x | x | x |  | x |
+| `Version` | lifecycle.go |  |  |  |  |  |  |  |
+| `MinVersion` | lifecycle.go |  |  |  |  |  |  |  |
+| `SetQueryState` | lifecycle.go |  |  |  |  |  |  |  |
+| `Now` | lifecycle.go |  |  |  |  |  |  |  |
+| `Random` | lifecycle.go |  |  |  |  |  |  |  |
+| `ServeWasiSleep` | durablecalls.go |  |  |  |  |  |  |  |
+| `CreatePromise` | promises.go | x | x | x | x | x | x | x |
+| `AwaitPromise` | promises.go | x | x | x |  | x | x | x |
+| `PluginCall` | plugins.go | x | x | x | x |  |  | x |
+| `PluginCallStreaming` | plugins.go | x | x | x | x | x | x | x |
+| `RegisterUpdateHandler` | lifecycle.go | x | x | x |  | x | x | x |
+| `DurablePollUpdate` | updater.go | x | x | x | x | x | x | x |
+| `DurableCompleteUpdate` | updater.go | x | x | x | x | x | x | x |
+| `SignalWorkflow` | signaller.go | x | x | x | x | x | x | x |
+| `SetScope` | scope.go | x | x | x | x | x |  | x |
+| `GetScope` | scope.go |  |  |  |  |  |  |  |
+| `UUID` | lifecycle.go |  |  |  |  |  |  |  |
+| `AcquireLock` | locking.go | x | x | x | x | x | x | x |
+| `ReleaseLock` | locking.go | x | x | x |  | x | x | x |
+| `SideEffect` | lifecycle.go | x | x | x | x | x |  | x |
+| `SideEffectRecorded` | lifecycle.go | x | x | x | x |  |  | x |
+| `WorkflowID` | lifecycle.go |  |  |  |  |  |  |  |
+| `RunID` | lifecycle.go |  |  |  |  |  |  |  |
+| `ResolvePromise` | promises.go | x | x | x | x | x | x | x |
+| `RejectPromise` | promises.go | x | x | x | x | x | x | x |
+| `DurableSend` | durablecalls.go | x | x | x | x | x | x | x |
+| `DurableScheduleInvoke` | durablecalls.go | x | x | x | x | x | x | x |
+| `RegisterQueryHandler` | lifecycle.go |  |  |  |  |  |  |  |
+| `RunDetached` | children.go | x | x | x | x | x | x | x |
+| `StartDetached` | children.go | x | x | x | x | x | x | x |
+| `Fetch` | lifecycle.go | x | x | x | x | x | x | x |
+| `JsonParse` | lifecycle.go |  |  |  |  |  |  |  |
+| `JsonStringify` | lifecycle.go |  |  |  |  |  |  |  |
+| `ScheduleCron` | schedules.go | x | x | x | x | x | x | x |
+| `DeleteCron` | schedules.go | x | x | x | x | x | x | x |
+| `ListCrons` | schedules.go | x | x | x |  | x | x | x |
+
+## Appendix B. The script
+
+Run from the repository root. It reads the `HostHandler` interface from `engine/imports.go`, finds each method on `execSession`,
+and scans its body and the `execSession` methods it calls.
+
+```python
+import re, glob, subprocess, sys
+# Which methods are host-handler methods: the HostHandler interface in imports.go.
+src = open('engine/imports.go').read()
+a = src.index('type HostHandler interface')
+b = src.index('\n}\n', a)
+iface = src[a:b]
+names = re.findall(r'^\t([A-Z]\w*)\(', iface, re.M)
+files = [f for f in sorted(glob.glob('engine/*.go')) if not f.endswith('_test.go')]
+bodies = {}   # func name -> (file, body)
+allfuncs = {}
+for f in files:
+    s = open(f).read()
+    for m in re.finditer(r'^func (?:\(s \*execSession\) )?(\w+)\(', s, re.M):
+        i = s.index('{', s.index('\n', m.end()) if False else m.end())
+        # find the opening brace of the body: first '{' at end of a line after the signature
+        j = m.end()
+        k = s.index(') {\n', j) if ') {\n' in s[j:j+2000] else None
+        sig_end = re.compile(r'\{\n').search(s, j)
+        if not sig_end: continue
+        depth = 0; p = sig_end.start()
+        while p < len(s):
+            c = s[p]
+            if c == '{': depth += 1
+            elif c == '}':
+                depth -= 1
+                if depth == 0: break
+            p += 1
+        allfuncs.setdefault(m.group(1), []).append((f, s[sig_end.start():p+1], m.group(0).startswith('func (s *execSession)')))
+FEATS = [
+ ('isReplay', r'\bs\.isReplay\b'),
+ ('advanceReplayStep', r'advanceReplayStep\('),
+ ('exitReplay', r'\bexitReplay\('),
+ ('stopBeforeNewWork', r'stopBeforeNewWork\('),
+ ('callSuspendSentinel', r'callSuspendSentinel'),
+ ('recordEvent', r'\brecordEvent\(|recordEventPersisted\(|recordStreamError\('),
+ ('persistence', r'eventFlushFailed|eventNotAttempted|eventPersisted|persistence'),
+ ('divergence', r'replay divergence|RecordReplayFailure|divergen'),
+ ('history', r'\bs\.history\b'),
+ ('stepCount', r'\bs\.stepCount\b'),
+ ('frontier', r'stepCount\s*>=\s*len\(s\.history\)'),
+]
+def callees(body, depth=0, seen=None):
+    seen = seen if seen is not None else set()
+    out = ''
+    for fn in set(re.findall(r'\bs\.(\w+)\(', body)):
+        if fn in seen or fn not in allfuncs: continue
+        seen.add(fn)
+        for (f, b, isx) in allfuncs[fn]:
+            if isx and depth < 2:
+                out += b + callees(b, depth+1, seen)
+    return out
+rows = []
+for n in names:
+    cands = [(f, b) for (f, b, isx) in allfuncs.get(n, []) if isx]
+    if not cands:
+        rows.append((n, '(none)', [], [])); continue
+    f, b = cands[0]
+    direct = [k for k, rx in FEATS if re.search(rx, b)]
+    deep = [k for k, rx in FEATS if re.search(rx, b + callees(b)) and k not in direct]
+    rows.append((n, f.replace('engine/', ''), direct, deep))
+print('%d host-handler methods' % len(rows))
+for r in rows:
+    print('%-28s %-26s direct=%s  via-callees=%s' % (r[0], r[1], ','.join(r[2]), ','.join(r[3])))
+```
