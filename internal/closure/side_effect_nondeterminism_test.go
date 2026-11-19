@@ -42,6 +42,11 @@ func TestNondeterminismInsideTheSideEffectFunctionIsAllowedAndOnlyThere(t *testi
 		if got := codes(fn); len(got) != 0 {
 			t.Errorf("%s: the function passed to SideEffect was refused: %v", fn, got)
 		}
+		// No ENTRY at all, not merely no errors: a stored empty slice makes len(cr.Errors) non-zero, which callers that count entries (cmd/cleat's
+		// wiring test) read as a function with errors (cleat-review, #4126).
+		if _, present := cr.Errors[pkg+"."+fn]; present {
+			t.Errorf("%s: cr.Errors holds an entry (%v) for a function with no errors", fn, cr.Errors[pkg+"."+fn])
+		}
 	}
 
 	// Known-positives: the same constructs outside the literal are still refused.

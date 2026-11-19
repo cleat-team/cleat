@@ -297,8 +297,13 @@ func validateConstructs(fd *analyzer.FuncDecl, cr *Result) {
 		}
 		before := len(cr.Errors[name])
 		defer func() {
-			if insideSideEffect > 0 {
+			// Only when something was appended: assigning back a zero-length slice would store `name: []` (a non-nil, empty entry) for every
+			// function that contains a SideEffect literal, and callers that test len(cr.Errors) see an error where there is none.
+			if insideSideEffect > 0 && len(cr.Errors[name]) > before {
 				cr.Errors[name] = dropValueNondeterminism(cr.Errors[name], before)
+				if len(cr.Errors[name]) == 0 {
+					delete(cr.Errors, name)
+				}
 			}
 		}()
 		switch stmt := n.(type) {
