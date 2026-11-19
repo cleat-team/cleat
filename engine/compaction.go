@@ -629,9 +629,18 @@ func extractCompactionStateFrom(prev *CompactionState, events []EventRecord) (*C
 		case EventTypePromiseResolved:
 			ce.PromiseID = ev.PromiseID
 			ce.PromiseResult = ev.PromiseResult
+			// Service and Op are what tell a resolve_promise CALL from an await of a promise that was already settled, which records
+			// this same event type (cleat#4079): a killed run's stop point is chosen by them (isStoppableEvent). A compacted region
+			// that dropped them would make every settlement in it a non-stop-point, so the cleanup of exactly the oldest runs would
+			// silently miss the effect. They are not in the event checksum (eventRecordToPayload hashes the promise fields only),
+			// so dropping them breaks no chain, which is also why nothing else would notice.
+			ce.Service = ev.Service
+			ce.Op = ev.Op
 		case EventTypePromiseRejected:
 			ce.PromiseID = ev.PromiseID
 			ce.PromiseError = ev.PromiseError
+			ce.Service = ev.Service
+			ce.Op = ev.Op
 		case EventTypeUpdateHandler:
 			// Reuse PromiseName/PromiseID fields for storage efficiency.
 			ce.PromiseName = ev.UpdateHandlerName
@@ -824,9 +833,13 @@ func buildFullHistoryFromCompaction(tail []EventRecord, cs *CompactionState) []E
 		case EventCodePromiseResolved:
 			rec.PromiseID = ce.PromiseID
 			rec.PromiseResult = ce.PromiseResult
+			rec.Service = ce.Service
+			rec.Op = ce.Op
 		case EventCodePromiseRejected:
 			rec.PromiseID = ce.PromiseID
 			rec.PromiseError = ce.PromiseError
+			rec.Service = ce.Service
+			rec.Op = ce.Op
 		case EventCodeUpdateHandler:
 			rec.UpdateHandlerName = ce.PromiseName
 		case EventCodeUpdateReceived:

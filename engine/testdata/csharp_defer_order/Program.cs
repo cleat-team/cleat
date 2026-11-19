@@ -12,6 +12,24 @@ public class CleatWorkflowWorldExportsImpl : ICleatWorkflowWorldExports
     static bool SkipPhase;
     static readonly List<(string id, Action body)> Defers = new();
 
+    // Registers a defer the way an SDK must since cleat#4079: the body goes into the table BEFORE the host call, because durable-defer
+    // can answer err(suspended) -- a killed run cut short at this very registration -- and that stop carries no id, while the drain that
+    // follows the unwind still has to find the body. On ok the entry gets the host's id; on a failure that is not a stop it is removed.
+    static void RegisterDefer(string description, Action body)
+    {
+        var entry = (id: "", body);
+        Defers.Add(entry);
+        string id;
+        try { id = IDurableLifecycleImports.DurableDefer(description); }
+        catch (WitException e) when (e.Value is IOutcomesImports.CallFailure f && f.Tag != IOutcomesImports.CallFailure.Tags.Suspended)
+        {
+            Defers.Remove(entry);
+            throw;
+        }
+        var i = Defers.IndexOf(entry);
+        if (i >= 0) Defers[i] = (id, body);
+    }
+
     static string Field(string a, string key, string dflt)
     {
         var k = "\"" + key + "\":\"";
@@ -104,16 +122,14 @@ public class CleatWorkflowWorldExportsImpl : ICleatWorkflowWorldExports
                 }
                 case "defer":
                 {
-                    var id = IDurableLifecycleImports.DurableDefer("refund");
-                    Defers.Add((id, () => IDurableCallImports.DurableCall("payments", "Refund", "{\"x\":1}")));
+                    RegisterDefer("refund", () => IDurableCallImports.DurableCall("payments", "Refund", "{\"x\":1}"));
                     Deep(3, 400);                            // suspends: the defer must then run on this instance
                     return ICleatWorkflowWorldImports.RunOutcome.Completed("{\"done\":true}");
                 }
                 case "spin":
                 {
                     SkipPhase = Field(args, "phase", "1") == "0";
-                    var id = IDurableLifecycleImports.DurableDefer("refund");
-                    Defers.Add((id, () => IDurableCallImports.DurableCall("payments", "Refund", "{\"x\":1}")));
+                    RegisterDefer("refund", () => IDurableCallImports.DurableCall("payments", "Refund", "{\"x\":1}"));
                     long x = 0;
                     while (!Stop) { x++; }                   // killed by the epoch fence; Stop is volatile so this cannot be folded
                     return ICleatWorkflowWorldImports.RunOutcome.Completed("{\"never\":true}");
@@ -123,8 +139,7 @@ public class CleatWorkflowWorldExportsImpl : ICleatWorkflowWorldExports
                     // Models what an SDK's entry wrapper does: register a defer, make the body's own call, and drain the
                     // defers when the body completes. In a defer segment the body call is refused (suspended), so the
                     // body never completes and the HOST drains through run-deferred instead.
-                    var id = IDurableLifecycleImports.DurableDefer("refund");
-                    Defers.Add((id, () => IDurableCallImports.DurableCall("payments", "Refund", "{}")));
+                    RegisterDefer("refund", () => IDurableCallImports.DurableCall("payments", "Refund", "{}"));
                     IDurableCallImports.DurableCall("payments", "Body", "{}");
                     RunDeferred();
                     return ICleatWorkflowWorldImports.RunOutcome.Completed("{\"done\":true}");

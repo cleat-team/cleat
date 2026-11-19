@@ -84,6 +84,10 @@ var rustCallsTheHostCanRefuse = []sdkRefusableCall{
 	// error code 0, a success.
 	{"create_promise", "CreatePromise"},
 	{"set_scope", "freshSetScope"}, // the unexported method that holds the check; see the Java list
+	// resolve_promise and reject_promise joined in cleat#4079: a defer segment's body must not settle a promise another run may
+	// be waiting on. The simple layout reads a stop as error code 0, which is a successful settlement.
+	{"resolve_promise", "ResolvePromise"},
+	{"reject_promise", "RejectPromise"},
 	{"cleat_call_heartbeat", "DurableCallWithHeartbeat"},
 	{"child_workflow", "childWorkflowWithVersion"},
 	{"child_workflow_with_options", "childWorkflowWithVersion"},

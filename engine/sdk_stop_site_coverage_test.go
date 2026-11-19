@@ -47,6 +47,15 @@ type sdkCoverageExemption struct {
 var sdkStopSiteExemptions = map[string][]sdkCoverageExemption{
 	"rust": {
 		{
+			hostSite: "DurableDefer",
+			why: "the host refuses a defer registration only in a stop-at-last-stoppable segment (cleat#4079), " +
+				"and that is armed only for a COMPONENT guest: armStopAtLastStoppable sets stopArmed only when " +
+				"isComponentWasm. The Rust SDK builds a core module, whose segment stops at its frontier as it " +
+				"always has and never reaches this refusal. Pinned by the core-module CONTROL in " +
+				"TestAKilledRunsSegmentFastForwardsToItsStopPoint, which fails if a core module is ever armed; " +
+				"when it does, remove this entry and add the guard.",
+		},
+		{
 			hostSite: "DurableCallWithRetry",
 			why: "the Rust SDK has no call_with_retry: a Rust guest reaches the host's " +
 				"retry path through cleat_call, which is covered above. There is no " +
@@ -61,6 +70,14 @@ var sdkStopSiteExemptions = map[string][]sdkCoverageExemption{
 		},
 	},
 	"java": {
+		{
+			hostSite: "DurableDefer",
+			why: "the host refuses a defer registration only in a stop-at-last-stoppable segment (cleat#4079), " +
+				"armed only for a COMPONENT guest (armStopAtLastStoppable sets stopArmed only when isComponentWasm). " +
+				"The Java SDK builds a core module, which is never armed and so never refused here. Pinned by the " +
+				"core-module CONTROL in TestAKilledRunsSegmentFastForwardsToItsStopPoint; if a Java component target " +
+				"ever exists, that control or this entry fails and the guard must be added.",
+		},
 		{
 			hostSite: "ScheduleCron",
 			why: "the Java SDK declares no scheduleCron method and no raw import for it, " +

@@ -96,6 +96,12 @@ func (s *execSession) advanceReplayStep(ctx context.Context, rec *EventRecord) b
 	if rec != nil {
 		s.lastChecksum = s.chainAnchor.next(*rec, s.lastChecksum)
 	}
+	// A segment over a killed run stops at the last stoppable event: once the event before it is consumed, skip the rest
+	// and leave replay, so the guest's next call takes its fresh path and is refused. stopIdx 0 is resolved when the session
+	// is armed, and a session that was never armed carries the zero value, which must not match here. cleat#4079.
+	if s.stopIdx > 0 && s.isReplay && s.stepCount == s.stopIdx {
+		s.fastForwardToStop()
+	}
 	if s.stepCallback == nil {
 		return true
 	}

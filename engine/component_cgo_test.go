@@ -738,17 +738,30 @@ func TestDispatchDurableCallFailureIsNotAResponse(t *testing.T) {
 	wantCallOutcome(t, resultPtr, "failed", 7, 1)
 }
 
+// TestDispatchDurableDefer: durable-defer is result<string, call-failure> since cleat#4079, and DurableDefer answers in the
+// packSimpleResult layout (length at bits 32-63), the same as the child-workflow starts.
 func TestDispatchDurableDefer(t *testing.T) {
-	b := &wasmtimeBackend{handler: &mockHostHandler{ret: packStrLen(10)}}
+	b := &wasmtimeBackend{handler: &mockHostHandler{ret: packSimpleStrLen(10)}}
 	strPtr, _, freeArgs := cgotestMakeStrArgs("desc")
 	defer freeArgs()
 	resultPtr := cgotestAllocResult()
 	if err := b.cgotestDispatchStr(3, strPtr, 1, resultPtr); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if !cgotestHasResultString(resultPtr) {
-		t.Error("expected non-nil string result")
+	wantCallOutcome(t, resultPtr, "ok", 10, 0)
+}
+
+// TestDispatchDurableDeferStopIsNotAnId is the reason the signature changed. A bare string has no bits to carry a stop, so
+// the host could not say "stop at this registration"; a stop must arrive as err(suspended), never as an id.
+func TestDispatchDurableDeferStopIsNotAnId(t *testing.T) {
+	b := &wasmtimeBackend{handler: &mockHostHandler{ret: callSuspendSentinel}}
+	strPtr, _, freeArgs := cgotestMakeStrArgs("desc")
+	defer freeArgs()
+	resultPtr := cgotestAllocResult()
+	if err := b.cgotestDispatchStr(3, strPtr, 1, resultPtr); err != nil {
+		t.Fatalf("unexpected error: %v", err)
 	}
+	wantCallOutcome(t, resultPtr, "suspended", 0, 0)
 }
 
 func TestDispatchChildWorkflow(t *testing.T) {

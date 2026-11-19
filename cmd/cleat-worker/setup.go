@@ -4219,6 +4219,14 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 	deferPhase := wf.PendingTerminalStatus != ""
 	if deferPhase {
 		engineOpts = append(engineOpts, engine.WithDeferPhase())
+		// A segment whose recorded outcome is a FAILURE is, for a component guest, the second phase of a run that was killed
+		// with its defers owed (markKilledRunForItsDefers), or of a child failed by a terminating parent. Both stop at the
+		// last stoppable event, which is what lets a body killed in a loop reach its defers (cleat#4079). The engine arms it
+		// for a component guest only; a core module's segment is unchanged. A terminate's or cancel's segment is not a
+		// failure and keeps stopping at its frontier.
+		if wf.PendingTerminalStatus == "failed" || wf.PendingTerminalStatus == "dead_lettered" {
+			engineOpts = append(engineOpts, engine.WithStopAtLastStoppable())
+		}
 	}
 	if f := w.workflowFetcherFor(caller); f != nil {
 		engineOpts = append(engineOpts, engine.WithFetcher(f))
@@ -4320,6 +4328,12 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 			errorOp = ce.Op
 		}
 		errMsg := err.Error()
+		// A COMPONENT guest that was killed with defers still owed cannot run them in this process, so the run goes through
+		// a defer segment on a fresh instance instead of being failed here (cleat#4079). Nothing else changes for a run
+		// that owes no defers, a core module, or a guest that failed through its own entry point.
+		if w.markKilledRunForItsDefers(wf, eng, errMsg, errorCode, errorOp, history, resultHistory, queryState) {
+			return
+		}
 		// resultHistory, not history: the exhaustion that ended this workflow
 		// was recorded by the segment that just ran, so it is only in the
 		// post-execution history. Passing the pre-execution `history` here
@@ -8409,6 +8423,72 @@ func classifyTerminalErrorCode(errorCode string, deadLettered bool) string {
 	return errorCode
 }
 
+// classifyTerminalFailure decides whether a terminal failure is dead-lettered and what error code it carries. One
+// function for the immediate write (writeTerminalFailure) and the two-phase mark (markKilledRunForItsDefers), so a run
+// that owes defers is classified exactly as one that does not.
+func classifyTerminalFailure(errorCode string, eligibleForDLQ bool, history []engine.EventRecord) (string, bool) {
+	deadLettered := eligibleForDLQ && endedOnAnExhaustedCall(history)
+	return classifyTerminalErrorCode(errorCode, deadLettered), deadLettered
+}
+
+// markKilledRunForItsDefers routes a failed COMPONENT run that was killed with its defers still owed through a defer
+// segment, and reports whether it did (cleat#4079). On true the caller writes nothing more: the run is 'terminating', its
+// outcome and error are recorded, and it will be claimed again to run its cleanup on a fresh instance.
+//
+// Why it exists. A killed component instance is trapped and cannot be re-entered, and a fresh instance does not hold the
+// closures, so the cleanup can only run by REPLAYING the run's history on a new instance and stopping at its last stoppable
+// event (engine.WithStopAtLastStoppable), which is a defer segment. The two-phase transition already carries one: mark the
+// outcome now, run the segment, then FinalizeDeferPhase applies the outcome.
+//
+// The outcome is classified here, once, by the same rule as an immediate failure (classifyTerminalFailure), so a killed run
+// that exhausted a call and was then killed in a loop is still dead-lettered, and keeps its retention.
+//
+// It returns false, and the caller falls back to the immediate terminal write, when the engine says the run owes nothing, the
+// store cannot mark a defer phase, or the mark failed for a reason other than a lost fence. In the last case the run still
+// fails, as it did before; only the cleanup is lost, and the log says so.
+func (w *Worker) markKilledRunForItsDefers(wf *engine.WorkflowInstance, eng *engine.Engine, errMsg, errorCode, errorOp string, history, resultHistory []engine.EventRecord, queryState map[string]string) bool {
+	if eng == nil || !eng.KilledWithDefersOwed() || w.shuttingDown() {
+		return false
+	}
+	st, release := w.storeFor(wf)
+	defer release()
+	ctx := context.Background()
+
+	dps, ok := st.(engine.DeferPhaseFailureMarker)
+	if !ok {
+		w.logger.WarnContext(ctx, "a killed run owes defers but its store cannot mark a defer phase; failing it without the cleanup",
+			"worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID)
+		return false
+	}
+
+	errorCode, deadLettered := classifyTerminalFailure(errorCode, true, resultHistory)
+	status := "failed"
+	if deadLettered {
+		status = "dead_lettered"
+	}
+	var held []engine.EventRecord
+	if len(resultHistory) > len(history) {
+		held = resultHistory[len(history):]
+	}
+
+	err := dps.MarkFailureForDeferPhase(ctx, wf.ID, w.id, wf.Generation, engine.DeferPhaseFailure{
+		Status: status, ErrorMsg: errMsg, ErrorCode: errorCode, ErrorOp: errorOp, QueryState: queryState,
+	}, held)
+	if errors.Is(err, engine.ErrFenceLost) {
+		w.logger.DebugContext(ctx, "killed run: fence lost, the run was reassigned to another worker",
+			"worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID)
+		return true
+	}
+	if err != nil {
+		w.logger.ErrorContext(ctx, "could not mark a killed run for its defer phase; failing it without the cleanup",
+			"worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID, "error", err)
+		return false
+	}
+	w.logger.InfoContext(ctx, "a killed run owes defers; marked for a defer segment on a fresh instance",
+		"worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID, "outcome", status, "events_written", len(held))
+	return true
+}
+
 // writeTerminalFailure writes a workflow's terminal failure, to the dead-letter
 // queue or to 'failed'.
 //
@@ -8493,8 +8573,6 @@ func (w *Worker) writeTerminalFailure(wf *engine.WorkflowInstance, errMsg, error
 	// the failure to a specific call. cleat#979 is why that had to go: it made
 	// retention depend on the workflow author wrapping with %w. See
 	// endedOnAnExhaustedCall for what replaced it and what it cannot tell.
-	deadLettered = eligibleForDLQ && endedOnAnExhaustedCall(history)
-
 	// ...and the same fact classifies the failure, which it did not before:
 	// error_code was ALWAYS "unknown" on this path. cleat#1009.
 	//
@@ -8517,7 +8595,9 @@ func (w *Worker) writeTerminalFailure(wf *engine.WorkflowInstance, errMsg, error
 	// reads retries_exhausted, and the panic path -- which passes
 	// eligibleForDLQ=false because a recovered panic is a crash rather than a
 	// call that ran out of attempts -- keeps its own code.
-	errorCode = classifyTerminalErrorCode(errorCode, deadLettered)
+	// Both of the facts above, from the one function the two-phase mark also calls (classifyTerminalFailure), so a run that owes
+	// defers is classified exactly as one that does not.
+	errorCode, deadLettered = classifyTerminalFailure(errorCode, eligibleForDLQ, history)
 
 	var err error
 	if deadLettered {
@@ -8880,6 +8960,17 @@ func (w *Worker) finishDeferPhase(wf *engine.WorkflowInstance, execStore engine.
 	// sweep, marked 'abandoned' rather than its real outcome. cleat#1976.
 	w.notifyTerminal(wf, wf.PendingTerminalStatus)
 
+	// A failure applied through the two-phase path is counted the way the immediate write counts it
+	// (recordTerminalFailureWithHistory), which it never reached. That was invisible while only a terminate, a cancel and a
+	// child of a terminating parent came through here; a killed component run (cleat#4079) is the first ordinary failure,
+	// and without this it would drop out of the failed and dead-lettered counts. Side effect: a 'failed' outcome from a
+	// force-fail or a terminating parent is counted now too, where it was not.
+	if wf.PendingTerminalStatus == "failed" || wf.PendingTerminalStatus == "dead_lettered" {
+		w.Metrics.RecordWorkflowFailed(ctx, wf.DefName, "")
+		if wf.PendingTerminalStatus == "dead_lettered" {
+			w.Metrics.RecordWorkflowsDeadLettered(ctx)
+		}
+	}
 	w.Metrics.RecordWorkflowDuration(ctx, time.Since(startedAt), wf.DefName, wf.PendingTerminalStatus, "")
 	w.logger.InfoContext(ctx, "defer phase complete; terminal outcome applied",
 		"worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID,

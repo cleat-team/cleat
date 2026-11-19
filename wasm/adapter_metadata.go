@@ -184,14 +184,14 @@ var adapterDefs = map[string]adapterDef{
 		Params: []adapterParam{
 			{"description", "string"},
 		},
-		ResultStmts: []string{
+		ResultStmts: withSuspendCheck(
 			"deferIDLen := uint32(uint64(result) >> 32)",
 			"errCode := uint32(result)",
 			"if errCode != 0 {",
 			`	return "", fmt.Errorf("cleat_defer: %s", hostErrMessage(deferIDBuf[:], deferIDLen))`,
 			"}",
 			"return unsafe.String(&deferIDBuf[0], int(deferIDLen)), nil",
-		},
+		),
 	},
 	// DurableDeferFunc registers a closure, so unlike DurableDefer it has a
 	// body the guest can actually run. The ID the host mints is the key: it is
@@ -218,7 +218,7 @@ var adapterDefs = map[string]adapterDef{
 			`description := "deferred function"`,
 			"descriptionPtr, descriptionLen := stringPtr(description)",
 		},
-		ResultStmts: []string{
+		ResultStmts: withSuspendCheck(
 			"deferIDLen := uint32(uint64(result) >> 32)",
 			"errCode := uint32(result)",
 			"if errCode != 0 {",
@@ -229,7 +229,7 @@ var adapterDefs = map[string]adapterDef{
 			"deferID := string(unsafe.String(&deferIDBuf[0], int(deferIDLen)))",
 			"_cleatRegisterDefer(deferID, fn)",
 			"return deferID, nil",
-		},
+		),
 	},
 	"DurableLog": {
 		FieldName: "DurableLog",
@@ -337,13 +337,15 @@ var adapterDefs = map[string]adapterDef{
 			{"id", "string"},
 			{"value", "string"},
 		},
-		ResultStmts: []string{
+		// Refused in a defer segment (cleat#4079), so the stop is tested before the error code: bit 31 read as a code is
+		// 0x80000000, an ordinary error, and the guest would carry on instead of unwinding.
+		ResultStmts: withSuspendCheck(
 			"errCode := uint32(result)",
 			"if errCode != 0 {",
 			`	return fmt.Errorf("cleat_resolve_promise: error %d", errCode)`,
 			"}",
 			"return nil",
-		},
+		),
 	},
 	// RejectPromise: two strings in, nothing out. The mirror of ResolvePromise.
 	// IMPROVEMENT-PLAN 3.226.
@@ -354,13 +356,15 @@ var adapterDefs = map[string]adapterDef{
 			{"id", "string"},
 			{"errMsg", "string"},
 		},
-		ResultStmts: []string{
+		// Refused in a defer segment (cleat#4079), so the stop is tested before the error code: bit 31 read as a code is
+		// 0x80000000, an ordinary error, and the guest would carry on instead of unwinding.
+		ResultStmts: withSuspendCheck(
 			"errCode := uint32(result)",
 			"if errCode != 0 {",
 			`	return fmt.Errorf("cleat_reject_promise: error %d", errCode)`,
 			"}",
 			"return nil",
-		},
+		),
 	},
 	// ScheduleInvoke: three strings and a delay in, nothing out.
 	// IMPROVEMENT-PLAN 3.224. Same shape as SignalWorkflow below: no response

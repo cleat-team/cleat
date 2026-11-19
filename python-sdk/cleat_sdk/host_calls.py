@@ -2019,7 +2019,15 @@ class HostCalls:
         RuntimeError
             If the host reports an error from the fetch.
         """
-        result = _import_fetch(method, url, headers, body)
+        try:
+            result = _import_fetch(method, url, headers, body)
+        except _WitErr as err:
+            # ``err(call-failure)``: a stop unwinds, a host failure raises. This used
+            # to escape as the raw ``Err``, so a stop surfaced as an ordinary guest
+            # failure that user code could catch and swallow, and the workflow ran
+            # on past a call the engine had refused (cleat#4079).
+            _raise_call_failure("fetch", "host_fetch", err.value)
+            raise  # unreachable; _raise_call_failure always raises
         if isinstance(result, str):
             return result
         resp_len, err_code = decode_simple_result(result)
@@ -2861,7 +2869,12 @@ class HostCalls:
         RuntimeError
             If the host reports an error.
         """
-        return _import_cleat_defer(description)
+        try:
+            return _import_cleat_defer(description)
+        except _WitErr as err:
+            # ``err(call-failure)`` (cleat#4079): a stop unwinds, a host failure raises.
+            _raise_call_failure("lifecycle", "defer", err.value)
+            raise  # unreachable; _raise_call_failure always raises
 
     def defer_func(self, fn: Callable[[], None]) -> str:
         """Register cleanup **with a body**, run when the workflow finishes.
@@ -2887,7 +2900,13 @@ class HostCalls:
             The defer ID the host minted, which is also the key the body is
             stored under.
         """
-        from .defer import defer_phase_refusal, in_defer_phase, register_defer
+        from .defer import (
+            commit_defer,
+            defer_phase_refusal,
+            discard_defer,
+            in_defer_phase,
+            reserve_defer,
+        )
 
         # Refused BEFORE the host call -- IMPROVEMENT-PLAN 3.35 phase 4.
         # Registering here used to mint a real defer ID and write a durable
@@ -2896,8 +2915,25 @@ class HostCalls:
         if in_defer_phase():
             raise RuntimeError(defer_phase_refusal("defer_func"))
 
-        defer_id = _import_cleat_defer("deferred function")
-        register_defer(defer_id, fn)
+        # The body goes into the table BEFORE the host call (cleat#4079). The host
+        # can answer ``err(suspended)``: it stopped a run that was killed
+        # mid-flight, and the registration it stopped at is already in the
+        # history. A stop has no id to store the body under, and the drain that
+        # follows the unwind must still find it, or the cleanup the stop exists
+        # to run would be the one that is missing.
+        entry = reserve_defer(fn)
+        try:
+            defer_id = _import_cleat_defer("deferred function")
+        except _WitErr as err:
+            if isinstance(err.value, _CallFailureSuspended):
+                # A stop, not a failure: leave the body in the table and unwind.
+                raise SuspendSentinel() from None
+            # The host refused the registration, so nothing was recorded for it
+            # and the body must not run as though it had been.
+            discard_defer(entry)
+            _raise_call_failure("lifecycle", "defer_func", err.value)
+            raise  # unreachable; _raise_call_failure always raises
+        commit_defer(entry, defer_id)
         return defer_id
 
     # --------------------------------------------------------------------

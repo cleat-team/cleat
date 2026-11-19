@@ -58,11 +58,38 @@ func TestReReplayRefusesATerminatedRunWhoseDeferSegmentAlreadyRan(t *testing.T) 
 				t.Fatalf("PRECONDITION FAILED: status %q, want %q", got, statusTerminated)
 			}
 			err = reReplay(t, id)
-			if !errors.Is(err, ErrAdminStateConflict) || err == nil || !strings.Contains(err.Error(), "defer segment has already run") {
+			// A real segment's events carry the cleat#4079 marker, so the marker path answers; the legacy scan is the next subtest.
+			if !errors.Is(err, ErrAdminStateConflict) || err == nil || !strings.Contains(err.Error(), "ran a defer segment") {
 				t.Fatalf("want an ErrAdminStateConflict naming the segment, got %v", err)
 			}
 			if got := status(t, id); got != statusTerminated {
 				t.Fatalf("a refused re-replay changed the status to %q", got)
+			}
+		})
+
+		// A run from BEFORE the marker existed: its segment's events are InDeferPhase but unmarked, and only the legacy scan can refuse it.
+		t.Run("an old terminated run whose segment events are unmarked is refused by the legacy scan", func(t *testing.T) {
+			id := startTerminableWorkflow(t, ctx, store, "rr-old", false)
+			if err := store.AppendEventHistoryBatch(ctx, id, []EventRecord{
+				{Step: 0, EventType: EventTypeDefer, DeferID: "defer-0", DeferDescription: "cleanup"},
+				{Step: 1, EventType: EventTypeCall, Service: "cleanup", Op: "after", Response: `{}`, InDeferPhase: true},
+			}); err != nil {
+				t.Fatalf("append: %v", err)
+			}
+			if err := store.TerminateWorkflow(ctx, id, "by test"); err != nil {
+				t.Fatalf("terminate: %v", err)
+			}
+			// Terminate marked a defer phase (a defer is registered); finalize it with nothing so the run settles terminated.
+			claimed := claimByID(t, ctx, store, "worker-4094old", id)
+			if err := store.(DeferPhaseStore).FinalizeDeferPhase(ctx, id, "worker-4094old", claimed.Generation, nil); err != nil {
+				t.Fatalf("finalize: %v", err)
+			}
+			if got := status(t, id); got != statusTerminated {
+				t.Fatalf("PRECONDITION FAILED: status %q, want %q", got, statusTerminated)
+			}
+			err := reReplay(t, id)
+			if !errors.Is(err, ErrAdminStateConflict) || err == nil || !strings.Contains(err.Error(), "defer segment has already run") {
+				t.Fatalf("want the legacy message, got %v", err)
 			}
 		})
 
@@ -108,7 +135,9 @@ func TestReReplayRefusesATerminatedRunWhoseDeferSegmentAlreadyRan(t *testing.T) 
 			}
 		})
 
-		// KNOWN OVER-REFUSAL, pinned so that a later fix (a marker that tells a segment from an ordinary drain) changes this on purpose.
+		// KNOWN OVER-REFUSAL, pinned so that a later fix changes this on purpose. cleat#4079's marker removes it for the runs that
+		// ran a segment AFTER that change, but a history carries no signal saying which engine wrote it, so a dead-lettered-then-
+		// terminated run with an unmarked drain still cannot be told from an old run that did run a segment.
 		// A dead-lettered run terminated off the queue goes straight to terminated with no segment, and its history may hold the
 		// ordinary failure's own drain, whose events carry InDeferPhase. The scan cannot tell it from a segment, so it refuses a
 		// redrive that would in fact replay. Measured on all three dialects while writing cleat#4094.
@@ -131,7 +160,7 @@ func TestReReplayRefusesATerminatedRunWhoseDeferSegmentAlreadyRan(t *testing.T) 
 				t.Fatalf("PRECONDITION FAILED: status %q, want %q", got, statusTerminated)
 			}
 			if err := reReplay(t, id); !errors.Is(err, ErrAdminStateConflict) {
-				t.Fatalf("the known over-refusal changed: want ErrAdminStateConflict, got %v. If a marker now tells a segment from a drain, "+
+				t.Fatalf("the known over-refusal changed: want ErrAdminStateConflict, got %v. If a history now says which engine wrote it, "+
 					"this case should redrive; update this test and the comment on refuseRedriveAfterADeferSegment together", err)
 			}
 		})

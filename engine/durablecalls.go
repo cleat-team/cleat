@@ -920,6 +920,13 @@ func (s *execSession) DurableDefer(ctx context.Context, m api.Module, descriptio
 		s.exitReplay()
 	}
 
+	// A segment over a killed run stops at a defer registration the same way it stops at a call: the registration is in the
+	// history, so this is not a new one, it is the stop point. Only in that segment: an ordinary segment's body past its
+	// frontier has always been allowed to register a defer, and refusing it is not this change's to do. cleat#4079.
+	if s.stopArmed && s.stopBeforeNewWork() {
+		return callSuspendSentinel
+	}
+
 	deferID := fmt.Sprintf("defer-%d", s.stepCount)
 
 	rec := EventRecord{

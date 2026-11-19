@@ -143,6 +143,24 @@ type DeferPhaseStore interface {
 	ExpireDeferPhases(ctx context.Context) (int, error)
 }
 
+// DeferPhaseFailureMarker is the store half of a killed component run's trip through the defer phase (cleat#4079). It is its own
+// interface, and not a method of DeferPhaseStore, on purpose: finishDeferPhase asserts DeferPhaseStore to finalize a phase, and
+// a store that satisfied the old interface (a wrapper, an instrumented store, a test double) must not stop satisfying it because
+// a new way of ENTERING the phase was added -- the run would sit in 'terminating' until its deadline with nothing logged but one
+// error line. A store without this half costs only the cleanup of a run that was killed: the worker fails it immediately, as it
+// did before.
+type DeferPhaseFailureMarker interface {
+	// MarkFailureForDeferPhase is phase 1 of a two-phase FAILURE (cleat#4079): it appends the events the failing
+	// execution held in memory, records the failure's outcome and error payload, and moves the run to 'terminating' so it is
+	// claimed again for a defer segment. Fenced on the caller's claim, so a worker that lost its run during a long kill
+	// writes nothing and gets ErrFenceLost.
+	//
+	// The worker-owned sibling of adminForceMark, which is an operator's force-fail: it is fenced on (workerID, generation)
+	// and it carries events, because a killed run's history is the only record of what the replay must stop at. It does
+	// NOT set completed_at: the run is not finished, and FinalizeDeferPhase sets it.
+	MarkFailureForDeferPhase(ctx context.Context, runID, workerID string, generation int64, f DeferPhaseFailure, newEvents []EventRecord) error
+}
+
 // deferPhaseOwed reports whether a workflow being terminated should run a defer
 // phase before its outcome is applied, given what a single row and one EXISTS
 // can tell us.
@@ -199,4 +217,9 @@ var (
 	_ DeferPhaseStore = (*MySQLStore)(nil)
 	_ DeferPhaseStore = (*MSSQLStore)(nil)
 	_ DeferPhaseStore = (*ShardedStore)(nil)
+
+	_ DeferPhaseFailureMarker = (*PostgresStore)(nil)
+	_ DeferPhaseFailureMarker = (*MySQLStore)(nil)
+	_ DeferPhaseFailureMarker = (*MSSQLStore)(nil)
+	_ DeferPhaseFailureMarker = (*ShardedStore)(nil)
 )
