@@ -3,7 +3,6 @@ package engine
 import (
 	"context"
 	"fmt"
-	"time"
 
 	"github.com/tetratelabs/wazero/api"
 )
@@ -59,7 +58,7 @@ func (s *execSession) freshAcquireLock(ctx context.Context, m api.Module, key st
 		}
 
 		var err error
-		acquired, err = s.engine.concurrencyKeyStore.AcquireConcurrencyKey(ctx, key, s.workflowID, time.Duration(ttlMs)*time.Millisecond)
+		acquired, err = s.engine.concurrencyKeyStore.AcquireConcurrencyKey(ctx, key, s.workflowID, guestMsDuration(ttlMs))
 		if err != nil {
 			rec := EventRecord{
 				Step:         s.stepCount,

@@ -407,8 +407,8 @@ func retryPolicyFitsBudget(maxAttempts, initialIntervalMs, backoffCoefficient100
 		return true
 	}
 	total := time.Duration(0)
-	interval := time.Duration(initialIntervalMs) * time.Millisecond
-	maxInterval := time.Duration(maxIntervalMs) * time.Millisecond
+	interval := guestMsDuration(initialIntervalMs)
+	maxInterval := guestMsDuration(maxIntervalMs)
 
 	// maxAttempts attempts means maxAttempts-1 backoffs; the last failure is
 	// not followed by a wait.
@@ -685,7 +685,10 @@ func (s *execSession) freshCallWithRetry(ctx context.Context, m api.Module,
 			// intervals and could reject a policy as too long, while the
 			// executor would have run it in a millisecond per attempt. Zero
 			// means "no maximum" in one and "maximum of zero" in the other.
-			backoffMs := initialIntervalMs * int64(math.Pow(float64(backoffCoefficient100x)/100.0, float64(attempt-1)))
+			// The factor is truncated to a whole number BEFORE it multiplies, as it always was (a coefficient of 1.5 repeats the first interval), and the
+			// product is bounded: initialIntervalMs * int64(math.Pow(...)) overflowed int64, and int64() of an out-of-range float is
+			// implementation-defined (cleat#4105).
+			backoffMs := boundedBackoffMs(initialIntervalMs, math.Pow(float64(backoffCoefficient100x)/100.0, float64(attempt-1)))
 			if maxIntervalMs > 0 && backoffMs > maxIntervalMs {
 				backoffMs = maxIntervalMs
 			}
@@ -742,7 +745,7 @@ func (s *execSession) freshCallWithRetry(ctx context.Context, m api.Module,
 				// so the sentinel only has to make the guest unwind without
 				// doing anything more.
 				return callSuspendSentinel
-			case <-time.After(time.Duration(backoffMs) * time.Millisecond):
+			case <-time.After(guestMsDuration(backoffMs)):
 			}
 		}
 	}
@@ -826,7 +829,8 @@ func (s *execSession) DurableSleep(ctx context.Context, m api.Module, durationMs
 		// and no workflow run under `cleat run` or cleatctl would ever wait.
 		anchor = s.engine.realNowMs()
 	}
-	s.nowMs = anchor + durationMs
+	// clampGuestMs: anchor + i64::MAX wraps negative and reads as a deadline long past, so a sleep of "forever" completed at once (cleat#4105).
+	s.nowMs = anchor + clampGuestMs(durationMs)
 
 	if s.nowMs <= s.engine.realNowMs() {
 		return packSleepResult(sleepStatusCompleted, 0)
@@ -865,7 +869,7 @@ func (s *execSession) ServeWasiSleep(ctx context.Context, durationMs int64) time
 		// as DurableSleep's own zero-anchor branch.
 		anchor = s.engine.realNowMs()
 	}
-	s.nowMs = anchor + durationMs
+	s.nowMs = anchor + clampGuestMs(durationMs)
 
 	remainingMs := s.nowMs - s.engine.realNowMs()
 	if remainingMs <= 0 {
@@ -1148,7 +1152,7 @@ func (s *execSession) DurableScheduleInvoke(ctx context.Context, m api.Module, s
 				// the delayed dispatch instead of waiting out the delay on a
 				// worker that is already going away.
 				return
-			case <-time.After(time.Duration(delayMs) * time.Millisecond):
+			case <-time.After(guestMsDuration(delayMs)):
 				callCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 				defer cancel()
 				_, _ = s.callService(callCtx, service, operation, requestJSON, scheduleStep)

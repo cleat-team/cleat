@@ -197,7 +197,7 @@ func (s *execSession) AwaitPromise(ctx context.Context, m api.Module, promiseID 
 	// suspended workflow. Comparing against the recorded deadline does not
 	// depend on why we woke.
 	if resumingAwait {
-		deadlineMs := awaitAnchorMs + awaitTimeoutMs
+		deadlineMs := awaitAnchorMs + clampGuestMs(awaitTimeoutMs) // clamp: i64::MAX wrapped this negative (cleat#4105)
 		if awaitTimeoutMs <= 0 {
 			// An await recorded before the timeout was persisted, or one with
 			// no timeout at all. Nothing to measure against, so keep waiting
@@ -205,7 +205,7 @@ func (s *execSession) AwaitPromise(ctx context.Context, m api.Module, promiseID 
 			// await, which is what produced the duplicate events.
 			s.suspendErr = &SuspendError{
 				Reason: fmt.Sprintf("await_promise(%s)", promiseID),
-				Until:  time.Now().Add(time.Duration(timeoutMs) * time.Millisecond),
+				Until:  time.Now().Add(guestMsDuration(timeoutMs)),
 			}
 			return s.suspendingAwaitResult()
 		}
@@ -255,7 +255,7 @@ func (s *execSession) AwaitPromise(ctx context.Context, m api.Module, promiseID 
 
 	s.suspendErr = &SuspendError{
 		Reason: fmt.Sprintf("await_promise(%s)", promiseID),
-		Until:  time.UnixMilli(s.nowMs).Add(time.Duration(timeoutMs) * time.Millisecond),
+		Until:  time.UnixMilli(s.nowMs).Add(guestMsDuration(timeoutMs)),
 	}
 
 	return s.suspendingAwaitResult()
