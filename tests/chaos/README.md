@@ -44,6 +44,14 @@ and the worker log. Against another commit: `CLEAT_CHAOS_TREE=<checkout>` (copy 
 See the table on cleat#4169: against the builds before the fixes it finds #4143 (4 of 4 cases), #4152 (2 of 10) and #4160 (3 of 4), and the same
 cases pass on develop (#4143, #4152) and on #4166 (#4160).
 
+## Flake log
+
+`scripts/chaos-flake-log.py` re-derives a table of every ATTEMPT of every Chaos run from the API (a re-run that passed after a failure is two rows and a flake; `gh run list` alone shows only the latest attempt). `--self-test` checks it offline, and the live known-positive is a run whose attempt 1 failed and attempt 2 passed:
+
+    scripts/chaos-flake-log.py --workflow "Ecosystem CI" --since 2026-11-19T19:55:00Z --limit 40   # run 44604503158: failure, then success
+
+`scripts/chaos-failed-cases.py` reads the failed cases out of a `go test -json` job log; its known-positive is a real failing CI log in `testdata/`.
+
 ## Not yet
 
 Signal and promise polls (#4153), `continue_as_new` (#4159), cancel, kill while resident, the Python guest, a slow-service op (a response longer

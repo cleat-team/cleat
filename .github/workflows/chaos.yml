@@ -88,8 +88,10 @@ jobs:
           go-version-file: go.mod
       # The flake log's parser has a known-positive (a real failing job log); a parser that silently found nothing would make the stability call
       # meaningless, so it is checked here on every run.
-      - name: Failed-case parser self-test
-        run: python3 scripts/chaos-failed-cases.py --self-test
+      - name: Failed-case parser and flake-log self-tests
+        run: |
+          python3 scripts/chaos-failed-cases.py --self-test
+          python3 scripts/chaos-flake-log.py --self-test
       # ONE go test process: the worker build and the database migration cost ~50 s and happen once per process, so the whole sample runs in this
       # single invocation (setup-go's cache keeps the Go build cache between jobs). The seed is the PR number, so each PR samples differently and
       # a re-run of the same PR repeats. A failure prints the seed, the script and a one-line command that replays it.
@@ -137,6 +139,20 @@ jobs:
         run: |
           set -euo pipefail
           go test -json -tags chaos -count=1 -timeout 120m ./tests/chaos -skip 'TestChaosSeeded' 2>&1 | tee chaos-fixed.log
+      # The Python guest: without these steps CI never runs it, and the slow-service case (which only bites on the component path) could not fail.
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Install componentize-py and the Python SDK
+        run: |
+          pip install --upgrade pip
+          pip install componentize-py
+          pip install -e python-sdk
+      - name: Python guest, kill-and-reclaim and the slow-service call
+        run: |
+          set -euo pipefail
+          CLEAT_CHAOS_GUEST=python CLEAT_CHAOS_SCENARIO=calls go test -json -tags chaos -count=1 -timeout 60m ./tests/chaos \
+            -run 'TestChaosSigkillThenReclaimAtEveryBoundary|TestChaosASlowServiceCallIsNotKilledByTheInstanceTimeout' 2>&1 | tee chaos-python.log
       - name: Seeded scripts
         run: |
           set -euo pipefail
