@@ -4,6 +4,26 @@ This document catalogs all error codes produced by the Cleat project's
 static analysis tool (`cleat vet`). Each error is emitted when the analyzer
 detects a pattern that would break workflow determinism during replay.
 
+## Where these rules do not apply: the function passed to `SideEffect`
+
+`cleat vet` and `cleat build` do **not** apply the replay-determinism rules (the E-codes below that name a non-deterministic construct:
+`time.Now()`, `crypto/rand`, `math/rand`, ranging over a map, and the rest) to the body of a **function literal written at a
+`h.SideEffect(...)` or `cleat.SideEffectTyped(h, ...)` call** (cleat#4123). That function runs **once**, on first execution, and its result
+is what is recorded and replayed, so it is exactly where a clock read, entropy or an API call is meant to go. The same construct anywhere
+else in the workflow is still refused, including after the literal in the same function, and a `SideEffect` method on a type that is not
+`cleat.HostCalls` earns no exemption.
+
+```go
+id, err := h.SideEffect(func() (string, error) {
+    return uuid.NewString() + time.Now().String(), nil // allowed here, and only here
+})
+```
+
+A **named** function passed to `SideEffect` is outside the exemption. In practice the scan validates only functions in the durable closure,
+and a function that calls no host method is not in it, so a pure named function is not checked either way; this is pinned by
+`internal/closure/side_effect_nondeterminism_test.go` so a change to it is deliberate. The function must still make no host calls: each
+consumes a step of the history.
+
 ## Error Code Overview
 
 | Code | Description | Severity |

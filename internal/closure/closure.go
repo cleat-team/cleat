@@ -271,7 +271,15 @@ func validateConstructs(fd *analyzer.FuncDecl, cr *Result) {
 	}
 
 	name := fd.FullyQualifiedName()
+	sideEffectBodies := sideEffectFuncLits(fd)
 	ast.Inspect(fd.Ast.Body, func(n ast.Node) bool {
+		// The function literal passed to SideEffect runs ONCE, on first execution, and its result is what is recorded and replayed: it is
+		// exactly where a wall-clock read, entropy, a map range or an API call is meant to go, and none of the replay-determinism rules
+		// below describe it (cleat#4123, under cleat#4113's freeze semantics). Its subtree is skipped. A NAMED function passed to
+		// SideEffect is not skipped: it is a function in the closure like any other and is validated as one.
+		if lit, ok := n.(*ast.FuncLit); ok && sideEffectBodies[lit] {
+			return false
+		}
 		switch stmt := n.(type) {
 		case *ast.GoStmt:
 			line := 0
@@ -360,6 +368,45 @@ func validateConstructs(fd *analyzer.FuncDecl, cr *Result) {
 		}
 		return true
 	})
+}
+
+// sideEffectFuncLits returns the function literals that are passed DIRECTLY as the function of a side effect: the argument of
+// h.SideEffect(fn), or the second argument of cleat.SideEffectTyped(h, fn). Only a literal written at the call is returned. A variable, a
+// named function and a literal that is merely called from one are not.
+//
+// The receiver of h.SideEffect must be a cleat.HostCalls (by its type), so a user type that happens to have a SideEffect method does not earn
+// the exemption.
+func sideEffectFuncLits(fd *analyzer.FuncDecl) map[*ast.FuncLit]bool {
+	lits := map[*ast.FuncLit]bool{}
+	if fd.Ast.Body == nil || fd.Pkg == nil || fd.Pkg.Info == nil {
+		return lits
+	}
+	ast.Inspect(fd.Ast.Body, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		sel, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok {
+			return true
+		}
+		var fnArg ast.Expr
+		switch sel.Sel.Name {
+		case "SideEffect":
+			if tv, ok := fd.Pkg.Info.Types[sel.X]; ok && analyzer.IsHostCallsType(tv.Type) && len(call.Args) == 1 {
+				fnArg = call.Args[0]
+			}
+		case "SideEffectTyped":
+			if id, ok := sel.X.(*ast.Ident); ok && resolveImportPath(fd, id) == "github.com/cleat-team/cleat/cleat" && len(call.Args) == 2 {
+				fnArg = call.Args[1]
+			}
+		}
+		if lit, ok := fnArg.(*ast.FuncLit); ok {
+			lits[lit] = true
+		}
+		return true
+	})
+	return lits
 }
 
 // resolveNamedType unwraps pointer types and returns the underlying named type.
