@@ -22,4 +22,18 @@ public static class GroupDefer
         h.Call("svc", "after", "{}");
         return new JsonObject { ["ok"] = true };
     }
+
+    /// <summary>
+    /// A defer, a call, a SLEEP, a call after. The sleep suspends the run, which is still alive and waiting: the registered cleanup must NOT
+    /// run then (cleat#4194), and a resumed run must make the call after the sleep, not find the cleanup in its place in the history.
+    /// </summary>
+    [CleatEntry("defer_then_sleep")]
+    public static JsonNode DeferThenSleep(HostCalls h, JsonElement input)
+    {
+        h.Defer("cleanup", () => { h.Call("svc", "cleanup", "{}"); });
+        h.Call("svc", "before", "{}");
+        h.Sleep(TimeSpan.FromSeconds(5));
+        h.Call("svc", "after", "{}");
+        return new JsonObject { ["ok"] = true };
+    }
 }

@@ -115,3 +115,61 @@ func TestPythonOrdinarySegmentRunsTheBody(t *testing.T) {
 		t.Fatalf("the ordinary execution recorded %v, want exactly %v (result %q)", got, want, res)
 	}
 }
+
+// cleat#4194: a Python workflow that registers a defer and then SLEEPS is suspended, not finished, and its cleanup must not run at the
+// suspension. Before the fix the component path drained a guest's defer table at every suspension, so the cleanup ran at the first sleep (and
+// was recorded in history, where the resumed run's next call belonged). An ORDINARY execution, no WithDeferPhase: the segment variants above are
+// where a drain is intended.
+func TestPythonDeferRegisteredBeforeASleepDoesNotRunAtTheSuspension(t *testing.T) {
+	if testing.Short() {
+		t.Skip("compiles a Python workflow with componentize-py")
+	}
+	h := newPythonWasmTestHelper(t)
+	if !h.toolsAvailable() {
+		if toolchainRequired("python") {
+			t.Fatalf("Python WASM prerequisites not met, but %s declares python: %s", requireToolchainEnv, h.missingTools())
+		}
+		t.Skip("Python WASM prerequisites not met: " + h.missingTools())
+	}
+	wasmBytes, err := os.ReadFile(h.compileWorkflow(t, "defer_then_sleep_workflow.py", "defer_then_sleep"))
+	if err != nil {
+		t.Fatalf("read Python WASM: %v", err)
+	}
+	ctx := context.Background()
+	rt, err := NewRuntime(ctx, 0, 0)
+	if err != nil {
+		t.Fatalf("NewRuntime: %v", err)
+	}
+	t.Cleanup(func() { rt.Close(ctx) })
+	wt, err := NewWasmtimeBackend(ctx)
+	if err != nil {
+		t.Fatalf("NewWasmtimeBackend: %v", err)
+	}
+	t.Cleanup(func() { wt.Close(ctx) })
+
+	caller := &mockCaller{}
+	eng := NewEngine(rt, caller, WithBackends(WasmtimeLanguages, wt), WithWorkflowID("wf-py-defer-sleep"))
+	_, hist, susp, _, _, err := eng.Execute(ctx, wasmBytes, "run", []byte(`{}`))
+	if err != nil || susp == nil {
+		t.Fatalf("the run should suspend in the sleep: err=%v suspended=%v", err, susp != nil)
+	}
+	if ops := operationsCalled(caller); len(ops) != 1 || ops[0] != "before" {
+		t.Fatalf("the run made calls %v, want exactly the one before the sleep: the cleanup ran while the workflow was only sleeping", ops)
+	}
+	// The resumed run: the recorded call looks older than the sleep, so it is served; the call after it is made and the cleanup runs last.
+	for i := range hist {
+		if hist[i].EventType == EventTypeCall {
+			hist[i].TimestampMs -= 6000
+		}
+	}
+	caller2 := &mockCaller{}
+	eng2 := NewEngine(rt, caller2, WithBackends(WasmtimeLanguages, wt), WithWorkflowID("wf-py-defer-sleep"))
+	res, _, susp2, _, _, err := eng2.Replay(ctx, wasmBytes, "run", []byte(`{}`), hist)
+	if err != nil || susp2 != nil {
+		t.Fatalf("the resumed run did not finish: err=%v suspended=%v result=%q", err, susp2 != nil, res)
+	}
+	ops := operationsCalled(caller2)
+	if len(ops) != 2 || ops[0] != "after" || ops[1] != "cleanup" {
+		t.Fatalf("the resumed run made calls %v, want the call after the sleep, then the cleanup once", ops)
+	}
+}

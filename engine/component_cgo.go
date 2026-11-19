@@ -1732,7 +1732,14 @@ func (b *wasmtimeBackend) ExecuteComponentCGo(
 		// has to be the one to call the drain, because only the host can
 		// bracket it so the defer bodies' calls are permitted while the
 		// workflow body's are stopped.
-		b.componentRunGuestDefersAfterSuspend(store, instance, entryPoint)
+		//
+		// ONLY in a defer segment, exactly as the core-module path guards the same call (backend_wasmtime.go,
+		// `if b.deferPhase`). In an ordinary run a suspension means the workflow is still alive and WAITING; draining
+		// there ran its cleanup early (the defer body's calls are permitted during a drain and are recorded), and the
+		// resume then diverged at the step the cleanup had taken (cleat#4194).
+		if b.deferPhase {
+			b.componentRunGuestDefersAfterSuspend(store, instance, entryPoint)
+		}
 		return &ExecResult{Suspended: true}, nil
 	}
 
