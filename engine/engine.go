@@ -749,6 +749,10 @@ func WithDeferPassBudget(d time.Duration) EngineOption {
 // The engine fails the execution rather than proceeding if the backend cannot
 // honour it. A defer segment that silently skipped the drain would report the
 // workflow's cleanup as done, which is the failure mode 3.81 exists to record.
+func WithDeferPhase() EngineOption {
+	return func(e *Engine) { e.deferPhase = true }
+}
+
 // WithStopAtLastStoppable makes a defer segment replay a KILLED run only as far as the last host call the engine can
 // refuse, and stop there (cleat#4079). It has no effect without WithDeferPhase.
 //
@@ -771,10 +775,6 @@ func WithStopAtLastStoppable() EngineOption {
 // cannot happen in this process: a trapped component instance cannot be re-entered. The worker routes such a run through a
 // defer segment on a fresh instance.
 func (e *Engine) KilledWithDefersOwed() bool { return e.killedWithDefersOwed.Load() }
-
-func WithDeferPhase() EngineOption {
-	return func(e *Engine) { e.deferPhase = true }
-}
 
 // WithContinueAsNewHandler sets a handler for atomic ContinueAsNew transitions.
 func WithContinueAsNewHandler(fn func(ctx context.Context, currentRunID, workerID string, generation int64, defName string, defVersion int, newInput string, newEvents []EventRecord, result string, queryState map[string]string, priority int) (newRunID string, err error)) EngineOption {
