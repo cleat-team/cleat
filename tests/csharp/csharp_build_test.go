@@ -2,12 +2,14 @@ package csharp
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/cleat-team/cleat/wasm"
 )
@@ -121,6 +123,12 @@ func TestExecFormatErrorIsRecognisedAndNothingElseIs(t *testing.T) {
 		}
 	}
 }
+
+// toolchainFiles are the files of packages/cleat-csharp that a COPY of the toolchain needs to be runnable: the tests that tamper with
+// one lock file copy the directory (CLEAT_CSHARP_DIR) and must carry the rest unchanged. One list, because a file added to the build
+// (resolved-packages.pl, cleat#4099) that a copy forgets makes build.sh fail for a reason that has nothing to do with what the test
+// is measuring.
+var toolchainFiles = []string{"build.sh", "resolved-packages.pl", "toolchain.env", "toolchain.packages.tsv", "nuget.config"}
 
 func cleatBinary(t *testing.T, root string) string {
 	t.Helper()
@@ -241,7 +249,7 @@ func TestCSharpBuildRefusesAPackageThatIsNotTheLockedOne(t *testing.T) {
 	}
 	src := filepath.Join(root, "packages", "cleat-csharp")
 	cp := t.TempDir()
-	for _, f := range []string{"build.sh", "toolchain.env", "toolchain.packages.tsv", "nuget.config"} {
+	for _, f := range toolchainFiles {
 		b, err := os.ReadFile(filepath.Join(src, f))
 		if err != nil {
 			t.Fatal(err)
@@ -356,7 +364,7 @@ func TestCSharpBuildRefusesAToolchainThatLetsThePackageDownloadItsOwnWasiSdk(t *
 	}
 	src := filepath.Join(root, "packages", "cleat-csharp")
 	cp := t.TempDir()
-	for _, f := range []string{"build.sh", "toolchain.env", "toolchain.packages.tsv", "nuget.config"} {
+	for _, f := range toolchainFiles {
 		b, err := os.ReadFile(filepath.Join(src, f))
 		if err != nil {
 			t.Fatal(err)
@@ -381,5 +389,128 @@ func TestCSharpBuildRefusesAToolchainThatLetsThePackageDownloadItsOwnWasiSdk(t *
 	}
 	if entries, _ := os.ReadDir(out); len(entries) != 0 {
 		t.Errorf("a refused build left %d file(s) in the output directory", len(entries))
+	}
+}
+
+// throwawayNugetVolume returns a package-cache volume name no other build uses, and removes it when the test ends. Only the volume this
+// test names is ever removed.
+func throwawayNugetVolume(t *testing.T) string {
+	t.Helper()
+	vol := fmt.Sprintf("cleat-cs-test-nuget-%d", time.Now().UnixNano())
+	t.Cleanup(func() { _ = exec.Command("docker", "volume", "rm", "-f", vol).Run() })
+	return vol
+}
+
+// TestCSharpAnUnpinnedPackageFromOneProjectDoesNotFailAnother is the regression for cleat#4099, and the known-positive for the pin
+// check beside it. The cache volume is shared by every build with the same lock. build.sh used to check every package in the cache
+// directory, so one project whose dependency was not in the lock left that package behind (the restore runs before the check) and
+// every LATER build with that lock failed "unpinned package", including projects that needed none of it, until someone removed the
+// volume.
+//
+// Three facts, in order, each of which has to hold for the last to mean anything:
+//  1. a project with an unpinned dependency is still refused (exit 2) and the package is named: the check has not been weakened;
+//  2. the unpinned package really IS in the cache afterwards: the premise, so the next step is not passing because nothing was left;
+//  3. an unrelated project, restored from the same cache volume, is accepted (exit 0). Before the fix it was refused.
+func TestCSharpAnUnpinnedPackageFromOneProjectDoesNotFailAnother(t *testing.T) {
+	needDocker(t)
+	root := repoRoot(t)
+	vol := throwawayNugetVolume(t)
+	build := func(project string) (int, string) {
+		cmd := exec.Command("bash", filepath.Join(root, "packages", "cleat-csharp", "build.sh"), root, project, t.TempDir())
+		cmd.Env = append(os.Environ(), "CLEAT_CS_NUGET_VOLUME="+vol, "CLEAT_CS_RESTORE_ONLY=1")
+		out, err := cmd.CombinedOutput()
+		if err == nil {
+			return 0, string(out)
+		}
+		if ee, ok := err.(*exec.ExitError); ok {
+			return ee.ExitCode(), string(out)
+		}
+		t.Fatalf("could not run build.sh: %v", err)
+		return -1, ""
+	}
+
+	code, log := build("tests/csharp/testdata/unpinned")
+	// The wording is not asserted beyond "unpinned package" and the name: an earlier build.sh said "in the cache" and a test pinned to the
+	// new sentence would fail HERE for the old code, never reaching step 3, which is the step that tells the two apart.
+	if code != 2 || !strings.Contains(log, "unpinned package") || !strings.Contains(log, "newtonsoft.json") {
+		t.Fatalf("1. a project with an unpinned dependency: exit %d, want 2 naming newtonsoft.json:\n%s", code, log)
+	}
+
+	image := ""
+	b, err := os.ReadFile(filepath.Join(root, "packages", "cleat-csharp", "toolchain.env"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, l := range strings.Split(string(b), "\n") {
+		if v, ok := strings.CutPrefix(l, "CLEAT_CS_SDK_IMAGE="); ok {
+			image = strings.TrimSpace(v)
+		}
+	}
+	ls, err := exec.Command("docker", "run", "--rm", "-v", vol+":/n:ro", "--entrypoint", "ls", image, "/n/packages").CombinedOutput()
+	if err != nil || !strings.Contains(string(ls), "newtonsoft.json") {
+		t.Fatalf("2. the unpinned package is not in the cache after the refusal, so step 3 would pass for the wrong reason (%v):\n%s", err, ls)
+	}
+
+	code, log = build("tests/csharp/testdata/hello")
+	if code != 0 {
+		t.Fatalf("3. an unrelated project, from the cache the first one left newtonsoft.json in: exit %d, want 0 (cleat#4099):\n%s", code, log)
+	}
+}
+
+// TestCSharpResolvedPackagesReader runs the assets reader inside the SDK image (where build.sh runs it: perl and core JSON::PP are
+// there, jq and python are not) against small fixtures. The failure cases matter as much as the success: a reader that printed nothing
+// and exited 0 for a file it could not understand would make the pin check examine nothing and pass.
+func TestCSharpResolvedPackagesReader(t *testing.T) {
+	needDocker(t)
+	root := repoRoot(t)
+	image := ""
+	b, err := os.ReadFile(filepath.Join(root, "packages", "cleat-csharp", "toolchain.env"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, l := range strings.Split(string(b), "\n") {
+		if v, ok := strings.CutPrefix(l, "CLEAT_CS_SDK_IMAGE="); ok {
+			image = strings.TrimSpace(v)
+		}
+	}
+	dir := t.TempDir()
+	write := func(name, body string) {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("ok.json", `{"version":3,"libraries":{
+	  "Foo.Bar/1.2.3":{"type":"package","path":"foo.bar/1.2.3","sha512":"x"},
+	  "MyProj/1.0.0":{"type":"project","path":"../MyProj/MyProj.csproj"},
+	  "Baz/2.0.0-rc.1":{"type":"package","path":"baz/2.0.0-rc.1"}},
+	 "downloadDependencies":[{"name":"Some.Pack","version":"[10.0.1, 10.0.1]"}]}`)
+	write("projectonly.json", `{"libraries":{"MyProj/1.0.0":{"type":"project","path":"../MyProj/MyProj.csproj"}}}`)
+	write("nolibraries.json", `{"version":3}`)
+	write("notjson.json", `this is not json`)
+	run := func(file string) (int, string) {
+		cmd := exec.Command("docker", "run", "--rm", "-v", filepath.Join(root, "packages", "cleat-csharp")+":/pkg:ro", "-v", dir+":/f:ro",
+			"--entrypoint", "perl", image, "/pkg/resolved-packages.pl", "/f/"+file)
+		out, err := cmd.CombinedOutput()
+		if err == nil {
+			return 0, string(out)
+		}
+		if ee, ok := err.(*exec.ExitError); ok {
+			return ee.ExitCode(), string(out)
+		}
+		t.Fatalf("could not run docker: %v", err)
+		return -1, ""
+	}
+	code, out := run("ok.json")
+	want := "baz\t2.0.0-rc.1\tbaz/2.0.0-rc.1\nfoo.bar\t1.2.3\tfoo.bar/1.2.3\nsome.pack\t10.0.1\tsome.pack/10.0.1\n"
+	if code != 0 || out != want {
+		t.Errorf("a normal assets file: exit %d, got %q, want %q (packages and downloadDependencies, the project library skipped, ids lower-cased)", code, out, want)
+	}
+	if code, out := run("projectonly.json"); code != 0 || out != "" {
+		t.Errorf("an assets file with no package: exit %d, output %q; it must print nothing and exit 0 so build.sh's own guard names the empty list", code, out)
+	}
+	for _, bad := range []string{"nolibraries.json", "notjson.json", "missing.json"} {
+		if code, out := run(bad); code != 2 {
+			t.Errorf("%s: exit %d (output %q), want 2: a file it cannot read must never read as 'nothing resolved'", bad, code, out)
+		}
 	}
 }
