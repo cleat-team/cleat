@@ -60,7 +60,7 @@ jobs:
     name: Chaos sample
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
-    # The sample is sized to finish in about ten minutes; the step's own go test -timeout is 20m, so a hung worker reaches its goroutine dump
+    # The sample is sized to finish in about seven minutes (measured: 24 runs took 3m05s in the first CI run, cleat#4188; 60 is ~7 min); the step's own go test -timeout is 20m, so a hung worker reaches its goroutine dump
     # before this cap.
     timeout-minutes: 30
     services:
@@ -98,7 +98,7 @@ jobs:
       - name: Seeded sample
         run: |
           set -euo pipefail
-          CLEAT_CHAOS_SEED="${{ github.event.pull_request.number }}" CLEAT_CHAOS_MODE=sample CLEAT_CHAOS_SAMPLE=24 CLEAT_CHAOS_SCRIPTS=4 \
+          CLEAT_CHAOS_SEED="${{ github.event.pull_request.number }}" CLEAT_CHAOS_MODE=sample CLEAT_CHAOS_SAMPLE=60 CLEAT_CHAOS_SCRIPTS=4 \
             go test -json -tags chaos -count=1 -timeout 20m ./tests/chaos -run 'TestChaosSeeded' 2>&1 | tee chaos-sample.log
       - uses: actions/upload-artifact@v7
         if: always()
