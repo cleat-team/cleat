@@ -843,6 +843,9 @@ public class HostCalls {
 
         long result = cleatContinueAsNewRaw(p[0], p[1]);
 
+        // cleat#4159: the host refuses a continuation in a defer segment; read as an error code a stop is a success.
+        Memory.throwIfStopped(result);
+
         int errCode = Memory.decodeSimpleErrCode(result);
         if (errCode != 0) {
             return CleatResult.err("continueAsNew(...) failed: host returned error code " + errCode + ". Check that the input JSON is valid and continue-as-new is available.");
@@ -871,6 +874,9 @@ public class HostCalls {
         int[] p = packStrings(newInputJSON);
 
         long result = cleatContinueAsNewVersionedRaw(p[0], p[1], newVersion);
+
+        // cleat#4159: the host refuses a continuation in a defer segment; read as an error code a stop is a success.
+        Memory.throwIfStopped(result);
 
         int errCode = Memory.decodeSimpleErrCode(result);
         if (errCode != 0) {

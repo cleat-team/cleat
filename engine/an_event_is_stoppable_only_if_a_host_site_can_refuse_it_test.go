@@ -53,6 +53,9 @@ var stopSiteEvents = map[string]stopEvent{
 var stopSiteNotStoppable = map[string]string{
 	"DurablePollUpdate": "it records update_received, the same event type that records an update's DELIVERY, which no call of the " +
 		"guest refuses, and an update has no Service/Op marking its effect the way a signal send has (stoppableByOp)",
+	"ContinueAsNew": "the host refuses it in a segment (cleat#4159), but the continue_as_new event ends a run: a history that holds one has " +
+		"nothing after it for a kill to interrupt, so a segment over a killed run is never cut at it",
+	"ContinueAsNewWithVersion": "see ContinueAsNew",
 	"DeleteCron": "the host refuses it in a segment (cleat#4083), but its WIT function returns nothing (reasonWitReturnsNothing in " +
 		"stopSurfaces), so a component guest never receives the stop and carries on past the refused call, back into the loop the kill " +
 		"interrupted",

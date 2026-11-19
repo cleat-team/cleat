@@ -30,6 +30,12 @@ func (s *execSession) ContinueAsNew(ctx context.Context, m api.Module, newInputJ
 		}
 		s.exitReplay()
 	}
+	// New work, so a defer segment refuses it (cleat#4159). It used to record a continue_as_new event in the history of a workflow
+	// being terminated, and a guest that ignored the stop went on into its own defer drain, where the cleanup's call was refused
+	// and the whole defer table consumed.
+	if s.stopBeforeNewWork() {
+		return callSuspendSentinel
+	}
 
 	rec := EventRecord{
 		Step:      s.stepCount,
@@ -65,6 +71,12 @@ func (s *execSession) ContinueAsNewWithVersion(ctx context.Context, m api.Module
 			}
 		}
 		s.exitReplay()
+	}
+	// New work, so a defer segment refuses it (cleat#4159). It used to record a continue_as_new event in the history of a workflow
+	// being terminated, and a guest that ignored the stop went on into its own defer drain, where the cleanup's call was refused
+	// and the whole defer table consumed.
+	if s.stopBeforeNewWork() {
+		return callSuspendSentinel
 	}
 
 	rec := EventRecord{

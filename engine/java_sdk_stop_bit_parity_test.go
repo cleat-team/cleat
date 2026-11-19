@@ -101,6 +101,11 @@ var javaCallsTheHostCanRefuse = []sdkRefusableCall{
 	// could delete a schedule the workflow never reached. The refusal reads as
 	// errCode 0 in the simple layout, which is a successful delete.
 	{"deleteCron", "DeleteCron"},
+	// continueAsNew and continueAsNewVersioned joined in cleat#4159: a terminated workflow's defer segment recorded the body's continuation
+	// in the history of a workflow being terminated, and a guest that read the refusal as an error code (the simple layout reads a stop as
+	// errCode 0, a success) went on into its own defer drain, where the cleanup's call was refused and the defer table consumed.
+	{"continueAsNew", "ContinueAsNew"},
+	{"continueAsNewVersioned", "ContinueAsNewWithVersion"},
 	// createPromise and setScope joined in the cleat#4079 audit: a terminated
 	// workflow's defer segment created a promise row and took a 24-hour scope key
 	// from a real store. Both layouts read a refusal as errCode 0, a success.
@@ -352,7 +357,13 @@ func TestTheRequiredJavaGuardsCoverEveryHostStopSite(t *testing.T) {
 	// 26 since cleat#4152 (DurableCallWithRetry, a further site, counted after cleat#4143's second): the replay-frontier block refuses a defer segment inside the block, so that
 	// the refusal sits in the branch that spells the frontier predicate. Same host call as the sites already counted, so Java needs no
 	// new method; a count of sites and a list of methods are different things, as at 18.
-	const stopSitesOn20260904 = 26
+	//
+	// 28 since cleat#4159 (ContinueAsNew and ContinueAsNewWithVersion): a defer segment's body must not continue as new. Both sides were
+	// checked rather than assumed, and both needed code: Java's continueAsNew and continueAsNewVersioned went straight to
+	// Memory.decodeSimpleErrCode, where a stop reads as errCode 0, a SUCCESS, so both list entries above and Memory.throwIfStopped guards
+	// in HostCalls.java were added. Rust got the matching stop_requested guards, Go's adapters withSuspendCheck. Python decodes bit 31
+	// (_check_host_result) and C# tests the sentinel first (Packed.CheckHostResult); neither needed code.
+	const stopSitesOn20260904 = 28
 	if stopSites != stopSitesOn20260904 {
 		t.Errorf("the engine has %d `if s.stopBeforeNewWork() {` sites; this test was written "+
 			"against %d.\n\nIf a site was ADDED, the Java SDK has a call the host can now "+

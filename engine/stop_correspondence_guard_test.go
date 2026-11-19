@@ -195,6 +195,19 @@ var stopSurfaces = map[string]stopSurface{
 		adapterWhy: reasonNoGoAdapter,
 		wit:        []string{"side-effect-recorded"},
 	},
+	// cleat#4159: a defer segment's body must not continue as new. Both calls return a packed u64 (a scalar), so the stop rides in bit 31
+	// and every SDK has to test it: Go's adapters are guarded, Java and Rust carry the check, C# tests it first in Packed.CheckHostResult,
+	// and py names the Python methods that do.
+	"ContinueAsNew": {
+		adapters: []string{"ContinueAsNew"},
+		wit:      []string{"durable-continue-as-new"},
+		py:       []string{"continue_as_new"},
+	},
+	"ContinueAsNewWithVersion": {
+		adapters: []string{"ContinueAsNewWithVersion"},
+		wit:      []string{"continue-as-new-versioned"},
+		py:       []string{"continue_as_new_versioned"},
+	},
 	// cleat#4083. Go's adapter is guarded; Java and Rust carry the check; a
 	// component guest cannot receive it because the WIT function has no return.
 	"DeleteCron": {
@@ -485,11 +498,21 @@ func adaptersWithSuspendCheck(t *testing.T) (wrapped, all map[string]bool) {
 // added quietly.
 func witCallOutcomeFuncs(t *testing.T) (outcome, scalar, all map[string]bool) {
 	t.Helper()
-	src := repoFile(t, "python-sdk/wit/cleat.wit")
-	fn := regexp.MustCompile(`(?s)\n\s*([a-z0-9-]+): func\(.*?\)\s*->\s*([^;]+);`)
+	return classifyWitFuncs(repoFile(t, "python-sdk/wit/cleat.wit"))
+}
+
+// witFuncDecl matches one WIT function declaration, with or without a return type. The parameters may not contain ';', which is what keeps a
+// function with NO return (`durable-defer-phase: func(on: bool);`) from swallowing the declaration after it: this used to read
+// `func\(.*?\)\s*->`, whose non-greedy body ran on past the first ';' to the next arrow. That attributed the next function's return to the
+// wrong name and dropped the next function from the set, so durable-continue-as-new, the declaration right after durable-defer-phase, was
+// invisible to every check that reads this (cleat#4159).
+var witFuncDecl = regexp.MustCompile(`(?s)\n\s*([a-z0-9-]+): func\(([^;]*?)\)\s*(?:->\s*([^;]+))?;`)
+
+// classifyWitFuncs is witCallOutcomeFuncs over a source text, so a test can hand it a known positive.
+func classifyWitFuncs(src string) (outcome, scalar, all map[string]bool) {
 	outcome, scalar, all = map[string]bool{}, map[string]bool{}, map[string]bool{}
-	for _, m := range fn.FindAllStringSubmatch(src, -1) {
-		name, ret := m[1], strings.TrimSpace(m[2])
+	for _, m := range witFuncDecl.FindAllStringSubmatch(src, -1) {
+		name, ret := m[1], strings.TrimSpace(m[3])
 		all[name] = true
 		switch {
 		case strings.Contains(ret, "call-failure"):
@@ -499,6 +522,25 @@ func witCallOutcomeFuncs(t *testing.T) (outcome, scalar, all map[string]bool) {
 		}
 	}
 	return outcome, scalar, all
+}
+
+// TestTheWitScanSeesTheFunctionAfterOneWithNoReturn is the known positive for the extractor above. The first declaration returns nothing, as
+// durable-defer-phase does, and the second returns a scalar, as durable-continue-as-new does.
+func TestTheWitScanSeesTheFunctionAfterOneWithNoReturn(t *testing.T) {
+	const src = "interface x {\n    /// a\n    durable-defer-phase: func(on: bool);\n\n    /// b\n    durable-continue-as-new: func(input: string) -> u64;\n\n" +
+		"    some-call: func(\n        input: string,\n    ) -> result<string, call-failure>;\n}\n"
+	outcome, scalar, all := classifyWitFuncs(src)
+	for _, name := range []string{"durable-defer-phase", "durable-continue-as-new", "some-call"} {
+		if !all[name] {
+			t.Errorf("%s is missing from the scanned set %v", name, all)
+		}
+	}
+	if !scalar["durable-continue-as-new"] || scalar["durable-defer-phase"] {
+		t.Errorf("scalar set = %v, want durable-continue-as-new and not durable-defer-phase", scalar)
+	}
+	if !outcome["some-call"] || len(outcome) != 1 {
+		t.Errorf("outcome set = %v, want exactly some-call", outcome)
+	}
 }
 
 // pySDKStopChecks reports which Python HostCalls methods test the stop sentinel

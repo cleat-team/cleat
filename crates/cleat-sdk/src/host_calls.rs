@@ -646,6 +646,10 @@ impl HostCalls {
                 input_json.as_ptr(), input_json.len() as u32,
             )
         };
+        // cleat#4159: the host refuses a continuation in a defer segment. Read as a plain error code a stop is a success.
+        if stop_requested(result) {
+            return Err("cleat: host refused this call -- the workflow is running its defer phase".to_string());
+        }
         let (_extra, err_code) = memory::decode_simple_result(result);
         if err_code != 0 {
             return Err(format!("continue_as_new(...) failed: host error code {}. Check that the input JSON is valid and continue-as-new is available.", err_code));
@@ -2036,6 +2040,10 @@ impl HostCalls {
                 new_version,
             )
         };
+        // cleat#4159: the host refuses a continuation in a defer segment. Read as a plain error code a stop is a success.
+        if stop_requested(result) {
+            return Err("cleat: host refused this call -- the workflow is running its defer phase".to_string());
+        }
         let (_extra, err_code) = memory::decode_simple_result(result);
         if err_code != 0 {
             return Err(format!("continue_as_new_versioned(...) failed: host error code {}. Check that the input JSON is valid.", err_code));
