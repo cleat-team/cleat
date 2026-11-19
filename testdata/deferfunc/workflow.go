@@ -363,6 +363,46 @@ func RetryBacksOffOnHost(h cleat.HostCalls, input string) (string, error) {
 	return "", err
 }
 
+// SleepThenRetryCall is cleat#4152's fixture: one recorded call, a durable sleep, then a call under a retry policy that is short enough to
+// run on the host. The run suspends on the sleep, and the claim that resumes it replays [work/before] and meets the retried call at the
+// replay frontier. The same call in a run's first segment gets its whole policy.
+//
+// THE FIRST CALL IS LOAD-BEARING. A sleep records no event, so a run that sleeps and has recorded nothing resumes with an EMPTY history and
+// a session that is not replaying; the retried call is then fresh and gets its policy. The defect needs at least one recorded event ahead
+// of the suspension.
+//
+// 5 attempts at 1ms, so a service that fails twice and then succeeds is retried to success in a few milliseconds, and a call that gets
+// ONE attempt fails.
+func SleepThenRetryCall(h cleat.HostCalls, input string) (string, error) {
+	if _, err := h.DurableCall("work", "before", `{}`); err != nil {
+		return "", err
+	}
+	h.DurableSleepMs(300)
+	return RetryCallOnly(h, input)
+}
+
+// CallThenRetryCall is cleat#4152's fixture without the wait: one recorded call and then the retried call, nothing in between that waits.
+// A run lost after the first call (a worker crash, a reclaim, a deploy) resumes with history [work/before] and meets the retried call at
+// the replay frontier with no dispatch point ahead of it.
+func CallThenRetryCall(h cleat.HostCalls, input string) (string, error) {
+	if _, err := h.DurableCall("work", "before", `{}`); err != nil {
+		return "", err
+	}
+	return RetryCallOnly(h, input)
+}
+
+// RetryCallOnly is SleepThenRetryCall's control: the same call under the same policy, made by a session that has nothing to replay.
+func RetryCallOnly(h cleat.HostCalls, input string) (string, error) {
+	return h.DurableCallWithOptions(cleat.CallOptions{
+		Retry: &cleat.RetryPolicy{
+			MaxAttempts:        5,
+			InitialInterval:    time.Millisecond,
+			BackoffCoefficient: 1.0,
+			MaxInterval:        time.Millisecond,
+		},
+	}, "flaky", "op", `{}`)
+}
+
 // RetryThenCompensate is cleat#2285's fixture: RetryBacksOffOnHost, plus what a saga does when a call fails.
 // If a shutdown that interrupts the backoff reaches the guest as a failed call, this workflow runs its
 // compensation and finishes "compensated" -- COMPLETED, on a fault that never happened -- and the service

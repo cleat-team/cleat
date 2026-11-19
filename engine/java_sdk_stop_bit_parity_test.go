@@ -349,7 +349,10 @@ func TestTheRequiredJavaGuardsCoverEveryHostStopSite(t *testing.T) {
 	// has no import for it (sdkStopSiteExemptions records that and checks it by absence), so there is no decoder to guard; the PR that adds
 	// the import takes on the guard for BOTH sites, since the call is refused at either. A count of sites and a list of methods are
 	// different things, as at 18.
-	const stopSitesOn20260904 = 25
+	// 26 since cleat#4152 (DurableCallWithRetry, a further site, counted after cleat#4143's second): the replay-frontier block refuses a defer segment inside the block, so that
+	// the refusal sits in the branch that spells the frontier predicate. Same host call as the sites already counted, so Java needs no
+	// new method; a count of sites and a list of methods are different things, as at 18.
+	const stopSitesOn20260904 = 26
 	if stopSites != stopSitesOn20260904 {
 		t.Errorf("the engine has %d `if s.stopBeforeNewWork() {` sites; this test was written "+
 			"against %d.\n\nIf a site was ADDED, the Java SDK has a call the host can now "+
