@@ -128,10 +128,10 @@ type Caller interface {
 	// side effect is safe to take, so it is the only code that may read the
 	// outside world non-deterministically.
 	//
-	// Under a host that predates cleat#4113 (or a runtime with no lookup, such
-	// as the in-process dev runners), fn is called every time and the host is
-	// left to hand back the recorded value; the host built for this change
-	// returns it instead of failing the replay on a difference.
+	// Under a runtime with no lookup (the in-process dev runners), fn is called every time and the runtime hands back the recorded value if
+	// it has one. A GUEST built with this SDK does not run on a worker that predates cleat#4113 at all: it imports cleat_side_effect_recorded,
+	// which an older wasmtime host does not register, so the module fails to instantiate ("unknown import"; measured in cleat#4146 review).
+	// Upgrade the workers before deploying a rebuilt Go workflow.
 	SideEffect(fn func() (string, error)) (string, error)
 }
 

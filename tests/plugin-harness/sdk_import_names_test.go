@@ -400,7 +400,6 @@ var sdkUnreachedBaseline = map[string][]string{
 		"cleat_fetch",
 		"cleat_json_parse",
 		"cleat_json_stringify",
-		"cleat_side_effect_recorded", // cleat#4113: the Go SDK binds it in its own PR, which deletes this line
 		"cleat_uuid",
 	},
 

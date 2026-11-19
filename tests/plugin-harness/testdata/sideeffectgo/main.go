@@ -9,6 +9,7 @@ package sideeffectgo
 import (
 	"encoding/json"
 	"strconv"
+	"time"
 
 	"github.com/cleat-team/cleat/cleat"
 )
@@ -26,9 +27,9 @@ type result struct {
 func SideEffectOnce(h cleat.HostCalls, input string) (string, error) {
 	v, err := h.SideEffect(func() (string, error) {
 		ran++
-		// The value is not the evidence: the count below is. (A value from the outside world, time.Now or crypto/rand, is refused by the
-		// build even inside a side effect, E003 and E017; see the PR.)
-		return "computed-in-run-" + strconv.Itoa(ran), nil
+		// A value from the wall clock: it differs on every execution, so a replay that returned anything but the RECORDED value would show it.
+		// (The build refused this before cleat#4123, E003, even inside a side effect.)
+		return "run-" + strconv.Itoa(ran) + "-" + strconv.FormatInt(time.Now().UnixNano(), 10), nil
 	})
 	if err != nil {
 		return "", err

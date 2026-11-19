@@ -1279,10 +1279,6 @@ func TestEveryHostCallIsWired(t *testing.T) {
 		"HandleUpdate":                "falls back to the registered handlers",
 		"PluginCallStreaming":         "guarded with != nil, so nil is a no-op path",
 		"AwaitSignalsWithQuorum":      "falls back to the plain await",
-		// cleat#4113. nil makes HostCallsImpl.SideEffect call the function every time, which is what cleattest's own replay (keyed on the
-		// computed value, not on the step) was built around. A test that replays a side effect whose function returns something different
-		// each time therefore re-runs it here, where the engine would freeze the first value. A known difference, listed on the PR.
-		"SideEffectRecorded": "nil: SideEffect always calls its function; cleattest replays by computed value, not by step",
 		// The claim/register/re-claim loop, composed in
 		// cleat/runtime_signals.go's WaitForEvent from PluginCall and
 		// DurableAwaitSignals -- both wired in this harness, so the fallback
@@ -1450,4 +1446,64 @@ func TestContinueAsNew_LeavesVersionUnpinned(t *testing.T) {
 	if got := env.LastContinuedVersion(); got != 0 {
 		t.Errorf("LastContinuedVersion = %d after plain ContinueAsNew, want 0", got)
 	}
+}
+
+// cleat#4113: cleattest replays a side effect BY STEP, as the engine does. A function that returns something different every time (a clock, a
+// counter) gets the first run's value back on a replay and is not called, instead of being re-run and compared by its value.
+func TestSideEffectReplaysByStepAndDoesNotRunItsFunction(t *testing.T) {
+	env := NewTestEnv()
+	env.EnableReplay()
+	calls := 0
+	next := func() (string, error) { calls++; return fmt.Sprintf("v%d", calls), nil }
+
+	first, err := env.H().SideEffect(next)
+	if err != nil || first != "v1" || calls != 1 {
+		t.Fatalf("recording run: got %q, err %v, calls %d; want v1 after one call", first, err, calls)
+	}
+	second, _ := env.H().SideEffect(next)
+	if second != "v2" {
+		t.Fatalf("recording run, second effect: got %q, want v2", second)
+	}
+
+	env.StartReplay()
+	got1, err := env.H().SideEffect(next)
+	got2, _ := env.H().SideEffect(next)
+	if err != nil || got1 != "v1" || got2 != "v2" {
+		t.Errorf("replay returned %q and %q (err %v), want the recorded v1 and v2 by step", got1, got2, err)
+	}
+	if calls != 2 {
+		t.Errorf("the function ran %d time(s) in total, want 2 (both in the recording run, none in the replay)", calls)
+	}
+	env.AssertReplayDivergence(t, 0)
+
+	// Past the end of the recorded side effects there is nothing to hand back: the function runs, and the replay notes the divergence.
+	extra, _ := env.H().SideEffect(next)
+	if extra != "v3" || calls != 3 {
+		t.Errorf("a third side effect in the replay returned %q after %d call(s), want a fresh v3", extra, calls)
+	}
+	env.AssertReplayDivergence(t, 1)
+}
+
+// A side effect past the end of the recorded ones is a divergence EVEN WHEN the function computes a value equal to a recorded one. The by-value
+// fallback this used to take handed the recorded value back and counted no divergence, so a replay that ran a side effect the original run never
+// made passed as clean whenever the two happened to agree (cleat#4146 review).
+func TestSideEffectPastTheEndIsADivergenceEvenForAnEqualValue(t *testing.T) {
+	env := NewTestEnv()
+	env.EnableReplay()
+	same := func() (string, error) { return "same", nil }
+
+	if v, err := env.H().SideEffect(same); err != nil || v != "same" {
+		t.Fatalf("recording run: %q, %v", v, err)
+	}
+	env.StartReplay()
+	if v, _ := env.H().SideEffect(same); v != "same" {
+		t.Fatalf("the recorded side effect replayed as %q", v)
+	}
+	env.AssertReplayDivergence(t, 0)
+
+	// A second side effect that computes the SAME value as the recorded one: nothing was recorded for it.
+	if v, _ := env.H().SideEffect(same); v != "same" {
+		t.Fatalf("the extra side effect returned %q", v)
+	}
+	env.AssertReplayDivergence(t, 1)
 }

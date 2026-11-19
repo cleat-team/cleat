@@ -335,9 +335,9 @@ function on every replay and the host failed the replay when its result
 differed, so the `uuid` example above failed its first replay; **v0.5.0 has
 that defect**). The function must not make host calls, the same rule Temporal
 states, because each host call consumes a step of the history. Run it through
-the tests with the engine, not `cleattest`: `cleattest` replays a side effect
-by the value the function computed, so a function whose value differs on every
-call runs again there. Available in the Go SDK (`cleat/runtime.go`,
+the tests with `cleattest` or the engine: both replay a side effect by step, so
+the function does not run again and its fresh value cannot differ from the
+recorded one. Available in the Go SDK (`cleat/runtime.go`,
 `SideEffectTyped` in `cleat/runtime_workflow.go`), and registered as `cleat_side_effect` by the wasmtime backend that
 runs workers and by the wazero runtime the dev tools use.
 
