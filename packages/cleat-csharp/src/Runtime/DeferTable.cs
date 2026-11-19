@@ -33,6 +33,10 @@ internal sealed class DeferTable
 
     internal int Count => _bodies.Count;
 
+    /// <summary>True while a drain is running bodies: a durable call made now is a defer body's, not the workflow body's. Calls that
+    /// decide the run's outcome (continue-as-new) refuse in this window (python-sdk/cleat_sdk/defer.py, <c>in_defer_phase</c>).</summary>
+    internal bool InDeferPhase { get; private set; }
+
     internal void Register(string id, Func<Task> body) => _bodies.Add((id, body));
 
     internal uint Drain(bool propagateSuspend)
@@ -42,6 +46,7 @@ internal sealed class DeferTable
         _bodies.Clear();
 
         _phase(true);
+        InDeferPhase = true;
         try
         {
             uint ran = 0;
@@ -65,6 +70,7 @@ internal sealed class DeferTable
         }
         finally
         {
+            InDeferPhase = false;
             _phase(false);
         }
     }
