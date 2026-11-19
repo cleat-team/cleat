@@ -33,7 +33,7 @@ func (e *wasmInstanceTimeoutFloorError) Is(target error) bool {
 
 // CheckWasmInstanceTimeoutFloor refuses a duration above 0 and under MinWasmInstanceTimeout.
 //
-// 0 is allowed here: what 0 means is the caller's (the worker flag reads it as "disabled, not recommended", a tenant setting as
+// 0 is allowed here: what 0 means is the caller's (the worker flag reads it as "use the default", a tenant setting as
 // "unset, use the operator's flag"). zeroHint finishes the sentence "Raise <subject> to at least 250ms, or <zeroHint>." and says
 // what 0 does for THIS caller. A negative duration is not judged: each caller already has its own rule for it.
 //

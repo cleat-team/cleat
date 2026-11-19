@@ -38,7 +38,7 @@ const DefaultOutBufSize = 1048576
 
 // OutBufSize is the output buffer size in bytes for WASM export calls.
 // Set before creating any Runtime to configure. Default: 1 MiB.
-var OutBufSize uint32 = 1048576
+var OutBufSize uint32 = DefaultOutBufSize
 
 const wasmPageSize = 65536 // 64 KB WASM page size
 

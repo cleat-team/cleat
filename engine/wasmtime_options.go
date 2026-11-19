@@ -24,6 +24,11 @@ import (
 // (engine/runtime.go), so both backends behave the same way out of the box.
 const DefaultWasmtimeExecutionTimeout = 30 * time.Second
 
+// DefaultWasmWallClockCeiling is the worker's default for --wasm-wall-clock-ceiling: the longest one WASM invocation may take in wall-clock time, host calls
+// included. The engine itself falls back to the instance timeout when the option is not set (WithWasmWallClockCeiling); this is the value the worker
+// passes, and it lived as a literal in the flag declaration until cleat#4172.
+const DefaultWasmWallClockCeiling = 5 * time.Minute
+
 // DefaultWasmtimeMemoryLimitBytes bounds linear memory per wasmtime store
 // when the caller has not configured a tighter one via
 // WithWasmtimeMemoryLimits. It matches DefaultMemoryLimitPages (32 MiB),
