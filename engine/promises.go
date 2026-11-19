@@ -196,11 +196,16 @@ func (s *execSession) AwaitPromise(ctx context.Context, m api.Module, promiseID 
 	// with the timeout it was given, because a replay must return the same answer without asking the store: recording nothing let a
 	// replay that ran after the promise settled return RESOLVED where the original run was told it timed out (measured by
 	// cleat-review), and left a later event at this step for the replay to trip over. The replay branch above returns the timeout from
-	// this record alone. One event per poll is what a poll loop's own sleep already costs.
+	// this record alone. A poll loop therefore records one event per iteration, which counts toward the event cap.
 	//
 	// Not for a resume that carries a POSITIVE recorded timeout: that deadline belongs to the original await and wins, as it always did.
 	// (A recorded timeout of 0 or less with a non-positive argument never arrives here: it returned from the replay branch.)
 	if timeoutMs <= 0 && !(resumingAwait && awaitTimeoutMs > 0) {
+		// A poll is an event like any other, so it counts toward the event cap and stops at it (cleat#4153). Without this a poll loop
+		// kept recording into a quota the flush refuses, retrying each refused write for the whole flush window.
+		if s.refuseAtEventCap(ctx, m) {
+			return s.suspendingAwaitResult()
+		}
 		s.recordEvent(EventRecord{
 			Step:      s.stepCount,
 			EventType: EventTypeAwaitPromise,

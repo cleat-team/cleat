@@ -2537,7 +2537,9 @@ class HostCalls:
         timeout_ms : int
             Maximum wait time in milliseconds. Zero or negative means DO NOT
             WAIT (cleat#4144): an already-settled promise is returned, and a
-            pending one reports a timeout at once. To wait without a limit,
+            pending one reports a timeout at once, recording one event. A loop
+            of such polls records one event per iteration, so prefer a positive
+            timeout to a zero-timeout poll loop. To wait without a limit,
             pass ``INFINITE_TIMEOUT_MS``. (:meth:`await_signals_ms` still
             maps ``<= 0`` to "wait for ever" itself; whether the two should
             agree is an open decision.)

@@ -323,9 +323,13 @@ func (s *execSession) DurableAwaitSignals(ctx context.Context, m api.Module, sig
 	// OUTCOME OF A LOOK AT THE STORE, and a replay that reached this call after a signal had arrived returned the signal where
 	// the original run returned a timeout, so the guest took a different branch; and because the call left no event, a replay
 	// found some LATER event at this step, fell out of the replay branch above with history unread, and re-ran every call that
-	// followed (measured by cleat-review: an already-recorded durable call executed again). One event per poll is what a poll
-	// loop's own sleep already costs. The replay branch above returns the timeout from this record alone.
+	// followed (measured by cleat-review: an already-recorded durable call executed again). A poll loop therefore records one
+	// event per iteration, and each counts toward the event cap. The replay branch above returns the timeout from this record alone.
 	if timeoutMs <= 0 {
+		// Counts toward the event cap and stops at it, as promises.go does for await_promise (cleat#4153).
+		if s.refuseAtEventCap(ctx, m) {
+			return s.suspendingAwaitResult()
+		}
 		s.recordEvent(EventRecord{
 			Step:        s.stepCount,
 			EventType:   EventTypeAwaitSignals,

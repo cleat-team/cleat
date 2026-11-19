@@ -743,7 +743,7 @@ Wait for one or more external signals, with a timeout.
 |---|---|---|
 | `names_ptr` | `i32` | JSON array of signal names, e.g. `["payment_received","order_cancelled"]` |
 | `names_len` | `i32` | JSON array length |
-| `timeout_ms` | `i64` | Timeout in milliseconds. Zero or negative means do not wait: an already-waiting signal is returned and otherwise `timedOut` is reported at once (cleat#1331). |
+| `timeout_ms` | `i64` | Timeout in milliseconds. Zero or negative means do not wait: an already-waiting signal is returned and otherwise `timedOut` is reported at once (cleat#1331). That outcome is recorded as one `await_signals` event and a replay returns it from the record (cleat#4153), so a loop of such polls records one event per iteration: prefer a positive timeout to a zero-timeout poll loop. |
 | `sig_name_ptr` | `i32` | Output buffer for received signal name |
 | `sig_name_max_len` | `i32` | Output buffer capacity (1048576) |
 | `payload_ptr` | `i32` | Output buffer for signal payload |
@@ -1225,7 +1225,7 @@ Wait for a promise to be resolved by an external caller. Blocks until resolved o
 |---|---|---|
 | `promise_id_ptr` | `i32` | Promise ID pointer |
 | `promise_id_len` | `i32` | Promise ID length |
-| `timeout_ms` | `i64` | Timeout in milliseconds. **Zero or negative means do not wait** (cleat#4144): a promise that is already settled is reported, and a pending one returns `timedOut` at once. It never suspends the run. The outcome is RECORDED as one `await_promise` event carrying the timeout, and a replay returns the timeout from that record without asking the store (cleat#4153), as `cleat_await_signals` now does. |
+| `timeout_ms` | `i64` | Timeout in milliseconds. **Zero or negative means do not wait** (cleat#4144): a promise that is already settled is reported, and a pending one returns `timedOut` at once. It never suspends the run. The outcome is RECORDED as one `await_promise` event carrying the timeout, and a replay returns the timeout from that record without asking the store (cleat#4153), as `cleat_await_signals` now does. A loop of these records one event per iteration, so prefer a positive timeout to a zero-timeout poll loop. |
 | `result_out_ptr` | `i32` | Output buffer for result |
 | `result_out_max` | `i32` | Output buffer capacity (1048576) |
 
