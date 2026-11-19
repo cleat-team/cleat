@@ -4,7 +4,8 @@ name: C# Tier 2
 # the SDK's managed unit tests and the Go-side tests in tests/csharp, both in the digest-pinned .NET SDK container, with the toolchain
 # DECLARED to the tests (CLEAT_REQUIRE_TOOLCHAINS) so a missing docker is a failure here and a skip on a laptop.
 #
-# NOT A REQUIRED CHECK: "C# Tier 2 (Linux x86_64)" and "C# Tier 2 (Linux arm64)"
+# NOT A REQUIRED CHECK: C# Tier 2 (Linux x86_64)
+# NOT A REQUIRED CHECK: C# Tier 2 (Linux arm64)
 # Tier 2 must RUN and may fail, so neither is in tiers.yaml's required_contexts and neither is to be added to a ruleset. THAT IS WHAT
 # MAKES THE WORKFLOW-LEVEL `paths:` FILTER BELOW SAFE: a required context behind a path filter never reports on a PR that does not
 # touch the paths, and blocks it (a required context can be absent). If either job is ever made required, the filter must go and the
@@ -20,7 +21,7 @@ name: C# Tier 2
 #     runner has no binfmt/QEMU, so it cannot execute the arm64 image (tests/csharp needPlatform). One skip, declared in
 #     scripts/skip-ledger.d/csharp-tier2.tsv.
 #   - arm64 (ubuntu-24.04-arm, NATIVE, no emulator): the lock's arm64 row and a real arm64 compile. The job declares csharp-arm64, so
-#     if the leg cannot run it FAILS rather than skips. It runs ONLY the linux_arm64 subtest (the `/^linux_arm64$` in its -run), so it
+#     if the leg cannot run it FAILS rather than skips. It runs ONLY the linux_arm64 subtest (its -skip names the amd64 one), so it
 #     skips nothing and its budget is zero. It does not probe linux/amd64, and that is measured, not assumed: on this runner's first
 #     run (cleat#4098) the amd64 probe pulled the image and then failed with "docker: cannot overwrite digest" (one digest reference,
 #     a second platform, a daemon that will not hold both), which is neither a missing emulator nor a finding about the lock. The
@@ -161,12 +162,14 @@ jobs:
           go-version-file: go.mod
 
       # Not the whole package: the lock's arm64 row, and one real arm64 compile with its stamp read back. The rest runs on x86_64 and
-      # costs the same here. `/^linux_arm64$` selects the one subtest, so the amd64 leg is not run (see the header for why it is not
-      # probed either); the Stamped test has no subtests, so the subtest filter leaves it whole.
+      # costs the same here. `-skip` names the amd64 subtest, so that leg is not run (see the header for why it is not probed
+      # either). A -skip rather than a `/^linux_arm64$` on the -run, because scripts/sdk-host-call-coverage.py reads the whole -run string
+      # as ONE regex against top-level names, so a subtest part makes it report that the pattern "selects NO test" (cleat#4098); go itself
+      # splits -run on `/` per level, and the guard should too (filed separately).
       - name: Tests (the arm64 lock and a native arm64 build)
         run: |
           set -o pipefail
-          go test -count=1 -timeout 25m -json -run '^(TestCSharpLockResolvesOnEveryPlatform|TestCSharpBuildProducesAStampedComponent)$/^linux_arm64$' ./tests/csharp/... | tee csharp-tier2-arm64-report.json > /dev/null
+          go test -count=1 -timeout 25m -json -run '^(TestCSharpLockResolvesOnEveryPlatform|TestCSharpBuildProducesAStampedComponent)$' -skip '^TestCSharpLockResolvesOnEveryPlatform$/^linux_amd64$' ./tests/csharp/... | tee csharp-tier2-arm64-report.json > /dev/null
 
       - name: Upload the report
         if: always()
