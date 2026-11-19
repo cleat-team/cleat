@@ -27,6 +27,22 @@ internal static class EntryJson
 
     internal static string Element(JsonElement e) => e.GetRawText();
     internal static string Node(JsonNode? n) => n is null ? "null" : n.ToJsonString(Options);
+    /// <summary>
+    /// A JSON array of strings, written by hand like everything here (no reflection). Host calls take lists of names
+    /// this way: signal names, child run ids.
+    /// </summary>
+    internal static string StringArray(System.Collections.Generic.IReadOnlyList<string> items)
+    {
+        using var ms = new System.IO.MemoryStream();
+        using (var w = new Utf8JsonWriter(ms, new JsonWriterOptions { Encoder = Encoder }))
+        {
+            w.WriteStartArray();
+            foreach (var item in items) w.WriteStringValue(item);
+            w.WriteEndArray();
+        }
+        return System.Text.Encoding.UTF8.GetString(ms.ToArray());
+    }
+
     internal static string String(string? s) => s is null ? "null" : JsonValue.Create(s)!.ToJsonString(Options);
     internal static string Bool(bool b) => b ? "true" : "false";
     internal static string Int(int v) => JsonValue.Create(v).ToJsonString(Options);

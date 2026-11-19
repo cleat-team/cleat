@@ -18,6 +18,31 @@ internal static class Packed
     /// <summary><c>sleepStatusSuspend</c> in the top byte of a sleep result.</summary>
     internal const byte SleepStatusSuspend = 1;
 
+    /// <summary>
+    /// Decodes a packed status word, as Python's <c>_check_host_result</c> does: the stop first, then the error,
+    /// then the upper 32 bits (which some calls use as a length or flag).
+    /// </summary>
+    /// <remarks>
+    /// The stop is tested FIRST and by MASK, before any field is read. Bit 31 is free in every layout the host
+    /// packs for these calls, but "free" means the host cannot produce it as an ordinary value, not that a field
+    /// decode would ignore it: a decoder that reads fields first turns a stop into an ordinary result and carries on
+    /// past a stop it was told to obey. This is not <see cref="SleepMustSuspend"/>'s whole-word test, which exists
+    /// because a sleep word's DURATION field can legitimately set bit 31.
+    /// </remarks>
+    internal static uint CheckHostResult(ulong result, string service, string operation, string what)
+    {
+        if ((result & SuspendSentinel) != 0) throw new Cleat.CleatSuspendException();
+        var code = (uint)(result & 0xFF);
+        // The BASE exception, with no classification claimed. These words are not call-failure values: the engine answers
+        // a generic 1 for ANY failure of resolve/reject (packSimpleResult(1, 0), engine/promises.go), so mapping the number
+        // through the call-error table would turn "promise not found" into a TIMEOUT, the retryable kind. Python does the
+        // same by raising a plain RuntimeError here and borrowing the table only for its message; this does not borrow
+        // the names, because the names are wrong for these words.
+        if (code != 0)
+            throw new Cleat.CleatCallException(service, operation, $"{what} failed: host status code {code}", 0);
+        return (uint)(result >> 32);
+    }
+
     /// <summary>True if a <c>durable-sleep</c> result means the workflow must suspend.</summary>
     internal static bool SleepMustSuspend(ulong result)
         => result == SuspendSentinel || (byte)(result >> 56) == SleepStatusSuspend;
