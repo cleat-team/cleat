@@ -1652,6 +1652,8 @@ func TestCreatePromiseReplayMatch(t *testing.T) {
 	}
 }
 
+// A foreign event at the step, with history unread: a divergence, not a hand-off to fresh. This asserted the opposite (isReplay=false and a
+// create_promise appended after the foreign event at a colliding step) until cleat#4157, which is the defect.
 func TestCreatePromiseReplayDivergence(t *testing.T) {
 	s := newTestExecSession()
 	s.isReplay = true
@@ -1660,29 +1662,7 @@ func TestCreatePromiseReplayDivergence(t *testing.T) {
 		EventType: "call", // wrong type
 	}}
 	result := s.CreatePromise(context.Background(), nil, "my-promise", 0, 0)
-
-	if s.isReplay {
-		t.Error("expected isReplay=false after exitReplay")
-	}
-	if s.isReplay {
-		t.Error("expected replay to have ended")
-	}
-	// Fresh path runs after exitReplay, recording a create_promise event.
-	if len(s.history) < 2 {
-		t.Fatalf("expected at least 2 history entries (original + fresh event), got %d", len(s.history))
-	}
-	if s.history[1].EventType != EventTypeCreatePromise {
-		t.Errorf("expected fresh event type create_promise, got %q", s.history[1].EventType)
-	}
-	if s.history[1].PromiseID == "" {
-		t.Error("expected non-empty PromiseID in fresh event")
-	}
-	// newTestExecSession has NO promise store. This asserted success, which is
-	// what let 3.231 survive: a create that reaches no store produces an ID the
-	// guest proceeds with and a promise nobody can ever settle.
-	if errCode := uint32(result) & 0xFF; errCode != 1 {
-		t.Errorf("expected errCode 1 with no promise store, got %d (raw %d)", errCode, result)
-	}
+	wantReplayDivergence(t, s, result, 1)
 }
 
 func TestCreatePromiseReplayPastEnd(t *testing.T) {
@@ -2244,30 +2224,10 @@ func TestContinueAsNewReplayDivergence(t *testing.T) {
 		Step:      0,
 		EventType: "call", // wrong type — should be EventTypeContinueAsNew
 	}}
-
 	result := s.ContinueAsNew(context.Background(), nil, `{"v":1}`)
-
-	if result != 0 {
-		t.Errorf("expected result 0, got %d", result)
-	}
-	if s.isReplay {
-		t.Error("expected isReplay=false after exitReplay")
-	}
-	if s.isReplay {
-		t.Error("expected replay to have ended")
-	}
-	if s.stepCount != 1 {
-		t.Errorf("expected stepCount=1 after recordEvent, got %d", s.stepCount)
-	}
-	if len(s.history) != 2 {
-		t.Fatalf("expected history len=2 (original + new ContinueAsNew), got %d", len(s.history))
-	}
-	last := s.history[len(s.history)-1]
-	if last.EventType != EventTypeContinueAsNew {
-		t.Errorf("expected EventTypeContinueAsNew, got %s", last.EventType)
-	}
-	if last.NewInput != `{"v":1}` {
-		t.Errorf("expected NewInput='{\"v\":1}', got %q", last.NewInput)
+	wantReplayDivergence(t, s, result, 1)
+	if s.suspendErr != nil {
+		t.Errorf("a divergent continue_as_new restarted the run: %+v", s.suspendErr)
 	}
 }
 
@@ -2406,30 +2366,10 @@ func TestContinueAsNewWithVersionReplayDivergence(t *testing.T) {
 		Step:      0,
 		EventType: "call", // wrong type
 	}}
-
 	result := s.ContinueAsNewWithVersion(context.Background(), nil, `{"v":1}`, 2)
-
-	if result != 0 {
-		t.Errorf("expected result 0, got %d", result)
-	}
-	if s.isReplay {
-		t.Error("expected isReplay=false after exitReplay")
-	}
-	if s.isReplay {
-		t.Error("expected replay to have ended")
-	}
-	if s.stepCount != 1 {
-		t.Errorf("expected stepCount=1 after recordEvent, got %d", s.stepCount)
-	}
-	if len(s.history) != 2 {
-		t.Fatalf("expected history len=2 (original + new ContinueAsNew), got %d", len(s.history))
-	}
-	last := s.history[len(s.history)-1]
-	if last.EventType != EventTypeContinueAsNew {
-		t.Errorf("expected EventTypeContinueAsNew, got %s", last.EventType)
-	}
-	if last.NewVersion != 2 {
-		t.Errorf("expected NewVersion=2 in event, got %d", last.NewVersion)
+	wantReplayDivergence(t, s, result, 1)
+	if s.suspendErr != nil {
+		t.Errorf("a divergent continue_as_new restarted the run: %+v", s.suspendErr)
 	}
 }
 
@@ -2588,23 +2528,7 @@ func TestSignalWorkflowReplayDivergence(t *testing.T) {
 		EventType: "call", // wrong type
 	}}
 	result := s.SignalWorkflow(context.Background(), nil, "target-run-123", "my-signal", `{"x":1}`)
-
-	if s.isReplay {
-		t.Error("expected isReplay=false after exitReplay")
-	}
-	if s.isReplay {
-		t.Error("expected replay to have ended")
-	}
-	// Fresh path records EventTypeSignalReceived.
-	if len(s.history) < 2 {
-		t.Fatalf("expected at least 2 history entries, got %d", len(s.history))
-	}
-	if s.history[1].EventType != EventTypeSignalReceived {
-		t.Errorf("expected EventTypeSignalReceived, got %q", s.history[1].EventType)
-	}
-	if result != 0 {
-		t.Errorf("expected 0, got %d", result)
-	}
+	wantReplayDivergence(t, s, result, 1)
 }
 
 func TestSignalWorkflowReplayPastEnd(t *testing.T) {
@@ -2865,22 +2789,7 @@ func TestRegisterUpdateHandlerReplayDivergence(t *testing.T) {
 		EventType: "call", // wrong type
 	}}
 	result := s.RegisterUpdateHandler(context.Background(), nil, "my-handler")
-
-	if s.isReplay {
-		t.Error("expected isReplay=false after exitReplay")
-	}
-	if s.isReplay {
-		t.Error("expected replay to have ended")
-	}
-	if len(s.history) < 2 {
-		t.Fatalf("expected at least 2 history entries, got %d", len(s.history))
-	}
-	if s.history[1].EventType != EventTypeUpdateHandler {
-		t.Errorf("expected EventTypeUpdateHandler, got %q", s.history[1].EventType)
-	}
-	if result != 0 {
-		t.Errorf("expected 0, got %d", result)
-	}
+	wantReplayDivergence(t, s, result, 1)
 }
 
 func TestRegisterUpdateHandlerReplayPastEnd(t *testing.T) {
@@ -3195,25 +3104,7 @@ func TestRegisterUpdateHandlerReplay_Mismatch(t *testing.T) {
 		EventType: "call", // wrong type
 	}}
 	result := s.RegisterUpdateHandler(context.Background(), nil, "my-handler")
-
-	if s.isReplay {
-		t.Error("expected isReplay=false after exitReplay")
-	}
-	if s.isReplay {
-		t.Error("expected replay to have ended")
-	}
-	if len(s.history) < 2 {
-		t.Fatalf("expected at least 2 history entries, got %d", len(s.history))
-	}
-	if s.history[1].EventType != EventTypeUpdateHandler {
-		t.Errorf("expected fresh event type update_handler, got %q", s.history[1].EventType)
-	}
-	if s.history[1].UpdateHandlerName != "my-handler" {
-		t.Errorf("expected UpdateHandlerName='my-handler', got %q", s.history[1].UpdateHandlerName)
-	}
-	if result != 0 {
-		t.Errorf("expected 0, got %d", result)
-	}
+	wantReplayDivergence(t, s, result, 1)
 }
 
 func TestRegisterUpdateHandlerReplay_PastEnd(t *testing.T) {

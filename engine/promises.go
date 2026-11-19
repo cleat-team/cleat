@@ -27,6 +27,7 @@ func (s *execSession) CreatePromise(ctx context.Context, m api.Module, name stri
 				written, writtenEC := s.writeOut(ctx, m, promiseIDPtr, rec.PromiseID, promiseIDMaxLen)
 				return packSimpleResult(writtenEC, written)
 			}
+			return s.replayDivergence(ctx, m, EventTypeCreatePromise, promiseIDPtr, promiseIDMaxLen)
 		}
 		s.exitReplay()
 	}
@@ -314,12 +315,15 @@ func (s *execSession) ResolvePromise(ctx context.Context, m api.Module, promiseI
 	if s.isReplay {
 		if s.stepCount < len(s.history) {
 			rec := s.history[s.stepCount]
+			if rec.EventType != EventTypePromiseResolved {
+				// Not consumed: this used to advance past ANY event and then leave replay, swallowing an event that belongs to
+				// another call and running the rest fresh (cleat#4157).
+				return s.replayDivergence(ctx, m, EventTypePromiseResolved, 0, 0)
+			}
 			if !s.advanceReplayStep(ctx, &rec) {
 				return 0
 			}
-			if rec.EventType == EventTypePromiseResolved {
-				return 0
-			}
+			return 0
 		}
 		s.exitReplay()
 	}
@@ -366,12 +370,13 @@ func (s *execSession) RejectPromise(ctx context.Context, m api.Module, promiseID
 	if s.isReplay {
 		if s.stepCount < len(s.history) {
 			rec := s.history[s.stepCount]
+			if rec.EventType != EventTypePromiseRejected {
+				return s.replayDivergence(ctx, m, EventTypePromiseRejected, 0, 0)
+			}
 			if !s.advanceReplayStep(ctx, &rec) {
 				return 0
 			}
-			if rec.EventType == EventTypePromiseRejected {
-				return 0
-			}
+			return 0
 		}
 		s.exitReplay()
 	}

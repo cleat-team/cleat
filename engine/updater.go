@@ -158,6 +158,7 @@ func (s *execSession) DurableCompleteUpdate(ctx context.Context, m api.Module, r
 				// (#818) and turn every replay into an error.
 				return 0
 			}
+			return s.replayDivergence(ctx, m, EventTypeUpdateCompleted, 0, 0)
 		}
 		s.exitReplay()
 	}
