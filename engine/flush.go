@@ -622,7 +622,7 @@ func (e *Engine) flushEventUngated(ctx context.Context, workflowID string, rec E
 			return fmt.Errorf("flush event (quota): %w", err)
 		}
 		if currentCount >= e.maxQuotaEvents {
-			return fmt.Errorf("flush event: event quota exceeded (max %d)", e.maxQuotaEvents)
+			return fmt.Errorf("flush event: %w (max %d)", ErrEventQuotaExceeded, e.maxQuotaEvents)
 		}
 		res, err := tx.ExecContext(ctx, insertEventSQL, workflowID, rec.Step, rec.EventType,
 			nullStr(rec.Service), nullStr(rec.Op), nullStr(stored.Request), nullStr(stored.Response), nullStr(stored.Err),

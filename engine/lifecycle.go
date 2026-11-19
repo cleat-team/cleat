@@ -184,6 +184,54 @@ const (
 	eventFlushFailed
 )
 
+// eventWriteRetryAfter is how long a run that stopped after a failed event write waits before it is claimed again.
+const eventWriteRetryAfter = 5 * time.Second
+
+// stopAfterFailedEventWrite is what a failed write of a recorded event does to the session (cleat#4160). The guest used to carry on: the
+// call's effect had happened, its event was not durable, and the next event was written at the next step, so the run's record had a hole
+// (measured: two calls executed, one event written, no suspension). A worker lost before the segment-end write then replays the persisted
+// prefix, reaches the hole and re-executes everything after it.
+//
+// ErrFenceLost is NOT handled here: another worker owns the run and the fence already deals with it. A quota refusal is answered with the
+// event cap's continue-as-new, because a suspend would be refused again for ever. Anything else stops the session at its next fresh host call
+// (stopBeforeNewWork) and suspends the run; the segment-end write then persists the event if the database is back, and otherwise the run is
+// reclaimed and replays the persisted prefix, so one step runs again rather than everything after it.
+func (s *execSession) stopAfterFailedEventWrite(rec EventRecord, err error) {
+	if err == nil || s.eventWriteFailure != nil || s.handlingEventWriteFailure {
+		return
+	}
+	s.handlingEventWriteFailure = true
+	defer func() { s.handlingEventWriteFailure = false }()
+	reason := "error"
+	if errors.Is(err, ErrEventQuotaExceeded) {
+		reason = "quota"
+	}
+	if s.engine.Metrics != nil {
+		s.engine.Metrics.RecordEventWriteFailure(context.Background(), reason)
+	}
+	// Named for an operator to alert on: a run that keeps landing here is being suspended and reclaimed by a store that will not take its events.
+	s.engine.log().WarnContext(context.Background(), "recorded event could not be written; stopping the run at its next host call",
+		"workflow_id", s.workflowID, "tenant_id", s.tenantID, "step", rec.Step, "event_type", rec.EventType, "reason", reason, "error", err)
+	if errors.Is(err, ErrEventQuotaExceeded) {
+		// The continuation is the REMEDY for a refused quota, and ContinueAsNew refuses while the session is stopping (a defer segment, a
+		// shutdown, #4159) and now also after a failed write. So it runs BEFORE the failure is recorded on the session: with the flag set
+		// first it refused itself, set no suspension, and left the run going on top of the hole (found in review of the first version, on a
+		// merge with #4161). Its own event write fails on the quota too; the latch above stops that re-entering here.
+		if !s.autoContinueAsNewTriggered {
+			s.triggerEventCapContinueAsNew(context.Background(), nil)
+		}
+		s.eventWriteFailure = err
+		return
+	}
+	s.eventWriteFailure = err
+	if s.suspendErr == nil {
+		s.suspendErr = &SuspendError{
+			Reason: fmt.Sprintf("event write failed at step %d (%s): %v", rec.Step, rec.EventType, err),
+			Until:  time.Now().Add(eventWriteRetryAfter),
+		}
+	}
+}
+
 // recordEvent appends an event to the session history and persists it.
 //
 // It returns what became of the durable write. EXISTING CALLERS IGNORE IT and
@@ -274,6 +322,7 @@ func (s *execSession) recordEvent(rec EventRecord) eventPersistence {
 						s.engine.log().DebugContext(context.Background(), "adaptive flush: fence lost, workflow reassigned to another worker", "workflow_id", s.workflowID, "step", rec.Step)
 					} else {
 						s.engine.log().ErrorContext(context.Background(), "adaptive flush failed", "workflow_id", s.workflowID, "step", rec.Step, "error", err)
+						s.stopAfterFailedEventWrite(rec, err)
 					}
 					outcome = eventFlushFailed
 				} else {
@@ -317,6 +366,7 @@ func (s *execSession) recordEvent(rec EventRecord) eventPersistence {
 					s.engine.log().DebugContext(context.Background(), "flushEvent: fence lost, workflow reassigned to another worker", "workflow_id", s.workflowID, "step", rec.Step)
 				} else {
 					s.engine.log().ErrorContext(context.Background(), "recordEvent flushEvent failed", "workflow_id", s.workflowID, "step", rec.Step, "event_type", rec.EventType, "error", flushErr)
+					s.stopAfterFailedEventWrite(rec, flushErr)
 				}
 				outcome = eventFlushFailed
 			} else {
