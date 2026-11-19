@@ -491,6 +491,11 @@ func main() {
 	// Set WASM output buffer size before any Runtime is created.
 	engine.OutBufSize = uint32(*wasmOutputBufferSize)
 	engine.MaxWasmStringLen = uint32(*wasmMaxStringLen)
+	if *wasmMaxResponseBytes < 1 || *wasmMaxResponseBytes > 1<<24-1 {
+		// A result word carries the response length in 24 bits (packDurableCallResult), so a larger value would wrap and report a short response.
+		log.Fatalf("--wasm-max-response-bytes must be between 1 and %d, got %d", 1<<24-1, *wasmMaxResponseBytes)
+	}
+	engine.MaxHostCallResponseBytes = uint32(*wasmMaxResponseBytes)
 
 	workerID := generateWorkerID()
 

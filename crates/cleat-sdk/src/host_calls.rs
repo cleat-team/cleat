@@ -475,13 +475,13 @@ impl HostCalls {
     ///
     /// Deprecated: Use `call` instead.
     pub fn cleat_call(&self, service: &str, operation: &str, request_json: &str) -> (String, Option<String>) {
-        let mut resp_buf = vec![0u8; memory::OUT_BUF_SIZE as usize];
+        let mut resp_buf = vec![0u8; memory::out_buf_cap() as usize];
         let result = unsafe {
             imports::cleat_call(
                 service.as_ptr(), service.len() as u32,
                 operation.as_ptr(), operation.len() as u32,
                 request_json.as_ptr(), request_json.len() as u32,
-                resp_buf.as_mut_ptr(), memory::OUT_BUF_SIZE,
+                resp_buf.as_mut_ptr(), memory::out_buf_cap(),
             )
         };
         // The host refuses new work in a defer segment and marks the refusal
@@ -557,11 +557,11 @@ impl HostCalls {
 
     /// Register cleanup to run on exit. Mirrors Go's DurableDefer.
     pub fn cleat_defer(&self, description: &str) -> (String, Option<String>) {
-        let mut id_buf = vec![0u8; memory::OUT_BUF_SIZE as usize];
+        let mut id_buf = vec![0u8; memory::out_buf_cap() as usize];
         let result = unsafe {
             imports::cleat_defer(
                 description.as_ptr(), description.len() as u32,
-                id_buf.as_mut_ptr(), memory::OUT_BUF_SIZE,
+                id_buf.as_mut_ptr(), memory::out_buf_cap(),
             )
         };
         let (id_len, err_code) = memory::decode_simple_result(result);
@@ -609,10 +609,10 @@ impl HostCalls {
 
     /// Check for cancellation. Mirrors Go's PollCancellation.
     pub fn poll_cancellation(&self) -> (bool, String) {
-        let mut reason_buf = vec![0u8; memory::OUT_BUF_SIZE as usize];
+        let mut reason_buf = vec![0u8; memory::out_buf_cap() as usize];
         let result = unsafe {
             imports::cleat_poll_cancellation(
-                reason_buf.as_mut_ptr(), memory::OUT_BUF_SIZE,
+                reason_buf.as_mut_ptr(), memory::out_buf_cap(),
             )
         };
         let (reason_len, cancelled) = memory::decode_poll_cancellation_result(result);
@@ -626,11 +626,11 @@ impl HostCalls {
 
     /// Poll for a specific signal. Mirrors Go's PollSignal.
     pub fn poll_signal(&self, name: &str) -> (String, bool, Option<String>) {
-        let mut payload_buf = vec![0u8; memory::OUT_BUF_SIZE as usize];
+        let mut payload_buf = vec![0u8; memory::out_buf_cap() as usize];
         let result = unsafe {
             imports::cleat_poll_signal(
                 name.as_ptr(), name.len() as u32,
-                payload_buf.as_mut_ptr(), memory::OUT_BUF_SIZE,
+                payload_buf.as_mut_ptr(), memory::out_buf_cap(),
             )
         };
         let (payload_len, found, err_code) = memory::decode_poll_signal_result(result);
@@ -671,12 +671,12 @@ impl HostCalls {
 
     /// Start a child workflow. Mirrors Go's ChildWorkflow.
     pub fn child_workflow(&self, name: &str, input_json: &str) -> (String, Option<String>) {
-        let mut run_id_buf = vec![0u8; memory::OUT_BUF_SIZE as usize];
+        let mut run_id_buf = vec![0u8; memory::out_buf_cap() as usize];
         let result = unsafe {
             imports::cleat_child_workflow(
                 name.as_ptr(), name.len() as u32,
                 input_json.as_ptr(), input_json.len() as u32,
-                run_id_buf.as_mut_ptr(), memory::OUT_BUF_SIZE,
+                run_id_buf.as_mut_ptr(), memory::out_buf_cap(),
             )
         };
         // The host refuses new work in a defer segment and marks the refusal
@@ -699,7 +699,7 @@ impl HostCalls {
     pub fn child_workflow_with_options(
         &self, name: &str, input_json: &str, opts: &ChildWorkflowOptions,
     ) -> (String, Option<String>) {
-        let mut run_id_buf = vec![0u8; memory::OUT_BUF_SIZE as usize];
+        let mut run_id_buf = vec![0u8; memory::out_buf_cap() as usize];
         let result = unsafe {
             imports::cleat_child_workflow_with_options(
                 name.as_ptr(), name.len() as u32,
@@ -707,7 +707,7 @@ impl HostCalls {
                 opts.version,
                 opts.priority as i64,
                 opts.parent_close_policy.as_ptr(), opts.parent_close_policy.len() as u32,
-                run_id_buf.as_mut_ptr(), memory::OUT_BUF_SIZE,
+                run_id_buf.as_mut_ptr(), memory::out_buf_cap(),
             )
         };
         // The host refuses new work in a defer segment and marks the refusal
@@ -730,11 +730,11 @@ impl HostCalls {
     /// Await child workflow completion. Mirrors Go's AwaitChild.
     pub fn await_child(&self, run_id: &str) -> Result<String, CallError> {
         self.dispatch_updates(); // dispatch point; see updates::dispatch_updates
-        let mut result_buf = vec![0u8; memory::OUT_BUF_SIZE as usize];
+        let mut result_buf = vec![0u8; memory::out_buf_cap() as usize];
         let r = unsafe {
             imports::cleat_await_child(
                 run_id.as_ptr(), run_id.len() as u32,
-                result_buf.as_mut_ptr(), memory::OUT_BUF_SIZE,
+                result_buf.as_mut_ptr(), memory::out_buf_cap(),
             )
         };
         // The host returns SUSPEND_SENTINEL when the child has not completed
@@ -759,14 +759,14 @@ impl HostCalls {
         self.dispatch_updates(); // dispatch point; see updates::dispatch_updates
         // JSON-marshal the signal names array, matching Go's adapter.go behavior.
         let names_json = serde_json::to_string(signal_names).unwrap_or_else(|e| { eprintln!("warning: failed to serialize signal names: {}", e); "[]".to_string() });
-        let mut sig_name_buf = vec![0u8; memory::OUT_BUF_SIZE as usize];
-        let mut payload_buf = vec![0u8; memory::OUT_BUF_SIZE as usize];
+        let mut sig_name_buf = vec![0u8; memory::out_buf_cap() as usize];
+        let mut payload_buf = vec![0u8; memory::out_buf_cap() as usize];
         let result = unsafe {
             imports::cleat_await_signals(
                 names_json.as_ptr(), names_json.len() as u32,
                 timeout_ms,
-                sig_name_buf.as_mut_ptr(), memory::OUT_BUF_SIZE,
-                payload_buf.as_mut_ptr(), memory::OUT_BUF_SIZE,
+                sig_name_buf.as_mut_ptr(), memory::out_buf_cap(),
+                payload_buf.as_mut_ptr(), memory::out_buf_cap(),
             )
         };
         // The host returns SUSPEND_SENTINEL when no signal is available and a
@@ -855,7 +855,7 @@ impl HostCalls {
             eprintln!("warning: failed to serialize signal names: {}", e);
             "[]".to_string()
         });
-        let mut out_buf = vec![0u8; memory::OUT_BUF_SIZE as usize];
+        let mut out_buf = vec![0u8; memory::out_buf_cap() as usize];
         let result = unsafe {
             imports::cleat_wait_for_event(
                 plugin.as_ptr(), plugin.len() as u32,
@@ -863,7 +863,7 @@ impl HostCalls {
                 input_json.as_ptr(), input_json.len() as u32,
                 names_json.as_ptr(), names_json.len() as u32,
                 timeout_ms,
-                out_buf.as_mut_ptr(), memory::OUT_BUF_SIZE,
+                out_buf.as_mut_ptr(), memory::out_buf_cap(),
             )
         };
         // Ask BEFORE decoding, and the reason is the layout: the host marks a
@@ -899,11 +899,11 @@ impl HostCalls {
     /// Create a durable promise. Mirrors Go's CreatePromise (ABI 2.20).
     /// Returns (promise_id, error).
     pub fn create_promise(&self, name: &str) -> (String, Option<String>) {
-        let mut id_buf = vec![0u8; memory::OUT_BUF_SIZE as usize];
+        let mut id_buf = vec![0u8; memory::out_buf_cap() as usize];
         let result = unsafe {
             imports::cleat_create_promise(
                 name.as_ptr(), name.len() as u32,
-                id_buf.as_mut_ptr(), memory::OUT_BUF_SIZE,
+                id_buf.as_mut_ptr(), memory::out_buf_cap(),
             )
         };
         // The host refuses a promise created by a defer segment's workflow body
@@ -929,12 +929,12 @@ impl HostCalls {
     /// Returns (result, timed_out, error).
     pub fn await_promise_ms(&self, promise_id: &str, timeout_ms: i64) -> (String, bool, Option<String>) {
         self.dispatch_updates(); // dispatch point; see updates::dispatch_updates
-        let mut result_buf = vec![0u8; memory::OUT_BUF_SIZE as usize];
+        let mut result_buf = vec![0u8; memory::out_buf_cap() as usize];
         let result = unsafe {
             imports::cleat_await_promise(
                 promise_id.as_ptr(), promise_id.len() as u32,
                 timeout_ms,
-                result_buf.as_mut_ptr(), memory::OUT_BUF_SIZE,
+                result_buf.as_mut_ptr(), memory::out_buf_cap(),
             )
         };
         // A fresh await that has to wait answers with the stop sentinel, not a
@@ -983,9 +983,9 @@ impl HostCalls {
     /// update is answered. Delivery is durable, so an update returned here is
     /// recorded as delivered whether or not you complete it.
     pub fn poll_update(&self) -> (String, bool, Option<String>) {
-        let mut envelope_buf = vec![0u8; memory::OUT_BUF_SIZE as usize];
+        let mut envelope_buf = vec![0u8; memory::out_buf_cap() as usize];
         let result = unsafe {
-            imports::cleat_poll_update(envelope_buf.as_mut_ptr(), memory::OUT_BUF_SIZE)
+            imports::cleat_poll_update(envelope_buf.as_mut_ptr(), memory::out_buf_cap())
         };
         // Ask before decoding: a stop is bit 31, which in this layout sits
         // inside the flags word a decoder would read as an ordinary result.
@@ -1035,13 +1035,13 @@ impl HostCalls {
     /// Plugin calls target Go host plugins rather than external services.
     /// They are journaled for deterministic replay, same as [`call`](Self::call).
     pub fn plugin_call(&self, plugin_name: &str, function_name: &str, input_json: &str) -> (String, Option<String>) {
-        let mut resp_buf = vec![0u8; memory::OUT_BUF_SIZE as usize];
+        let mut resp_buf = vec![0u8; memory::out_buf_cap() as usize];
         let result = unsafe {
             imports::cleat_plugin_call(
                 plugin_name.as_ptr(), plugin_name.len() as u32,
                 function_name.as_ptr(), function_name.len() as u32,
                 input_json.as_ptr(), input_json.len() as u32,
-                resp_buf.as_mut_ptr(), memory::OUT_BUF_SIZE,
+                resp_buf.as_mut_ptr(), memory::out_buf_cap(),
             )
         };
         // The host refuses new work in a defer segment and marks the refusal
@@ -1302,12 +1302,12 @@ impl HostCalls {
     /// Set the virtual object scope. Returns the previous scope.
     /// Mirrors Go's SetScope.
     pub fn set_scope(&self, object_type: &str, instance_key: &str) -> String {
-        let mut prev_buf = vec![0u8; memory::OUT_BUF_SIZE as usize];
+        let mut prev_buf = vec![0u8; memory::out_buf_cap() as usize];
         let result = unsafe {
             imports::cleat_set_scope(
                 object_type.as_ptr(), object_type.len() as u32,
                 instance_key.as_ptr(), instance_key.len() as u32,
-                prev_buf.as_mut_ptr(), memory::OUT_BUF_SIZE,
+                prev_buf.as_mut_ptr(), memory::out_buf_cap(),
             )
         };
         // The host refuses a scope taken by a defer segment's workflow body
@@ -1328,12 +1328,12 @@ impl HostCalls {
     /// Get the current virtual object scope.
     /// Mirrors Go's GetScope.
     pub fn get_scope(&self) -> (String, String) {
-        let mut obj_type_buf = vec![0u8; memory::OUT_BUF_SIZE as usize];
-        let mut inst_key_buf = vec![0u8; memory::OUT_BUF_SIZE as usize];
+        let mut obj_type_buf = vec![0u8; memory::out_buf_cap() as usize];
+        let mut inst_key_buf = vec![0u8; memory::out_buf_cap() as usize];
         let result = unsafe {
             imports::cleat_get_scope(
-                obj_type_buf.as_mut_ptr(), memory::OUT_BUF_SIZE,
-                inst_key_buf.as_mut_ptr(), memory::OUT_BUF_SIZE,
+                obj_type_buf.as_mut_ptr(), memory::out_buf_cap(),
+                inst_key_buf.as_mut_ptr(), memory::out_buf_cap(),
             )
         };
         let (obj_type_len, inst_key_len) = memory::decode_get_scope_result(result);
@@ -1354,12 +1354,12 @@ impl HostCalls {
     /// Mirrors Go's ClearScope.
     pub fn clear_scope(&self) -> String {
         // Clear scope by setting it to empty strings.
-        let mut prev_buf = vec![0u8; memory::OUT_BUF_SIZE as usize];
+        let mut prev_buf = vec![0u8; memory::out_buf_cap() as usize];
         let result = unsafe {
             imports::cleat_set_scope(
                 std::ptr::null(), 0u32,
                 std::ptr::null(), 0u32,
-                prev_buf.as_mut_ptr(), memory::OUT_BUF_SIZE,
+                prev_buf.as_mut_ptr(), memory::out_buf_cap(),
             )
         };
         let (prev_len, _err_code) = memory::decode_simple_result(result);
@@ -1373,11 +1373,11 @@ impl HostCalls {
     /// Generate a deterministic UUID from a seed.
     /// Mirrors Go's UUID.
     pub fn uuid(&self, seed: &str) -> String {
-        let mut uuid_buf = vec![0u8; memory::OUT_BUF_SIZE as usize];
+        let mut uuid_buf = vec![0u8; memory::out_buf_cap() as usize];
         let result = unsafe {
             imports::cleat_uuid(
                 seed.as_ptr(), seed.len() as u32,
-                uuid_buf.as_mut_ptr(), memory::OUT_BUF_SIZE,
+                uuid_buf.as_mut_ptr(), memory::out_buf_cap(),
             )
         };
         let (uuid_len, _err_code) = memory::decode_simple_result(result);
@@ -1390,9 +1390,9 @@ impl HostCalls {
 
     /// Get the current workflow ID.
     pub fn workflow_id(&self) -> String {
-        let mut buf = vec![0u8; memory::OUT_BUF_SIZE as usize];
+        let mut buf = vec![0u8; memory::out_buf_cap() as usize];
         let result = unsafe {
-            imports::cleat_workflow_id(buf.as_mut_ptr(), memory::OUT_BUF_SIZE)
+            imports::cleat_workflow_id(buf.as_mut_ptr(), memory::out_buf_cap())
         };
         let (id_len, _err_code) = memory::decode_simple_result(result);
         if id_len > 0 {
@@ -1404,9 +1404,9 @@ impl HostCalls {
 
     /// Get the current run ID.
     pub fn run_id(&self) -> String {
-        let mut buf = vec![0u8; memory::OUT_BUF_SIZE as usize];
+        let mut buf = vec![0u8; memory::out_buf_cap() as usize];
         let result = unsafe {
-            imports::cleat_run_id(buf.as_mut_ptr(), memory::OUT_BUF_SIZE)
+            imports::cleat_run_id(buf.as_mut_ptr(), memory::out_buf_cap())
         };
         let (id_len, _err_code) = memory::decode_simple_result(result);
         if id_len > 0 {
@@ -1525,14 +1525,14 @@ impl HostCalls {
         timezone: &str,
         input_json: &str,
     ) -> Result<String, String> {
-        let mut buf = vec![0u8; memory::OUT_BUF_SIZE as usize];
+        let mut buf = vec![0u8; memory::out_buf_cap() as usize];
         let result = unsafe {
             imports::cleat_schedule_cron(
                 workflow_name.as_ptr(), workflow_name.len() as u32,
                 cron_expr.as_ptr(), cron_expr.len() as u32,
                 timezone.as_ptr(), timezone.len() as u32,
                 input_json.as_ptr(), input_json.len() as u32,
-                buf.as_mut_ptr(), memory::OUT_BUF_SIZE,
+                buf.as_mut_ptr(), memory::out_buf_cap(),
             )
         };
         // Ask BEFORE decoding. A cron schedule is new work with the longest
@@ -1604,9 +1604,9 @@ impl HostCalls {
     /// so the host never refuses it (cleat#4083 left it unguarded on purpose).
     /// Unlike `delete_cron`, a refusal is not possible.
     pub fn list_crons(&self) -> Result<String, String> {
-        let mut buf = vec![0u8; memory::OUT_BUF_SIZE as usize];
+        let mut buf = vec![0u8; memory::out_buf_cap() as usize];
         let result = unsafe {
-            imports::cleat_list_crons(buf.as_mut_ptr(), memory::OUT_BUF_SIZE)
+            imports::cleat_list_crons(buf.as_mut_ptr(), memory::out_buf_cap())
         };
         let (result_len, err_code) = memory::decode_simple_result(result);
         if err_code != 0 {
@@ -1673,12 +1673,12 @@ impl HostCalls {
     /// The started workflow is NOT a child: this workflow does not await it, is
     /// not its parent, and completing or being cancelled does not affect it.
     pub fn start_detached(&self, name: &str, input_json: &str) -> Result<String, String> {
-        let mut run_id_buf = vec![0u8; memory::OUT_BUF_SIZE as usize];
+        let mut run_id_buf = vec![0u8; memory::out_buf_cap() as usize];
         let result = unsafe {
             imports::cleat_start_detached(
                 name.as_ptr(), name.len() as u32,
                 input_json.as_ptr(), input_json.len() as u32,
-                run_id_buf.as_mut_ptr(), memory::OUT_BUF_SIZE,
+                run_id_buf.as_mut_ptr(), memory::out_buf_cap(),
             )
         };
         // The host refuses new work in a defer segment and marks the refusal
@@ -1699,11 +1699,11 @@ impl HostCalls {
     /// Await all children workflows. Returns aggregated JSON results.
     pub fn await_all_children(&self, run_ids: &[&str]) -> Result<String, CallError> {
         let run_ids_json = serde_json::to_string(run_ids).map_err(|e| CallError::Failed(format!("serialize run_ids: {}", e)))?;
-        let mut buf = vec![0u8; memory::OUT_BUF_SIZE as usize];
+        let mut buf = vec![0u8; memory::out_buf_cap() as usize];
         let result = unsafe {
             imports::cleat_await_all_children(
                 run_ids_json.as_ptr(), run_ids_json.len() as u32,
-                buf.as_mut_ptr(), memory::OUT_BUF_SIZE,
+                buf.as_mut_ptr(), memory::out_buf_cap(),
             )
         };
         if result == memory::SUSPEND_SENTINEL {
@@ -1719,11 +1719,11 @@ impl HostCalls {
 
     /// Poll a single child workflow for completion without suspending. Returns (result, error).
     pub fn poll_child(&self, run_id: &str) -> (String, Option<String>) {
-        let mut result_buf = vec![0u8; memory::OUT_BUF_SIZE as usize];
+        let mut result_buf = vec![0u8; memory::out_buf_cap() as usize];
         let r = unsafe {
             imports::cleat_poll_child(
                 run_id.as_ptr(), run_id.len() as u32,
-                result_buf.as_mut_ptr(), memory::OUT_BUF_SIZE,
+                result_buf.as_mut_ptr(), memory::out_buf_cap(),
             )
         };
         let (result_len, err_code) = memory::decode_simple_result(r);
@@ -1737,11 +1737,11 @@ impl HostCalls {
     /// Await any of the given child workflows to complete. Returns the result JSON.
     pub fn await_any_child(&self, run_ids: &[&str]) -> Result<String, CallError> {
         let run_ids_json = serde_json::to_string(run_ids).map_err(|e| CallError::Failed(format!("serialize run_ids: {}", e)))?;
-        let mut buf = vec![0u8; memory::OUT_BUF_SIZE as usize];
+        let mut buf = vec![0u8; memory::out_buf_cap() as usize];
         let result = unsafe {
             imports::cleat_await_any_child(
                 run_ids_json.as_ptr(), run_ids_json.len() as u32,
-                buf.as_mut_ptr(), memory::OUT_BUF_SIZE,
+                buf.as_mut_ptr(), memory::out_buf_cap(),
             )
         };
         if result == memory::SUSPEND_SENTINEL {
@@ -1851,7 +1851,7 @@ impl HostCalls {
         let non_retryable_json = serde_json::to_string(&retry_policy.non_retryable_errors)
             .map_err(|e| CallError::Failed(format!("serialize non-retryable errors: {}", e)))?;
         let backoff_coefficient_100x = (retry_policy.backoff_multiplier * 100.0) as i64;
-        let mut resp_buf = vec![0u8; memory::OUT_BUF_SIZE as usize];
+        let mut resp_buf = vec![0u8; memory::out_buf_cap() as usize];
         let result = unsafe {
             imports::cleat_call_with_retry(
                 service.as_ptr(), service.len() as u32,
@@ -1862,7 +1862,7 @@ impl HostCalls {
                 backoff_coefficient_100x,
                 retry_policy.maximum_interval_ms as i64,
                 non_retryable_json.as_ptr(), non_retryable_json.len() as u32,
-                resp_buf.as_mut_ptr(), memory::OUT_BUF_SIZE,
+                resp_buf.as_mut_ptr(), memory::out_buf_cap(),
             )
         };
         let (response_len, call_error_code, err_code) = memory::decode_cleat_call_result(result);
@@ -1952,14 +1952,14 @@ impl HostCalls {
     pub fn cleat_fetch(
         &self, method: &str, url: &str, headers: &str, body: &str,
     ) -> Result<FetchResult, String> {
-        let mut resp_buf = vec![0u8; memory::OUT_BUF_SIZE as usize];
+        let mut resp_buf = vec![0u8; memory::out_buf_cap() as usize];
         let result = unsafe {
             imports::cleat_fetch(
                 method.as_ptr(), method.len() as u32,
                 url.as_ptr(), url.len() as u32,
                 headers.as_ptr(), headers.len() as u32,
                 body.as_ptr(), body.len() as u32,
-                resp_buf.as_mut_ptr(), memory::OUT_BUF_SIZE,
+                resp_buf.as_mut_ptr(), memory::out_buf_cap(),
             )
         };
         // The host refuses new work in a defer segment and marks the refusal
@@ -2070,14 +2070,14 @@ impl HostCalls {
     pub fn cleat_call_heartbeat(
         &self, service: &str, operation: &str, request_json: &str, heartbeat_interval_ms: i64,
     ) -> (String, Option<String>) {
-        let mut resp_buf = vec![0u8; memory::OUT_BUF_SIZE as usize];
+        let mut resp_buf = vec![0u8; memory::out_buf_cap() as usize];
         let result = unsafe {
             imports::cleat_call_heartbeat(
                 service.as_ptr(), service.len() as u32,
                 operation.as_ptr(), operation.len() as u32,
                 request_json.as_ptr(), request_json.len() as u32,
                 heartbeat_interval_ms,
-                resp_buf.as_mut_ptr(), memory::OUT_BUF_SIZE,
+                resp_buf.as_mut_ptr(), memory::out_buf_cap(),
             )
         };
         // The host refuses new work in a defer segment and marks the refusal
@@ -2114,11 +2114,11 @@ impl HostCalls {
     /// Record a non-deterministic computation result in event history on first
     /// execution, returning the cached result on replay. Mirrors Go's SideEffect.
     pub fn side_effect(&self, computed_result: &str) -> Result<String, String> {
-        let mut out_buf = vec![0u8; memory::OUT_BUF_SIZE as usize];
+        let mut out_buf = vec![0u8; memory::out_buf_cap() as usize];
         let result = unsafe {
             imports::cleat_side_effect(
                 computed_result.as_ptr(), computed_result.len() as u32,
-                out_buf.as_mut_ptr(), memory::OUT_BUF_SIZE,
+                out_buf.as_mut_ptr(), memory::out_buf_cap(),
             )
         };
         // Bit 31 before any field. IMPROVEMENT-PLAN 3.300.
@@ -2149,13 +2149,13 @@ impl HostCalls {
     pub fn plugin_call_streaming(
         &self, plugin_name: &str, function_name: &str, input_json: &str,
     ) -> (String, Option<String>) {
-        let mut resp_buf = vec![0u8; memory::OUT_BUF_SIZE as usize];
+        let mut resp_buf = vec![0u8; memory::out_buf_cap() as usize];
         let result = unsafe {
             imports::cleat_plugin_call_streaming(
                 plugin_name.as_ptr(), plugin_name.len() as u32,
                 function_name.as_ptr(), function_name.len() as u32,
                 input_json.as_ptr(), input_json.len() as u32,
-                resp_buf.as_mut_ptr(), memory::OUT_BUF_SIZE,
+                resp_buf.as_mut_ptr(), memory::out_buf_cap(),
             )
         };
         // The host refuses new work in a defer segment and marks the refusal
@@ -2195,11 +2195,11 @@ impl HostCalls {
     /// output buffer.
     #[cfg(target_arch = "wasm32")]
     pub fn json_parse(&self, json: &str) -> Option<String> {
-        let mut out_buf = vec![0u8; memory::OUT_BUF_SIZE as usize];
+        let mut out_buf = vec![0u8; memory::out_buf_cap() as usize];
         let result = unsafe {
             imports::cleat_json_parse(
                 json.as_ptr(), json.len() as u32,
-                out_buf.as_mut_ptr(), memory::OUT_BUF_SIZE,
+                out_buf.as_mut_ptr(), memory::out_buf_cap(),
             )
         };
         let (written, err_code) = memory::decode_simple_result(result);
@@ -2225,11 +2225,11 @@ impl HostCalls {
     /// output buffer.
     #[cfg(target_arch = "wasm32")]
     pub fn json_stringify(&self, value: &str) -> Option<String> {
-        let mut out_buf = vec![0u8; memory::OUT_BUF_SIZE as usize];
+        let mut out_buf = vec![0u8; memory::out_buf_cap() as usize];
         let result = unsafe {
             imports::cleat_json_stringify(
                 value.as_ptr(), value.len() as u32,
-                out_buf.as_mut_ptr(), memory::OUT_BUF_SIZE,
+                out_buf.as_mut_ptr(), memory::out_buf_cap(),
             )
         };
         let (written, err_code) = memory::decode_simple_result(result);

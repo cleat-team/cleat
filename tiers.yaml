@@ -162,6 +162,9 @@ tier1:
     # producing the error the worker dead-letters on. Same toolchain dependency, same
     # reason -- it would skip in the tier-1 gate, where a skip is a failure.
     - "^TestARustGuestReachesTheHostRetryLoop$"
+    # tier 2 -- rust. cleat#4132: a Rust guest receives a response over 64 KiB on the call after the one that truncated. Builds examples/rust-workflow
+    # like the two entries above, and would skip in the tier-1 gate.
+    - "^TestARustGuestReceivesAResponseOverSixtyFourKiBOnTheCallAfterTheTruncation$"
     # tier 2 -- rust. The other side of 3.88's threshold: a policy too long to hold a
     # worker for must suspend rather than reach the host loop. Same toolchain dependency
     # as the entry above -- both build examples/rust-workflow.

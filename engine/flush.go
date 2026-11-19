@@ -23,6 +23,11 @@ func (s *execSession) writeResult(ctx context.Context, m api.Module, ptr uint32,
 			data = data[:maxLen]
 			truncated = true
 		}
+		// A component dispatcher's buffer is sized by this write rather than before the call (see responseBuf): grow it to exactly what is
+		// about to be written, so the bounds check below is against the buffer this response needs and no more.
+		if rb, ok := responseBufFrom(ctx); ok {
+			rawBuf = rb.ensure(uint64(ptr) + uint64(len(data)))
+		}
 		// ptr comes from the guest. Unchecked, `rawBuf[ptr:]` panics for any
 		// ptr past the end of linear memory -- reachable from guest code by
 		// calling e.g. cleat_workflow_id with a bad output pointer, and

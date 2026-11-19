@@ -76,11 +76,11 @@ func (b *wasmtimeBackend) dispatchDurableCallString(
 		return refuseOversizeWithCallFailure(results, nresults, "durable-call", "req", len(req))
 	}
 
-	buf := make([]byte, 65536)
-	packed := b.handler.DurableCall(ctxWithMem(context.Background(), buf), nil, svc, op, req, 0, 65536)
+	resp, respCtx := newResponseBuf(context.Background())
+	packed := b.handler.DurableCall(respCtx, nil, svc, op, req, 0, hostCallResponseLimit())
 
 	setResultCallOutcome(results, nresults,
-		decodeCallOutcome(packed, buf, durableCallLayout))
+		decodeCallOutcome(packed, resp.bytes(), durableCallLayout))
 	return nil
 }
 
@@ -113,12 +113,12 @@ func (b *wasmtimeBackend) dispatchDurableCallRetry(
 		return refuseOversizeWithCallFailure(results, nresults, "durable-call-retry", "nonRetryable", len(nonRetryable))
 	}
 
-	buf := make([]byte, 65536)
-	packed := b.handler.DurableCallWithRetry(ctxWithMem(context.Background(), buf), nil,
-		svc, op, req, maxAttempts, initialInterval, backoffCoeff, maxInterval, nonRetryable, 0, 65536)
+	resp, respCtx := newResponseBuf(context.Background())
+	packed := b.handler.DurableCallWithRetry(respCtx, nil,
+		svc, op, req, maxAttempts, initialInterval, backoffCoeff, maxInterval, nonRetryable, 0, hostCallResponseLimit())
 
 	setResultCallOutcome(results, nresults,
-		decodeCallOutcome(packed, buf, durableCallLayout))
+		decodeCallOutcome(packed, resp.bytes(), durableCallLayout))
 	return nil
 }
 
@@ -144,12 +144,12 @@ func (b *wasmtimeBackend) dispatchDurableCallHeartbeat(
 	}
 	heartbeatInterval := int64(readU64Arg(args, 3, nargs))
 
-	buf := make([]byte, 65536)
-	packed := b.handler.DurableCallWithHeartbeat(ctxWithMem(context.Background(), buf), nil,
-		svc, op, req, heartbeatInterval, 0, 65536)
+	resp, respCtx := newResponseBuf(context.Background())
+	packed := b.handler.DurableCallWithHeartbeat(respCtx, nil,
+		svc, op, req, heartbeatInterval, 0, hostCallResponseLimit())
 
 	setResultCallOutcome(results, nresults,
-		decodeCallOutcome(packed, buf, durableCallLayout))
+		decodeCallOutcome(packed, resp.bytes(), durableCallLayout))
 	return nil
 }
 
@@ -271,11 +271,11 @@ func (b *wasmtimeBackend) dispatchDurableDefer(
 		return b.refuseOversizeWithoutAResult("durable-defer", "desc", len(desc), results, nresults)
 	}
 
-	buf := make([]byte, 65536)
-	packed := b.handler.DurableDefer(ctxWithMem(context.Background(), buf), nil, desc, 0, 65536)
+	resp, respCtx := newResponseBuf(context.Background())
+	packed := b.handler.DurableDefer(respCtx, nil, desc, 0, hostCallResponseLimit())
 
 	setResultCallOutcome(results, nresults,
-		decodeCallOutcome(packed, buf, simpleLayout))
+		decodeCallOutcome(packed, resp.bytes(), simpleLayout))
 	return nil
 }
 
@@ -305,9 +305,9 @@ func (b *wasmtimeBackend) dispatchPollCancellation(
 		return nil
 	}
 
-	buf := make([]byte, 65536)
-	packed := b.handler.PollCancellation(ctxWithMem(context.Background(), buf), nil, 0, 65536)
-	response := extractStringFromSimplePacked(packed, buf)
+	resp, respCtx := newResponseBuf(context.Background())
+	packed := b.handler.PollCancellation(respCtx, nil, 0, hostCallResponseLimit())
+	response := extractStringFromSimplePacked(packed, resp.bytes())
 
 	setResultString(results, nresults, response)
 	return nil
@@ -395,9 +395,9 @@ func (b *wasmtimeBackend) dispatchPollSignal(
 		return b.refuseNameWithoutAResult("durable-poll-signal", "name", results, nresults)
 	}
 
-	buf := make([]byte, 65536)
-	packed := b.handler.PollSignal(ctxWithMem(context.Background(), buf), nil, name, 0, 65536)
-	response := extractStringFromSimplePacked(packed, buf)
+	resp, respCtx := newResponseBuf(context.Background())
+	packed := b.handler.PollSignal(respCtx, nil, name, 0, hostCallResponseLimit())
+	response := extractStringFromSimplePacked(packed, resp.bytes())
 
 	setResultString(results, nresults, response)
 	return nil
@@ -449,11 +449,11 @@ func (b *wasmtimeBackend) dispatchChildWorkflow(
 		return refuseOversizeWithCallFailure(results, nresults, "durable-child-workflow", "input", len(input))
 	}
 
-	buf := make([]byte, 65536)
-	packed := b.handler.ChildWorkflow(ctxWithMem(context.Background(), buf), nil, name, input, 0, 65536)
+	resp, respCtx := newResponseBuf(context.Background())
+	packed := b.handler.ChildWorkflow(respCtx, nil, name, input, 0, hostCallResponseLimit())
 
 	setResultCallOutcome(results, nresults,
-		decodeCallOutcome(packed, buf, simpleLayout))
+		decodeCallOutcome(packed, resp.bytes(), simpleLayout))
 	return nil
 }
 
@@ -470,12 +470,12 @@ func (b *wasmtimeBackend) dispatchAwaitChild(
 		return b.refuseNameWithoutAResult("durable-await-child", "runID", results, nresults)
 	}
 
-	buf := make([]byte, 65536)
-	packed := b.handler.AwaitChild(ctxWithMem(context.Background(), buf), nil, runID, 0, 65536)
+	resp, respCtx := newResponseBuf(context.Background())
+	packed := b.handler.AwaitChild(respCtx, nil, runID, 0, hostCallResponseLimit())
 	if packed == packAwaitChildResultSuspend() {
 		return b.stopAtPendingChildAwait("await_child", results, nresults)
 	}
-	response := extractStringFromSimplePacked(packed, buf)
+	response := extractStringFromSimplePacked(packed, resp.bytes())
 
 	setResultString(results, nresults, response)
 	return nil
@@ -573,10 +573,10 @@ func (b *wasmtimeBackend) dispatchPollChild(
 		return b.refuseNameWithoutAResult("durable-poll-child", "runID", results, nresults)
 	}
 
-	buf := make([]byte, 65536)
-	packed := b.handler.PollChild(ctxWithMem(context.Background(), buf), nil, runID, 0, 65536)
+	resp, respCtx := newResponseBuf(context.Background())
+	packed := b.handler.PollChild(respCtx, nil, runID, 0, hostCallResponseLimit())
 
-	setResultString(results, nresults, extractChildAnswer(packed, buf))
+	setResultString(results, nresults, extractChildAnswer(packed, resp.bytes()))
 	return nil
 }
 
@@ -593,13 +593,13 @@ func (b *wasmtimeBackend) dispatchAwaitAnyChild(
 		return b.refuseOversizeWithoutAResult("durable-await-any-child", "runIDsJSON", len(runIDsJSON), results, nresults)
 	}
 
-	buf := make([]byte, 65536)
-	packed := b.handler.AwaitAnyChild(ctxWithMem(context.Background(), buf), nil, runIDsJSON, 0, 65536)
+	resp, respCtx := newResponseBuf(context.Background())
+	packed := b.handler.AwaitAnyChild(respCtx, nil, runIDsJSON, 0, hostCallResponseLimit())
 	if packed == packAwaitChildResultSuspend() {
 		return b.stopAtPendingChildAwait("await_any_child", results, nresults)
 	}
 
-	setResultString(results, nresults, extractChildAnswer(packed, buf))
+	setResultString(results, nresults, extractChildAnswer(packed, resp.bytes()))
 	return nil
 }
 
@@ -616,12 +616,12 @@ func (b *wasmtimeBackend) dispatchAwaitAllChildren(
 		return b.refuseOversizeWithoutAResult("durable-await-all-children", "runIDsJSON", len(runIDsJSON), results, nresults)
 	}
 
-	buf := make([]byte, 65536)
-	packed := b.handler.AwaitAllChildren(ctxWithMem(context.Background(), buf), nil, runIDsJSON, 0, 65536)
+	resp, respCtx := newResponseBuf(context.Background())
+	packed := b.handler.AwaitAllChildren(respCtx, nil, runIDsJSON, 0, hostCallResponseLimit())
 	if packed == packAwaitChildResultSuspend() {
 		return b.stopAtPendingChildAwait("await_all_children", results, nresults)
 	}
-	response := extractStringFromSimplePacked(packed, buf)
+	response := extractStringFromSimplePacked(packed, resp.bytes())
 
 	setResultString(results, nresults, response)
 	return nil
@@ -650,12 +650,12 @@ func (b *wasmtimeBackend) dispatchChildWorkflowWithOptions(
 		return refuseNameWithCallFailure(results, nresults, "durable-child-workflow-with-options", "policy")
 	}
 
-	buf := make([]byte, 65536)
-	packed := b.handler.ChildWorkflowWithOptions(ctxWithMem(context.Background(), buf), nil,
-		name, input, version, priority, policy, 0, 65536)
+	resp, respCtx := newResponseBuf(context.Background())
+	packed := b.handler.ChildWorkflowWithOptions(respCtx, nil,
+		name, input, version, priority, policy, 0, hostCallResponseLimit())
 
 	setResultCallOutcome(results, nresults,
-		decodeCallOutcome(packed, buf, simpleLayout))
+		decodeCallOutcome(packed, resp.bytes(), simpleLayout))
 	return nil
 }
 
@@ -677,9 +677,9 @@ func (b *wasmtimeBackend) dispatchCreatePromise(
 		return b.refuseNameWithoutAResult("durable-create-promise", "name", results, nresults)
 	}
 
-	buf := make([]byte, 65536)
-	packed := b.handler.CreatePromise(ctxWithMem(context.Background(), buf), nil, name, 0, 65536)
-	response := extractStringFromSimplePacked(packed, buf)
+	resp, respCtx := newResponseBuf(context.Background())
+	packed := b.handler.CreatePromise(respCtx, nil, name, 0, hostCallResponseLimit())
+	response := extractStringFromSimplePacked(packed, resp.bytes())
 
 	setResultString(results, nresults, response)
 	return nil
@@ -717,8 +717,8 @@ func (b *wasmtimeBackend) dispatchAwaitPromise(
 	}
 	timeoutMs := int64(readU64Arg(args, 1, nargs))
 
-	buf := make([]byte, 65536)
-	packed := b.handler.AwaitPromise(ctxWithMem(context.Background(), buf), nil, id, timeoutMs, 0, 65536)
+	resp, respCtx := newResponseBuf(context.Background())
+	packed := b.handler.AwaitPromise(respCtx, nil, id, timeoutMs, 0, hostCallResponseLimit())
 
 	// The stop is tested FIRST and by mask, for the reason decodeCallOutcome
 	// gives. In this layout bit 31 sits in the byte at bits 24-31 (the
@@ -733,7 +733,7 @@ func (b *wasmtimeBackend) dispatchAwaitPromise(
 	}
 
 	u := uint64(packed)
-	payload := extractStringFromSimplePacked(packed, buf)
+	payload := extractStringFromSimplePacked(packed, resp.bytes())
 	if errCode := uint16(u & 0xFFFF); errCode != 0 {
 		if r, ok := b.handler.(awaitRejectionReporter); ok && r.lastAwaitPromiseRejected() {
 			setResultAwaitOutcome(results, nresults, awaitRejected, payload)
@@ -874,10 +874,10 @@ func (b *wasmtimeBackend) dispatchPollUpdate(
 	if b.handler == nil {
 		return nil
 	}
-	buf := make([]byte, 65536)
-	packed := b.handler.DurablePollUpdate(ctxWithMem(context.Background(), buf), nil, 0, 65536)
+	resp, respCtx := newResponseBuf(context.Background())
+	packed := b.handler.DurablePollUpdate(respCtx, nil, 0, hostCallResponseLimit())
 	// found=false packs as 0, and extractStringFromSimplePacked then yields "".
-	envelope := extractStringFromSimplePacked(packed, buf)
+	envelope := extractStringFromSimplePacked(packed, resp.bytes())
 	setResultString(results, nresults, envelope)
 	return nil
 }
@@ -971,9 +971,9 @@ func (b *wasmtimeBackend) dispatchWorkflowID(
 		return nil
 	}
 
-	buf := make([]byte, 65536)
-	packed := b.handler.WorkflowID(ctxWithMem(context.Background(), buf), nil, 0, 65536)
-	response := extractStringFromSimplePacked(packed, buf)
+	resp, respCtx := newResponseBuf(context.Background())
+	packed := b.handler.WorkflowID(respCtx, nil, 0, hostCallResponseLimit())
+	response := extractStringFromSimplePacked(packed, resp.bytes())
 
 	setResultString(results, nresults, response)
 	return nil
@@ -988,9 +988,9 @@ func (b *wasmtimeBackend) dispatchRunID(
 		return nil
 	}
 
-	buf := make([]byte, 65536)
-	packed := b.handler.RunID(ctxWithMem(context.Background(), buf), nil, 0, 65536)
-	response := extractStringFromSimplePacked(packed, buf)
+	resp, respCtx := newResponseBuf(context.Background())
+	packed := b.handler.RunID(respCtx, nil, 0, hostCallResponseLimit())
+	response := extractStringFromSimplePacked(packed, resp.bytes())
 
 	setResultString(results, nresults, response)
 	return nil
@@ -1021,11 +1021,11 @@ func (b *wasmtimeBackend) dispatchPluginCall(
 		return refuseOversizeWithCallFailure(results, nresults, "plugin-call", "input", len(input))
 	}
 
-	buf := make([]byte, 65536)
-	packed := b.handler.PluginCall(ctxWithMem(context.Background(), buf), nil, pluginName, funcName, input, 0, 65536)
+	resp, respCtx := newResponseBuf(context.Background())
+	packed := b.handler.PluginCall(respCtx, nil, pluginName, funcName, input, 0, hostCallResponseLimit())
 
 	setResultCallOutcome(results, nresults,
-		decodeCallOutcome(packed, buf, durableCallLayout))
+		decodeCallOutcome(packed, resp.bytes(), durableCallLayout))
 	return nil
 }
 
@@ -1050,11 +1050,11 @@ func (b *wasmtimeBackend) dispatchPluginCallStreaming(
 		return refuseOversizeWithCallFailure(results, nresults, "plugin-call-streaming", "input", len(input))
 	}
 
-	buf := make([]byte, 65536)
-	packed := b.handler.PluginCallStreaming(ctxWithMem(context.Background(), buf), nil, pluginName, funcName, input, 0, 65536)
+	resp, respCtx := newResponseBuf(context.Background())
+	packed := b.handler.PluginCallStreaming(respCtx, nil, pluginName, funcName, input, 0, hostCallResponseLimit())
 
 	setResultCallOutcome(results, nresults,
-		decodeCallOutcome(packed, buf, durableCallLayout))
+		decodeCallOutcome(packed, resp.bytes(), durableCallLayout))
 	return nil
 }
 
@@ -1118,9 +1118,9 @@ func (b *wasmtimeBackend) dispatchSetScope(
 		return b.refuseNameWithoutAResult("set-scope", "instKey", results, nresults)
 	}
 
-	buf := make([]byte, 65536)
-	packed := b.handler.SetScope(ctxWithMem(context.Background(), buf), nil, objType, instKey, 0, 65536)
-	response := extractStringFromSimplePacked(packed, buf)
+	resp, respCtx := newResponseBuf(context.Background())
+	packed := b.handler.SetScope(respCtx, nil, objType, instKey, 0, hostCallResponseLimit())
+	response := extractStringFromSimplePacked(packed, resp.bytes())
 
 	setResultString(results, nresults, response)
 	return nil
@@ -1178,9 +1178,9 @@ func (b *wasmtimeBackend) dispatchUUID(
 		return b.refuseOversizeWithoutAResult("uuid", "seed", len(seed), results, nresults)
 	}
 
-	buf := make([]byte, 65536)
-	packed := b.handler.UUID(ctxWithMem(context.Background(), buf), nil, seed, 0, 65536)
-	response := extractStringFromSimplePacked(packed, buf)
+	resp, respCtx := newResponseBuf(context.Background())
+	packed := b.handler.UUID(respCtx, nil, seed, 0, hostCallResponseLimit())
+	response := extractStringFromSimplePacked(packed, resp.bytes())
 
 	setResultString(results, nresults, response)
 	return nil
@@ -1270,14 +1270,14 @@ func (b *wasmtimeBackend) dispatchSideEffect(
 		return refuseOversizeWithCallFailure(results, nresults, "durable-side-effect", "result", len(result))
 	}
 
-	buf := make([]byte, 65536)
-	packed := b.handler.SideEffect(ctxWithMem(context.Background(), buf), nil, result, 0, 65536)
+	resp, respCtx := newResponseBuf(context.Background())
+	packed := b.handler.SideEffect(respCtx, nil, result, 0, hostCallResponseLimit())
 	// result<string, call-failure>, not a bare string: decodeCallOutcome tests
 	// the stop sentinel by mask BEFORE reading any field, so a refusal reaches
 	// the component guest as the `suspended` case rather than as a response the
 	// service could also have produced. setResultString discarded those bits.
 	setResultCallOutcome(results, nresults,
-		decodeCallOutcome(packed, buf, simpleLayout))
+		decodeCallOutcome(packed, resp.bytes(), simpleLayout))
 	return nil
 }
 
@@ -1293,19 +1293,19 @@ func (b *wasmtimeBackend) dispatchSideEffectRecorded(
 	if b.handler == nil {
 		return nil
 	}
-	buf := make([]byte, 65536)
-	packed := b.handler.SideEffectRecorded(ctxWithMem(context.Background(), buf), nil, 0, 65536)
+	resp, respCtx := newResponseBuf(context.Background())
+	packed := b.handler.SideEffectRecorded(respCtx, nil, 0, hostCallResponseLimit())
 	if uint64(packed)&uint64(callSuspendSentinel) != 0 {
 		setResultCallOutcome(results, nresults, callOutcome{suspended: true})
 		return nil
 	}
 	switch status := byte(uint64(packed) & 0xFF); status {
 	case 0:
-		setResultSideEffectLookup(results, nresults, true, extractStringFromSimplePacked(packed, buf))
+		setResultSideEffectLookup(results, nresults, true, extractStringFromSimplePacked(packed, resp.bytes()))
 	case sideEffectNotRecorded:
 		setResultSideEffectLookup(results, nresults, false, "")
 	default:
-		setResultCallOutcome(results, nresults, callOutcome{failed: true, code: 0, payload: extractStringFromSimplePacked(packed, buf)})
+		setResultCallOutcome(results, nresults, callOutcome{failed: true, code: 0, payload: extractStringFromSimplePacked(packed, resp.bytes())})
 	}
 	return nil
 }
@@ -1339,11 +1339,11 @@ func (b *wasmtimeBackend) dispatchFetch(
 		return refuseOversizeWithCallFailure(results, nresults, "durable-fetch", "body", len(body))
 	}
 
-	buf := make([]byte, 65536)
-	packed := b.handler.Fetch(ctxWithMem(context.Background(), buf), nil, method, url, headers, body, 0, 65536)
+	resp, respCtx := newResponseBuf(context.Background())
+	packed := b.handler.Fetch(respCtx, nil, method, url, headers, body, 0, hostCallResponseLimit())
 
 	setResultCallOutcome(results, nresults,
-		decodeCallOutcome(packed, buf, simpleLayout))
+		decodeCallOutcome(packed, resp.bytes(), simpleLayout))
 	return nil
 }
 
@@ -1401,15 +1401,15 @@ func (b *wasmtimeBackend) dispatchScheduleCron(
 		return refuseOversizeWithCallFailure(results, nresults, "durable-schedule-cron", "input", len(input))
 	}
 
-	buf := make([]byte, 65536)
-	packed := b.handler.ScheduleCron(ctxWithMem(context.Background(), buf), nil,
-		workflowName, cronExpr, timezone, input, 0, 65536)
+	resp, respCtx := newResponseBuf(context.Background())
+	packed := b.handler.ScheduleCron(respCtx, nil,
+		workflowName, cronExpr, timezone, input, 0, hostCallResponseLimit())
 	// result<string, call-failure>, not a bare string: decodeCallOutcome tests
 	// the stop sentinel by mask BEFORE reading any field, so a refusal reaches
 	// the component guest as the `suspended` case rather than as a response the
 	// service could also have produced. setResultString discarded those bits.
 	setResultCallOutcome(results, nresults,
-		decodeCallOutcome(packed, buf, simpleLayout))
+		decodeCallOutcome(packed, resp.bytes(), simpleLayout))
 	return nil
 }
 
@@ -1446,9 +1446,9 @@ func (b *wasmtimeBackend) dispatchListCrons(
 		return nil
 	}
 
-	buf := make([]byte, 65536)
-	packed := b.handler.ListCrons(ctxWithMem(context.Background(), buf), nil, 0, 65536)
-	response := extractStringFromSimplePacked(packed, buf)
+	resp, respCtx := newResponseBuf(context.Background())
+	packed := b.handler.ListCrons(respCtx, nil, 0, hostCallResponseLimit())
+	response := extractStringFromSimplePacked(packed, resp.bytes())
 
 	setResultString(results, nresults, response)
 	return nil

@@ -196,6 +196,9 @@ func readOutBufString(ctx context.Context, m api.Module, ptr, length, maxLen uin
 		return "", false
 	}
 	if rawBuf, ok := ctx.Value(wasmMemBufKey{}).([]byte); ok && rawBuf != nil {
+		if rb, grows := responseBufFrom(ctx); grows {
+			rawBuf = rb.bytes() // the growable buffer holds what was written; the placeholder in the key is empty
+		}
 		if uint64(ptr)+uint64(length) > uint64(len(rawBuf)) {
 			return "", false
 		}
