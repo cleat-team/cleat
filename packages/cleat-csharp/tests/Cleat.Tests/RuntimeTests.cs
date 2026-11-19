@@ -547,3 +547,94 @@ public class SignalEnvelopeTests
         Assert.False(Decode("{\"note\":\"see cleat_reply_to\"}", out _, out _));
     }
 }
+
+public class ChildDocumentTests
+{
+    // ---- await_all_children ----
+
+    [Fact]
+    public void AllReadsEachResultAndKeepsTheRawError()
+    {
+        var r = ChildDocuments.ParseAll("[{\"run_id\":\"a\",\"result\":\"{}\"},{\"run_id\":\"b\",\"result\":\"\",\"error\":\"boom\"}]");
+        Assert.Equal(2, r.Count);
+        Assert.Equal(new ChildResult("a", "{}", null), r[0]);
+        Assert.Equal(new ChildResult("b", "", "boom"), r[1]);
+    }
+
+    [Fact]
+    public void AllReadsAnEmptyAnswerAsNoChildren()
+        => Assert.Empty(ChildDocuments.ParseAll(""));
+
+    [Theory]
+    [InlineData("not json")]
+    [InlineData("{\"run_id\":\"a\"}")]            // an object, not an array
+    [InlineData("[{\"result\":\"x\"}]")]            // an item with no run_id
+    [InlineData("[1]")]
+    public void AllRefusesWhatIsNotTheDocumentItExpects(string raw)
+    {
+        var e = Assert.Throws<CleatCallException>(() => ChildDocuments.ParseAll(raw));
+        Assert.Contains("await_all_children failed", e.Message);
+    }
+
+    // ---- await_any_child ----
+
+    [Fact]
+    public void AnyReadsTheWinner()
+        => Assert.Equal(new ChildResult("w", "ok", null), ChildDocuments.ParseAny("{\"run_id\":\"w\",\"result\":\"ok\"}"));
+
+    [Fact]
+    public void AnyReadsAWinnerThatFailedAsAWinnerNotAsAHostError()
+    {
+        // BOTH run_id and error: the child failed, the call did not. Only an error with NO run_id is the host refusing.
+        var r = ChildDocuments.ParseAny("{\"run_id\":\"w\",\"result\":\"\",\"error\":\"child blew up\"}");
+        Assert.Equal(new ChildResult("w", "", "child blew up"), r);
+    }
+
+    [Fact]
+    public void AnyThrowsOnAnErrorWithNoRunId()
+    {
+        var e = Assert.Throws<CleatCallException>(() => ChildDocuments.ParseAny("{\"error\":\"invalid runIDs: bad\"}"));
+        Assert.Contains("invalid runIDs: bad", e.Message);
+    }
+
+    [Fact]
+    public void AnyThrowsOnAnEmptyAnswerBecauseTheHostWritesTheWinnerThere()
+    {
+        var e = Assert.Throws<CleatCallException>(() => ChildDocuments.ParseAny(""));
+        Assert.Contains("returned nothing", e.Message);
+    }
+
+    [Fact]
+    public void AnyRefusesText()
+        => Assert.Throws<CleatCallException>(() => ChildDocuments.ParseAny("no such child"));
+
+    // ---- poll_child ----
+
+    [Fact]
+    public void PollIsNullWhenTheAnswerIsEmptyOrTheChildIsRunning()
+    {
+        Assert.Null(ChildDocuments.ParsePoll("r", ""));
+        Assert.Null(ChildDocuments.ParsePoll("r", "{\"status\":\"running\"}"));
+    }
+
+    [Fact]
+    public void PollTakesTheRunIdFromTheCallerBecauseTheDocumentHasNone()
+    {
+        var r = ChildDocuments.ParsePoll("run-9", "{\"status\":\"completed\",\"result\":\"42\"}");
+        Assert.Equal(new ChildResult("run-9", "42", null), r);
+    }
+
+    [Fact]
+    public void PollReadsAnEmptyErrorAsNoneButAnyOtherErrorAsAFailure()
+    {
+        Assert.Null(ChildDocuments.ParsePoll("r", "{\"status\":\"completed\",\"result\":\"x\",\"error\":\"\"}")!.Value.Error);
+        Assert.Equal("nope", ChildDocuments.ParsePoll("r", "{\"status\":\"failed\",\"error\":\"nope\"}")!.Value.Error);
+    }
+
+    [Fact]
+    public void PollRefusesWhatIsNotAnObject()
+    {
+        Assert.Throws<CleatCallException>(() => ChildDocuments.ParsePoll("r", "[1]"));
+        Assert.Throws<CleatCallException>(() => ChildDocuments.ParsePoll("r", "garbage"));
+    }
+}

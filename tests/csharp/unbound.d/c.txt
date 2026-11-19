@@ -1,9 +1,0 @@
-# Group C: children (cleat#4080, PR 5; owner WS-cleat-3).
-# WIT functions the C# SDK has not wired yet. Delete a line in the PR that wires it, and delete this file
-# when it is empty. tests/csharp/unbound_drift_test.go fails if a function is neither wired nor listed.
-durable-child-workflow
-durable-await-child
-durable-await-all-children
-durable-await-any-child
-durable-poll-child
-durable-child-workflow-with-options
