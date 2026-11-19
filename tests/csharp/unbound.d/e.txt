@@ -1,8 +1,8 @@
-# Group E: handlers, query state (cleat#4080, PR 5; owner WS-cleat-3).
-# WIT functions the C# SDK has not wired yet. Delete a line in the PR that wires it, and delete this file
-# when it is empty. tests/csharp/unbound_drift_test.go fails if a function is neither wired nor listed.
-durable-register-update-handler
+# Group E (cleat#4080, PR 5; owner WS-cleat-3).
+# WIT functions the C# SDK has NOT wired and deliberately will not. This file stays: it is a permanent entry, not a to-do.
+# tests/csharp/unbound_drift_test.go fails if a function is neither wired nor listed.
+#
+# durable-register-query-handler: every SDK had a register_query_handler until 2026-08-09. It recorded a handler name with the host
+# and no worker code ever routed an external query back to it. docs/determinism.md, "Why there is no RegisterQueryHandler", and
+# docs/contributor/SDK_README_TEMPLATE.md ("Do not add a register_query_handler") say a new SDK exposes set_query_state instead.
 durable-register-query-handler
-durable-poll-update
-durable-complete-update
-set-query-state

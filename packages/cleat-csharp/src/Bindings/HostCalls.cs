@@ -77,6 +77,7 @@ public sealed partial class HostCalls
     /// <summary><see cref="Sleep(TimeSpan)"/> in milliseconds.</summary>
     public void SleepMs(ulong milliseconds)
     {
+        DispatchUpdates(); // a dispatch point: python's sleep_ms serves pending updates before it suspends
         if (Packed.SleepMustSuspend(IDurableSleepImports.DurableSleep(milliseconds)))
             throw new CleatSuspendException();
     }
