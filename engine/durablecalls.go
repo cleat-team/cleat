@@ -479,6 +479,13 @@ func (s *execSession) DurableCallWithRetry(ctx context.Context, m api.Module,
 	// branch, which still reads it: a terminal call, a refusal, or attempts to resume.
 	if s.isReplay && s.stepCount >= len(s.history) {
 		s.exitReplay()
+		// A defer segment is refused here, at the frontier it arrives on, before the budget check below can answer with a refusal of its
+		// own: bit 31 wins over any field (ABI.md). The check further down also refuses a segment, so this is not a second behaviour. It is
+		// here because a hand-off to fresh work that spells the frontier predicate has to refuse INSIDE it, which is what
+		// TestEveryFrontierAnswerReachesARefusalOrIsNamed requires and what keeps the refusal from sitting in a different branch.
+		if s.stopBeforeNewWork() {
+			return callSuspendSentinel
+		}
 	}
 
 	// REFUSE A POLICY TOO LONG TO RUN IN ONE SEGMENT, AND RECORD THE REFUSAL. cleat#4032.
