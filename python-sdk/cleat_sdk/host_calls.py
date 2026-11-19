@@ -541,12 +541,13 @@ INFINITE_TIMEOUT_MS: int = 9223372036854775807  # i64::MAX / 2^63 - 1
 
 
 def _seconds_to_timeout_ms(seconds: float | None) -> int:
-    """Seconds to the milliseconds a wait is given, without letting a POSITIVE timeout become the wait-forever 0.
+    """Seconds to the milliseconds a wait is given, without letting a POSITIVE timeout become 0.
 
-    ``int(seconds * 1000)`` truncates: ``0.0004`` is 0 ms, and a 0 in :meth:`HostCalls.await_signals_ms` means wait without a limit, so
-    a caller who asked for a tenth of a millisecond waited for ever. A positive value that would truncate to 0 is 1 ms, so that a
-    positive timeout can never become the one value that means something else. A non-positive value is returned as it is (the
-    caller's own, unchanged), and one too large for the host saturates at :data:`INFINITE_TIMEOUT_MS` instead of raising.
+    ``int(seconds * 1000)`` truncates: ``0.0004`` is 0 ms, and a 0 in :meth:`HostCalls.await_signals_ms` means do not wait (cleat#4144),
+    so a caller who asked for a tenth of a millisecond would not wait at all. A positive value that would truncate to 0 is 1 ms, so a
+    positive timeout never becomes the value that means something else. A non-positive value is returned as the caller's own, unchanged
+    (:func:`_host_timeout_ms` turns it into the 0 the host is given), and one too large for the host saturates at
+    :data:`INFINITE_TIMEOUT_MS` instead of raising.
     """
     if seconds is None:
         return INFINITE_TIMEOUT_MS
@@ -557,6 +558,17 @@ def _seconds_to_timeout_ms(seconds: float | None) -> int:
     if ms == 0 and seconds > 0:
         return 1
     return ms
+
+
+def _host_timeout_ms(timeout_ms: int | None) -> int:
+    """The timeout a wait hands the host: ``None`` waits without a limit, and 0 or less is 0, which means do not wait (cleat#4144).
+
+    The WIT's ``timeout-ms`` is a ``u64``. A negative Python int cannot be lowered into it: componentize-py's ``wit_dylib_pop_u64`` raises
+    ``OverflowError``, which is an uncatchable wasm trap, so the run fails (found in review of cleat#4189, measured on a real guest). So a
+    negative value is clamped to 0 HERE, at the one place the SDK hands a wait's timeout to the host, rather than relied on to be
+    refused by the host as it was before.
+    """
+    return INFINITE_TIMEOUT_MS if timeout_ms is None else max(timeout_ms, 0)
 
 
 # ========================================================================
@@ -2134,9 +2146,9 @@ class HostCalls:
         self.dispatch_updates()  # dispatch point; see dispatch_updates
         names_json = json.dumps(signal_names)
 
-        # Waiting without a limit is explicit: ``None``. A timeout of 0 or less is passed through, and the host reads it as
-        # "do not wait" (cleat#4144), the same as for await_promise.
-        effective_timeout = INFINITE_TIMEOUT_MS if timeout_ms is None else timeout_ms
+        # Waiting without a limit is explicit: ``None``. A timeout of 0 or less is 0, which the host reads as "do not wait"
+        # (cleat#4144), the same as for await_promise; see _host_timeout_ms for why a negative one is clamped here.
+        effective_timeout = _host_timeout_ms(timeout_ms)
 
         try:
             outcome = _import_cleat_await_signals(names_json, effective_timeout)
@@ -2564,7 +2576,7 @@ class HostCalls:
         """
         self.dispatch_updates()  # dispatch point; see dispatch_updates
         try:
-            result = _import_cleat_await_promise(promise_id, INFINITE_TIMEOUT_MS if timeout_ms is None else timeout_ms)
+            result = _import_cleat_await_promise(promise_id, _host_timeout_ms(timeout_ms))
         except _WitErr as err:
             # ``err(call-failure)``: a stop unwinds, a host failure raises.
             # Neither is an outcome of the promise (cleat#3425).

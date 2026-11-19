@@ -77,12 +77,32 @@ class TestWhatTheHostIsGivenForZeroAndNone:
         assert len(seen) == 1
         return seen[0]
 
-    @pytest.mark.parametrize("ms", [0, -1])
-    def test_zero_or_negative_reaches_the_host_as_it_is_so_the_host_does_not_wait(
+    @pytest.mark.parametrize("ms", [0, -1, -5, -60_000])
+    def test_zero_or_negative_reaches_the_host_as_zero_so_the_host_does_not_wait(
         self, ms: int
     ) -> None:
-        assert self._signals_arg(ms) == ms
-        assert self._promise_arg(ms) == ms
+        # EXACTLY 0, never the caller's negative number: the WIT's timeout-ms is a u64, and a real componentize-py guest raises OverflowError
+        # lowering a negative int into it, which is an uncatchable wasm trap (found in review of cleat#4189). A mock that only checked
+        # "the host is not given the wait-forever value" passed on the negative and would have shipped it.
+        assert self._signals_arg(ms) == 0
+        assert self._promise_arg(ms) == 0
+
+    @pytest.mark.parametrize("seconds", [0, -0.5, -3])
+    def test_a_zero_or_negative_seconds_timeout_reaches_the_host_as_zero(
+        self, seconds: float
+    ) -> None:
+        from cleat_sdk.host_calls import HostCalls
+
+        seen: list[int] = []
+
+        def fake(_promise_id: str, ms: int) -> int:
+            seen.append(ms)
+            return 1 << 16  # timed out, stop sentinel clear
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr("cleat_sdk.host_calls._import_cleat_await_promise", fake)
+            HostCalls().await_promise("p", timeout_seconds=seconds)
+        assert seen == [0]
 
     def test_none_reaches_the_host_as_the_wait_without_a_limit(self) -> None:
         assert self._signals_arg(None) == INFINITE_TIMEOUT_MS
