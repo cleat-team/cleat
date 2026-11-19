@@ -69,6 +69,8 @@ type planned struct {
 //	CLEAT_CHAOS_MODE     "sample" (default): a seeded random sample of CLEAT_CHAOS_SAMPLE fault runs (default 12), the bounded check;
 //	                     "full": every boundary x every fault, the pre-release sweep
 //	CLEAT_CHAOS_ONLY     one "<script index>/<fault>" to replay exactly, printed by a failure
+//	CLEAT_CHAOS_SKIP_FAULTS  comma-separated fault kinds to leave out (reclaim, terminate, dbwrite, signal): an explicit, logged opt-out for a
+//	                     kind whose fix is not on develop yet, never a default
 func TestChaosSeeded(t *testing.T) {
 	seed := int64(envInt("CLEAT_CHAOS_SEED", 1))
 	scripts := generate(seed, envInt("CLEAT_CHAOS_SCRIPTS", 3))
@@ -76,9 +78,21 @@ func TestChaosSeeded(t *testing.T) {
 	if mode == "" {
 		mode = "sample"
 	}
+	skipped := map[string]bool{}
+	for _, k := range strings.Split(os.Getenv("CLEAT_CHAOS_SKIP_FAULTS"), ",") {
+		if k = strings.TrimSpace(k); k != "" {
+			switch k {
+			case "reclaim", "terminate", "dbwrite", "signal":
+				skipped[k] = true
+			default:
+				t.Fatalf("CLEAT_CHAOS_SKIP_FAULTS names an unknown fault kind %q", k)
+			}
+		}
+	}
 	e := newEnv(t)
 
 	var plan []planned
+	skippedRuns := map[string]int{}
 	for _, sc := range scripts {
 		g := goldenOf(t, e, sc)
 		for _, b := range g.boundaries() {
@@ -92,6 +106,10 @@ func TestChaosSeeded(t *testing.T) {
 					{"dbwrite", verifyRefusedWriteStopsTheGuest},
 					{"signal", verifyReclaim},
 				} {
+					if skipped[k.then] {
+						skippedRuns[k.then]++
+						continue
+					}
 					if k.then == "signal" && !hasOp(sc, "await0") {
 						continue
 					}
@@ -104,6 +122,9 @@ func TestChaosSeeded(t *testing.T) {
 		}
 	}
 	t.Logf("seed=%d scripts=%d: %d fault runs possible", seed, len(scripts), len(plan))
+	if len(skippedRuns) > 0 {
+		t.Logf("EXCLUDED by CLEAT_CHAOS_SKIP_FAULTS (not run, not passed): %v", skippedRuns)
+	}
 	for _, sc := range scripts {
 		t.Logf("script %s: %s", sc.Name, describe(sc))
 	}
