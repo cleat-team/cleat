@@ -909,6 +909,7 @@ func (s *execSession) freshPluginCallStreaming(ctx context.Context, m api.Module
 				PluginOutput:     chunk.Content,
 				StreamChunkIndex: index,
 				StreamFinish:     chunk.Finish,
+				StreamData:       true, // plugin output, never the synthetic failure chunk (cleat#4117)
 			}
 			persistence := s.recordEvent(rec)
 
@@ -990,6 +991,9 @@ func (s *execSession) replayPluginCallStreaming(ctx context.Context, m api.Modul
 	// chunk case below where there is exactly one record and so no ambiguity
 	// about which one it came from.
 	var recordedErrCode byte
+	// Whether the last chunk read was recorded as plugin output (cleat#4117). Read only in the single-chunk case below, where "the last" is
+	// "the only".
+	var recordedAsData bool
 
 	// Read consecutive stream chunk events from history.
 	for s.stepCount < len(s.history) {
@@ -1001,6 +1005,7 @@ func (s *execSession) replayPluginCallStreaming(ctx context.Context, m api.Modul
 			return 0
 		}
 		recordedErrCode = byte(rec.StreamErrCode)
+		recordedAsData = rec.StreamData
 
 		chunk := plugin.StreamEvent{
 			Index:   rec.StreamChunkIndex,
@@ -1033,7 +1038,11 @@ func (s *execSession) replayPluginCallStreaming(ctx context.Context, m api.Modul
 	// replays the way it always did, and only events recorded from now on
 	// carry the corrected code. That is the property 2.35 asks for --
 	// determinism is per recorded step, not across eras.
-	if len(collected) == 1 && collected[0].Finish {
+	//
+	// BUT only when the chunk is not marked as plugin output. A stream function that sends exactly one final chunk records the same row a
+	// failure does, and reading it back as a failure turned a successful stream into an error on every resume, with the chunk's own text as the
+	// message (cleat#4117). StreamData is what tells them apart; a record without it replays as it always did.
+	if len(collected) == 1 && collected[0].Finish && !recordedAsData {
 		written, _ := s.writeResult(ctx, m, responsePtr, collected[0].Content, responseMaxLen)
 		return packDurableCallResult(int(written), recordedErrCode, 1)
 	}

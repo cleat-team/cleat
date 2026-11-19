@@ -324,6 +324,17 @@ type EventRecord struct {
 	// 2.35's plugin half, because callErrorUnknown is exactly what those
 	// failures reported when they were fresh.
 	StreamErrCode int `json:"stream_err_code,omitempty"`
+	// StreamData marks a chunk the plugin PRODUCED, as opposed to the one synthetic chunk recordStreamError writes for a stream-level failure
+	// (cleat#4117). Both are one chunk at index 0 with Finish true, and a stream function that sends a single final chunk writes the same
+	// record a failure does, so the chunk count cannot tell them apart on replay. Before this field replay read every one-chunk finished stream
+	// as a failure whose message was the chunk's content: a successful stream turned into an error the moment its run was resumed.
+	//
+	// It is set on the SUCCESS side, not the failure side, on purpose. A history written before this field holds failure chunks with no marker,
+	// and a marker on failures alone could not tell those from a successful chunk written after it. Marking the data keeps one rule for both
+	// eras: a lone finished chunk is a failure unless it says it is data, so every pre-existing record replays as it always did and only a
+	// chunk recorded from now on can replay as the success it was. (A one-chunk success recorded BEFORE this field still replays as a
+	// failure; nothing recorded then distinguishes it.)
+	StreamData bool `json:"stream_data,omitempty"`
 
 	// Update handler fields.
 	//
