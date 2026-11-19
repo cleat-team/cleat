@@ -43,9 +43,16 @@ func allEventTypes(t *testing.T) []EventType {
 	return out
 }
 
-// resumesItsOwnPendingEvent are (call, event type) pairs that leave replay with history unread ON PURPOSE: the call is resuming the pending
-// await it recorded itself, which is the history's last event when a run is resumed (the fresh path then records the outcome at the same
-// step, overwriting the empty event). Each is a grant: an entry added to silence a failure is the next duplicate effect.
+// resumesItsOwnPendingEvent are (call, event type) pairs that leave replay with history unread, and are EXEMPTED FROM THIS GUARD BY READING,
+// NOT BY MEASUREMENT. The reason given for the exemption was that the call is resuming the pending await it recorded itself, which is the
+// history's last event when a run is resumed, so the fresh path records the outcome at the same step and overwrites the empty event. THAT REASON
+// IS FALSE FOR AwaitPromise: measured on the real Go guest (cleat#4177), the outcome is recorded at the NEXT step, and a timed-out await records
+// nothing, so a later replay leaves replay at the await and a recorded call after it runs again (2 calls, want 1). The entry stays only because
+// removing it fails the probe for the right reason, and cleat#4177 owns the fix; when it lands, delete the entry and let the guard cover it.
+//
+// The other pending-resume sites this guard's neighbours exempt (AwaitChild, AwaitAnyChild, replayAwaitAllChildren, replaySetScope's retry) are
+// NOT MEASURED either: whether a defer segment's drain can append events after the pending record has not been tried. Each is a grant, and an
+// entry added to silence a failure is the next duplicate effect.
 var resumesItsOwnPendingEvent = map[string]EventType{
 	"AwaitPromise": EventTypeAwaitPromise,
 }
