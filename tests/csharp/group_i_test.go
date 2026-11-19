@@ -25,7 +25,7 @@ func fnvOf(s string) string {
 
 func bigResponse(n int) string { return `"` + strings.Repeat("y", n-2) + `"` }
 
-func callInput(requestChars int) string {
+func groupICallInput(requestChars int) string {
 	return fmt.Sprintf(`{"service":"svc","operation":"big","requestChars":%d}`, requestChars)
 }
 
@@ -33,7 +33,7 @@ func callInput(requestChars int) string {
 func TestCSharpGroupICallResponsesUpToTheHostBufferArriveWhole(t *testing.T) {
 	for _, n := range []int{2, 1000, 60000, hostBuffer - 1, hostBuffer} {
 		resp := bigResponse(n)
-		m := objectResult(t, runConformanceEntry(t, "i_call", entryRun{Input: callInput(1000), Responses: map[string]string{"svc/big": resp}}))
+		m := objectResult(t, runConformanceEntry(t, "i_call", entryRun{Input: groupICallInput(1000), Responses: map[string]string{"svc/big": resp}}))
 		if m["failed"] == true {
 			t.Errorf("a %d-char response was refused: %v", n, m)
 			continue
@@ -49,7 +49,7 @@ func TestCSharpGroupICallResponsesUpToTheHostBufferArriveWhole(t *testing.T) {
 // but the C# SDK, like the Python one, leaves codes 6-8 on the base exception class, which is read here rather than assumed.
 func TestCSharpGroupICallAResponseOverTheHostBufferIsRefusedWithItsPrefixNotTruncatedSilently(t *testing.T) {
 	for _, n := range []int{hostBuffer + 1, 100000, 1000000} {
-		res := runConformanceEntry(t, "i_call", entryRun{Input: callInput(10), Responses: map[string]string{"svc/big": bigResponse(n)}})
+		res := runConformanceEntry(t, "i_call", entryRun{Input: groupICallInput(10), Responses: map[string]string{"svc/big": bigResponse(n)}})
 		m := objectResult(t, res)
 		if m["failed"] != true {
 			t.Errorf("a %d-char response was reported as a success (%v): the guest was handed a truncated answer as if it were whole", n, m)
@@ -67,12 +67,11 @@ func TestCSharpGroupICallAResponseOverTheHostBufferIsRefusedWithItsPrefixNotTrun
 	}
 }
 
-// Requests are not bounded by the 64 KiB host buffer (that bounds RESPONSES): a request up to 1 MiB, the default MaxWasmStringLen, reaches the
-// service intact. Nothing above 1 MiB is asserted here: the component path currently applies no bound at all (cleat#4130), which is being changed to
-// the core-module path's, so the over-limit case belongs to that change.
+// Requests are not bounded by the 64 KiB host buffer (that bounds RESPONSES): a request up to 2 MiB, the default MaxWasmStringLen for every
+// language since cleat#4130, reaches the service intact. The over-limit case is the next test.
 func TestCSharpGroupICallRequestsLargerThanTheHostBufferReachTheServiceIntact(t *testing.T) {
-	for _, n := range []int{hostBuffer, hostBuffer + 1, 200000, 1 << 20} {
-		res := runConformanceEntry(t, "i_call", entryRun{Input: callInput(n)})
+	for _, n := range []int{hostBuffer, hostBuffer + 1, 200000, 1 << 20, 2 << 20} {
+		res := runConformanceEntry(t, "i_call", entryRun{Input: groupICallInput(n)})
 		m := objectResult(t, res)
 		if m["failed"] == true {
 			t.Errorf("a %d-char request was refused: %v", n, m)
@@ -86,6 +85,20 @@ func TestCSharpGroupICallRequestsLargerThanTheHostBufferReachTheServiceIntact(t 
 				return len(res.Calls[0].Request)
 			}())
 		}
+	}
+}
+
+// One character over the limit is refused BEFORE the service is asked: the call fails visibly and the service saw nothing. The component path
+// applied no bound at all until cleat#4130 (the guest could hand the host a request of any size); it now refuses at the same limit as a
+// core-module guest.
+func TestCSharpGroupICallRequestsOverTheLimitAreRefusedBeforeTheServiceIsAsked(t *testing.T) {
+	res := runConformanceEntry(t, "i_call", entryRun{Input: groupICallInput(2<<20 + 1)})
+	m := objectResult(t, res)
+	if m["failed"] != true {
+		t.Errorf("a request one character over 2 MiB was not refused: %v", m)
+	}
+	if len(res.Calls) != 0 {
+		t.Errorf("the service was asked %d time(s) for a request over the limit, want 0", len(res.Calls))
 	}
 }
 
