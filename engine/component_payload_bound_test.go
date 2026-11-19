@@ -128,9 +128,10 @@ func TestTheComponentPayloadTableCoversEveryPayloadRead(t *testing.T) {
 // The limit the sites above are tested at is a small one chosen to keep the table cheap. This runs one site at the REAL default (2 MiB, cleat#4130):
 // exactly 2 MiB reaches the handler and one byte more is refused, so the default the docs and the worker flag state is the one enforced.
 func TestAComponentRequestIsBoundedAtTheDefaultTwoMiB(t *testing.T) {
-	if MaxWasmStringLen != DefaultMaxWasmStringLen {
-		t.Skipf("MaxWasmStringLen is %d, not the default: another test changed it", MaxWasmStringLen)
-	}
+	// Establish the precondition rather than skip when it does not hold: this must test the DEFAULT, whatever another test left behind.
+	old := MaxWasmStringLen
+	MaxWasmStringLen = DefaultMaxWasmStringLen
+	t.Cleanup(func() { MaxWasmStringLen = old })
 	for _, tc := range []struct {
 		size    int
 		refused bool
