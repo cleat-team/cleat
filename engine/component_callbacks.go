@@ -257,7 +257,7 @@ func (b *wasmtimeBackend) dispatchDurableDefer(
 	packed := b.handler.DurableDefer(ctxWithMem(context.Background(), buf), nil, desc, 0, 65536)
 
 	setResultCallOutcome(results, nresults,
-		decodeCallOutcome(packed, buf, extractStringFromSimplePacked))
+		decodeCallOutcome(packed, buf, simpleLayout))
 	return nil
 }
 

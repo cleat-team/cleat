@@ -1138,6 +1138,8 @@ func TestDispatchersReadTheFailureCodeOfTheirOwnLayout(t *testing.T) {
 	}{
 		{"child-workflow (simple)", 4, 2, []string{"child", "{}"}, packSimpleResult(1, 110), 0},
 		{"side-effect (simple)", 14, 1, []string{"x"}, packSimpleResult(1, 48), 0},
+		// Added with cleat#4079 part 3, which made durable-defer a result<string, call-failure> and brought a SIXTH simple-layout caller.
+		{"durable-defer (simple)", 3, 1, []string{"d"}, packSimpleResult(1, 110), 0},
 		{"durable-call (durable)", 0, 3, []string{"svc", "op", "{}"}, packDurableCallResult(110, 3, 1), 3},
 	}
 	for _, tc := range cases {
