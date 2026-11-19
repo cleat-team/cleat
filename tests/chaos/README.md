@@ -26,6 +26,11 @@ observation; the final status as in the fault-free run (or `terminated` for the 
 ~37 s (`minimumReclaimAfter`), which at ~10 s per run would make the sweep unaffordable. The lease row ends up in the state the wait would have
 left it in; the reaper's own timing is not exercised.
 
+## Limits of the faults, stated
+
+- A `before` hold that is aborted after the kill still counts as an ARRIVAL at the service: for a call with a scripted failure (`call_retry`) the aborted request consumes one of the failures. Measured against #4152 it hides nothing, but "nothing was performed" is a description of the effect, not of the service's counters, so the fault is weaker than the word suggests.
+- A comparison across two checkouts (`CLEAT_CHAOS_TREE`) needs a FRESH database: each run applies the migrations of the tree under test to the database it is given, and `CREATE TABLE IF NOT EXISTS` never adds a column.
+
 ## Run
 
     CLEAT_CRASH_DB='postgres://cleat:cleat@localhost:55432/cleat?sslmode=disable' \
