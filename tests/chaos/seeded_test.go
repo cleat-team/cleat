@@ -95,7 +95,7 @@ func TestChaosSeeded(t *testing.T) {
 					if k.then == "signal" && !hasOp(sc, "await0") {
 						continue
 					}
-					if !applies(k.then, mode, b, g) {
+					if !applies(k.then, mode, b, sc, g) {
 						continue
 					}
 					plan = append(plan, planned{sc: sc, g: g, b: b, f: &fault{Op: b.Op, Nth: b.Nth, Mode: mode, Then: k.then}, verify: k.verify})

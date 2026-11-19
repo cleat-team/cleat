@@ -417,7 +417,7 @@ func runBoundaries(t *testing.T, then string, verify func(scenario, goldenRecord
 			g := goldenOf(t, e, sc)
 			for _, b := range g.boundaries() {
 				for _, mode := range []string{"before", "after"} {
-					if !applies(then, mode, b, g) {
+					if !applies(then, mode, b, sc, g) {
 						continue
 					}
 					f := &fault{Op: b.Op, Nth: b.Nth, Mode: mode, Then: then, Flags: flags}
@@ -431,13 +431,36 @@ func runBoundaries(t *testing.T, then string, verify func(scenario, goldenRecord
 	}
 }
 
+// beforeThePollsBranch reports whether boundary b is at or before the first call named for a signal poll's outcome in the golden run.
+func beforeThePollsBranch(sc scenario, g goldenRecord, b request) bool {
+	branch := map[string]bool{}
+	for _, o := range sc.Ops {
+		if o.Op == "await0" || o.Op == "await_promise" {
+			branch[o.Hit], branch[o.Miss] = true, true
+		}
+	}
+	bi, pi := -1, -1
+	for i, r := range g.Reqs {
+		if r == b && bi < 0 {
+			bi = i
+		}
+		if branch[r.Op] && pi < 0 {
+			pi = i
+		}
+	}
+	return bi >= 0 && pi >= 0 && bi <= pi
+}
+
 // applies reports whether a fault of kind `then` is meaningful at this boundary.
-func applies(then, mode string, b request, g goldenRecord) bool {
+func applies(then, mode string, b request, sc scenario, g goldenRecord) bool {
 	switch {
 	case then == "terminate" && strings.HasPrefix(b.Op, "defer_"):
 		return false // a kill during a run's own defer drain is a different scenario from terminating a body mid-flight
-	case then == "signal" && mode == "before" && b == g.Reqs[0]:
-		return false // before the first effect nothing of the poll's outcome has been acted on, so a signal that lands now may legitimately be seen
+	case then == "signal" && mode == "before" && beforeThePollsBranch(sc, g, b):
+		// Until the poll's branch call has been performed nothing of the poll's outcome has been acted on, so a signal that lands while the worker
+		// is dead may legitimately be SEEN by the replayed poll (a HIT is then correct). The poll can be anywhere in a generated script, so this is
+		// derived from the golden order, not from the first request (cleat-review3, #4188, seed 4188).
+		return false
 	case then == "dbwrite" && mode == "after":
 		return false // the fault releases the held call itself
 	}
