@@ -148,7 +148,43 @@ func TestCSharpGroupHPluginCallTypedRoundTripsARecord(t *testing.T) {
 	}
 }
 
-// A reply that is not the response type is an error for that plugin, not a crash and not a default value.
+// What the typed overload refuses, and what it does NOT (cleat-review2, #4118). It is the serializer's notion of "the response type", so the
+// claim is narrower than "a reply that is not the response type is an error": a wrong JSON type for a member, text that is not JSON and null are
+// errors; an empty object and a reply in a different naming convention are not, and arrive as defaults. Each is pinned so the doc comment and the
+// behaviour cannot drift apart again.
+func TestCSharpGroupHPluginCallTypedWhatTheSerializerAcceptsAndRefuses(t *testing.T) {
+	typed := `{"plugin":"echo-plugin","function":"echo","text":"x","times":1}`
+	run := func(t *testing.T, input, reply string) map[string]any {
+		t.Helper()
+		opts := registryWith(t, &pluginSeen{}, func(context.Context, string) (string, error) { return reply, nil })
+		return mustFinish(t, runConformanceEntry(t, "h_plugin_call_typed", entryRun{Input: input, Options: opts}))
+	}
+	// Refused: a reply of null is a CleatCallException, not a NullReferenceException at the caller's first use.
+	m := run(t, typed, `null`)
+	if m["failed"] != true || !strings.Contains(fmt.Sprint(m["message"]), "null") {
+		t.Errorf("a null reply: got %v, want a CleatCallException saying so", m)
+	}
+	// Refused: not JSON.
+	if m := run(t, typed, `not json`); m["failed"] != true {
+		t.Errorf("a non-JSON reply: got %v, want an error", m)
+	}
+	// NOT refused, pinned: members absent from the reply take their defaults.
+	if m := run(t, typed, `{}`); m["failed"] == true || m["times"] != float64(0) {
+		t.Errorf("an empty object: got %v, want success with default members", m)
+	}
+	// NOT refused, pinned: the default context matches names case-sensitively, so a snake_case or camelCase reply to a Pascal-case record
+	// arrives as defaults. This is the trap the remarks warn about.
+	if m := run(t, typed, `{"text":"a","times":2}`); m["failed"] == true || m["times"] != float64(0) || m["text"] != nil {
+		t.Errorf("a differently-named reply to the default context: got %v, want success with defaults (the documented trap)", m)
+	}
+	// The remedy the remarks give: a context with the snake_case policy reads the same reply.
+	snake := `{"plugin":"echo-plugin","function":"echo","text":"x","times":1,"snake":true}`
+	if m := run(t, snake, `{"text":"a","times":2}`); m["failed"] == true || m["text"] != "a" || m["times"] != float64(2) {
+		t.Errorf("a snake_case reply through the snake_case context: got %v, want {text:a, times:2}", m)
+	}
+}
+
+// A reply whose member has the wrong JSON type is an error for that plugin, not a crash and not a default value.
 func TestCSharpGroupHPluginCallTypedAReplyOfTheWrongShapeIsAnError(t *testing.T) {
 	opts := registryWith(t, &pluginSeen{}, func(context.Context, string) (string, error) { return `{"Text":5}`, nil })
 	m := mustFinish(t, runConformanceEntry(t, "h_plugin_call_typed", entryRun{

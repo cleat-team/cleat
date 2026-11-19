@@ -51,8 +51,19 @@ public sealed partial class HostCalls
     /// <c>[JsonSerializable(typeof(TRequest))]</c> and <c>[JsonSerializable(typeof(TResponse))]</c>. Using a type the context does not declare
     /// is an <see cref="InvalidOperationException"/> that names the context and the type, before the plugin is called.
     /// </summary>
+    /// <remarks>
+    /// <b>What "a response of the right type" means is what <paramref name="context"/>'s serializer says, and no more.</b> Member names are
+    /// matched by the context's own naming policy, <b>case-sensitively</b>, so a plugin that replies in <c>snake_case</c> (the cleat plugins do,
+    /// for example <c>config_id</c>) needs a context declared with
+    /// <c>[JsonSourceGenerationOptions(PropertyNamingPolicy = JsonKnownNamingPolicy.SnakeCaseLower)]</c>; with the default names a reply whose
+    /// members do not match deserializes <b>without error</b> to a response whose members are their defaults, and so does a reply of <c>{}</c>.
+    /// Members the type does not declare are ignored. What IS refused: a reply that is not JSON, one whose member has the wrong JSON type, and a
+    /// reply of <c>null</c>, which cannot be a <typeparamref name="TResponse"/> and would otherwise surface as a
+    /// <see cref="NullReferenceException"/> at the caller's first use of it.
+    /// </remarks>
     /// <exception cref="CleatCallException">As <see cref="PluginCall(string, string, string)"/>, or the plugin's response is not a
-    /// <typeparamref name="TResponse"/> (the message says so and carries the serializer's).</exception>
+    /// <typeparamref name="TResponse"/>: it is not JSON, a member has the wrong type, or it is <c>null</c> (the message says so and carries the
+    /// serializer's, <see cref="CleatCallException.Code"/> 0).</exception>
     public TResponse PluginCall<TRequest, TResponse>(string pluginName, string functionName, TRequest request, JsonSerializerContext context)
     {
         ArgumentNullException.ThrowIfNull(context);
@@ -62,7 +73,8 @@ public sealed partial class HostCalls
         var reply = PluginCall(pluginName, functionName, input);
         try
         {
-            return EntryJson.ReadText<TResponse>(reply, context);
+            return EntryJson.ReadText<TResponse>(reply, context)
+                ?? throw new JsonException("the reply is null");
         }
         catch (JsonException e)
         {

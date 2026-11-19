@@ -58,8 +58,9 @@ internal static class EntryJson
     /// <summary>Throws if <paramref name="ctx"/> does not declare <typeparamref name="T"/>, without reading anything.</summary>
     internal static void Require<T>(JsonSerializerContext ctx) => _ = Info<T>(ctx);
 
-    internal static T ReadText<T>(string json, JsonSerializerContext ctx)
-        => JsonSerializer.Deserialize(json, Info<T>(ctx))!;
+    /// <summary>Deserializes <paramref name="json"/>; a JSON <c>null</c> yields <c>default</c>, which for a reference type is null. Callers that cannot accept null check it.</summary>
+    internal static T? ReadText<T>(string json, JsonSerializerContext ctx)
+        => JsonSerializer.Deserialize(json, Info<T>(ctx));
 
     internal static string Write<T>(T value, JsonSerializerContext ctx)
         => JsonSerializer.Serialize(value, Info<T>(ctx));

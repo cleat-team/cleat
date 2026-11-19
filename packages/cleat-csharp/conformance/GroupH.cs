@@ -14,6 +14,11 @@ public sealed record PluginUndeclared(int X);
 [JsonSerializable(typeof(PluginEcho))]
 public sealed partial class GroupHJson : JsonSerializerContext { }
 
+/// <summary>The same type through a context with the snake_case naming policy, which is what a plugin that replies in snake_case needs.</summary>
+[JsonSourceGenerationOptions(PropertyNamingPolicy = JsonKnownNamingPolicy.SnakeCaseLower)]
+[JsonSerializable(typeof(PluginEcho))]
+public sealed partial class GroupHSnakeJson : JsonSerializerContext { }
+
 /// <summary>
 /// Group H of cleat#4080's host-call coverage (tests/csharp/group_h_test.go): calling plugins. Entry names are prefixed <c>h_</c>. An entry
 /// that can fail by design reports the failure as data; a <see cref="CleatSuspendException"/> is never caught, because it is how a run ends.
@@ -42,14 +47,16 @@ public static class GroupH
         catch (CleatCallException e) { return Failure(e); }
     }
 
-    /// <summary>Input: plugin, function, text, times. Calls the typed overload with a PluginEcho and reads a PluginEcho back.</summary>
+    /// <summary>Input: plugin, function, text, times, and optionally snake (true: use the snake_case context). Calls the typed overload with a
+    /// PluginEcho and reads a PluginEcho back.</summary>
     [CleatEntry("h_plugin_call_typed")]
     public static JsonNode PluginCallTyped(HostCalls h, JsonElement input)
     {
         try
         {
+            JsonSerializerContext ctx = input.TryGetProperty("snake", out var s) && s.GetBoolean() ? GroupHSnakeJson.Default : GroupHJson.Default;
             var back = h.PluginCall<PluginEcho, PluginEcho>(input.GetProperty("plugin").GetString()!, input.GetProperty("function").GetString()!,
-                new PluginEcho(input.GetProperty("text").GetString()!, input.GetProperty("times").GetInt32()), GroupHJson.Default);
+                new PluginEcho(input.GetProperty("text").GetString()!, input.GetProperty("times").GetInt32()), ctx);
             return new JsonObject { ["text"] = back.Text, ["times"] = back.Times };
         }
         catch (CleatCallException e) { return Failure(e); }
