@@ -140,6 +140,46 @@ func (s *execSession) AwaitPromise(ctx context.Context, m api.Module, promiseID 
 				// bottom of this function.
 				awaitAnchorMs = rec.TimestampMs
 				awaitTimeoutMs = rec.TimeoutMs
+
+				// HISTORY CONTINUES PAST THIS RECORD: the await was already answered, so answer it from history and STAY IN
+				// REPLAY (cleat#4177). A pending await can only be left in two ways, and both leave a trace in what follows:
+				//
+				//   - it RESOLVED or was REJECTED: the outcome is recorded at the NEXT step, not over the pending row (the fresh path
+				//     records at s.stepCount, which advanceReplayStep has just moved past this record). So the record right after this
+				//     one is this promise's promise_resolved or promise_rejected.
+				//   - it TIMED OUT: nothing is recorded for a timeout ("the deadline has passed" is monotone, below), so the next record
+				//     is simply the guest's next call. Any other record means the original run took the timeout.
+				//
+				// Leaving replay here instead, as this branch always did, ran every durable call recorded after the await a second time
+				// on every later replay, and answered `resolved` to a replay that ran after the promise had settled where the original
+				// had been told it timed out. Flush's immutability guard kept the duplicates out of the stored history, so the history
+				// read as correct while the effects ran twice.
+				//
+				// KNOWN AMBIGUITY, deliberately resolved toward resolved: [await_promise, promise_resolved(p)] is also what a timed-out
+				// await followed IMMEDIATELY by a second await of the same already-settled promise records. The two cannot be told apart
+				// from the record, and they are only both possible when the promise settles in the instant between the timeout and the
+				// guest's next call. An await followed by anything else, which is every shape a retry loop makes, is unambiguous.
+				if s.stepCount < len(s.history) {
+					next := s.history[s.stepCount]
+					sameID := next.PromiseID == promiseID || next.PromiseID == ""
+					switch {
+					case next.EventType == EventTypePromiseResolved && sameID:
+						if !s.advanceReplayStep(ctx, &next) {
+							return 0
+						}
+						written, writtenEC := s.writeOut(ctx, m, resultPtr, next.PromiseResult, resultMaxLen)
+						return packAwaitPromiseResult(written, false, uint16(writtenEC))
+					case next.EventType == EventTypePromiseRejected && sameID:
+						if !s.advanceReplayStep(ctx, &next) {
+							return 0
+						}
+						written, _ := s.writeResult(ctx, m, resultPtr, next.PromiseError, resultMaxLen)
+						s.setAwaitRejected(true)
+						return packAwaitPromiseResult(written, false, 1)
+					default:
+						return packAwaitPromiseResult(0, true, 0)
+					}
+				}
 				resumingAwait = true
 				s.exitReplay()
 			}
