@@ -18,19 +18,8 @@ Signed-off-by: <!-- Your Name <your.email@example.com> -->
 - [ ] `[DOCS]` - Documentation only
 
 ## Release notes
-<!-- Write a user-facing summary for the changelog. Delete sections that don't apply. -->
-
-### Added
--
-
-### Fixed
--
-
-### Changed
--
-
-### Removed
--
+<!-- A change that ships adds ONE file, changelog.d/<issue>-<slug>.md (format: changelog.d/README.md), and does NOT edit CHANGELOG.md.
+     A change with nothing to tell users (tests, docs, CI, a pure refactor) puts `no-changelog: <reason>` on a line of its own below. -->
 
 ## Testing checklist
 - [ ] `go test ./...` passes locally
