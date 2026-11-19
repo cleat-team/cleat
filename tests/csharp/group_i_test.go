@@ -67,11 +67,11 @@ func TestCSharpGroupICallAResponseOverTheHostBufferIsRefusedWithItsPrefixNotTrun
 	}
 }
 
-// Requests are not bounded by the host buffer: the component bridge reads an argument whole (readStrArg has no length check), so a 4 MB request
-// reaches the service intact. Recorded because the core-module wasmtime path reads the same argument through wasmtimeReadPayload with
-// MaxWasmStringLen (1 MiB, wasmtime_hostfuncs_core.go), so the same guest logic is refused there (cleat#4130). Read from the source, not run on a core guest.
+// Requests are not bounded by the 64 KiB host buffer (that bounds RESPONSES): a request up to 1 MiB, the default MaxWasmStringLen, reaches the
+// service intact. Nothing above 1 MiB is asserted here: the component path currently applies no bound at all (cleat#4130), which is being changed to
+// the core-module path's, so the over-limit case belongs to that change.
 func TestCSharpGroupICallRequestsLargerThanTheHostBufferReachTheServiceIntact(t *testing.T) {
-	for _, n := range []int{hostBuffer, hostBuffer + 1, 200000, 1000000, 4000000} {
+	for _, n := range []int{hostBuffer, hostBuffer + 1, 200000, 1 << 20} {
 		res := runConformanceEntry(t, "i_call", entryRun{Input: callInput(n)})
 		m := objectResult(t, res)
 		if m["failed"] == true {
