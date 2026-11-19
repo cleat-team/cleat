@@ -5,6 +5,9 @@ package sideeffectnondet
 
 import (
 	"crypto/rand"
+	"errors"
+	mathrand "math/rand"
+	"strconv"
 	"time"
 
 	"github.com/cleat-team/cleat/cleat"
@@ -20,15 +23,17 @@ func InsideLiteral(h cleat.HostCalls, input string) (string, error) {
 		for k := range m {
 			n += len(k)
 		}
+		n += mathrand.Intn(10)
 		return time.Now().String() + string(b), nil
 	})
 }
 
 // InsideTypedLiteral is the same through the typed form.
-func InsideTypedLiteral(h cleat.HostCalls, input string) (int64, error) {
-	return cleat.SideEffectTyped(h, func() (int64, error) {
+func InsideTypedLiteral(h cleat.HostCalls, input string) (string, error) {
+	v, err := cleat.SideEffectTyped(h, func() (int64, error) {
 		return time.Now().UnixNano(), nil
 	})
+	return strconv.FormatInt(v, 10), err
 }
 
 // OutsideSideEffect makes the same clock read directly in the workflow, and must still be flagged (E003). It also has a SideEffect call whose
@@ -66,4 +71,42 @@ func (notHostCalls) SideEffect(fn func() (string, error)) (string, error) { retu
 func NotTheSDKsSideEffect(h cleat.HostCalls, input string) (string, error) {
 	h.DurableLog("x")
 	return notHostCalls{}.SideEffect(func() (string, error) { return time.Now().String(), nil })
+}
+
+// InsideExplicitTypedLiteral is the typed form with its type argument written out, which wraps the callee in an index expression. Nothing here
+// may be flagged either.
+func InsideExplicitTypedLiteral(h cleat.HostCalls, input string) (string, error) {
+	v, err := cleat.SideEffectTyped[int64](h, func() (int64, error) {
+		return time.Now().UnixNano(), nil
+	})
+	return strconv.FormatInt(v, 10), err
+}
+
+// The three functions below are the exemption's LIMITS (cleat-review, #4126). The literal's value may be non-deterministic; nothing else about it
+// is relaxed, because a goroutine, a channel or an interface call inside it has effects that are not the recorded value.
+
+// GoroutineInLiteral starts a goroutine inside the side-effect function that later calls a host method. It outlives the side effect and makes
+// the call on the first run only, so replay diverges: E001 must still be reported.
+func GoroutineInLiteral(h cleat.HostCalls, input string) (string, error) {
+	return h.SideEffect(func() (string, error) {
+		go func() { h.DurableLog("from a goroutine") }()
+		return "x", nil
+	})
+}
+
+// ChannelInLiteral sends on a channel inside the side-effect function: E002 must still be reported.
+func ChannelInLiteral(h cleat.HostCalls, input string) (string, error) {
+	return h.SideEffect(func() (string, error) {
+		c := make(chan int, 1)
+		c <- 1
+		return "x", nil
+	})
+}
+
+// InterfaceCallInLiteral calls a method through an interface inside the side-effect function: E008 must still be reported.
+func InterfaceCallInLiteral(h cleat.HostCalls, input string) (string, error) {
+	return h.SideEffect(func() (string, error) {
+		var e error = errors.New("x")
+		return e.Error(), nil
+	})
 }

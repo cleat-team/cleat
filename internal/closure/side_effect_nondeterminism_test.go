@@ -35,7 +35,7 @@ func TestNondeterminismInsideTheSideEffectFunctionIsAllowedAndOnlyThere(t *testi
 
 	// Exempt: the literal passed to h.SideEffect and to cleat.SideEffectTyped. If the scan stopped finding these functions at all every
 	// assertion below would pass vacuously, so each one is also required to be a function the scan knows.
-	for _, fn := range []string{"InsideLiteral", "InsideTypedLiteral"} {
+	for _, fn := range []string{"InsideLiteral", "InsideTypedLiteral", "InsideExplicitTypedLiteral"} {
 		if !cr.DurableLeaves[pkg+"."+fn] && !cr.DurableClosure[pkg+"."+fn] {
 			t.Fatalf("%s is not in the durable closure, so a clean result for it measures nothing", fn)
 		}
@@ -49,6 +49,10 @@ func TestNondeterminismInsideTheSideEffectFunctionIsAllowedAndOnlyThere(t *testi
 		{"OutsideSideEffect", "E003", "a clock read directly in the workflow"},
 		{"AfterTheLiteral", "E003", "a clock read after the literal (the exemption ends with it)"},
 		{"NotTheSDKsSideEffect", "E003", "a SideEffect method on a type that is not cleat.HostCalls"},
+		// The exemption's limits: only the value-nondeterminism codes are relaxed inside the literal.
+		{"GoroutineInLiteral", "E001", "a goroutine in the side-effect function outlives it and calls the host on the first run only"},
+		{"ChannelInLiteral", "E002", "a channel send in the side-effect function"},
+		{"InterfaceCallInLiteral", "E008", "a call through an interface in the side-effect function"},
 	} {
 		found := false
 		for _, e := range cr.Errors[pkg+"."+tc.fn] {
@@ -71,7 +75,7 @@ func TestNondeterminismInsideTheSideEffectFunctionIsAllowedAndOnlyThere(t *testi
 	// The count that says the exemption removed exactly the errors inside the literals and nothing else: one E003 per known-positive
 	// function above, none in the exempt ones.
 	var inLiterals int
-	for _, fn := range []string{"InsideLiteral", "InsideTypedLiteral"} {
+	for _, fn := range []string{"InsideLiteral", "InsideTypedLiteral", "InsideExplicitTypedLiteral"} {
 		inLiterals += len(cr.Errors[pkg+"."+fn])
 	}
 	if inLiterals != 0 {

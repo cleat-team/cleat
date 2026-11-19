@@ -6,12 +6,14 @@ detects a pattern that would break workflow determinism during replay.
 
 ## Where these rules do not apply: the function passed to `SideEffect`
 
-`cleat vet` and `cleat build` do **not** apply the replay-determinism rules (the E-codes below that name a non-deterministic construct:
-`time.Now()`, `crypto/rand`, `math/rand`, ranging over a map, and the rest) to the body of a **function literal written at a
-`h.SideEffect(...)` or `cleat.SideEffectTyped(h, ...)` call** (cleat#4123). That function runs **once**, on first execution, and its result
-is what is recorded and replayed, so it is exactly where a clock read, entropy or an API call is meant to go. The same construct anywhere
-else in the workflow is still refused, including after the literal in the same function, and a `SideEffect` method on a type that is not
-`cleat.HostCalls` earns no exemption.
+`cleat vet` and `cleat build` do **not** apply the **value**-nondeterminism rules to the body of a **function literal written at a
+`h.SideEffect(...)` or `cleat.SideEffectTyped(h, ...)` call** (cleat#4123): E003 (`time.Now`), E007 (`math/rand`), E018 (`math/rand/v2`),
+E017 (`crypto/rand`) and E021 (ranging over a map). That function runs **once**, on first execution, and its **value** is what is recorded
+and replayed, so it is exactly where a clock read or entropy is meant to go. **Nothing else is relaxed inside it:** a goroutine (E001), a
+channel (E002), a call through an interface (E008) or a function value (E009), `close` (E012), atomics (E013), sleeping and timers, `net/http`,
+`database/sql`, printing and `os` are still refused, because their effects are not the recorded value (a goroutine started in the literal can
+outlive it and make host calls on the first run only, so replay diverges). The same construct anywhere else in the workflow is still refused,
+including after the literal in the same function, and a `SideEffect` method on a type that is not `cleat.HostCalls` earns no exemption.
 
 ```go
 id, err := h.SideEffect(func() (string, error) {

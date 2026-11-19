@@ -272,14 +272,35 @@ func validateConstructs(fd *analyzer.FuncDecl, cr *Result) {
 
 	name := fd.FullyQualifiedName()
 	sideEffectBodies := sideEffectFuncLits(fd)
+	// The function literal passed to SideEffect runs ONCE, on first execution, and its VALUE is what is recorded and replayed. So the rules
+	// that exist because a value differs across replays (a wall-clock read, entropy, a map's iteration order) do not describe it (cleat#4123,
+	// under cleat#4113's freeze semantics). Nothing else is relaxed: a goroutine started in the literal can outlive the side effect and make
+	// host calls on the first run only, so replay diverges (E001); channels (E002), calls through an interface (E008) or a function value
+	// (E009), close() (E012) and atomics (E013) stay refused, as do sleeping, timers, net/http, database/sql, printing and os. The first draft
+	// skipped the literal's whole subtree and silently dropped all of those too (cleat-review, #4126).
+	//
+	// A NAMED function passed to SideEffect is not exempt: it is a function in the closure like any other.
+	var stack []ast.Node
+	insideSideEffect := 0
 	ast.Inspect(fd.Ast.Body, func(n ast.Node) bool {
-		// The function literal passed to SideEffect runs ONCE, on first execution, and its result is what is recorded and replayed: it is
-		// exactly where a wall-clock read, entropy, a map range or an API call is meant to go, and none of the replay-determinism rules
-		// below describe it (cleat#4123, under cleat#4113's freeze semantics). Its subtree is skipped. A NAMED function passed to
-		// SideEffect is not skipped: it is a function in the closure like any other and is validated as one.
-		if lit, ok := n.(*ast.FuncLit); ok && sideEffectBodies[lit] {
-			return false
+		if n == nil { // leaving the node on top of the stack
+			top := stack[len(stack)-1]
+			stack = stack[:len(stack)-1]
+			if lit, ok := top.(*ast.FuncLit); ok && sideEffectBodies[lit] {
+				insideSideEffect--
+			}
+			return true
 		}
+		stack = append(stack, n)
+		if lit, ok := n.(*ast.FuncLit); ok && sideEffectBodies[lit] {
+			insideSideEffect++
+		}
+		before := len(cr.Errors[name])
+		defer func() {
+			if insideSideEffect > 0 {
+				cr.Errors[name] = dropValueNondeterminism(cr.Errors[name], before)
+			}
+		}()
 		switch stmt := n.(type) {
 		case *ast.GoStmt:
 			line := 0
@@ -370,6 +391,22 @@ func validateConstructs(fd *analyzer.FuncDecl, cr *Result) {
 	})
 }
 
+// valueNondeterminismCodes are the codes that flag a construct whose VALUE differs between executions: time.Now (E003), math/rand (E007),
+// math/rand/v2 (E018), crypto/rand (E017) and ranging over a map (E021). They are exempt inside the function passed to SideEffect and nowhere
+// else.
+var valueNondeterminismCodes = map[string]bool{"E003": true, "E007": true, "E017": true, "E018": true, "E021": true}
+
+// dropValueNondeterminism removes the value-nondeterminism errors appended at or after index `from`.
+func dropValueNondeterminism(errs []ValidationError, from int) []ValidationError {
+	kept := errs[:from]
+	for _, e := range errs[from:] {
+		if !valueNondeterminismCodes[e.Code] {
+			kept = append(kept, e)
+		}
+	}
+	return kept
+}
+
 // sideEffectFuncLits returns the function literals that are passed DIRECTLY as the function of a side effect: the argument of
 // h.SideEffect(fn), or the second argument of cleat.SideEffectTyped(h, fn). Only a literal written at the call is returned. A variable, a
 // named function and a literal that is merely called from one are not.
@@ -386,7 +423,15 @@ func sideEffectFuncLits(fd *analyzer.FuncDecl) map[*ast.FuncLit]bool {
 		if !ok {
 			return true
 		}
-		sel, ok := call.Fun.(*ast.SelectorExpr)
+		callee := call.Fun
+		// cleat.SideEffectTyped[int64](h, fn): an explicit instantiation wraps the selector in an index expression.
+		switch ix := callee.(type) {
+		case *ast.IndexExpr:
+			callee = ix.X
+		case *ast.IndexListExpr:
+			callee = ix.X
+		}
+		sel, ok := callee.(*ast.SelectorExpr)
 		if !ok {
 			return true
 		}
