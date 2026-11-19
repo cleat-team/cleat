@@ -1,6 +1,6 @@
 # One place for per-step replay logic: a step dispatcher
 
-**Status: DRAFT for review, 2026-11-19.** Author: WS-cleat-3. Reviewer: WS-cleat-2 (this touches defer segments, and the
+**Status: DRAFT, revised 2026-11-19 after WS-cleat-2's review (see "Revision 1" at the end).** Author: WS-cleat-3. Reviewer: WS-cleat-2 (this touches defer segments, and the
 residency design in #4162 depends on it). Gate: WS-cleat-1's fault-injection harness (#4169). **Nothing here is built, and
 nothing is built until the harness exists and this design is agreed.**
 
@@ -134,7 +134,7 @@ and the dispatcher is, in full:
                                                 #  unless stopIdx fast-forward is armed (a segment's stop)     -- the #4153/#4157 invariant
       if sp.Effect != Pure && s.stopBeforeNewWork():  return callSuspendSentinel          -- (3), once, for every non-pure step, on both paths
       res, recs := sp.Fresh(ctx)
-      for rec in recs:  p := s.recordEvent(rec); if p == eventFlushFailed: return s.persistenceFailure(sp, res)   -- (4), the #4160 hook
+      for rec in recs:  s.recordEvent(rec)      # a failed write is noted ON THE SESSION (see below), not returned per step   -- (4)
       s.countStep()                                                                         -- (5)
       return res
 
@@ -145,9 +145,12 @@ The five questions become five lines. The properties the bugs violated become pr
   stronger than a guard that scans for them.
 - **Replay never ends with history unread.** `leaveReplay` asserts it, once. #4153 and #4157 are one assertion.
 - **A divergence has one shape**: one message, one metric, one place a replay tester hooks.
-- **A recorded event's write is checked.** `persistenceFailure` is where the policy for #4160 goes. This design gives that
-  policy a home; it does **not** choose it. Choosing between "fail the call", "retry", and "suspend and let the run resume
-  from its last durable event" is #4160's decision, and the dispatcher must not be where it is made by accident.
+- **A recorded event's write failing stops the guest, without a per-step check.** The first draft of this design put a
+  `persistenceFailure` hook after every record. WS-cleat-2's #4166 (stacked on #4151, **in review, not on develop**) chose the
+  #4160 policy differently and better: a failed write (other than `ErrFenceLost`) sets `s.eventWriteFailure` and suspends the run,
+  and `stopBeforeNewWork` returns true while it is set, so **the next fresh step is refused by the refusal in line (3)**. The
+  dispatcher needs no extra code for #4160; it needs line (3) to be on every non-`Pure` step, which is its main property. A quota
+  refusal is a typed `ErrEventQuotaExceeded` answered with the cap's continue-as-new (their description, not re-measured here).
 
 ### `effectClass`, and why it is not a boolean
 
@@ -172,8 +175,8 @@ instead gives the awkward ones a **kind**, so the exception is in the spec and n
 | `Single` | `DurableCall`, `DurableSend`, `DurableDefer`, `CreatePromise`, `SideEffect`, `PluginCall`, `SignalWorkflow`, `ScheduleCron`, `DeleteCron`, `ListCrons`, `AcquireLock`, `ReleaseLock`, `SetScope`, `Fetch`, `RegisterUpdateHandler`, `ResolvePromise`, `RejectPromise`, `DurableScheduleInvoke`, `DurableCompleteUpdate` | one call, one event | the base case |
 | `Multi` | `DurableCallWithRetry`, `DurableCallWithHeartbeat` | one call, 1..n events (`call_attempt_failed`..., then `call`); a history can end **inside** the call (a run lost mid-policy), and the call then *resumes* | `takeRecords` reads a run of `call_attempt_failed` then at most one terminal; "ends inside" returns a `Resume{spent}` the spec's `Fresh` continues from (#1145, #4152) |
 | `Stream` | `PluginCallStreaming` | n chunk events for one call; the *fresh* side publishes each chunk to a live reader as it is recorded, and a failure is one synthetic chunk | `Kind = Stream` has its own `takeRecords` (read chunks until finished) and its `Fresh` records as it goes. This is the one place the dispatcher's "record after Fresh returns" is wrong, so `Stream` records inside `Fresh` and returns an empty list. #4117's marker (`StreamData`) belongs to this spec. |
-| `Wait` | `DurableAwaitSignals`, `AwaitPromise`, `AwaitChild`, `AwaitAllChildren`, `AwaitAnyChild` | the outcome depends on **time and the world** at replay: the recorded `await_*` event is followed by the delivery or by nothing, and "nothing" means *suspend again*, not "diverge". `await_signals` re-polls the store on replay when its event is the last one. | `Kind = Wait` has `Decode` return one of `Done(result)`, `StillWaiting(until)`, or `TimedOut`; the dispatcher turns `StillWaiting` into the suspension. The hand-written time arithmetic in `DurableAwaitSignals` stays in its spec; what moves is the exit-from-replay and the refusal. |
-| `Sleep` | `DurableSleep` | **records no event**: it decides from the clock (`IMPROVEMENT-PLAN 3.67`), which is why it appears in neither the replay nor the record column | stays outside the dispatcher, as a `Pure`-class function with no history access. Putting it through the dispatcher would *add* an event and change the history format. It is listed so nobody does. |
+| `Wait` | `DurableAwaitSignals`, `AwaitPromise`, `AwaitChild`, `AwaitAllChildren`, `AwaitAnyChild` | the outcome depends on **time and the world** at replay: the recorded `await_*` event is followed by the delivery or by nothing, and "nothing" means *wait again*, not "diverge". `await_signals` re-polls the store on replay when its event is the last one. **Wait is also where residency (#4162) attaches.** | `Kind = Wait`: `Decode` returns `Done(result)`, `StillWaiting{until, wake}` or `TimedOut`. The dispatcher turns `StillWaiting` into **park-or-suspend**: if the session may park it blocks on `wake` and then returns `Done` through the *same* `Decode` run against the live store; otherwise it returns the stop as today. **Residency lives in this one place and the spec only says what it waits for.** Two consequences (WS-cleat-2): a Wait **records its `await_*` event BEFORE it blocks** (a crash while parked must find the await event and its `TimestampMs` anchor in history, or recovery restarts the timeout clock), so Wait, like Stream, records inside `Fresh` or through a pre-block hook; and `update_received`, written by the API side, is a new wake source. |
+| `Sleep` | `DurableSleep` | **records no event**: it decides from the clock (`IMPROVEMENT-PLAN 3.67`), which is why it appears in neither the replay nor the record column | stays outside the dispatcher: it has no history access, and putting it through would *add* an event and change the history format. **But its final "set `suspendErr` and return the stop" goes through the same helper as a Wait's suspension (`s.suspendOrPark(until)`),** or a sleep can never park (WS-cleat-2). |
 | `Terminal` | `ContinueAsNew`, `ContinueAsNewWithVersion` | records the event that **ends** the run and sets the suspension; nothing may follow it | the dispatcher refuses it in a segment (#4159) and records nothing after it; the `Terminal` class carries that |
 | `Lookup` | `SideEffectRecorded` | the **lookup half** of a two-call protocol (lookup, then record): an SDK that asks first runs the user's function *between* the two. It records nothing; it answers "recorded value / not recorded" | its `Fresh` is "answer not-recorded", and it is refused at the frontier like an `Effect`, because answering "not recorded" is what makes the SDK run the function (#4158). This is why the class is decided by what the *caller will do next*, not by what the call itself does. |
 | `Live` | `PollSignal`, `PollChild`, `PollCancellation` | **return the world's current state with no event** | outside the dispatcher. Their determinism is a property of when the guest asks (`PollCancellation` returns 0 during replay by construction), not of the engine's history. They are listed as the exceptions the dispatcher *must not* absorb, and as the first place a future "unrecorded read" bug will be. |
@@ -190,27 +193,35 @@ lists the two I am least sure of.
 
 ---
 
-## 5. Decisions the dispatcher forces, per call (not made here)
+## 5. The refusal rule, and what it couples to
 
-Moving every call through one function means the nine "records but never refuses" methods each need an explicit answer. These
-are the open questions, with my recommendation, for WS-cleat-2 to overrule:
+The first draft listed nine host calls that record an event and never refuse in a segment, with a recommendation per call.
+WS-cleat-2's review replaced that with **a rule**, and the rule is better because the per-call list is the shape of #4143 and #4158:
 
-| call | recommend | why |
-|---|---|---|
-| `ContinueAsNew*` | refuse (done in #4161) | measured: the run lost its cleanup |
-| `AwaitChild`, `AwaitAllChildren`, `AwaitAnyChild` | **open**: refuse? A segment's body that stops at a child wait is plausible; one that waits for a child while its workflow is being terminated is the defect. Not measured. | filed as an optional follow-up in #4101's neighbourhood; the dispatcher makes it a one-field change |
-| `AwaitPromise` | same as the child waits | not measured |
-| `RegisterUpdateHandler` | `Read` (not refused): it registers a name, does nothing outside the run | arguable |
-| `ReleaseLock` | **refuse**? It releases a lock a *terminated* run may still hold; a segment that releases it in the body is the cleanup working. Needs the harness. | open |
-| `ListCrons` | `Read`; stays a named exemption in the hand-off guard | read of the schedule table |
+> In a defer segment's body, **refuse every non-`Pure`, non-`Live` step at the frontier.** A segment's job is to stop the body
+> and run the defers. An exemption list buys nothing.
 
-None of these is decided by this document. The dispatcher turns each into one `Effect:` field, which is the point.
+So `AwaitChild`, `AwaitAllChildren`, `AwaitAnyChild`, `AwaitPromise`, `ReleaseLock` (a body release past the end of history is
+the body running on; the defers' own calls go through via `inDeferDrain`, and a lock TTL covers a leak), `RegisterUpdateHandler`
+and `ListCrons` are all refused, unless the harness shows a case that needs one, and `ContinueAsNew*` already is (#4161).
+**None of the waits' or `ReleaseLock`'s refusals has been measured**; the rule is argued, not observed, and the PR that
+adds each says so. The dispatcher makes each a one-field change (`Effect:`), which is what makes the rule cheap to follow.
 
-**Event cap (5).** Today only `freshCall` counts toward `maxEventsPerWorkflow` and triggers auto-ContinueAsNew
-(`grep -n 's.eventCount\|maxEventsPerWorkflow' engine/*.go`: three sites, all in `DurableCall`). Counting every recorded
-event in the dispatcher is **a behaviour change** (a workflow of plugin calls would start hitting the cap), so the migration
-does not do it silently: PR 1 keeps the count on `Single` steps of `DurableCall` only, through a spec field, and a later,
-separately-announced PR decides whether to widen it.
+**One coupling to write down, because it is easy to miss: refusal and stoppability are linked.** The stoppable set
+(`engine/stop_at_last_stoppable.go`, `stoppableByOp`, `TestEveryHostStopSiteIsClassifiedForTheStoppableSet`) is derived from the
+refusing sites intersected with the component world's typed outcomes, so **every new refusal can move the stop point later and
+change which prefix a cleanup replays.** Each widened refusal therefore needs a **kill-after-it test** in the real-worker kill
+test; `cmd/cleat-worker/a_killed_python_component_runs_its_defers_through_the_worker_test.go` is the pattern (a kill right after
+the call, and the cleanup must see the call before it).
+
+**Event cap (5).** On develop (`1157baf3`) only `freshCall` counts toward `maxEventsPerWorkflow` and triggers auto-ContinueAsNew
+(`grep -n 's.eventCount\|maxEventsPerWorkflow' engine/*.go`: three sites, all in `DurableCall`). **WS-cleat-2 reports this is already
+changing:** on #4151 (head `35f9eec0`, in review, not merged) the no-wait `await_signals` and `await_promise` record an event, count
+toward the cap and stop at it (`refuseAtEventCap`, `triggerEventCapContinueAsNew`), after a poll loop at `--max-quota-events 25`
+failed at the 30 s fence. Counting *every* recorded event in the dispatcher would still be **a behaviour change** (a workflow of
+plugin calls would start hitting the cap), so the migration does not do it silently: PR 1 keeps the count where it is on the day it
+is written (`DurableCall`, plus the two no-wait awaits if #4151 has merged), through a spec field, and a later, separately
+announced PR decides whether to widen it.
 
 ---
 
@@ -278,18 +289,25 @@ A guard is removed only after a mutation of the dispatcher makes its replacement
 1. **The coexistence period (section 6).** Two answers to the five questions live in the engine until PR 8. The migration
    order is the mitigation; the risk is that PR 8 never lands and the engine keeps both. *Mitigation: PR 8's deletion list is
    written in PR 1 and its absence is a visible TODO, not an implicit one.*
-2. **`Wait` is the least likely to fit.** `DurableAwaitSignals` re-polls the signal store on replay and decides from
-   `rec.TimestampMs + TimeoutMs` against the wall clock. If `Decode` returning `Done | StillWaiting | TimedOut` cannot express
-   it without the spec reaching into the session, `Wait` stays outside the dispatcher and *only* its exit-from-replay and
-   refusal move into shared helpers. **Decide after PR 5, with `DurableAwaitSignals` as the test case, not before.**
-3. **`Stream` records inside `Fresh`.** That breaks the dispatcher's "record after" invariant for one kind; the
-   `persistenceFailure` hook must then be callable from inside a spec, which makes it a method the spec can reach. If that
-   is too much surface, `Stream` stays outside too. *The kinds I would most like a second opinion on are `Stream` and `Wait`.*
-4. **Resident workflows (#4162).** If a suspended run stays resident, `position()` can no longer be derived from "this session
-   started in replay": a resident session continues *without* replaying. `stepCount`, `history` and `isReplay` are then live
-   state of a long-lived object and `leaveReplay`'s assertion must hold across a resume that never replays. This design
-   makes that easier (the state transitions are in one function) but does not do it; it is the reason WS-cleat-2 reviews.
-   A kill-while-resident boundary is a new fault the harness needs (I said so on #4169).
+2. **`Wait` is the least likely to fit, and WS-cleat-2's point makes it necessary to try.** `DurableAwaitSignals` re-polls the
+   signal store on replay and decides from `rec.TimestampMs + TimeoutMs` against the wall clock. If `Decode` returning
+   `Done | StillWaiting | TimedOut` cannot express it without the spec reaching into the session, `Wait` stays outside the
+   dispatcher, **and then residency has to be implemented in every wait's helper instead of once.** That argues for making
+   `Wait` fit. **Decide after PR 5, with `DurableAwaitSignals` as the test case, not before; the bar is that it fits.**
+3. **`Stream` and `Wait` both record inside `Fresh`** (Wait must record its `await_*` event before blocking). That breaks the
+   dispatcher's "record after Fresh returns" for two kinds. Because a failed write now stops the guest through line (3) and
+   not through a per-step return, nothing needs to be reachable from inside a spec for persistence; the remaining surface is
+   `recordEvent` itself. If that is too much, `Stream` stays outside. *The kinds I would most like a second opinion on are
+   `Stream` and `Wait`.*
+4. **Resident workflows (#4162).** Settled by WS-cleat-2's review, and worth keeping as a stated assumption. Under PARK (their
+   `docs/design/resident-suspended-runs.md`, a draft) the wait **blocks instead of returning the stop**, so a parked session never
+   leaves the code path it is on: a wait happens at the frontier, the session is already past replay (`Fresh`), and after the wake
+   it is still `Fresh`. **`position()` needs no fourth state**; a resident session is a `Fresh` session that lives longer. What it
+   needs is a *stage* in the dispatcher (park-or-suspend, section 4), not a position. A defer segment's body is **never** on a
+   resident session: terminate/cancel bumps the generation and nulls `assigned_to`, so the parked instance loses its fence and is
+   evicted, and the segment is a fresh claim that replays to the last stoppable event on a new instance; a segment is also made
+   ineligible to park. So "a body past the end of history" stays the definition. A kill-while-resident boundary is a new fault the
+   harness needs (said on #4169).
 5. **Performance.** A spec built per call allocates closures. A host call is already a database round trip when it records;
    there is **no host-call benchmark in the tree today** (`git grep -n 'func Benchmark' -- 'engine/*_test.go' 'benchmarks/*.go'` finds database, compilation and end-to-end ones only), so PR 1 adds one for `DurableCall` replayed and fresh, and PR 2 must show it unchanged within noise. If a spec allocation
    shows up, specs are package-level values and the per-call data goes in a small struct, not in closures.
@@ -299,16 +317,35 @@ A guard is removed only after a mutation of the dispatcher makes its replacement
 
 ## 10. Questions
 
-**For WS-cleat-2:** (a) Does `position()` as defined survive resident workflows, or does #4162 need `Fresh | InHistory |
-AtFrontier | Resident`? (b) Is a defer segment's body on a resident session still "a body past the end of history"? (c) The
-section 5 table: which of the nine do you overrule?
+**Answered by WS-cleat-2** (their review of this draft): position() survives (no fourth state); a segment's body is never on a
+resident session; refuse by rule (section 5); keep `Spawn` and `Poll` as kinds (`Spawn`'s one-transaction record is a durability
+property, `RecordedBy: Store` is the honest spec, and `Poll` is the reason the assertion is "at leave-replay").
 
-**For WS-cleat-1:** (a) PR 0's golden fixtures are in-process; the harness is black-box. I want both, and the harness's golden
-run to be the same table at process level: can its op-list oracle emit `(events, effects)` per op in a form PR 0 can compare
-against? (b) A counter for "steps refused in a segment" would let the harness assert that a segment ran its defers and nothing
-else, which a count of effects cannot.
+**Still open, for WS-cleat-1:** (a) PR 0's golden fixtures are in-process; the harness is black-box. I want both, and the
+harness's golden run to be the same table at process level: can its op-list oracle emit `(events, effects)` per op in a form PR 0
+can compare against? (b) A counter for "steps refused in a segment" would let the harness assert that a segment ran its defers and
+nothing else, which a count of effects cannot.
+
+**Still open, for me:** how the Java/Rust stop-site count is re-derived from the specs (section 8); and, from WS-cleat-2, that
+the transitional guard `engine/every_recorded_event_site_is_classified_test.go` (every function that calls `recordEvent` either
+checks `stopBeforeNewWork` or carries a written reason, on #4166, not yet on develop) becomes, when the dispatcher lands, "every
+`HostHandler` method is stepped through `step()` or is on the `Pure`/`Live` list". I agree, and PR 8 should say so.
 
 ---
+
+## Revision 1 (2026-11-19): after WS-cleat-2's review of the first draft
+
+What changed, and what did not.
+
+- **#4160 no longer needs a hook.** #4166 (open) chose a policy that stops the guest through the existing refusal; the
+  `persistenceFailure` step is gone from the dispatcher (section 3).
+- **Wait is where residency attaches**, so it records before it blocks, and its suspension is a *park-or-suspend* stage; sleep's
+  stop goes through the same helper (section 4).
+- **Section 5 is a rule, not nine answers**, and it names the refusal/stoppability coupling and the kill-after-it test it needs.
+- **The event cap is already moving** on #4151 (open); the migration's PR 1 is written against whichever is on develop.
+- **Unchanged:** the dispatcher shape, the nine kinds (WS-cleat-2 agreed `Spawn` and `Poll` stay), the migration order, and
+  section 7.
+- **Facts taken from WS-cleat-2 about open PRs (#4151, #4166, #4162) are theirs and have not been re-measured here.**
 
 ## Appendix A. Inventory (generated; 2026-11-19, develop `1157baf3`)
 
