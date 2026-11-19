@@ -229,6 +229,15 @@ func TestCSharpGroupBResolvePromiseFailureIsACallExceptionNotASilentSuccess(t *t
 	t.Logf("a failed resolve surfaces as %v (code %v): %v", got["raised"], got["code"], got["message"])
 }
 
+func TestCSharpGroupBRejectPromiseFailureIsACallExceptionNotASilentSuccess(t *testing.T) {
+	got := mustFinish(t, runConformanceEntry(t, "b_reject_promise", entryRun{Input: `{"id":"missing","error":"nope"}`,
+		Options: []engine.EngineOption{engine.WithPromiseStore(&fakePromiseStore{rejectErr: engine.ErrPromiseNotFound})}}))
+	if got["ok"] == true || got["raised"] == nil {
+		t.Fatalf("a store failure was reported as success: %v", got)
+	}
+	t.Logf("a failed reject surfaces as %v (code %v): %v", got["raised"], got["code"], got["message"])
+}
+
 // ---- signals --------------------------------------------------------------------------------------------------------------------
 
 const signalIn = `{"names":["approve"],"timeout_ms":60000}`
@@ -286,6 +295,23 @@ func TestCSharpGroupBAwaitSignalsFreshWaitStopsTheGuestAtTheWait(t *testing.T) {
 	}
 	if res.Suspended == nil {
 		t.Fatalf("the run completed (%s); with no signal pending it should have suspended", res.Result)
+	}
+	if ops := opsOf(res); len(ops) != 0 {
+		t.Errorf("the guest ran on past the wait and made %v", ops)
+	}
+}
+
+// timeout_ms 0 is documented as "wait indefinitely". The host reads a 0ms await_signals as an immediate timed_out (the cleat#1331
+// guard), so an SDK that passed 0 through would mean "time out now". With no signal pending the run must SUSPEND at the wait, not
+// finish with a timeout.
+func TestCSharpGroupBAwaitSignalsZeroTimeoutWaitsIndefinitely(t *testing.T) {
+	res := runConformanceEntry(t, "b_await_signals", entryRun{Input: `{"names":["approve"],"timeout_ms":0}`,
+		Options: []engine.EngineOption{engine.WithSignalStore(newFakeSignalStore())}})
+	if res.Err != nil {
+		t.Fatalf("the run FAILED where it should have suspended: %v", res.Err)
+	}
+	if res.Suspended == nil {
+		t.Fatalf("timeout_ms 0 completed (%s): it was passed through as an immediate timeout instead of meaning wait indefinitely", res.Result)
 	}
 	if ops := opsOf(res); len(ops) != 0 {
 		t.Errorf("the guest ran on past the wait and made %v", ops)
