@@ -68,6 +68,14 @@ var sdkStopSiteExemptions = map[string][]sdkCoverageExemption{
 				"is 0 on 2026-09-04. A Rust guest cannot register a cron trigger at all, " +
 				"so there is no decoder to guard. An absence, not a gap.",
 		},
+		{
+			hostSite: "SideEffectRecorded",
+			why: "cleat#4113 added the host function and the Rust SDK has not imported it yet: until its " +
+				"PR lands a Rust guest cannot call it, so there is no decoder to guard. The PR that " +
+				"adds the import removes this entry, and absentToken makes that automatic.",
+			absentFrom:  "../crates/cleat-sdk/src/host_calls.rs",
+			absentToken: "cleat_side_effect_recorded",
+		},
 	},
 	"java": {
 		{
@@ -83,6 +91,14 @@ var sdkStopSiteExemptions = map[string][]sdkCoverageExemption{
 			why: "the Java SDK declares no scheduleCron method and no raw import for it, " +
 				"so a Java guest cannot register a cron trigger and there is no decoder " +
 				"to guard. Same absence as the Rust entry above.",
+		},
+		{
+			hostSite: "SideEffectRecorded",
+			why: "cleat#4113 added the host function and the Java SDK has not imported it yet: until its " +
+				"PR lands a Java guest cannot call it, so there is no decoder to guard. The PR that " +
+				"adds the import removes this entry, and absentToken makes that automatic.",
+			absentFrom:  "../crates/cleat-java/src/main/java/cleat/HostCalls.java",
+			absentToken: "cleat_side_effect_recorded",
 		},
 	},
 }

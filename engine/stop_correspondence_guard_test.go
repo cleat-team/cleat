@@ -187,6 +187,14 @@ var stopSurfaces = map[string]stopSurface{
 		adapters: []string{"ScheduleCron"},
 		wit:      []string{"durable-schedule-cron"},
 	},
+	// cleat#4113: the lookup that lets an SDK skip running a side effect's function on replay. A FRESH lookup in a stopped workflow is
+	// refused so the function, which may call an API, never runs. No Go adapter YET: no Go SDK calls it, and the PR that makes the Go
+	// SDK ask first replaces this reason with the adapter.
+	"SideEffectRecorded": {
+		adapters:   nil,
+		adapterWhy: reasonNoGoAdapter,
+		wit:        []string{"side-effect-recorded"},
+	},
 	// cleat#4083. Go's adapter is guarded; Java and Rust carry the check; a
 	// component guest cannot receive it because the WIT function has no return.
 	"DeleteCron": {

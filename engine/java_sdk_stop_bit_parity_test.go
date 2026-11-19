@@ -339,7 +339,10 @@ func TestTheRequiredJavaGuardsCoverEveryHostStopSite(t *testing.T) {
 	// straight to Memory.decodeSimpleErrCode, where a stop reads as errCode 0, a SUCCESSFUL settlement, so both list entries above
 	// and the Memory.throwIfStopped guards in HostCalls.java were added. Rust got the matching stop_requested guards. Python,
 	// TypeScript and the Go adapters already decode bit 31 (_check_host_result, withSuspendCheck).
-	const stopSitesOn20260904 = 23
+	//
+	// 24 since cleat#4113 (SideEffectRecorded): a fresh lookup in a stopped workflow is refused so a guest's side-effect function never runs.
+	// Java has no import for it yet, which sdkStopSiteExemptions records and checks by absence; the PR that adds one removes the exemption.
+	const stopSitesOn20260904 = 24
 	if stopSites != stopSitesOn20260904 {
 		t.Errorf("the engine has %d `if s.stopBeforeNewWork() {` sites; this test was written "+
 			"against %d.\n\nIf a site was ADDED, the Java SDK has a call the host can now "+

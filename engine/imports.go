@@ -114,6 +114,10 @@ type HostHandler interface {
 	// history on first execution and returns cached result on replay.
 	SideEffect(ctx context.Context, m api.Module, computedResult string, respPtr, respMaxLen uint32) int64
 
+	// SideEffectRecorded asks whether the history already holds the value for this side effect (cleat#4113). A recorded value is
+	// returned and the step consumed; otherwise the status is sideEffectNotRecorded and nothing changes. See the session's method.
+	SideEffectRecorded(ctx context.Context, m api.Module, respPtr, respMaxLen uint32) int64
+
 	// WorkflowID returns the current workflow's unique identifier.
 	WorkflowID(ctx context.Context, m api.Module, idPtr, idMaxLen uint32) int64
 
@@ -721,6 +725,12 @@ func registerHostFunctions(builder wazero.HostModuleBuilder, rt *Runtime) {
 		}
 		return uint64(h.SideEffect(ctx, m, result, outPtr, outMaxLen))
 	}).Export("cleat_side_effect")
+
+	// cleat_side_effect_recorded: (ptr,maxLen) -> i64   (cleat#4113)
+	builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module,
+		outPtr, outMaxLen uint32) uint64 {
+		return uint64(handlerFromContext(ctx).SideEffectRecorded(ctx, m, outPtr, outMaxLen))
+	}).Export("cleat_side_effect_recorded")
 
 	// cleat_workflow_id: (ptr,maxLen) -> i64
 	builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module,
