@@ -811,8 +811,7 @@ the old behaviour has to catch the failure.
 
 **Delivery is at-least-once.** The engine delivers the signal first and records the outcome after. A crash between the two replays the
 call, which delivers again: the target can receive the same signal twice. The other order loses the signal on a crash with the event
-saying it was sent, and that is the defect cleat#4102 fixed. Effectively-once delivery needs an idempotency key on the delivery
-(sender run and step) and a unique index behind it; it is not built.
+saying it was sent, and that is the defect cleat#4102 fixed. Effectively-once delivery is not built. The stores already have an idempotent delivery path (`DeliverSignalIdempotent`, cleat#1121, which writes the key and the delivery in one transaction), used today only by the HTTP signal endpoint; calling it from this host call with a key derived from the sender run and step would absorb the duplicate, and needs no new index.
 
 **The outcome is recorded and replayed.** The event is a `signal_received` carrying `Service = "signal"`, `Op = "send"` and the outcome in
 `Response` (empty for a delivered signal), which is also what tells a send from the delivery of a signal the workflow awaits. Replay
