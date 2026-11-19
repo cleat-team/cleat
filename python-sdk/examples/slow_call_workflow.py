@@ -34,3 +34,10 @@ def slow_plugin_stream(h: HostCalls, request: dict) -> str:
     for _ in h.plugin_call_streaming("slowstream", "run", {}):
         n += 1
     return f"completed {n}"
+
+
+@cleat_entry("spin_without_a_host_call")
+def spin_without_a_host_call(h: HostCalls, request: dict) -> str:
+    """NEGATIVE CONTROL: a guest that never calls the host. Its budget is armed once, before it runs, and never re-armed."""
+    while True:
+        pass

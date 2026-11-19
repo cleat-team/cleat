@@ -69,9 +69,10 @@ func TestASlowHostCallIsNotChargedToTheInstanceFence(t *testing.T) {
 		// The fix must not switch the fence off. A host call that returns and then a guest-side tight loop is killed at the fence, counted from the
 		// call's return; a tight loop with no host call at all is killed at the fence.
 		{"python, a short call and then a tight loop: the fence still kills it", py("slow_call_then_spin"), 2000, "failed", 2*time.Second + fence, 2*time.Second + fence + 15*time.Second, "(10s wall-clock budget"},
-		{"python, a tight loop and no host call: the fence kills it", func(t *testing.T) ([]byte, json.RawMessage) {
-			return buildPythonExample(t, "python-sdk/examples/killed_with_defers_workflow.py", "spin_no_defer"), json.RawMessage(`{"request":{}}`)
-		}, 0, "failed", fence, fence + 15*time.Second, "(10s wall-clock budget"},
+		// A guest that never re-enters the host: its budget is armed once, before it runs, so the arm() before the guest is the only thing in play.
+		// An earlier version of this row used killed_with_defers_workflow.py's spin_no_defer, which makes a durable call before it spins (the service
+		// log said requests served=1), so it was a second "call, then loop" row. This one asserts that no request reached the service.
+		{"python, a tight loop and no host call at all: the fence kills it", py("spin_without_a_host_call"), 0, "failed", fence, fence + 15*time.Second, "(10s wall-clock budget"},
 	} {
 		t.Run(strings.ReplaceAll(tc.name, " ", "_"), func(t *testing.T) {
 			wasmBytes, input := tc.build(t)
@@ -134,6 +135,9 @@ func TestASlowHostCallIsNotChargedToTheInstanceFence(t *testing.T) {
 			t.Logf("fence %v, service %d ms -> status=%q after %.1fs, requests served=%d, error=%q", fence, tc.serviceMs, got.Status, elapsed.Seconds(), served.Load(), got.Error)
 			if got.Status != tc.wantStatus {
 				t.Fatalf("status = %q, want %q (error %q)", got.Status, tc.wantStatus, got.Error)
+			}
+			if strings.Contains(tc.name, "no host call at all") && served.Load() != 0 {
+				t.Fatalf("%d request(s) reached the service: this row is meant to be a guest that never calls the host", served.Load())
 			}
 			if tc.wantErrContains != "" && !strings.Contains(got.Error, tc.wantErrContains) {
 				t.Fatalf("error = %q, want it to contain %q", got.Error, tc.wantErrContains)
