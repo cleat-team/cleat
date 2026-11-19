@@ -32,9 +32,9 @@ public sealed record ChildWorkflowOptions(ulong Version = 0, ulong Priority = 0,
 
 // Group C (cleat#4080): child workflows. python-sdk/cleat_sdk/host_calls.py is the reference.
 //
-// NOT HERE, ON PURPOSE: Python's await_child calls dispatch_updates() first, so a pending workflow update is delivered at the wait.
-// Update handlers are group E, and this PR must not depend on it; the call goes in AwaitChild in the follow-up PR that wires
-// the three remaining dispatch points once B, C and E are all on develop.
+// AwaitChild is a dispatch point, as Python's await_child is: a pending workflow update is delivered before the wait. AwaitAllChildren and
+// AwaitAnyChild are not, in Python either. It was left out of group C because update handlers were group E, and no group PR may depend on
+// another; cleat#4129 added it once all three were on develop.
 public sealed partial class HostCalls
 {
     private static string Spelling(ParentClosePolicy p) => p switch
@@ -70,7 +70,11 @@ public sealed partial class HostCalls
     /// Waits for a child to finish and returns the host's answer as text. A pending wait stops the guest and does not return here.
     /// The answer is empty ONLY inside a defer segment or the guest's own defer drain, where a stop would lose the cleanup.
     /// </summary>
-    public string AwaitChild(string runId) => IDurableChildrenImports.DurableAwaitChild(runId);
+    public string AwaitChild(string runId)
+    {
+        DispatchUpdates(); // a dispatch point: python's await_child serves pending updates before it waits
+        return IDurableChildrenImports.DurableAwaitChild(runId);
+    }
 
     /// <summary>Waits for every child. An empty answer (a defer body with children still pending) is an empty list.</summary>
     public IReadOnlyList<ChildResult> AwaitAllChildren(IReadOnlyList<string> runIds)

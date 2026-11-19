@@ -13,9 +13,9 @@ public readonly record struct PromiseResult(string Result, bool TimedOut, bool R
 
 // Group B (cleat#4080): durable promises. python-sdk/cleat_sdk/host_calls.py is the reference.
 //
-// NOT HERE, ON PURPOSE: Python's await_promise_ms calls dispatch_updates() first, so a pending workflow update is
-// delivered at the wait. Update handlers are group E, and this PR must not depend on it; the call goes in AwaitPromiseMs in the follow-up PR that
-// wires the three remaining dispatch points once B, C and E are all on develop.
+// AwaitPromiseMs is a dispatch point, as Python's await_promise_ms is: a pending workflow update is served before the wait. It was left
+// out of group B because update handlers were group E, and no group PR may depend on another; cleat#4129 added it once all three were on
+// develop.
 public sealed partial class HostCalls
 {
     /// <summary>Creates a durable promise and returns its id. A <paramref name="ttlMs"/> of zero means no expiry.</summary>
@@ -32,6 +32,7 @@ public sealed partial class HostCalls
     /// <summary><see cref="AwaitPromise(string, TimeSpan)"/> in milliseconds.</summary>
     public PromiseResult AwaitPromiseMs(string id, ulong timeoutMs)
     {
+        DispatchUpdates(); // a dispatch point: python's await_promise_ms serves pending updates before it waits
         IDurablePromisesImports.AwaitOutcome outcome;
         try
         {
