@@ -509,6 +509,200 @@ public class StringArrayJsonTests
     }
 }
 
+public class UpdateEnvelopeTests
+{
+    private static UpdateEnvelopeKind Decode(string raw, out string name, out string id, out string payload)
+        => UpdateEnvelope.TryDecode(raw, out name, out id, out payload);
+
+    [Fact]
+    public void AnEmptyStringIsNothingPending()
+        => Assert.Equal(UpdateEnvelopeKind.None, Decode("", out _, out _, out _));
+
+    [Theory]
+    [InlineData("not json")]
+    [InlineData("[]")]
+    [InlineData("\"just a string\"")]
+    [InlineData("{\"request_id\":\"r\"}")]                           // no name
+    [InlineData("{\"name\":\"n\"}")]                                  // no request id
+    [InlineData("{\"name\":5,\"request_id\":\"r\"}")]                 // name is not a string
+    [InlineData("{\"name\":\"n\",\"request_id\":null}")]              // request id is not a string
+    [InlineData("{\"name\":\"\",\"request_id\":\"r\"}")]            // empty name
+    [InlineData("{\"name\":\"n\",\"request_id\":\"\"}")]            // empty request id: complete_update would address nothing
+    public void AnEnvelopeTheSdkCannotActOnIsMalformed(string raw)
+        => Assert.Equal(UpdateEnvelopeKind.Malformed, Decode(raw, out _, out _, out _));
+
+    [Fact]
+    public void AGoodEnvelopeCarriesNamePayloadAndTheOpaqueRequestId()
+    {
+        Assert.Equal(UpdateEnvelopeKind.Update, Decode("{\"name\":\"n\",\"payload\":\"{\\\"a\\\":1}\",\"request_id\":\"n|row|p\"}", out var n, out var id, out var p));
+        Assert.Equal("n", n);
+        Assert.Equal("n|row|p", id);
+        Assert.Equal("{\"a\":1}", p);
+    }
+
+    [Theory]
+    [InlineData("{\"name\":\"n\",\"request_id\":\"r\"}")]                       // absent
+    [InlineData("{\"name\":\"n\",\"request_id\":\"r\",\"payload\":5}")]         // not a string
+    [InlineData("{\"name\":\"n\",\"request_id\":\"r\",\"payload\":null}")]
+    public void ANonStringPayloadIsTheEmptyPayload(string raw)
+    {
+        Assert.Equal(UpdateEnvelopeKind.Update, Decode(raw, out _, out _, out var p));
+        Assert.Equal("", p);
+    }
+}
+
+public class UpdateDispatchTests
+{
+    private static string Env(string name, string payload, string id)
+        => JsonSerializer.Serialize(new Dictionary<string, string> { ["name"] = name, ["payload"] = payload, ["request_id"] = id });
+
+    /// <summary>A host that hands out the given envelopes in order, then "", and records every completion.</summary>
+    private sealed class FakeHost
+    {
+        private readonly Queue<string> _queue;
+        internal readonly List<(string Id, string Result, string Error)> Completed = new();
+        internal int Polls;
+        internal FakeHost(params string[] envelopes) { _queue = new Queue<string>(envelopes); }
+        internal string Poll() { Polls++; return _queue.Count > 0 ? _queue.Dequeue() : ""; }
+        internal void Complete(string id, string result, string error) => Completed.Add((id, result, error));
+    }
+
+    [Fact]
+    public void ServesEveryPendingUpdateInOrderAndCompletesEachWithItsResult()
+    {
+        var u = new UpdateHandlers();
+        u.Register("echo", p => "got:" + p, null);
+        var h = new FakeHost(Env("echo", "a", "r1"), Env("echo", "b", "r2"));
+        u.Dispatch(h.Poll, h.Complete);
+        Assert.Equal(new[] { ("r1", "got:a", ""), ("r2", "got:b", "") }, h.Completed);
+        Assert.Equal(3, h.Polls); // two updates, then the empty poll that ends it
+    }
+
+    [Fact]
+    public void ANullResultIsAnEmptyResultAndStillResolves()
+    {
+        var u = new UpdateHandlers();
+        u.Register("n", p => null!, null);
+        var h = new FakeHost(Env("n", "", "r"));
+        u.Dispatch(h.Poll, h.Complete);
+        Assert.Equal(new[] { ("r", "", "") }, h.Completed);
+    }
+
+    [Fact]
+    public void AnUnregisteredNameIsRejectedNotDropped()
+    {
+        var h = new FakeHost(Env("ghost", "", "r"));
+        new UpdateHandlers().Dispatch(h.Poll, h.Complete);
+        var c = Assert.Single(h.Completed);
+        Assert.Equal("", c.Result);
+        Assert.Contains("no update handler registered for 'ghost'", c.Error);
+    }
+
+    [Fact]
+    public void AValidatorThatRefusesRejectsAndTheHandlerNeverRuns()
+    {
+        var u = new UpdateHandlers();
+        var ran = false;
+        u.Register("n", p => { ran = true; return "x"; }, p => false);
+        var h = new FakeHost(Env("n", "bad", "r"));
+        u.Dispatch(h.Poll, h.Complete);
+        Assert.False(ran);
+        Assert.Equal("update 'n' failed validation", Assert.Single(h.Completed).Error);
+    }
+
+    [Fact]
+    public void AValidatorThatThrowsAndAHandlerThatThrowsBothRejectWithTheMessage()
+    {
+        var u = new UpdateHandlers();
+        u.Register("v", p => "x", p => throw new InvalidOperationException("validator blew up"));
+        u.Register("h", p => throw new InvalidOperationException("handler blew up"), null);
+        var h = new FakeHost(Env("v", "", "r1"), Env("h", "", "r2"));
+        u.Dispatch(h.Poll, h.Complete);
+        Assert.Equal(new[] { ("r1", "", "validator blew up"), ("r2", "", "handler blew up") }, h.Completed);
+    }
+
+    [Fact]
+    public void AnExceptionWithAnEmptyMessageStillRejects()
+    {
+        // An empty error is what means "resolved", so an exception whose message is empty must not turn into a success.
+        var u = new UpdateHandlers();
+        u.Register("n", p => throw new InvalidOperationException(""), null);
+        var h = new FakeHost(Env("n", "", "r"));
+        u.Dispatch(h.Poll, h.Complete);
+        var c = Assert.Single(h.Completed);
+        Assert.NotEqual("", c.Error);
+        Assert.Equal(nameof(InvalidOperationException), c.Error);
+    }
+
+    [Fact]
+    public void AStopFromAHandlerPropagatesAndCompletesNothing()
+    {
+        var u = new UpdateHandlers();
+        u.Register("n", p => throw new CleatSuspendException(), null);
+        var h = new FakeHost(Env("n", "", "r"));
+        Assert.Throws<CleatSuspendException>(() => u.Dispatch(h.Poll, h.Complete));
+        Assert.Empty(h.Completed); // the update is redelivered next segment; answering it now would be an error for deferred work
+    }
+
+    [Fact]
+    public void AStopFromAValidatorPropagatesToo()
+    {
+        var u = new UpdateHandlers();
+        u.Register("n", p => "x", p => throw new CleatSuspendException());
+        var h = new FakeHost(Env("n", "", "r"));
+        Assert.Throws<CleatSuspendException>(() => u.Dispatch(h.Poll, h.Complete));
+        Assert.Empty(h.Completed);
+    }
+
+    [Fact]
+    public void ADispatchAfterAStopIsNotLockedOut()
+    {
+        var u = new UpdateHandlers();
+        var first = true;
+        u.Register("n", p => { if (first) { first = false; throw new CleatSuspendException(); } return "ok"; }, null);
+        var h = new FakeHost(Env("n", "", "r"));
+        Assert.Throws<CleatSuspendException>(() => u.Dispatch(h.Poll, h.Complete));
+        var h2 = new FakeHost(Env("n", "", "r2"));
+        u.Dispatch(h2.Poll, h2.Complete);
+        Assert.Equal(new[] { ("r2", "ok", "") }, h2.Completed);
+    }
+
+    [Fact]
+    public void ADispatchFromInsideAHandlerReturnsAtOnce()
+    {
+        var u = new UpdateHandlers();
+        var inner = new FakeHost(Env("n", "", "inner"));
+        u.Register("n", p => { u.Dispatch(inner.Poll, inner.Complete); return "outer-done"; }, null);
+        var h = new FakeHost(Env("n", "", "r"));
+        u.Dispatch(h.Poll, h.Complete);
+        Assert.Equal(0, inner.Polls);      // the nested dispatch did not even poll
+        Assert.Empty(inner.Completed);
+        Assert.Equal(new[] { ("r", "outer-done", "") }, h.Completed);
+    }
+
+    [Fact]
+    public void AMalformedEnvelopeEndsTheLoopWithoutCompletingOrSpinning()
+    {
+        var u = new UpdateHandlers();
+        u.Register("n", p => "x", null);
+        var h = new FakeHost("not json", Env("n", "", "never-reached"));
+        u.Dispatch(h.Poll, h.Complete);
+        Assert.Empty(h.Completed);
+        Assert.Equal(1, h.Polls);
+    }
+
+    [Fact]
+    public void ARegistrationReplacesAnEarlierOneOfTheSameName()
+    {
+        var u = new UpdateHandlers();
+        u.Register("n", p => "old", null);
+        u.Register("n", p => "new", null);
+        var h = new FakeHost(Env("n", "", "r"));
+        u.Dispatch(h.Poll, h.Complete);
+        Assert.Equal("new", Assert.Single(h.Completed).Result);
+    }
+}
+
 public class SignalEnvelopeTests
 {
     private static bool Decode(string raw, out string reply, out string payload)

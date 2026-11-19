@@ -135,11 +135,13 @@ type entryRun struct {
 }
 
 type conformanceResult struct {
-	Result    string
-	History   []engine.EventRecord
-	Suspended *engine.SuspendResult
-	Calls     []recordedCall
-	Err       error
+	Result  string
+	History []engine.EventRecord
+	// QueryState is what the guest set with set_query_state, as the engine reports it at the end of the run.
+	QueryState map[string]string
+	Suspended  *engine.SuspendResult
+	Calls      []recordedCall
+	Err        error
 }
 
 // runConformanceEntry runs one entry point of the conformance component through the real engine and wasmtime.
@@ -173,16 +175,17 @@ func runConformanceEntry(t *testing.T, entry string, r entryRun) conformanceResu
 	opts := append([]engine.EngineOption{engine.WithBackends(engine.WasmtimeLanguages, wt), engine.WithWorkflowID(id)}, r.Options...)
 	eng := engine.NewEngine(rt, caller, opts...)
 	var (
-		res  string
-		hist []engine.EventRecord
-		susp *engine.SuspendResult
+		res   string
+		hist  []engine.EventRecord
+		susp  *engine.SuspendResult
+		state map[string]string
 	)
 	if r.Replay != nil {
-		res, hist, susp, _, _, err = eng.Replay(ctx, b, entry, json.RawMessage(input), r.Replay)
+		res, hist, susp, _, state, err = eng.Replay(ctx, b, entry, json.RawMessage(input), r.Replay)
 	} else {
-		res, hist, susp, _, _, err = eng.Execute(ctx, b, entry, json.RawMessage(input))
+		res, hist, susp, _, state, err = eng.Execute(ctx, b, entry, json.RawMessage(input))
 	}
-	return conformanceResult{Result: res, History: hist, Suspended: susp, Calls: caller.recorded(), Err: err}
+	return conformanceResult{Result: res, History: hist, QueryState: state, Suspended: susp, Calls: caller.recorded(), Err: err}
 }
 
 // TestCSharpConformanceSmoke is the foundation's own case: the build, the stamp, the engine, the SDK's entry wrapper and one host call that
