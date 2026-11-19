@@ -27,7 +27,7 @@ namespace Cleat;
 /// to it as the SDK's coverage grows; see packages/cleat-csharp/README.md for the list.
 /// </para>
 /// </remarks>
-public sealed class HostCalls
+public sealed partial class HostCalls
 {
     private readonly DeferTable _defers;
 
