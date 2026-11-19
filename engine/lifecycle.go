@@ -447,15 +447,15 @@ const sideEffectNotRecorded byte = 2
 // nothing is recorded and nothing changes: the guest computes the value and calls SideEffect, which records it.
 //
 // Status, in the low byte of a simple-pack word: 0 = a recorded value, written to the output buffer; 1 = an error, with its message; 2 =
-// sideEffectNotRecorded. The stop sentinel (tested first, by mask) is returned for a FRESH lookup in a workflow the host has stopped: the
-// SideEffect that follows would be refused anyway, and refusing here means the guest's function, which may call an API, never runs.
+// sideEffectNotRecorded. The stop sentinel is returned for a lookup that would be NEW work in a workflow the host has stopped, whether the session has left replay
+// or is at the replay frontier: the SideEffect that follows would be refused anyway, and refusing here means the guest's function, which may call an API, never runs.
 //
 // The three cases, which the tests pin one by one:
 //   - replaying, and the record at this step is a side_effect: consume it, return its value;
 //   - replaying, and the record is some other event: a replay divergence, reported the way every other call reports it, and the step is
 //     NOT consumed (cleat#1507 -- check before consuming, so the record that belongs to another operation is still there);
-//   - fresh, or replaying past the end of history: "not recorded", with no state change. The switch from replay to fresh stays in
-//     SideEffect, where it has always been.
+//   - fresh, or replaying past the end of history: "not recorded", with no state change, or the stop sentinel when the host has stopped
+//     the workflow. The switch from replay to fresh stays in SideEffect, where it has always been.
 func (s *execSession) SideEffectRecorded(ctx context.Context, m api.Module, respPtr, respMaxLen uint32) int64 {
 	if !s.isReplay {
 		// A fresh lookup is the step BEFORE new work, and the guest's function (which may call an API) runs between it and the SideEffect that
@@ -466,7 +466,19 @@ func (s *execSession) SideEffectRecorded(ctx context.Context, m api.Module, resp
 		return packSimpleResult(sideEffectNotRecorded)
 	}
 	if s.stepCount >= len(s.history) {
-		// The replay-to-fresh boundary. SideEffect makes the switch (and today it does not stop-check there), so the lookup only reports.
+		// The replay-to-fresh boundary. SideEffect makes the switch to fresh, so the lookup leaves replay to it and only reports.
+		//
+		// THE REFUSAL HAS TO BE HERE TOO, and it was missing (cleat#4143). A segment over a run with history starts in replay, so the
+		// body's first new side effect arrives at this boundary and not on the non-replay half above. SideEffect refuses there (freshSideEffect),
+		// but an SDK that asks first runs the user's FUNCTION between the two calls, and that function may call an API: refusing only the
+		// record left the function to run for a workflow that had already terminated. Measured through the real C# SDK, a defer body saw the
+		// function run once in a segment over a history cut at the frontier, and not at all once the lookup refused.
+		//
+		// Refused before "not recorded" is answered, because that answer is what starts the function. A RECORDED value is read below
+		// this branch, not here: reading history is not new work.
+		if s.stopBeforeNewWork() {
+			return callSuspendSentinel
+		}
 		return packSimpleResult(sideEffectNotRecorded)
 	}
 	rec := s.history[s.stepCount]

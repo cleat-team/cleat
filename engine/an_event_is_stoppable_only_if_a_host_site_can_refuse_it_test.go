@@ -71,8 +71,8 @@ var stopSiteNotStoppable = map[string]string{
 		"fresh path for a stop point to key on",
 	"SideEffectRecorded": "the side-effect lookup (cleat#4113) records no event of its own: a lookup that finds nothing changes " +
 		"nothing, and one that finds a value consumes the side_effect event the guest's following call would otherwise have recorded, which " +
-		"is that call's event and not this one's. It refuses a FRESH lookup in a stopped workflow only so a guest's side-effect function " +
-		"never runs, which the stop-site guards check on their own",
+		"is that call's event and not this one's. It refuses a lookup that would be new work in a stopped workflow, fresh or at the replay " +
+		"frontier, only so a guest's side-effect function never runs, which the stop-site guards check on their own",
 }
 
 func TestEveryHostStopSiteIsClassifiedForTheStoppableSet(t *testing.T) {
