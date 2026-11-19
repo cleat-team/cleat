@@ -1700,3 +1700,24 @@ func TestRunDetached_ARefusalSurvivesThePayloadAndCompaction(t *testing.T) {
 		t.Errorf("compaction round trip: %+v, want the refusal and no run id", back)
 	}
 }
+
+// The recorded refusal is what a replay RETURNS, so it must be inside the integrity checksum: computeEventChecksum hashes eventRecordToPayload
+// for the event type, and an Err that the payload omitted would leave the message editable in the row with VerifyWorkflowEvents still passing.
+func TestRunDetached_TheRecordedRefusalIsInsideTheChecksum(t *testing.T) {
+	base := EventRecord{Step: 3, EventType: EventTypeRunDetached, DetachedName: "wf", DetachedInput: `{}`}
+	refused := base
+	refused.Err = `detached run "wf": start failed: down`
+	edited := base
+	edited.Err = `detached run "wf": start failed: up`
+
+	cBase, cRefused, cEdited := computeEventChecksum(base, "prev"), computeEventChecksum(refused, "prev"), computeEventChecksum(edited, "prev")
+	if cRefused == cBase {
+		t.Errorf("a refusal and no refusal have the same checksum %s: the refusal is outside the integrity chain", cBase)
+	}
+	if cRefused == cEdited {
+		t.Errorf("two different refusal messages have the same checksum %s: the message is editable without detection", cRefused)
+	}
+	if again := computeEventChecksum(refused, "prev"); again != cRefused {
+		t.Errorf("the checksum is not stable: %s then %s", cRefused, again)
+	}
+}
