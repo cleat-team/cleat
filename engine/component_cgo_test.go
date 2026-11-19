@@ -1097,3 +1097,62 @@ func BenchmarkLookupCB(b *testing.B) {
 		lookupCB(id)
 	}
 }
+
+// cleat#4107: a simple-packed word (extra<<32 | errCode) carries no failure classification. Its bits 8-39 are 24 zero bits and the LOW BYTE
+// OF THE MESSAGE LENGTH, so reading them as the code (right for packDurableCallResult) gave the guest (len(message) & 0xFF) << 24: a cron
+// refusal with a 48-character message arrived as code 0x30000000. The code is now 0 for every simple word.
+func TestDecodeCallOutcomeAFailedSimpleWordHasNoCodeWhateverTheMessageLength(t *testing.T) {
+	buf := make([]byte, 65536)
+	for _, n := range []uint32{1, 48, 85, 110, 255, 256, 257, 300, 513} {
+		got := decodeCallOutcome(packSimpleResult(1, n), buf, simpleLayout)
+		if !got.failed || got.code != 0 || len(got.payload) != int(n) {
+			t.Errorf("simple word, message length %d: %+v, want failed with code 0 and a %d-byte message", n, got, n)
+		}
+	}
+}
+
+// The control: the durable layout's code IS a classification and is still read, and the stop is still tested first in both layouts.
+func TestDecodeCallOutcomeTheDurableLayoutKeepsItsClassification(t *testing.T) {
+	buf := make([]byte, 65536)
+	got := decodeCallOutcome(packDurableCallResult(110, 3, 1), buf, durableCallLayout)
+	if !got.failed || got.code != 3 || len(got.payload) != 110 {
+		t.Errorf("durable word: %+v, want failed with code 3 and a 110-byte message", got)
+	}
+	for _, l := range []hostWordLayout{durableCallLayout, simpleLayout} {
+		if got := decodeCallOutcome(callSuspendSentinel, buf, l); !got.suspended || got.failed {
+			t.Errorf("layout %d: the stop sentinel decoded as %+v, want suspended", l, got)
+		}
+	}
+}
+
+// Through the real dispatchers, so the pairing at each call site is what is tested and not only the function: child-workflow and side-effect
+// answer in the simple layout, durable-call in the durable one.
+func TestDispatchersReadTheFailureCodeOfTheirOwnLayout(t *testing.T) {
+	cases := []struct {
+		name     string
+		method   int
+		nargs    int
+		args     []string
+		ret      int64
+		wantCode uint32
+	}{
+		{"child-workflow (simple)", 4, 2, []string{"child", "{}"}, packSimpleResult(1, 110), 0},
+		{"side-effect (simple)", 14, 1, []string{"x"}, packSimpleResult(1, 48), 0},
+		{"durable-call (durable)", 0, 3, []string{"svc", "op", "{}"}, packDurableCallResult(110, 3, 1), 3},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			b := &wasmtimeBackend{handler: &mockHostHandler{ret: tc.ret}}
+			strPtr, _, free := cgotestMakeStrArgs(tc.args...)
+			defer free()
+			resultPtr := cgotestAllocResult()
+			if err := b.cgotestDispatchStr(tc.method, strPtr, tc.nargs, resultPtr); err != nil {
+				t.Fatalf("dispatch: %v", err)
+			}
+			kind, _, code := cgotestReadCallOutcome(resultPtr)
+			if kind != "failed" || code != tc.wantCode {
+				t.Errorf("kind=%q code=%d, want failed with code %d", kind, code, tc.wantCode)
+			}
+		})
+	}
+}
