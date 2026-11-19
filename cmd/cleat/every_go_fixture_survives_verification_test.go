@@ -128,6 +128,11 @@ var goFixtureExpectations = map[string]string{
 	// one this fixture was never written to exercise.
 	"errors": "does not have a HostCalls parameter",
 
+	// cleat#4123. Must verify cleanly HERE: this table measures entry-point threading and shape, which the fixture's functions satisfy (the typed
+	// ones return a string for that reason). The non-determinism rules it exists for (E001, E002, E003, E008...) belong to the closure scan and
+	// are asserted in internal/closure/side_effect_nondeterminism_test.go, which reads the same package.
+	"sideeffectnondet": "",
+
 	// cleat#1614. A method reaching the host through the package-level h.
 	// The substring is the part that is specific to a METHOD: the generic
 	// "does not have a HostCalls parameter" above would be satisfied by the
