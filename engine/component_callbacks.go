@@ -1203,7 +1203,8 @@ func (b *wasmtimeBackend) dispatchSideEffect(
 // dispatchSideEffectRecorded handles () -> result<side-effect-lookup, call-failure> (cleat#4113).
 //
 // The status is the low byte of a simple-pack word: 0 a recorded value, 1 an error with its message, sideEffectNotRecorded nothing recorded.
-// The stop sentinel is read FIRST like everywhere else, though this call never returns it except for a debugger's ReplayQuit.
+// The stop sentinel is read FIRST like everywhere else. A FRESH lookup in a stopped workflow returns it (stopBeforeNewWork: the value would
+// be new work), and so does a debugger's ReplayQuit; a lookup that finds a recorded value, or past the end of a replay, never does.
 func (b *wasmtimeBackend) dispatchSideEffectRecorded(
 	args *C.wasmtime_component_val_t, nargs C.size_t,
 	results *C.wasmtime_component_val_t, nresults C.size_t,

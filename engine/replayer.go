@@ -64,7 +64,8 @@ func (s *execSession) advanceReplayStep(ctx context.Context, rec *EventRecord) b
 	// written by the database; event timestamps are written by the worker
 	// process. Measured 40ms apart with PostgreSQL in a container -- enough
 	// that a replay could read a LATER clock than the original execution did,
-	// which is a replay divergence and fails any SideEffect that read it.
+	// which is a replay divergence for anything that compares the clock. (A SideEffect no longer does: since cleat#4113 it returns what was
+	// recorded, whatever the guest computed.)
 	if rec != nil && rec.TimestampMs > 0 {
 		s.nowMs = rec.TimestampMs
 	}
