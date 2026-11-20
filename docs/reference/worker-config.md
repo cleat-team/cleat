@@ -1111,6 +1111,29 @@ bound on what the host will copy out of guest memory; responses are bounded sepa
 
 ---
 
+### --wasm-max-response-bytes
+
+| Type | Default | Description |
+|------|---------|-------------|
+| int | `2097152` (2 MiB) | Maximum size, in bytes, of one host call's response, for component guests (Python, C#) |
+
+Added with cleat#4132. A component guest used to receive at most 64 KiB of any host call's response (a service reply, a plugin result, a fetched
+body), however large the host's was, so a Python or C# workflow could not receive an LLM reply or a document that a Go workflow could. The host now
+sizes the buffer to the response up to this ceiling, so a 200-byte reply costs 200 bytes. **Over the ceiling the call fails, visibly:** call-error
+code 7 (output truncated), with the prefix that fit as its message; the call has already run and recorded its effect, so it is not retried.
+
+The Go and Rust SDKs size their own buffers, start at 64 KiB and double on each reported truncation, and are **compiled with the same 2 MiB
+ceiling** (`_cleatOutBufCeiling` in the generated adapter, `OUT_BUF_CEILING` in `cleat-sdk`). Raising this flag above 2 MiB therefore does not
+raise what a Go or Rust workflow can receive until it is rebuilt against a larger constant: no guest-reported length is available to grow to. The
+call that truncates cannot be rescued, so the first oversize response on a Go or Rust workflow fails and the buffer is larger for the calls after
+it. The value is capped at 16 MiB - 1, which is what a durable-call result word can carry; a larger setting is rejected at startup.
+
+**One response stays small in every language:** an `await_signals` payload is carried in a 16-bit length field of its result word, so it is at most 65,535 bytes whatever this is set to.
+
+This is **not** `--wasm-output-buffer-size`, which sizes the entry-point input and result regions in the module's linear memory.
+
+---
+
 ### --wasm-cache-dir
 
 | Type | Default | Description |

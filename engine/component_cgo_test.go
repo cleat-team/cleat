@@ -654,7 +654,7 @@ func TestDispatchGetScopeReturnsTheScopeTheHandlerWrote(t *testing.T) {
 // =============================================================================
 
 func TestDispatchDurableCallString(t *testing.T) {
-	b := &wasmtimeBackend{handler: &mockHostHandler{ret: packStrLen(5)}}
+	b := &wasmtimeBackend{handler: &mockHostHandler{fill: 5, ret: packStrLen(5)}}
 	strPtr, _, freeArgs := cgotestMakeStrArgs("svc", "op", "req")
 	defer freeArgs()
 	resultPtr := cgotestAllocResult()
@@ -665,7 +665,7 @@ func TestDispatchDurableCallString(t *testing.T) {
 }
 
 func TestDispatchDurableCallRetry(t *testing.T) {
-	b := &wasmtimeBackend{handler: &mockHostHandler{ret: packStrLen(5)}}
+	b := &wasmtimeBackend{handler: &mockHostHandler{fill: 5, ret: packStrLen(5)}}
 	argsPtr, _, freeArgs := cgotestMakeMixedArgs("svc", "op", "req", uint64(0), uint64(0), uint64(0), uint64(0), "none")
 	defer freeArgs()
 	resultPtr := cgotestAllocResult()
@@ -676,7 +676,7 @@ func TestDispatchDurableCallRetry(t *testing.T) {
 }
 
 func TestDispatchDurableCallHeartbeat(t *testing.T) {
-	b := &wasmtimeBackend{handler: &mockHostHandler{ret: packStrLen(5)}}
+	b := &wasmtimeBackend{handler: &mockHostHandler{fill: 5, ret: packStrLen(5)}}
 	argsPtr, _, freeArgs := cgotestMakeMixedArgs("svc", "op", "req", uint64(5000))
 	defer freeArgs()
 	resultPtr := cgotestAllocResult()
@@ -728,7 +728,7 @@ func TestDispatchDurableCallStopIsNotAResponse(t *testing.T) {
 func TestDispatchDurableCallFailureIsNotAResponse(t *testing.T) {
 	// responseLen=7 ("timeout" would be in the buffer), callErrorCode=1
 	// (CallErrorTimeout), errCode=1.
-	b := &wasmtimeBackend{handler: &mockHostHandler{ret: packDurableCallResult(7, 1, 1)}}
+	b := &wasmtimeBackend{handler: &mockHostHandler{fill: 7, ret: packDurableCallResult(7, 1, 1)}}
 	strPtr, _, freeArgs := cgotestMakeStrArgs("svc", "op", "req")
 	defer freeArgs()
 	resultPtr := cgotestAllocResult()
@@ -741,7 +741,7 @@ func TestDispatchDurableCallFailureIsNotAResponse(t *testing.T) {
 // TestDispatchDurableDefer: durable-defer is result<string, call-failure> since cleat#4079, and DurableDefer answers in the
 // packSimpleResult layout (length at bits 32-63), the same as the child-workflow starts.
 func TestDispatchDurableDefer(t *testing.T) {
-	b := &wasmtimeBackend{handler: &mockHostHandler{ret: packSimpleStrLen(10)}}
+	b := &wasmtimeBackend{handler: &mockHostHandler{fill: 10, ret: packSimpleStrLen(10)}}
 	strPtr, _, freeArgs := cgotestMakeStrArgs("desc")
 	defer freeArgs()
 	resultPtr := cgotestAllocResult()
@@ -765,7 +765,7 @@ func TestDispatchDurableDeferStopIsNotAnId(t *testing.T) {
 }
 
 func TestDispatchChildWorkflow(t *testing.T) {
-	b := &wasmtimeBackend{handler: &mockHostHandler{ret: packSimpleStrLen(20)}}
+	b := &wasmtimeBackend{handler: &mockHostHandler{fill: 20, ret: packSimpleStrLen(20)}}
 	strPtr, _, freeArgs := cgotestMakeStrArgs("wf-name", "input")
 	defer freeArgs()
 	resultPtr := cgotestAllocResult()
@@ -776,7 +776,7 @@ func TestDispatchChildWorkflow(t *testing.T) {
 }
 
 func TestDispatchCreatePromise(t *testing.T) {
-	b := &wasmtimeBackend{handler: &mockHostHandler{ret: packStrLen(8)}}
+	b := &wasmtimeBackend{handler: &mockHostHandler{fill: 8, ret: packStrLen(8)}}
 	strPtr, _, freeArgs := cgotestMakeStrArgs("promise")
 	defer freeArgs()
 	resultPtr := cgotestAllocResult()
@@ -789,7 +789,7 @@ func TestDispatchCreatePromise(t *testing.T) {
 }
 
 func TestDispatchPluginCall(t *testing.T) {
-	b := &wasmtimeBackend{handler: &mockHostHandler{ret: packStrLen(15)}}
+	b := &wasmtimeBackend{handler: &mockHostHandler{fill: 15, ret: packStrLen(15)}}
 	strPtr, _, freeArgs := cgotestMakeStrArgs("plugin", "func", "input")
 	defer freeArgs()
 	resultPtr := cgotestAllocResult()
@@ -800,7 +800,7 @@ func TestDispatchPluginCall(t *testing.T) {
 }
 
 func TestDispatchSetScope(t *testing.T) {
-	b := &wasmtimeBackend{handler: &mockHostHandler{ret: packStrLen(12)}}
+	b := &wasmtimeBackend{handler: &mockHostHandler{fill: 12, ret: packStrLen(12)}}
 	strPtr, _, freeArgs := cgotestMakeStrArgs("type", "key")
 	defer freeArgs()
 	resultPtr := cgotestAllocResult()
@@ -813,7 +813,7 @@ func TestDispatchSetScope(t *testing.T) {
 }
 
 func TestDispatchPollCancellation(t *testing.T) {
-	b := &wasmtimeBackend{handler: &mockHostHandler{ret: packStrLen(5)}}
+	b := &wasmtimeBackend{handler: &mockHostHandler{fill: 5, ret: packStrLen(5)}}
 	resultPtr := cgotestAllocResult()
 	if err := b.cgotestDispatchStr(10, nil, 0, resultPtr); err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -824,7 +824,7 @@ func TestDispatchPollCancellation(t *testing.T) {
 }
 
 func TestDispatchWorkflowID(t *testing.T) {
-	b := &wasmtimeBackend{handler: &mockHostHandler{ret: packStrLen(20)}}
+	b := &wasmtimeBackend{handler: &mockHostHandler{fill: 20, ret: packStrLen(20)}}
 	resultPtr := cgotestAllocResult()
 	if err := b.cgotestDispatchStr(11, nil, 0, resultPtr); err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -835,7 +835,7 @@ func TestDispatchWorkflowID(t *testing.T) {
 }
 
 func TestDispatchRunID(t *testing.T) {
-	b := &wasmtimeBackend{handler: &mockHostHandler{ret: packStrLen(20)}}
+	b := &wasmtimeBackend{handler: &mockHostHandler{fill: 20, ret: packStrLen(20)}}
 	resultPtr := cgotestAllocResult()
 	if err := b.cgotestDispatchStr(12, nil, 0, resultPtr); err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -846,7 +846,7 @@ func TestDispatchRunID(t *testing.T) {
 }
 
 func TestDispatchUUID(t *testing.T) {
-	b := &wasmtimeBackend{handler: &mockHostHandler{ret: packStrLen(36)}}
+	b := &wasmtimeBackend{handler: &mockHostHandler{fill: 36, ret: packStrLen(36)}}
 	strPtr, _, freeArgs := cgotestMakeStrArgs("seed")
 	defer freeArgs()
 	resultPtr := cgotestAllocResult()
@@ -859,7 +859,7 @@ func TestDispatchUUID(t *testing.T) {
 }
 
 func TestDispatchSideEffect(t *testing.T) {
-	b := &wasmtimeBackend{handler: &mockHostHandler{ret: packSimpleStrLen(8)}}
+	b := &wasmtimeBackend{handler: &mockHostHandler{fill: 8, ret: packSimpleStrLen(8)}}
 	strPtr, _, freeArgs := cgotestMakeStrArgs("result")
 	defer freeArgs()
 	resultPtr := cgotestAllocResult()
@@ -900,7 +900,7 @@ func TestDispatchSideEffectRecorded(t *testing.T) {
 }
 
 func TestDispatchFetch(t *testing.T) {
-	b := &wasmtimeBackend{handler: &mockHostHandler{ret: packSimpleStrLen(10)}}
+	b := &wasmtimeBackend{handler: &mockHostHandler{fill: 10, ret: packSimpleStrLen(10)}}
 	strPtr, _, freeArgs := cgotestMakeStrArgs("GET", "http://x", "{}", "")
 	defer freeArgs()
 	resultPtr := cgotestAllocResult()
@@ -911,7 +911,7 @@ func TestDispatchFetch(t *testing.T) {
 }
 
 func TestDispatchAwaitChild(t *testing.T) {
-	b := &wasmtimeBackend{handler: &mockHostHandler{ret: packStrLen(8)}}
+	b := &wasmtimeBackend{handler: &mockHostHandler{fill: 8, ret: packStrLen(8)}}
 	strPtr, _, freeArgs := cgotestMakeStrArgs("run-id")
 	defer freeArgs()
 	resultPtr := cgotestAllocResult()
@@ -924,7 +924,7 @@ func TestDispatchAwaitChild(t *testing.T) {
 }
 
 func TestDispatchAwaitAllChildren(t *testing.T) {
-	b := &wasmtimeBackend{handler: &mockHostHandler{ret: packStrLen(10)}}
+	b := &wasmtimeBackend{handler: &mockHostHandler{fill: 10, ret: packStrLen(10)}}
 	strPtr, _, freeArgs := cgotestMakeStrArgs(`["id1","id2"]`)
 	defer freeArgs()
 	resultPtr := cgotestAllocResult()
@@ -937,7 +937,7 @@ func TestDispatchAwaitAllChildren(t *testing.T) {
 }
 
 func TestDispatchPluginCallStreaming(t *testing.T) {
-	b := &wasmtimeBackend{handler: &mockHostHandler{ret: packStrLen(15)}}
+	b := &wasmtimeBackend{handler: &mockHostHandler{fill: 15, ret: packStrLen(15)}}
 	strPtr, _, freeArgs := cgotestMakeStrArgs("plugin", "func", "input")
 	defer freeArgs()
 	resultPtr := cgotestAllocResult()
@@ -948,7 +948,7 @@ func TestDispatchPluginCallStreaming(t *testing.T) {
 }
 
 func TestDispatchChildWorkflowWithOptions(t *testing.T) {
-	b := &wasmtimeBackend{handler: &mockHostHandler{ret: packSimpleStrLen(20)}}
+	b := &wasmtimeBackend{handler: &mockHostHandler{fill: 20, ret: packSimpleStrLen(20)}}
 	argsPtr, _, freeArgs := cgotestMakeMixedArgs("wf-name", "input", uint64(0), uint64(0), "policy")
 	defer freeArgs()
 	resultPtr := cgotestAllocResult()
@@ -974,12 +974,12 @@ func TestDispatchAwaitPromiseMapsEachPackedWordToItsOwnCase(t *testing.T) {
 		wantKind    string
 		wantPayload int
 	}{
-		{"resolved", &mockHostHandler{ret: packAwaitPromiseResult(5, false, 0)}, "resolved", 5},
+		{"resolved", &mockHostHandler{fill: 5, ret: packAwaitPromiseResult(5, false, 0)}, "resolved", 5},
 		{"resolved with an empty value", &mockHostHandler{ret: packAwaitPromiseResult(0, false, 0)}, "resolved", 0},
 		{"timeout", &mockHostHandler{ret: packAwaitPromiseResult(0, true, 0)}, "timed-out", 0},
 		{"timeout inside a host defer drain", &mockHostHandler{ret: packAwaitSignalsResult(0, 0, true, 0)}, "timed-out", 0},
-		{"host error", &mockHostHandler{ret: packAwaitPromiseResult(7, false, 1)}, "failed", 7},
-		{"rejection", rejectingHandler{&mockHostHandler{ret: packAwaitPromiseResult(6, false, 1)}}, "rejected", 6},
+		{"host error", &mockHostHandler{fill: 7, ret: packAwaitPromiseResult(7, false, 1)}, "failed", 7},
+		{"rejection", rejectingHandler{&mockHostHandler{fill: 6, ret: packAwaitPromiseResult(6, false, 1)}}, "rejected", 6},
 		// The stop sentinel is bit 31, which lands inside this layout's timed-out
 		// byte. Reading the fields first takes it for a timeout.
 		{"stop", &mockHostHandler{ret: callSuspendSentinel}, "suspended", 0},
@@ -1007,7 +1007,7 @@ func TestDispatchAwaitPromiseMapsEachPackedWordToItsOwnCase(t *testing.T) {
 }
 
 func TestDispatchPollSignal(t *testing.T) {
-	b := &wasmtimeBackend{handler: &mockHostHandler{ret: packStrLen(6)}}
+	b := &wasmtimeBackend{handler: &mockHostHandler{fill: 6, ret: packStrLen(6)}}
 	strPtr, _, freeArgs := cgotestMakeStrArgs("signal")
 	defer freeArgs()
 	resultPtr := cgotestAllocResult()

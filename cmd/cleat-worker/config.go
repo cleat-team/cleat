@@ -376,6 +376,7 @@ var (
 	syncCommitOff                 = flag.Bool("synchronous-commit-off", false, "SET LOCAL synchronous_commit = off in finalize transactions (higher throughput, weaker durability)")
 	wasmOutputBufferSize          = flag.Int("wasm-output-buffer-size", 32768, "WASM output buffer size in bytes (default 32 KB)")
 	wasmMaxStringLen              = flag.Int("wasm-max-string-len", engine.DefaultMaxWasmStringLen, "Maximum WASM string parameter length in bytes, for every guest language (default 2 MiB)")
+	wasmMaxResponseBytes          = flag.Int("wasm-max-response-bytes", engine.DefaultMaxHostCallResponseBytes, "Maximum size in bytes of one host call's response for component guests, i.e. Python and C# (default 2 MiB). Over it the call fails with output-truncated. The Go and Rust SDKs size their own buffers and are compiled with the same 2 MiB ceiling. Not --wasm-output-buffer-size, which sizes the entry-point input and result.")
 	wasmCacheDir                  = flag.String("wasm-cache-dir", "", "Directory for disk-backed compiled WASM module cache (empty disables)")
 	wasmDiskCacheMaxFiles         = flag.Int("wasm-disk-cache-max-files", 100, "Max files in the disk-backed compiled WASM module cache (LRU eviction)")
 	redactPatternsFile            = flag.String("redact-patterns-file", "", "Path to file with custom redaction patterns (one per line)")

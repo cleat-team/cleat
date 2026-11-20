@@ -325,3 +325,23 @@ fn retry_long_probe(h: &HostCalls, _input: PlaceOrderInput) -> Result<String, St
         h.cleat_call_with_retry("always-fails", "op", &serde_json::json!({}), &policy)?;
     Ok("{\"unreachable\":true}".to_string())
 }
+
+/// Two calls to a service that answers with a response larger than the SDK's starting 64 KiB buffer (cleat#4132).
+///
+/// The first call is truncated by the host (code 7) and fails, and that is the SDK growing its buffer for the calls after it: the failed call
+/// has already run and recorded its effect, so it cannot be rescued. The second call, to the same service, then receives the whole response.
+/// This is the behaviour the Go adapter has had since cleat#1384, and `engine/rust_big_response_test.go` is the evidence for the Rust side.
+///
+/// Keep this entry point: it has no other caller.
+#[cleat_entry]
+fn big_response_probe(h: &HostCalls, _input: PlaceOrderInput) -> Result<String, String> {
+    let (first, e1) = h.cleat_call("big", "op", "{}");
+    let (second, e2) = h.cleat_call("big", "op", "{}");
+    Ok(format!(
+        "{{\"first_failed\":{},\"first_len\":{},\"second_failed\":{},\"second_len\":{}}}",
+        e1.is_some(),
+        first.len(),
+        e2.is_some(),
+        second.len()
+    ))
+}

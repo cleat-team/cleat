@@ -212,7 +212,7 @@ func GenerateHostAdapter(pkgName string, usage *UsageInfo, target string) []byte
 	buf.WriteString("// call, and a workflow that has just exhausted its memory still has to\n")
 	buf.WriteString("// run its defers.\n")
 	buf.WriteString("const _cleatOutBufFloor = 65536\n")
-	buf.WriteString("const _cleatOutBufCeiling = 1048576\n\n")
+	buf.WriteString("const _cleatOutBufCeiling = 2097152\n\n")
 	buf.WriteString("var _cleatOutBufCap = _cleatOutBufFloor\n\n")
 	buf.WriteString("// _cleatGrowOutBuf is called when the host reports errCode 7. It doubles\n")
 	buf.WriteString("// the buffer for subsequent calls and reports whether it managed to grow.\n")
