@@ -30,36 +30,31 @@ const g3rBufLen = 1024
 // idempotency key each attempt carried. It implements IdempotentCaller, so callService hands it a key.
 type g3rCaller struct {
 	failFirst int
-	attempts  int      // attempts at svc.op
-	others    int      // every other call
-	keys      []string // the idempotency key each svc.op attempt carried, raw; stepsOf turns them into steps
+	attempts  int            // attempts at svc.op
+	others    int            // every other call
+	stepOfKey map[string]int // the key of each of steps 0..9, learned from the engine's own call path before the call (learnKeys)
+	steps     []int          // the step each svc.op attempt's key was derived from; -1 for a key that matches none; the key itself is not kept
 	onAttempt func(n int)
 }
 
-// stepsOf maps each recorded key to the step it was derived from (steps 0..9; -1 for a key that matches none). The key for each step is learned
-// from the engine's own call path (callService) and NOT by calling DurableCallIdempotencyKey from this file: a version that called it directly made
-// golangci-lint's gosec G701 report an unrelated line of production code (engine/mysql_lifecycle.go) that it does not report without this file
-// (measured: 0 findings on develop, 1 with the direct call, 0 with this). Nothing about the finding is in this file's code, so the way round it is
-// to not call that function from here.
-func (c *g3rCaller) stepsOf(workflowID string) []int {
-	// The key for each step is learned from the engine's own call path (callService), not by calling the key function from here.
+// learnKeys fills stepOfKey: the idempotency key for each of steps 0..9, learned from the engine's own call path (callService) and NOT by calling
+// DurableCallIdempotencyKey from this file. THE CALLER KEEPS THE STEP AND NOT THE KEY, and that is deliberate: golangci-lint's gosec G701 (SQL taint
+// analysis) reports an UNRELATED line of production code (engine/mysql_lifecycle.go:114) when a test type that implements IdempotentCaller stores
+// the key argument it is handed. Measured on the merge of this file into develop 0678b1cb: 1 finding with the key stored, 0 with the interface
+// implemented and the key never stored, 0 with the key used for a lookup and only the step stored (this version). An earlier version of this file
+// learned the keys correctly through callService but still stored them, linted clean on the base it was written on (5a4d59db) and failed CI's
+// lint-go on the merge with the next develop: the finding depends on the base as well as on the file.
+func (c *g3rCaller) learnKeys(workflowID string) {
 	probe := newRecordingCaller()
 	ps := &execSession{engine: NewEngine(nil, probe), workflowID: workflowID}
-	stepOfKey := map[string]int{}
+	c.stepOfKey = map[string]int{}
 	for n := 0; n < 10; n++ {
 		_, _ = ps.callService(context.Background(), "probe", "probe", `{}`, n)
-		stepOfKey[probe.keys[n]] = n
+		c.stepOfKey[probe.keys[n]] = n
 	}
-	out := make([]int, 0, len(c.keys))
-	for _, k := range c.keys {
-		step, ok := stepOfKey[k]
-		if !ok {
-			step = -1
-		}
-		out = append(out, step)
-	}
-	return out
 }
+
+func (c *g3rCaller) stepsOf(string) []int { return c.steps }
 
 func (c *g3rCaller) Call(ctx context.Context, service, operation, req string) (string, error) {
 	return c.CallWithIdempotencyKey(ctx, service, operation, req, "")
@@ -71,7 +66,11 @@ func (c *g3rCaller) CallWithIdempotencyKey(_ context.Context, service, operation
 		return `{"ok":true}`, nil
 	}
 	c.attempts++
-	c.keys = append(c.keys, key)
+	step, ok := c.stepOfKey[key]
+	if !ok {
+		step = -1
+	}
+	c.steps = append(c.steps, step)
 	if c.onAttempt != nil {
 		c.onAttempt(c.attempts)
 	}
@@ -117,6 +116,7 @@ func g3rEvents(history []EventRecord, from int) string {
 
 func (c g3rCase) observe() string {
 	caller := &g3rCaller{failFirst: c.failFirst}
+	caller.learnKeys("wf-g3r")
 	opts := []EngineOption{WithWorkflowID("wf-g3r")}
 	if c.deferPhase {
 		opts = append(opts, WithDeferPhase())
