@@ -45,6 +45,7 @@ func TestExtractStringFromPacked(t *testing.T) {
 func TestRegisterCBLookupCB(t *testing.T) {
 	cbRegistry.Lock()
 	cbRegistry.entries = make(map[uintptr]cbEntry)
+	cbRegistry.next = 0
 	cbRegistry.Unlock()
 	b1 := &wasmtimeBackend{}
 	b2 := &wasmtimeBackend{}
@@ -74,6 +75,7 @@ func TestRegisterCBLookupCB(t *testing.T) {
 func TestRegisterCBConcurrent(t *testing.T) {
 	cbRegistry.Lock()
 	cbRegistry.entries = make(map[uintptr]cbEntry)
+	cbRegistry.next = 0
 	cbRegistry.Unlock()
 	b := &wasmtimeBackend{}
 	var wg sync.WaitGroup
@@ -1105,6 +1107,7 @@ func BenchmarkExtractStringFromPacked(b *testing.B) {
 func BenchmarkRegisterCB(b *testing.B) {
 	cbRegistry.Lock()
 	cbRegistry.entries = make(map[uintptr]cbEntry)
+	cbRegistry.next = 0
 	cbRegistry.Unlock()
 	backend := &wasmtimeBackend{}
 	b.ResetTimer()
@@ -1116,6 +1119,7 @@ func BenchmarkRegisterCB(b *testing.B) {
 func BenchmarkLookupCB(b *testing.B) {
 	cbRegistry.Lock()
 	cbRegistry.entries = make(map[uintptr]cbEntry)
+	cbRegistry.next = 0
 	cbRegistry.Unlock()
 	backend := &wasmtimeBackend{}
 	id := registerCB(backend, cbTypeDurableSleep)

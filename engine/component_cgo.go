@@ -496,16 +496,6 @@ package engine
 //     return (wasmtime_context_t *)ctx_ptr;
 // }
 //
-// // Save memory data pointer after instantiation. Initialized by
-// // save_first_memory_data which is called once after instantiation.
-// static uint8_t *saved_memory_ptr = NULL;
-// static size_t saved_memory_len = 0;
-//
-// static uint8_t *get_saved_memory_ptr(void) { return saved_memory_ptr; }
-// static size_t get_saved_memory_len(void) { return saved_memory_len; }
-//
-// // Memory scan disabled - not needed with WIT string ABI.
-// static void save_first_memory_data(wasmtime_context_t *ctx, uint64_t store_id) {}
 //// // Trampoline for cleat host functions.
 // extern wasmtime_error_t *goComponentCallback(
 //     void *env, wasmtime_context_t *ctx,
@@ -853,19 +843,56 @@ type cbEntry struct {
 	typ     cbType
 }
 
+// cbRegistry maps the id each linked host function carries (as its C env pointer) to the backend and callback type that serve it.
+//
+// IDS ARE MINTED FROM A COUNTER AND NEVER FROM THE MAP'S SIZE. They used to be len(entries)+1, which was only unique because nothing was ever
+// removed: with entries {1,2,3}, removing 1 makes the next id 3 and overwrites a LIVE entry, so the callback that id belongs to would be
+// served by another execution's backend. An execution now removes its own entries (cbScope), so the id must not depend on how many are left.
+// A removed id is never reused, which also means a callback that somehow fired after its execution ended finds nothing and not a stranger.
 var cbRegistry = struct {
 	sync.Mutex
 	entries map[uintptr]cbEntry
-	store   wasmtime.Storelike
-	storeID uint64
+	next    uintptr
 }{entries: make(map[uintptr]cbEntry)}
 
+// registerCB adds one entry and returns its id. An execution registers through a cbScope, which remembers the ids so it can remove them.
 func registerCB(b *wasmtimeBackend, typ cbType) uintptr {
 	cbRegistry.Lock()
 	defer cbRegistry.Unlock()
-	id := uintptr(len(cbRegistry.entries) + 1)
+	cbRegistry.next++
+	id := cbRegistry.next
 	cbRegistry.entries[id] = cbEntry{backend: b, typ: typ}
 	return id
+}
+
+// cbScope is the set of registry entries ONE execution registered, so that execution can remove exactly those and no other's (cleat#4257).
+// Before it, nothing ever removed an entry: every component execution kept its per-execution backend, and with it the whole execution
+// session, reachable from this package-level map for the life of the process (57 entries per execution on a minimal guest).
+//
+// It is not safe for concurrent use and does not need to be: an execution registers its imports on one goroutine before the guest runs.
+type cbScope struct {
+	ids []uintptr
+}
+
+func (sc *cbScope) register(b *wasmtimeBackend, typ cbType) uintptr {
+	id := registerCB(b, typ)
+	sc.ids = append(sc.ids, id)
+	return id
+}
+
+// release removes every entry this scope registered. It must run AFTER nothing can call back: the linker, the store and the component are
+// released by the execution's own defers, so the scope's release is deferred FIRST and therefore runs LAST. Calling it earlier would leave a
+// live instance whose callbacks find no entry; goComponentCallback answers that with a silent success that writes no results.
+func (sc *cbScope) release() {
+	if len(sc.ids) == 0 {
+		return
+	}
+	cbRegistry.Lock()
+	defer cbRegistry.Unlock()
+	for _, id := range sc.ids {
+		delete(cbRegistry.entries, id)
+	}
+	sc.ids = nil
 }
 
 func lookupCB(id uintptr) cbEntry {
@@ -1613,6 +1640,11 @@ func withCleatEntryKey(input []byte, entryPoint string) ([]byte, error) {
 func (b *wasmtimeBackend) ExecuteComponentCGo(
 	ctx context.Context, wasmBytes []byte, entryPoint string, input []byte, outBufSz uint32,
 ) (*ExecResult, error) {
+	// THE FIRST DEFER, SO THE LAST TO RUN. Every callback this execution registers is removed when it returns, by any path, and only after the
+	// store, linker and component below have been released: see cbScope.release (cleat#4257).
+	scope := &cbScope{}
+	defer scope.release()
+
 	// A cache hit and a fresh compile both hand back a reference this call owns,
 	// so the delete below is right for either (cleat#3748). It stays BEFORE
 	// configureStore, as the compile always was: a hit leaves more of the
@@ -1657,10 +1689,10 @@ func (b *wasmtimeBackend) ExecuteComponentCGo(
 	// Shadow the WASI clock and entropy interfaces before cleat's own, inside
 	// the allow_shadowing bracket opened above and after add_wasip2 supplied
 	// the real ones. cleat#1410.
-	if err := b.registerWasiDeterminismImports(linker, wasiDeterminismVersionsOf(wasmBytes)); err != nil {
+	if err := b.registerWasiDeterminismImports(linker, wasiDeterminismVersionsOf(wasmBytes), scope); err != nil {
 		return nil, fmt.Errorf("register wasi determinism imports: %w", err)
 	}
-	if err := b.registerCleatComponentImports(linker); err != nil {
+	if err := b.registerCleatComponentImports(linker, scope); err != nil {
 		return nil, fmt.Errorf("cleat component imports: %w", err)
 	}
 
@@ -1688,13 +1720,6 @@ func (b *wasmtimeBackend) ExecuteComponentCGo(
 		}
 		return nil, err
 	}
-
-	// Save store info and scan for memory once.
-	cbRegistry.Lock()
-	cbRegistry.store = store
-	cbRegistry.storeID = uint64(instance.store_id)
-	cbRegistry.Unlock()
-	C.save_first_memory_data(C.store_context(unsafe.Pointer(store.Context())), instance.store_id)
 
 	fn, err := componentGetFunc(instance, store, componentRunExport)
 	if err != nil {
