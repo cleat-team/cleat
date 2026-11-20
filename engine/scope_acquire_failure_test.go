@@ -21,9 +21,10 @@ import (
 // and -- via the two controls -- that it refuses only when it should.
 
 // The two stores these tests need already exist in locking_test.go, which is
-// the point: freshAcquireLock and freshSetScope are the only two callers of
-// AcquireConcurrencyKey, and they were given opposite treatments of the same
-// two outcomes.
+// the point: AcquireLock (its step, acquireLockStep in locking.go) and freshSetScope are the only two engine host calls that reach
+// AcquireConcurrencyKey, and they were given opposite treatments of the same two outcomes. (sharded_store.go only delegates, and the
+// worker's HTTP route at cmd/cleat-worker/server.go calls it too, but neither is a host call. Re-derive:
+// grep -rn --include='*.go' '\.AcquireConcurrencyKey(' . | grep -v _test.go)
 //
 //	acquireErrorStore        -> (false, "store error")  the store is broken
 //	acquireNotAcquiredStore  -> (false, nil)            somebody else holds it

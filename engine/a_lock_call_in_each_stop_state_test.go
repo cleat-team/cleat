@@ -26,10 +26,14 @@ import (
 // release at all is a separate decision. Each row is run twice: the call as the guest makes it fresh, and the same call reached at the replay frontier
 // (a defer segment starts in replay, so its body's first new call arrives that way, cleat#4101).
 
-type recordingLockStore struct{ acquires, releases int }
+type recordingLockStore struct {
+	acquires, releases int
+	ttl                time.Duration
+}
 
-func (p *recordingLockStore) AcquireConcurrencyKey(context.Context, string, string, time.Duration) (bool, error) {
+func (p *recordingLockStore) AcquireConcurrencyKey(_ context.Context, _, _ string, ttl time.Duration) (bool, error) {
 	p.acquires++
+	p.ttl = ttl
 	return true, nil
 }
 
@@ -90,8 +94,15 @@ func TestAcquireLockAndReleaseLockBehaveAsMeasuredInEachStopState(t *testing.T) 
 					if got != callSuspendSentinel || len(s.history) != 0 || store.acquires != 0 {
 						t.Fatalf("want the suspend sentinel and no event and no store call, got result %d, %d event(s), %d acquire(s)", got, len(s.history), store.acquires)
 					}
-				} else if got != packAcquireLockResult(true, 0) || len(s.history) != 1 || store.acquires != 1 {
-					t.Fatalf("want acquired (%d), one event, one acquire, got result %d, %d event(s), %d acquire(s)", packAcquireLockResult(true, 0), got, len(s.history), store.acquires)
+				} else {
+					if got != packAcquireLockResult(true, 0) || len(s.history) != 1 || store.acquires != 1 {
+						t.Fatalf("want acquired (%d), one event, one acquire, got result %d, %d event(s), %d acquire(s)", packAcquireLockResult(true, 0), got, len(s.history), store.acquires)
+					}
+					// The lock's time to live reaches the store and the recorded event. Found by falsification: dropping it from the step's arguments
+					// turned nothing red, so a move onto the dispatcher could have lost it without a test saying so.
+					if store.ttl != guestMsDuration(1000) || s.history[0].LockTTLMs != 1000 || s.history[0].LockKey != "k" {
+						t.Fatalf("the TTL or key did not reach the store and the event: store ttl %v (want %v), event ttl %d (want 1000), event key %q (want k)", store.ttl, guestMsDuration(1000), s.history[0].LockTTLMs, s.history[0].LockKey)
+					}
 				}
 				if len(s.stepViolations) != 0 {
 					t.Fatalf("a spec reported itself in violation: %v", s.stepViolations)
