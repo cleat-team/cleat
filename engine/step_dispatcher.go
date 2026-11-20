@@ -195,13 +195,20 @@ func init() {
 	}
 }
 
-// neverRefuse is a Refuse for a step that gives back something the workflow holds (a lock): it is NEVER refused, not in a segment's body, not
-// after a worker shutdown and not after an event that could not be written. It is the one use of the hook that says "never", and the reason is
-// measured and not argued. AcquireLock is refused in all four of those states and ReleaseLock in none (a_lock_call_in_each_stop_state_test.go,
-// taken before the move), and a defer draining on a shutting-down worker is the case that needs it: it cannot take a lock but must be able to
-// give one back, or the lock stays held until its lease runs out. The design's blanket rule was argued from a segment's body alone, which is only
-// one of the three states stopBeforeNewWork covers. Whether a segment's BODY should release is a separate decision; this keeps what the call did
-// before it moved. The scans that count host stop sites (stop_correspondence_guard_test.go, java_sdk_stop_bit_parity_test.go) read the spec
+// neverRefuse is a Refuse for a step that is NEVER refused: not in a segment's body, not after a worker shutdown and not after an event that could
+// not be written. It has two uses, with two different reasons, and in both the reason is a measurement of what the call did before it moved and not
+// an argument.
+//
+//   - ReleaseLock, which gives back something the workflow holds. AcquireLock is refused in all four states and ReleaseLock in none
+//     (a_lock_call_in_each_stop_state_test.go, taken before the move), and a defer draining on a shutting-down worker is the case that needs it: it
+//     cannot take a lock but must be able to give one back, or the lock stays held until its lease runs out. The design's blanket rule was argued
+//     from a segment's body alone, which is only one of the three states stopBeforeNewWork covers. Whether a segment's BODY should release is a
+//     separate decision.
+//   - ListCrons, a read that records its answer. It listed in all four states before it moved (the golden table in
+//     a_cron_single_steps_behave_as_recorded_before_the_dispatcher_test.go, rows segment_*, write_failed_* and shutdown_fresh), and this keeps that.
+//     Here the design's rule WOULD refuse it, and whether it should is cleat#4239; unlike the lock, nothing shows a defer that needs it unrefused.
+//
+// Both keep what the call did before it moved. The scans that count host stop sites (stop_correspondence_guard_test.go, java_sdk_stop_bit_parity_test.go) read the spec
 // declaration for exactly `Refuse: neverRefuse` and do not count such a call; any other Refuse counts as a site, because they cannot prove it
 // never refuses and an over-count fails loudly where an under-count would pass a call the SDKs do not guard.
 func neverRefuse(*execSession) bool { return false }
