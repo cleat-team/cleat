@@ -153,6 +153,12 @@ func g1Characterize(t *testing.T, gc g1Call) map[string]string {
 	s10 := g1Session(nil, false, WithShutdownSignal(down))
 	got["shutdown_fresh"] = g1Observe(gc, s10)
 
+	// a debugger's ReplayQuit (cleat debug) at the call's own record: the callback aborts the replay as the record is consumed. The lookup answers
+	// the stop sentinel there (component_callbacks.go documents it as the contract), the other two answer 0.
+	quit := g1Session(own(), true)
+	quit.stepCallback = func(int, *EventRecord, map[string]string) ReplayStepAction { return ReplayQuit }
+	got["replay_quit"] = g1Observe(gc, quit)
+
 	// A defer record written before DeferID and the description were recorded: replay rebuilds the id ("defer-<step>") and takes the
 	// description from the argument, so a history written long ago still hands the guest the id it was first given.
 	if gc.name == "defer" {
@@ -174,6 +180,7 @@ var g1Golden = map[string]map[string]string{
 		"fresh":                  `res=0xc00000000 wrote="computed-now" isReplay=false step=1 recorded=[side_effect/step=0/value="computed-now"/defer=""/desc=""] defers={}`,
 		"frontier":               `res=0xc00000000 wrote="computed-now" isReplay=false step=2 recorded=[side_effect/step=1/value="computed-now"/defer=""/desc=""] defers={}`,
 		"replay":                 `res=0xe00000000 wrote="recorded-value" isReplay=true step=1 recorded=[] defers={}`,
+		"replay_quit":            `res=0x0 wrote="" isReplay=true step=1 recorded=[] defers={}`,
 		"segment_fresh":          `res=0x80000000 wrote="" isReplay=false step=0 recorded=[] defers={}`,
 		"segment_frontier":       `res=0x80000000 wrote="" isReplay=false step=1 recorded=[] defers={}`,
 		"shutdown_fresh":         `res=0x80000000 wrote="" isReplay=false step=0 recorded=[] defers={}`,
@@ -187,6 +194,7 @@ var g1Golden = map[string]map[string]string{
 		"fresh":                  `res=0x2 wrote="" isReplay=false step=0 recorded=[] defers={}`,
 		"frontier":               `res=0x2 wrote="" isReplay=true step=1 recorded=[] defers={}`,
 		"replay":                 `res=0xe00000000 wrote="recorded-value" isReplay=true step=1 recorded=[] defers={}`,
+		"replay_quit":            `res=0x80000000 wrote="" isReplay=true step=1 recorded=[] defers={}`,
 		"segment_fresh":          `res=0x80000000 wrote="" isReplay=true step=0 recorded=[] defers={}`,
 		"segment_frontier":       `res=0x80000000 wrote="" isReplay=true step=1 recorded=[] defers={}`,
 		"shutdown_fresh":         `res=0x80000000 wrote="" isReplay=false step=0 recorded=[] defers={}`,
@@ -201,6 +209,7 @@ var g1Golden = map[string]map[string]string{
 		"frontier":               `res=0x700000000 wrote="defer-1" isReplay=false step=2 recorded=[defer/step=1/value=""/defer="defer-1"/desc="the-cleanup"] defers={defer-0="recorded-cleanup",defer-1="the-cleanup"}`,
 		"replay":                 `res=0x700000000 wrote="defer-0" isReplay=true step=1 recorded=[] defers={defer-0="recorded-cleanup"}`,
 		"replay_legacy_record":   `res=0x700000000 wrote="defer-0" isReplay=true step=1 recorded=[] defers={defer-0="the-cleanup"}`,
+		"replay_quit":            `res=0x0 wrote="" isReplay=true step=1 recorded=[] defers={}`,
 		"segment_fresh":          `res=0x700000000 wrote="defer-0" isReplay=false step=1 recorded=[defer/step=0/value=""/defer="defer-0"/desc="the-cleanup"] defers={defer-0="the-cleanup"}`,
 		"segment_frontier":       `res=0x700000000 wrote="defer-1" isReplay=false step=2 recorded=[defer/step=1/value=""/defer="defer-1"/desc="the-cleanup"] defers={defer-0="recorded-cleanup",defer-1="the-cleanup"}`,
 		"shutdown_fresh":         `res=0x700000000 wrote="defer-0" isReplay=false step=1 recorded=[defer/step=0/value=""/defer="defer-0"/desc="the-cleanup"] defers={defer-0="the-cleanup"}`,
