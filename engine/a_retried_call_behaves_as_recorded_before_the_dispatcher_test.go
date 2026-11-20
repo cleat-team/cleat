@@ -37,13 +37,13 @@ type g3rCaller struct {
 	onAttempt func(n int)
 }
 
-// learnKeys fills stepOfKey: the idempotency key for each of steps 0..9, learned from the engine's own call path (callService) and NOT by calling
-// DurableCallIdempotencyKey from this file. THE CALLER KEEPS THE STEP AND NOT THE KEY, and that is deliberate: golangci-lint's gosec G701 (SQL taint
-// analysis) reports an UNRELATED line of production code (engine/mysql_lifecycle.go:114) when a test type that implements IdempotentCaller stores
-// the key argument it is handed. Measured on the merge of this file into develop 0678b1cb: 1 finding with the key stored, 0 with the interface
-// implemented and the key never stored, 0 with the key used for a lookup and only the step stored (this version). An earlier version of this file
-// learned the keys correctly through callService but still stored them, linted clean on the base it was written on (5a4d59db) and failed CI's
-// lint-go on the merge with the next develop: the finding depends on the base as well as on the file.
+// learnKeys fills stepOfKey: the idempotency key for each of steps 0..9, learned from the engine's own call path (callService), so this file never calls
+// DurableCallIdempotencyKey itself. The caller keeps the STEP each key came from and not the key.
+//
+// THAT SHAPE IS NOT A LINT FIX AND IS NOT CLAIMED TO BE ONE. An earlier version of this comment said it stopped gosec's G701 from flagging an unrelated
+// production line (engine/mysql_lifecycle.go:114); that rested on single runs of each variant and did not hold: lint-go failed on a head built this way,
+// and the finding fires on some runs of UNMODIFIED develop (1 of 5 fresh-cache runs, cleat#4252, the cleat#3247 mechanism). It is kept because it is a
+// sufficient way to read the keys and the golden table passes with it, not because it avoids anything.
 func (c *g3rCaller) learnKeys(workflowID string) {
 	probe := newRecordingCaller()
 	ps := &execSession{engine: NewEngine(nil, probe), workflowID: workflowID}
