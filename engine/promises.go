@@ -19,6 +19,20 @@ func (s *execSession) CreatePromise(ctx context.Context, m api.Module, name stri
 	return s.step(ctx, m, &createPromiseStep, stepArgs{s1: name, outPtr: promiseIDPtr, outMaxLen: promiseIDMaxLen})
 }
 
+// settlementIdentity is the identity check of resolve_promise and reject_promise: the record must name the promise the workflow is settling,
+// and when it carries the cleat#4079 Service/Op discriminator it must be the settlement of this kind. A record WITHOUT the discriminator is
+// accepted: a history written before cleat#4079 has none, and so does the record await_promise writes for a promise that was already
+// settled, which replay has always taken by type (pinned by the replay_by_type_alone characterization row).
+func settlementIdentity(promiseID string, rec *EventRecord, op string) string {
+	if rec.PromiseID != promiseID {
+		return fmt.Sprintf("promise %q, recorded %q", promiseID, rec.PromiseID)
+	}
+	if rec.Service != "" && (rec.Service != PromiseEventService || rec.Op != op) {
+		return fmt.Sprintf("a %s, recorded as %s/%s", op, rec.Service, rec.Op)
+	}
+	return ""
+}
+
 // createPromiseStep is CreatePromise as a step (cleat#4152). The refusal below is the one the dispatcher applies to every non-Pure step:
 // a fresh create_promise is new work, it appends an event that finishDeferPhase writes into the terminal transaction and writes a
 // promise row at once. In a defer segment that is the workflow BODY running past its recorded history, so it is refused; a defer body
@@ -28,6 +42,13 @@ var createPromiseStep = stepSpec{
 	Effect:  effectEffect,
 	Records: recordsOne,
 	Want:    EventTypeCreatePromise,
+	// A promise is identified by its NAME: the id is generated, and replay hands back the recorded one.
+	Identity: func(a stepArgs, rec *EventRecord) string {
+		if rec.PromiseName != a.s1 {
+			return fmt.Sprintf("promise name %q, recorded %q", a.s1, rec.PromiseName)
+		}
+		return ""
+	},
 	Decode: func(c *stepCtx, rec *EventRecord) int64 {
 		written, writtenEC := c.s.writeOut(c.ctx, c.m, c.args.outPtr, rec.PromiseID, c.args.outMaxLen)
 		return packSimpleResult(writtenEC, written)
@@ -376,6 +397,9 @@ var resolvePromiseStep = stepSpec{
 	Effect:  effectEffect,
 	Records: recordsOne,
 	Want:    EventTypePromiseResolved,
+	Identity: func(a stepArgs, rec *EventRecord) string {
+		return settlementIdentity(a.s1, rec, PromiseOpResolve)
+	},
 	// Consumed and answered with success, whatever the original run was told by the store (see the characterization row
 	// resolve_promise/store_error_then_replay: nothing in the event says the store write failed).
 	Decode: func(*stepCtx, *EventRecord) int64 { return 0 },
@@ -424,7 +448,10 @@ var rejectPromiseStep = stepSpec{
 	Effect:  effectEffect,
 	Records: recordsOne,
 	Want:    EventTypePromiseRejected,
-	Decode:  func(*stepCtx, *EventRecord) int64 { return 0 },
+	Identity: func(a stepArgs, rec *EventRecord) string {
+		return settlementIdentity(a.s1, rec, PromiseOpReject)
+	},
+	Decode: func(*stepCtx, *EventRecord) int64 { return 0 },
 	Fresh: func(c *stepCtx) int64 {
 		s, ctx, promiseID, errMsg := c.s, c.ctx, c.args.s1, c.args.s2
 

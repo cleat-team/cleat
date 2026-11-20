@@ -26,7 +26,7 @@ const fakeEvent EventType = "fake_step_event"
 // fakeSpec builds a one-event spec whose Fresh counts how often it ran.
 func fakeSpec(effect stepEffect, shape recordShape, ran *int32, record func(c *stepCtx)) *stepSpec {
 	return &stepSpec{
-		Name: "fake", Effect: effect, Records: shape, Want: fakeEvent,
+		Name: "fake", Effect: effect, Records: shape, Want: fakeEvent, NoIdentity: "a fake with nothing to compare",
 		Decode: func(*stepCtx, *EventRecord) int64 { return 7 },
 		Fresh: func(c *stepCtx) int64 {
 			atomic.AddInt32(ran, 1)
@@ -192,10 +192,12 @@ func TestEverySpecIsRegisteredAndNoPureSpecRecords(t *testing.T) {
 	}
 	// The control: validate refuses what it says it refuses, so the loop above is not vacuous.
 	for name, bad := range map[string]stepSpec{
-		"no name":              {Want: fakeEvent, Decode: func(*stepCtx, *EventRecord) int64 { return 0 }, Fresh: func(*stepCtx) int64 { return 0 }},
-		"no Want":              {Name: "x", Decode: func(*stepCtx, *EventRecord) int64 { return 0 }, Fresh: func(*stepCtx) int64 { return 0 }},
-		"no Decode":            {Name: "x", Want: fakeEvent, Fresh: func(*stepCtx) int64 { return 0 }},
-		"Pure but records one": {Name: "x", Want: fakeEvent, Effect: effectPure, Records: recordsOne, Decode: func(*stepCtx, *EventRecord) int64 { return 0 }, Fresh: func(*stepCtx) int64 { return 0 }},
+		"no name":                         {NoIdentity: "x", Want: fakeEvent, Decode: func(*stepCtx, *EventRecord) int64 { return 0 }, Fresh: func(*stepCtx) int64 { return 0 }},
+		"no Want":                         {NoIdentity: "x", Name: "x", Decode: func(*stepCtx, *EventRecord) int64 { return 0 }, Fresh: func(*stepCtx) int64 { return 0 }},
+		"no Decode":                       {NoIdentity: "x", Name: "x", Want: fakeEvent, Fresh: func(*stepCtx) int64 { return 0 }},
+		"both Identity and NoIdentity":    {Name: "x", Want: fakeEvent, Identity: func(stepArgs, *EventRecord) string { return "" }, NoIdentity: "x", Decode: func(*stepCtx, *EventRecord) int64 { return 0 }, Fresh: func(*stepCtx) int64 { return 0 }},
+		"neither Identity nor NoIdentity": {Name: "x", Want: fakeEvent, Decode: func(*stepCtx, *EventRecord) int64 { return 0 }, Fresh: func(*stepCtx) int64 { return 0 }},
+		"Pure but records one":            {NoIdentity: "x", Name: "x", Want: fakeEvent, Effect: effectPure, Records: recordsOne, Decode: func(*stepCtx, *EventRecord) int64 { return 0 }, Fresh: func(*stepCtx) int64 { return 0 }},
 	} {
 		bad := bad
 		if bad.validate() == nil {
@@ -344,5 +346,37 @@ func (s *execSession) bypass(c *stepCtx) { c.Record(EventRecord{}) }
 	cc, rr, rf := dispatcherCallerFacts(t, map[string]string{"bad.go": badStep})
 	if len(cc) != 2 || rr != 2 || rf != 1 {
 		t.Errorf("CONTROL: on a source with a second leaveReplay caller and a Record outside Fresh the scan reported callers=%v records=%d inFresh=%d, want 2 callers, 2 records, 1 in Fresh", cc, rr, rf)
+	}
+}
+
+// A record of the right TYPE that names something else is a divergence, not an answer (cleat#4211), and it is not consumed.
+func TestAStepOverARecordOfTheRightTypeThatNamesSomethingElseDiverges(t *testing.T) {
+	ctx := context.Background()
+	named := func() *stepSpec {
+		var ran int32
+		sp := fakeSpec(effectEffect, recordsOne, &ran, recordOneFake)
+		sp.NoIdentity = ""
+		sp.Identity = func(a stepArgs, rec *EventRecord) string {
+			if rec.PromiseID != a.s1 {
+				return "recorded " + rec.PromiseID + " for " + a.s1
+			}
+			return ""
+		}
+		return sp
+	}
+	rec := []EventRecord{{Step: 0, EventType: fakeEvent, PromiseID: "p-1"}}
+
+	same := stepSession(nil, append([]EventRecord(nil), rec...))
+	if got := same.step(ctx, nil, named(), stepArgs{s1: "p-1"}); got != 7 || same.stepCount != 1 {
+		t.Errorf("CONTROL: the call whose identity matches returned %d at step %d, want the decoded 7 at step 1", got, same.stepCount)
+	}
+
+	other := stepSession(nil, append([]EventRecord(nil), rec...))
+	got := other.step(ctx, nil, named(), stepArgs{s1: "p-2"})
+	if got&0xFF != 1 {
+		t.Errorf("a call whose identity differs from the record returned %#x, want errCode 1 (a divergence)", got)
+	}
+	if other.stepCount != 0 || !other.isReplay {
+		t.Errorf("a divergence on identity consumed the record or left replay: step=%d isReplay=%v, want 0 / true", other.stepCount, other.isReplay)
 	}
 }

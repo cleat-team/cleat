@@ -158,7 +158,7 @@ var promiseGolden = map[string]map[string]string{
 		"frontier":                   "res=0x0 isReplay=false step=2 recorded=[create_promise/step=1/svc=\"\"/op=\"\"/id=\"<generated>\"/name=\"n\"/result=\"\"/err=\"\"]",
 		"no_store":                   "res=0x1 isReplay=false step=1 recorded=[create_promise/step=0/svc=\"\"/op=\"\"/id=\"<generated>\"/name=\"n\"/result=\"\"/err=\"\"]",
 		"replay":                     "res=0x0 isReplay=true step=1 recorded=[]",
-		"replay_mismatched_identity": "res=0x0 isReplay=true step=1 recorded=[]",
+		"replay_mismatched_identity": "res=0x1 isReplay=true step=0 recorded=[]", // CHANGED ON PURPOSE by the dispatcher's identity check (cleat#4211): was res=0x0 step=1, accepted and consumed
 		"segment_fresh":              "res=0x80000000 isReplay=false step=0 recorded=[]",
 		"segment_frontier":           "res=0x80000000 isReplay=false step=1 recorded=[]",
 		"store_error":                "res=0x1 isReplay=false step=1 recorded=[create_promise/step=0/svc=\"\"/op=\"\"/id=\"<generated>\"/name=\"n\"/result=\"\"/err=\"\"]",
@@ -171,7 +171,7 @@ var promiseGolden = map[string]map[string]string{
 		"no_store":                   "res=0x1 isReplay=false step=1 recorded=[promise_resolved/step=0/svc=\"promise\"/op=\"resolve\"/id=\"p-1\"/name=\"\"/result=\"v\"/err=\"\"]",
 		"replay":                     "res=0x0 isReplay=true step=1 recorded=[]",
 		"replay_by_type_alone":       "res=0x0 isReplay=true step=1 recorded=[]",
-		"replay_mismatched_identity": "res=0x0 isReplay=true step=1 recorded=[]",
+		"replay_mismatched_identity": "res=0x1 isReplay=true step=0 recorded=[]", // CHANGED ON PURPOSE by the dispatcher's identity check (cleat#4211): was res=0x0 step=1, accepted and consumed
 		"segment_fresh":              "res=0x80000000 isReplay=false step=0 recorded=[]",
 		"segment_frontier":           "res=0x80000000 isReplay=false step=1 recorded=[]",
 		"store_error":                "res=0x1 isReplay=false step=1 recorded=[promise_resolved/step=0/svc=\"promise\"/op=\"resolve\"/id=\"p-1\"/name=\"\"/result=\"v\"/err=\"\"]",
@@ -184,7 +184,7 @@ var promiseGolden = map[string]map[string]string{
 		"no_store":                   "res=0x1 isReplay=false step=1 recorded=[promise_rejected/step=0/svc=\"promise\"/op=\"reject\"/id=\"p-1\"/name=\"\"/result=\"\"/err=\"\"]",
 		"replay":                     "res=0x0 isReplay=true step=1 recorded=[]",
 		"replay_by_type_alone":       "res=0x0 isReplay=true step=1 recorded=[]",
-		"replay_mismatched_identity": "res=0x0 isReplay=true step=1 recorded=[]",
+		"replay_mismatched_identity": "res=0x1 isReplay=true step=0 recorded=[]", // CHANGED ON PURPOSE by the dispatcher's identity check (cleat#4211): was res=0x0 step=1, accepted and consumed
 		"segment_fresh":              "res=0x80000000 isReplay=false step=0 recorded=[]",
 		"segment_frontier":           "res=0x80000000 isReplay=false step=1 recorded=[]",
 		"store_error":                "res=0x1 isReplay=false step=1 recorded=[promise_rejected/step=0/svc=\"promise\"/op=\"reject\"/id=\"p-1\"/name=\"\"/result=\"\"/err=\"\"]",

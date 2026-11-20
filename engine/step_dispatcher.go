@@ -83,6 +83,15 @@ type stepSpec struct {
 	Records recordShape
 	// Want is the type of the event this step consumes on replay. A record of any other type is a divergence, reported once, in one format.
 	Want EventType
+	// Identity compares what identifies THIS call with what the record at this step names, and returns "" when they are the same call or a
+	// short description of the difference when they are not (a different promise, lock, signal, child). A record of the right type that names
+	// something else is a divergence, not an answer (cleat#4211): without this a replay accepts another call's record, consumes it and answers
+	// as though it were this one. The fields that identify a call are the ones that cannot legitimately vary between a run and its replay;
+	// a payload that can (a timestamp in a request, a generated id) is not identity.
+	Identity func(a stepArgs, rec *EventRecord) string
+	// NoIdentity says why a call has no identifying field, when it has none: exactly one of Identity and NoIdentity is set, so "no identity"
+	// is a decision with a reason that a reviewer can read, not an omission.
+	NoIdentity string
 	// Decode turns the consumed record into the call's result. It must not touch the world.
 	Decode func(c *stepCtx, rec *EventRecord) int64
 	// Fresh does the work and records, through c.Record, where the call records. It is called only once the dispatcher has decided
@@ -105,6 +114,8 @@ func (sp *stepSpec) validate() error {
 		return fmt.Errorf("step spec %q has no Want: it names no event to consume on replay", sp.Name)
 	case sp.Decode == nil || sp.Fresh == nil:
 		return fmt.Errorf("step spec %q is missing its Decode or its Fresh", sp.Name)
+	case (sp.Identity == nil) == (sp.NoIdentity == ""):
+		return fmt.Errorf("step spec %q must set exactly one of Identity and NoIdentity: a call either names what identifies it or says why it has nothing to compare", sp.Name)
 	case sp.Effect == effectPure && sp.Records != recordsNone:
 		return fmt.Errorf("step spec %q is Pure and declares it records events: a Pure step is not refused in a segment, so it must record nothing", sp.Name)
 	}
@@ -137,6 +148,11 @@ func (s *execSession) step(ctx context.Context, m api.Module, sp *stepSpec, args
 			if rec.EventType != sp.Want {
 				// Not consumed: replayDivergence leaves the record for the call it belongs to (cleat#4157).
 				return s.replayDivergence(ctx, m, sp.Want, args.outPtr, args.outMaxLen)
+			}
+			if sp.Identity != nil {
+				if why := sp.Identity(args, &rec); why != "" {
+					return s.replayIdentityDivergence(ctx, m, sp.Name, why, args.outPtr, args.outMaxLen)
+				}
 			}
 			if !s.advanceReplayStep(ctx, &rec) {
 				return 0
