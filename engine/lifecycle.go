@@ -13,6 +13,14 @@ import (
 	"github.com/tetratelabs/wazero/api"
 )
 
+// suspendedForContinueAsNew reports whether this execution is suspending because the workflow continued as new (the guest's ContinueAsNew, its
+// versioned form, or the event-cap auto-continuation: all set the same reason). That suspension is the END of the run, not a wait: the workflow
+// is exiting, so its registered defers belong to this execution and must run, exactly as they do for a Go guest and for a guest that returns
+// after continuing as new. A component guest that raises SuspendSentinel after continue_as_new does not drain on its own (cleat#4197).
+func (s *execSession) suspendedForContinueAsNew() bool {
+	return s.suspendErr != nil && s.suspendErr.Reason == "continue_as_new"
+}
+
 func (s *execSession) ContinueAsNew(ctx context.Context, m api.Module, newInputJSON string) int64 {
 	if s.isReplay {
 		if s.stepCount < len(s.history) {

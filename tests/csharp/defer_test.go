@@ -61,3 +61,36 @@ func TestCSharpDeferRegistrationIsTheStopPointAndItsBodyStillRuns(t *testing.T) 
 		t.Errorf("the cleanup call is not marked as a defer body's (in_defer_phase)")
 	}
 }
+
+// cleat#4194: a run that registered a defer and then SLEEPS is suspended, not finished. Its cleanup must not run at the suspension, and the
+// resumed run must make the call after the sleep and then run the cleanup once. Before the fix the component path drained the defer table at every
+// suspension, so the first run called svc/cleanup and the resume failed with a replay divergence at the step the cleanup had taken.
+func TestCSharpDeferRegisteredBeforeASleepDoesNotRunAtTheSuspension(t *testing.T) {
+	first := runConformanceEntry(t, "defer_then_sleep", entryRun{WorkflowID: "wf-defer-sleep"})
+	if first.Err != nil || first.Suspended == nil {
+		t.Fatalf("the first run should suspend in the sleep: err=%v suspended=%v result=%q", first.Err, first.Suspended != nil, first.Result)
+	}
+	if got := opsOf(first); len(got) != 1 || got[0] != "svc/before" {
+		t.Fatalf("the first run made calls %v, want exactly [svc/before]: the cleanup ran while the workflow was only sleeping", got)
+	}
+	hist := moveRecordsBack(t, first.History, engine.EventTypeCall, 6_000)
+	second := runConformanceEntry(t, "defer_then_sleep", entryRun{WorkflowID: "wf-defer-sleep", Replay: hist})
+	if second.Err != nil || second.Suspended != nil {
+		t.Fatalf("the resumed run did not finish: err=%v suspended=%v", second.Err, second.Suspended != nil)
+	}
+	if got := opsOf(second); len(got) != 2 || got[0] != "svc/after" || got[1] != "svc/cleanup" {
+		t.Fatalf("the resumed run made calls %v, want [svc/after svc/cleanup]: before (replayed from history, not repeated), the cleanup last and once", got)
+	}
+}
+
+// cleat#4197: the other side of the guard above. continue-as-new ENDS the run, so the cleanup registered before it runs exactly once, at that
+// suspension, as it does for a Go guest. With only the defer-phase guard it never ran: the SDK's continuation does not drain by itself.
+func TestCSharpDeferRegisteredBeforeContinueAsNewRunsExactlyOnce(t *testing.T) {
+	res := runConformanceEntry(t, "defer_then_continue_as_new", entryRun{WorkflowID: "wf-defer-can"})
+	if res.Err != nil || res.Suspended == nil || res.Suspended.Reason != "continue_as_new" {
+		t.Fatalf("the run should suspend for continue_as_new: err=%v suspended=%+v", res.Err, res.Suspended)
+	}
+	if got := opsOf(res); len(got) != 2 || got[0] != "svc/before" || got[1] != "svc/cleanup" {
+		t.Fatalf("the run made calls %v, want [svc/before svc/cleanup]: the cleanup runs exactly once when the run continues as new", got)
+	}
+}

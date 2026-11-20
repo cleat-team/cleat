@@ -22,4 +22,31 @@ public static class GroupDefer
         h.Call("svc", "after", "{}");
         return new JsonObject { ["ok"] = true };
     }
+
+    /// <summary>
+    /// A defer, a call, a SLEEP, a call after. The sleep suspends the run, which is still alive and waiting: the registered cleanup must NOT
+    /// run then (cleat#4194), and a resumed run must make the call after the sleep, not find the cleanup in its place in the history.
+    /// </summary>
+    [CleatEntry("defer_then_sleep")]
+    public static JsonNode DeferThenSleep(HostCalls h, JsonElement input)
+    {
+        h.Defer("cleanup", () => { h.Call("svc", "cleanup", "{}"); });
+        h.Call("svc", "before", "{}");
+        h.Sleep(TimeSpan.FromSeconds(5));
+        h.Call("svc", "after", "{}");
+        return new JsonObject { ["ok"] = true };
+    }
+
+    /// <summary>
+    /// A defer, a call, then continue-as-new. That ENDS the run, so the cleanup belongs to it and must run exactly once (cleat#4197). The SDK
+    /// turns the continuation into a suspension that does not drain by itself, so the host's drain is the only thing that runs it.
+    /// </summary>
+    [CleatEntry("defer_then_continue_as_new")]
+    public static JsonNode DeferThenContinueAsNew(HostCalls h, JsonElement input)
+    {
+        h.Defer("cleanup", () => { h.Call("svc", "cleanup", "{}"); });
+        h.Call("svc", "before", "{}");
+        h.ContinueAsNew("{}");
+        return new JsonObject { ["unreachable"] = true };
+    }
 }

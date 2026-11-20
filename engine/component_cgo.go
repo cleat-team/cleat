@@ -1742,7 +1742,18 @@ func (b *wasmtimeBackend) ExecuteComponentCGo(
 		// has to be the one to call the drain, because only the host can
 		// bracket it so the defer bodies' calls are permitted while the
 		// workflow body's are stopped.
-		b.componentRunGuestDefersAfterSuspend(store, instance, entryPoint)
+		//
+		// ONLY in a defer segment, exactly as the core-module path guards the same call (backend_wasmtime.go,
+		// `if b.deferPhase`). In an ordinary run a suspension means the workflow is still alive and WAITING; draining
+		// there ran its cleanup early (the defer body's calls are permitted during a drain and are recorded), and the
+		// resume then diverged at the step the cleanup had taken (cleat#4194).
+		//
+		// And when the suspension is a CONTINUE-AS-NEW: that ends the run rather than pausing it, and a component guest that raises its suspend
+		// sentinel after continue_as_new does not drain (the wrapper only drains on completion), so the host drain is the only thing that runs
+		// the cleanup. Measured by cleat-review on the real component path: without this the cleanup of such a run never ran at all.
+		if b.deferPhase || suspendedForContinueAsNew(b.handler) {
+			b.componentRunGuestDefersAfterSuspend(store, instance, entryPoint)
+		}
 		return &ExecResult{Suspended: true}, nil
 	}
 
@@ -1750,6 +1761,14 @@ func (b *wasmtimeBackend) ExecuteComponentCGo(
 		return &ExecResult{Result: `"ok"`, Suspended: false}, nil
 	}
 	return &ExecResult{Result: resultStr, Suspended: false}, nil
+}
+
+// suspendedForContinueAsNew asks the session (when the backend has one) whether the suspension it is returning is a continue-as-new.
+func suspendedForContinueAsNew(h HostHandler) bool {
+	if s, ok := h.(interface{ suspendedForContinueAsNew() bool }); ok {
+		return s.suspendedForContinueAsNew()
+	}
+	return false
 }
 
 // componentRunGuestDefersAfterSuspend drains a suspended component guest's
