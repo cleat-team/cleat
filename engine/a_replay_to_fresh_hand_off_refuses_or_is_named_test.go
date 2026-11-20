@@ -40,6 +40,7 @@ import (
 // SHRINK: an entry added to silence a failure is the next unguarded call site. TestEveryHandOffExemptionStillDescribesSomething
 // fails if one stops being true.
 var handOffsThatNeedNoRefusal = map[string]string{
+	"leaveReplay": "the dispatcher's one exit from replay (cleat#4152). Its only caller is step, which applies stopBeforeNewWork to every non-Pure step on the next lines, so the refusal is not skipped by reaching a call this way; that is the property the dispatcher exists to have.",
 	"fastForwardToStop": "the mechanism that makes a stop-at-last-stoppable segment refuse: it leaves replay so that the guest's NEXT call " +
 		"takes the non-replay half, where the refusal is.",
 	"replayReleaseLock": "deliberately unrefused. A defer body that holds a lock must be able to release it, and a cleanup that cannot " +

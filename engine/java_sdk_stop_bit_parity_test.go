@@ -246,6 +246,11 @@ func TestTheRequiredJavaGuardsCoverEveryHostStopSite(t *testing.T) {
 	}
 	stopSites := 0
 	call := regexp.MustCompile(`(?m)^\s*if s\.stopBeforeNewWork\(\) \{`)
+	// A host call that goes through the dispatcher (cleat#4152) has no `if s.stopBeforeNewWork() {` of its own: step applies it to every
+	// non-Pure step. Each such call is still one stop site a guest must check, so it counts here, and the count of the three calls moved
+	// onto step is the same as before they were. Matched at the start of a code line so a comment quoting the call is not counted; a
+	// call written any other way is missed, which makes the count LOWER and fails this test, the safe direction.
+	viaStep := regexp.MustCompile(`(?m)^\s*return s\.step\(`)
 	for _, e := range entries {
 		if e.IsDir() || !strings.HasSuffix(e.Name(), ".go") || strings.HasSuffix(e.Name(), "_test.go") {
 			continue
@@ -255,6 +260,9 @@ func TestTheRequiredJavaGuardsCoverEveryHostStopSite(t *testing.T) {
 			t.Fatalf("reading %s: %v", e.Name(), err)
 		}
 		stopSites += len(call.FindAll(b, -1))
+		if e.Name() != "step_dispatcher.go" {
+			stopSites += len(viaStep.FindAll(b, -1))
+		}
 	}
 	if stopSites == 0 {
 		t.Fatal("found no `if s.stopBeforeNewWork() {` sites in engine/, so this test is " +

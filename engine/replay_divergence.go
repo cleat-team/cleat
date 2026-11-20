@@ -24,11 +24,28 @@ import (
 // later call, which is the honest answer.
 func (s *execSession) replayDivergence(ctx context.Context, m api.Module, expected EventType, outPtr, outMaxLen uint32) int64 {
 	got := s.history[s.stepCount]
+	msg := fmt.Sprintf("replay divergence at step %d: expected %s, got %s.\nRun 'cleat vet' on your workflow code to check for common non-determinism issues (time.Now(), random values, map iteration, goroutines).",
+		got.Step, expected, got.EventType)
+	return s.reportReplayDivergence(ctx, m, msg, outPtr, outMaxLen)
+}
+
+// replayIdentityDivergence reports that the event at the next step is the right TYPE for this call but names something else: a different
+// promise, lock, signal or child than the one the workflow is now asking for (cleat#4211). A replay that matched on type alone accepted it,
+// consumed it, and answered as though the recorded call were this one, so the history and the code had disagreed and nothing said so. Same
+// shape, metric and non-consumption as replayDivergence; what differs is the message, which names what was recorded and what was asked.
+func (s *execSession) replayIdentityDivergence(ctx context.Context, m api.Module, step string, why string, outPtr, outMaxLen uint32) int64 {
+	got := s.history[s.stepCount]
+	msg := fmt.Sprintf("replay divergence at step %d: %s asked for something other than the %s recorded there: %s.\nRun 'cleat vet' on your workflow code to check for common non-determinism issues (time.Now(), random values, map iteration, goroutines).",
+		got.Step, step, got.EventType, why)
+	return s.reportReplayDivergence(ctx, m, msg, outPtr, outMaxLen)
+}
+
+// reportReplayDivergence is the one place a divergence is counted and written to the guest: the failure metric, then error code 1 in a simple
+// result with the message in the call's own output buffer when it has one.
+func (s *execSession) reportReplayDivergence(ctx context.Context, m api.Module, msg string, outPtr, outMaxLen uint32) int64 {
 	if s.engine.Metrics != nil {
 		s.engine.Metrics.RecordReplayFailure(ctx)
 	}
-	msg := fmt.Sprintf("replay divergence at step %d: expected %s, got %s.\nRun 'cleat vet' on your workflow code to check for common non-determinism issues (time.Now(), random values, map iteration, goroutines).",
-		got.Step, expected, got.EventType)
 	var written uint32
 	if outMaxLen > 0 {
 		written, _ = s.writeResult(ctx, m, outPtr, msg, outMaxLen)
