@@ -1,8 +1,9 @@
-# cleat C# SDK (IN DEVELOPMENT, NOT SUPPORTED)
+# cleat C# SDK (tier 2, prerelease toolchain)
 
-C# is **not a supported guest language**. This package is the SDK half of the work tracked in
-[cleat#4080](https://github.com/cleat-team/cleat/issues/4080); `tiers.yaml` is the authority on what is supported,
-and it does not list C#. Nothing here is a claim that a C# workflow runs in production.
+C# is a **tier-2 guest language** (owner decision, recorded on
+[cleat#4080](https://github.com/cleat-team/cleat/issues/4080)). This package is the SDK half of that work; `tiers.yaml`
+(entry `sdk-csharp`) is the authority on what is claimed and on the open items, which include a prerelease toolchain, no NuGet
+package, and no run on a real worker against a database. Nothing here is a claim that a C# workflow runs in production.
 
 A C# workflow is compiled to a WebAssembly **component** by `componentize-dotnet` against the one WIT world the
 engine reads, `python-sdk/wit/cleat.wit` (world `cleat-workflow`). This package supplies the layer between the

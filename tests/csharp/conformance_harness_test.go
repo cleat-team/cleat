@@ -148,7 +148,13 @@ type conformanceResult struct {
 // runConformanceEntry runs one entry point of the conformance component through the real engine and wasmtime.
 func runConformanceEntry(t *testing.T, entry string, r entryRun) conformanceResult {
 	t.Helper()
-	b := conformanceComponent(t)
+	return runComponentEntry(t, conformanceComponent(t), entry, r)
+}
+
+// runComponentEntry runs one entry point of any built C# component through the real engine and wasmtime. The conformance component is one
+// caller; the quick-start example (quickstart_example_test.go) is another.
+func runComponentEntry(t *testing.T, b []byte, entry string, r entryRun) conformanceResult {
+	t.Helper()
 	if got := wasm.DetectLanguage(b); got != "csharp" {
 		t.Fatalf("PRECONDITION FAILED: the component is detected as %q, not csharp, so a different backend path would be measured", got)
 	}

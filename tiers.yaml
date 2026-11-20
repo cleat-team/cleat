@@ -799,66 +799,86 @@ tier2:
            dynamic mode only, which is out of scope"
 
     - id: sdk-csharp
-      status: IN DEVELOPMENT -- NOT SUPPORTED
+      decision: DECIDED 2026-11-19    # owner: C# is a tier-2 language; recorded at https://github.com/cleat-team/cleat/issues/4080#issuecomment-7034279024; promotion in C# PR 7 of cleat#4080, after the determinism vet (PR 6)
       why: |
         C# guests as Component Model components built with componentize-dotnet against the
         existing `cleat-workflow` world in python-sdk/wit/cleat.wit (Route B of the cleat#4077
-        spike). Owner decision 2026-11-18: build it, as tier 2, in the seven PRs tracked in
-        cleat#4080. This entry exists so that having a label and a test package is not read
-        as having support; it claims nothing, and it stays "IN DEVELOPMENT -- NOT SUPPORTED"
-        until the last of the seven (the one that wires the tier-2 gate and the promotion
-        criteria). The status changes in that PR, not before.
+        spike), tier 2. It carried "IN DEVELOPMENT -- NOT SUPPORTED" from its first commit
+        (cleat#4080, PR 1) so that having a label and a test package would not be read as
+        having support; that was removed in the last of the seven PRs, on the owner's decision
+        of 2026-11-19.
 
-        What the spike measured on the real engine (a spike branch, a mock caller, amd64 under
-        emulation; cleat#4077 separates measured from inferred, and nothing below is a
-        support claim): a C# component ran an identity call, a durable call recorded as one
-        history event, a suspension thrown 20 frames deep, a replay from history and a
-        `run-deferred` after a suspend; a component is 0.7-1.05 MB. Three things stood between
-        it and a usable guest, all on the engine side, tracked as C# PR 3: the engine's default
-        per-store memory limit (32 MiB) is below what .NET needs to start (at least 52 MiB);
-        the WASI determinism shadows are registered for one 0.2 minor and the toolchain imports
-        another, so DateTime.UtcNow, Random and Guid differ on every replay (a measured
-        defect); and a kill gives a component no defer drain (cleat#4079).
+        What the claim rests on (re-derive from the tree; do not trust this sentence): every
+        function in python-sdk/wit/cleat.wit is bound by the SDK except durable-register-query-
+        handler, which no SDK has and which stays listed in tests/csharp/unbound.d/ on purpose
+        (tests/csharp/unbound_drift_test.go fails if a function is neither bound nor listed);
+        each binding group is driven through the real engine and wasmtime backend by a
+        conformance component (packages/cleat-csharp/conformance/), and the Go-side tests are
+        every function named TestCSharp* in tests/csharp/ (`grep -h '^func TestCSharp'
+        tests/csharp/*.go | wc -l`); the engine's default per-store memory limit
+        (DefaultWasmtimeMemoryLimitBytes, 256 MiB, engine/wasmtime_options.go) is above the 52
+        MiB a .NET guest needs to start, which TestTheDefaultMemoryLimitClearsTheLargestRuntime
+        keeps true, and "csharp" is in deferSegmentLanguages (engine/engine.go), so a failed,
+        terminated or killed run's registered cleanup runs. The walk-through in docs/tutorials/csharp-quick-start.md is a real project,
+        examples/csharp-workflow, built by `cleat build --target csharp` and run on the engine
+        by TestCSharpQuickStartExampleSuspendsResumesFromHistoryAndRunsItsDefer, so the page
+        cannot drift from a workflow that works.
 
-        What exists on develop as of the PR that added this entry (2026-11-18; re-derive from
-        the tree, do not trust this sentence): the label "csharp" in engine.WasmtimeLanguages
-        (routes a module that declares it to the wasmtime backend and does nothing else;
-        defer-segment membership is C# PR 3's decision), the Go test package tests/csharp/,
-        and the guard below. What did not exist then: a build chain, a stamper, an SDK, a
-        host-call binding, a CI job.
+        What it does NOT rest on, stated plainly (each is an open item below): the toolchain is
+        a prerelease, there is no NuGet package, no C# workflow has been run on a real worker
+        against a database, and a suspension is an exception that user code can catch.
 
         Where its tests live, and why it matters (the exclusion is structural, not a list):
         every Go-side C# test is named TestCSharp* and lives in tests/csharp/, a package in
         tier2.packages and in NO tier-1 pattern, so it cannot run in the Tier 1 gate, where a
-        skip is a failure. scripts/check-csharp-tier.py refuses a TestCSharp* function
-        anywhere else, refuses a test that names the C# toolchain outside that package, and
-        refuses to pass if tests/csharp/ holds none. The SDK itself and its managed unit tests
-        will live in packages/cleat-csharp/ and run in a digest-pinned .NET SDK container, not
-        under `go test`; that directory does not exist yet. LANGUAGE_SUPPORT.md's C#/.NET row
-        is checked against this entry by scripts/check-typescript-tier.py, which compares
-        every row of the table with tiers.yaml.
+        skip is a failure. scripts/check-csharp-tier.py refuses a TestCSharp* function anywhere
+        else, refuses a test that names the C# toolchain outside that package, and refuses to
+        pass if tests/csharp/ holds none. The tests run in two places: the required Tier 2 Gate
+        (./tests/csharp/... is in tier2.packages; its x86_64 runner cannot execute arm64, so the
+        linux/arm64 lock leg skips there), and the NON-required workflow
+        .github/workflows/csharp-tier2.yml, which also runs the SDK's managed unit tests in the
+        pinned container with the toolchain DECLARED (a missing docker fails there, not skips),
+        and a native linux/arm64 job. That workflow is deliberately not a required check: it
+        sits behind a `paths:` filter, which a required context must not. LANGUAGE_SUPPORT.md's
+        C#/.NET row is checked against this entry by scripts/check-typescript-tier.py, which
+        compares every row of the table with tiers.yaml.
       open_items:
-        - "the build chain, C# PR 2 (cleat#4080): `cleat build --target csharp` in a pinned
-           container (native on linux/arm64 and linux/amd64 hosts), with the lock in packages/cleat-csharp/ (toolchain.env,
-           toolchain.packages.tsv, nuget.config) and a MANDATORY cleat.metadata stamp naming
-           \"csharp\", because an unstamped C# component is detected as python and routed as
-           a Python guest. Built and measured against a stand-in project that writes the
-           entry-point list itself; the SDK that writes it for real is PR 4. Runs in CI in two
-           places: the Tier 2 Gate (./tests/csharp/... is in tier2.packages; its x86_64 runner
-           cannot execute arm64, so the linux/arm64 lock leg skips there), and the
-           non-required workflow .github/workflows/csharp-tier2.yml, which runs the SDK unit
-           tests and tests/csharp in the pinned container with the toolchain DECLARED (a missing
-           docker fails, not skips), and a native linux/arm64 job (ubuntu-24.04-arm) that
-           verifies the arm64 row of the lock and one real arm64 compile (C# PR 7, CI half)"
-        - "engine: a per-language memory default, WASI determinism shadows that tolerate the
-           WASI 0.2 minor a component imports, and `csharp` in deferSegmentLanguages with the
-           test that earns it (C# PR 3)"
-        - "the SDK, host-call coverage, a determinism vet, and the tier-2 gate (C# PRs 4-7).
-           async/await over host calls was measured for PR 4's design (cleat#4077, comment
-           6985233908) and is not built"
-        - "the toolchain is a prerelease: Microsoft.DotNet.ILCompiler.LLVM 10.0.0-rc.1.* from
-           the dotnet-experimental feed (not on nuget.org) and componentize-dotnet
-           0.8.0-preview; builds are not byte-reproducible"
+        - "the toolchain is a PRERELEASE: Microsoft.DotNet.ILCompiler.LLVM 10.0.0-rc.1.* is a
+           release candidate from the dotnet-experimental feed (not on nuget.org) and
+           componentize-dotnet is 0.8.0-preview. Both are pinned by digest and hash in
+           packages/cleat-csharp/toolchain.env and toolchain.packages.tsv, and a build refuses
+           anything else, but a pin is not a support commitment from upstream. Builds are NOT
+           byte-reproducible (same size, different bytes)"
+        - "there is no NuGet package: the SDK is a SOURCE package a project imports by path from a
+           cleat checkout (build/Cleat.Sdk.props), so a C# workflow is built inside a checkout.
+           The compiler only runs on x64 Linux or Windows, so `cleat build --target csharp` runs
+           it in the pinned linux container (amd64, or arm64 natively on an arm64 host); there
+           is no native macOS build"
+        - "the determinism vet (`cleat vet --lang csharp`, run by `cleat build --target csharp`; C# PR
+           6) is a text scan with no type information: aliases declared in another file,
+           reflection, a delegate from a variable and an extension method wrapping a refused
+           API are invisible to it. It refuses what was MEASURED to differ or fail on the real
+           engine (Environment.TickCount[64] and Stopwatch differ on replay, Thread.Sleep holds
+           the worker, Task.Run/Task.Delay/threads/File/HttpClient fail) and warns on a catch
+           that swallows CleatSuspendException. DateTime.UtcNow, Random and Guid.NewGuid()
+           were measured replay-stable and are not refused"
+        - "no test runs a C# component on a real cleat-worker against a database: tests/csharp
+           drives the engine in process with a recording caller, and tests/crash has no C#
+           client. Kill-and-resume of a C# workflow is covered at the engine level (the
+           terminate and defer-segment tests), not by killing a real worker; MySQL and SQL
+           Server have not been measured for C# at all"
+        - "a suspension is an exception, and it can be caught: a `catch (Exception)` that swallows
+           CleatSuspendException does not change the run's outcome but lets the workflow keep
+           running past it, and the host calls it then makes are real. Go and Rust abort at once.
+           packages/cleat-csharp/README.md says never to swallow it; the determinism vet is the
+           mechanism that flags it"
+        - "async/await over host calls works only because every awaited task is already complete;
+           Task.Delay, Task.Run and a blocking wait on an incomplete task throw
+           PlatformNotSupportedException. To wait, call HostCalls.Sleep"
+        - "typed (record) entries go through a source-generated JsonSerializerContext the author
+           writes, and the first typed record costs about 1.6 MB and about 140 ms of first
+           execution (measured 2026-11-18 under amd64 emulation: packages/cleat-csharp/README.md)"
+        - "cleat-gen-plugin has no C# target: typed plugin clients are not generated for C#"
 
     - id: plugins
       why: 22 built-in, all with unit tests; 10 covered by the integration harness.

@@ -2,8 +2,8 @@ package main
 
 // `cleat build --target csharp`: compile a C# workflow project to a Component Model component and stamp it (cleat#4080, C# PR 2).
 //
-// C# is a TIER-2 language, IN DEVELOPMENT and NOT SUPPORTED (tiers.yaml): this target exists so the work can be exercised and
-// measured, and it makes no support claim. The build runs in a digest-pinned Linux .NET SDK container (native arm64 on an arm64 host,
+// C# is a TIER-2 language (tiers.yaml, entry sdk-csharp): this target builds it, on a PRERELEASE toolchain, and tiers.yaml says what is
+// claimed and what is not. The build runs in a digest-pinned Linux .NET SDK container (native arm64 on an arm64 host,
 // amd64 elsewhere; the compiler only runs on Linux): packages/cleat-csharp/build.sh does that, from the lock in packages/cleat-csharp/toolchain.env
 // and toolchain.packages.tsv. This file finds the toolchain, runs the script, and does the one step that must not be skippable:
 // the cleat.metadata stamp. A C# component that carries no stamp is detected as Python and routed as a Python guest (measured in the
@@ -189,7 +189,7 @@ func csharpBuild(spec, outDir string, workflowVersion int, stderr io.Writer) int
 	}
 	defer os.RemoveAll(stage)
 
-	fmt.Fprintf(stderr, "  C# is a tier-2 target: in development and not supported (see tiers.yaml).\n")
+	fmt.Fprintf(stderr, "  C# is a tier-2 target on a prerelease toolchain (see tiers.yaml for what is claimed).\n")
 	fmt.Fprintf(stderr, "  Building %s in the pinned .NET SDK container (needs docker; the first build downloads the toolchain)...\n", spec)
 	cmd := exec.Command("bash", filepath.Join(dir, "build.sh"), root, rel, stage) //nolint:gosec // G204: fixed interpreter, arguments passed as an array, no shell; the variable parts are the toolchain directory found by walking up (or $CLEAT_CSHARP_DIR), the project path the developer just typed, and a temp directory.
 	cmd.Stdout, cmd.Stderr = stderr, stderr

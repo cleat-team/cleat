@@ -1,7 +1,7 @@
 # The C# determinism checker: measure first, refuse what was measured
 
-**Status: implemented, cleat#4080 (PR 6).** C# is "in development, not supported" in `tiers.yaml`;
-nothing here claims otherwise.
+**Status: implemented, cleat#4080 (PR 6).** C# is a tier-2 language in `tiers.yaml` (promoted in PR 7); this checker is a text
+scan, and what it cannot see is listed below and in that entry.
 
 ## What it is
 
