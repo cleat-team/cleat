@@ -9,8 +9,9 @@
 #   chaos-sample  a SEEDED random sample, bounded to a few minutes, on every pull request that touches the replay machinery.
 #   chaos-full    every boundary x every fault, on a schedule and on demand. This is the pre-release sweep and a 0.6.0 gate.
 #
-# NOT A REQUIRED CHECK YET. Making `Chaos sample` required is a branch-protection change, which is the owner's to make (tiers.yaml's
-# required_contexts block). It runs on every matching PR so its record exists before anyone is asked to depend on it.
+# NOT A REQUIRED CHECK: Chaos sample
+# Not required yet. Making `Chaos sample` required is a branch-protection change, which is the owner's to make (tiers.yaml's required_contexts
+# block). It runs on every matching PR so its record exists before anyone is asked to depend on it.
 #
 # A failure prints the seed, the script and the fault, and a one-line command that replays exactly that case.
 # ---------------------------------------------------------------------------
