@@ -72,6 +72,7 @@ engine/testutil/mssql_row_disappearance.go	func MSSQLStatsDB
 engine/testutil/mssql_row_disappearance.go	func ReportMSSQLRowDisappearanceOnFailure
 engine/testutil/mssql_row_disappearance.go	func UninstallMSSQLRowDisappearanceAudit
 engine/testutil/mssql_schema.go	func SetupMSSQLMinimalSchema
+engine/testutil/owned_tempdir.go	func OwnedTempDir
 engine/testutil/packagedb.go	func SuiteTestDB
 engine/testutil/plugin_backend.go	func PluginTestBackend.CrossTenantConn
 engine/testutil/schema.go	func CleanupAllTestData

@@ -146,17 +146,29 @@ var (
 	workerBin string
 	guestWasm []byte
 	buildErr  error
+	// buildDir is where the worker and the guest were built, removed by TestMain when the run ends normally. A run that is killed or times out
+	// removes nothing; the next run's OwnedTempDir sweeps what such a run left (cleat#4226).
+	buildDir string
 )
+
+func TestMain(m *testing.M) {
+	code := m.Run()
+	if buildDir != "" {
+		os.RemoveAll(buildDir)
+	}
+	os.Exit(code)
+}
 
 func build(t *testing.T) (string, []byte) {
 	t.Helper()
 	buildOnce.Do(func() {
 		root := tree(t)
-		dir, err := os.MkdirTemp("", "chaos-build-")
+		dir, err := testutil.OwnedTempDir("chaos-build-")
 		if err != nil {
 			buildErr = err
 			return
 		}
+		buildDir = dir
 		workerBin = filepath.Join(dir, "cleat-worker")
 		// CGO at its default: CGO_ENABLED=0 removes the only WASM backend, and a result from that worker would not be about the engine that ships.
 		cmd := exec.Command("go", "build", "-o", workerBin, "./cmd/cleat-worker")
