@@ -232,6 +232,16 @@ onto the dispatcher declaring `Refuse: neverRefuse` (the hook of cleat#4220), wh
 `a_replay_to_fresh_hand_off_refuses_or_is_named_test.go` was deleted because the class says it where the spec is declared. Whether a segment's
 BODY should release a lock is a separate decision, not made here; the other calls in the list above are still unmeasured.
 
+**`SetScope` moved, cleat#4211, 2026-11-20, and three of its decisions are not visible from the code.** (1) *Only taking a scope is a step.* `SetScope("", "")`
+clears the scope, records no event and is never refused (measured in every stop state, fresh and replayed), so it stays in the `SetScope` method: a fresh clear
+releases the key, a replayed one only forgets it. (2) *The previous scope is written into the guest's buffer BEFORE the step*, on both arrivals, before history is
+read and before a refusal (a refused call has already written it, measured), and its packed result travels in `stepArgs.i1`. A `Before` hook was planned for this
+and was not needed. (3) *`outPtr` and `outMaxLen` stay ZERO on purpose*: that buffer holds the previous scope, and the divergence message a replay writes to
+`outPtr` would replace it. Its history is a run (failed attempts, then the acquisition), read whole by the run reader; the two shapes that used to be accepted or
+answered with a bare error (a first record naming another scope; a failed run followed by another scope's or another type's record) are now a counted divergence
+that consumes nothing. The fresh half records through `c.Record` in the spec's own `Fresh`, as the exemption test requires, and a method of its own
+(`freshSetScope`) arms the two suspensions, which the suspension-sites guard counts by that name.
+
 **One coupling to write down, because it is easy to miss: refusal and stoppability are linked.** The stoppable set
 (`engine/stop_at_last_stoppable.go`, `stoppableByOp`, `TestEveryHostStopSiteIsClassifiedForTheStoppableSet`) is derived from the
 refusing sites intersected with the component world's typed outcomes, so **every new refusal can move the stop point later and

@@ -659,7 +659,7 @@ func registerHostFunctions(builder wazero.HostModuleBuilder, rt *Runtime) {
 		h := handlerFromContext(ctx)
 		mem := m.Memory()
 		// Both empty is the documented "clear the scope" call -- see
-		// freshSetScope in scope.go.
+		// SetScope in scope.go.
 		objType, ok := readOptionalServiceName(mem, objTypePtr, objTypeLen)
 		if !ok {
 			return errBadParam

@@ -219,8 +219,8 @@ var stopSurfaces = map[string]stopSurface{
 		adapters: []string{"CreatePromise"},
 		witWhy:   reasonWitReturnsAPlainString,
 	},
-	// Keyed by freshSetScope, the method that holds the check; the Go adapter is SetScope.
-	"freshSetScope": {
+	// Keyed by SetScope, the method that goes through step (the refusal is the dispatcher's, cleat#4211); it is also the Go adapter.
+	"SetScope": {
 		adapters: []string{"SetScope"},
 		witWhy:   reasonWitReturnsAPlainString,
 	},

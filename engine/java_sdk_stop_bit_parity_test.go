@@ -114,9 +114,9 @@ var javaCallsTheHostCanRefuse = []sdkRefusableCall{
 	// workflow's defer segment created a promise row and took a 24-hour scope key
 	// from a real store. Both layouts read a refusal as errCode 0, a success.
 	{"createPromise", "CreatePromise"},
-	// The host site is freshSetScope, the unexported method that holds the check:
-	// SetScope and replaySetScope both reach it, as RunDetached does runDetached.
-	{"setScope", "freshSetScope"},
+	// The host site is SetScope, which goes through step (cleat#4211): the dispatcher holds the check for taking a scope. Clearing a scope
+	// (SetScope with both names empty) is not a step and is never refused.
+	{"setScope", "SetScope"},
 	// resolvePromise and rejectPromise joined in cleat#4079, for the same reason: the simple layout reads a stop as error code 0,
 	// which is a successful settlement. replyToSignal is a composite over resolvePromise and needs no entry of its own.
 	{"resolvePromise", "ResolvePromise"},

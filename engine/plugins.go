@@ -610,7 +610,7 @@ func (s *execSession) freshPluginCall(ctx context.Context, m api.Module,
 	// The refusal lives HERE and not in PluginCall: this function is reached from the non-replay entry AND from replayPluginCall at the replay
 	// frontier, and a defer segment over a run that has history starts in replay, so its body's first new call arrives by the second
 	// way. A refusal only in the entry was skipped (cleat#4143, measured on a real worker: a terminate's segment made the body's next
-	// call and never ran the registered cleanup). Same placement as freshSetScope (cleat#4091); AcquireLock's refusal (cleat#4140) is now the dispatcher's, for both ways in (cleat#4211).
+	// call and never ran the registered cleanup). SetScope's refusal (cleat#4091) and AcquireLock's (cleat#4140) are now the dispatcher's, for both ways in (cleat#4211).
 	if s.stopBeforeNewWork() {
 		return callSuspendSentinel
 	}
@@ -798,7 +798,7 @@ func (s *execSession) freshPluginCallStreaming(ctx context.Context, m api.Module
 	// The refusal lives HERE and not in PluginCallStreaming: this function is reached from the non-replay entry AND from replayPluginCallStreaming at the replay
 	// frontier, and a defer segment over a run that has history starts in replay, so its body's first new call arrives by the second
 	// way. A refusal only in the entry was skipped (cleat#4143, measured on a real worker: a terminate's segment made the body's next
-	// call and never ran the registered cleanup). Same placement as freshSetScope (cleat#4091); AcquireLock's refusal (cleat#4140) is now the dispatcher's, for both ways in (cleat#4211).
+	// call and never ran the registered cleanup). SetScope's refusal (cleat#4091) and AcquireLock's (cleat#4140) are now the dispatcher's, for both ways in (cleat#4211).
 	if s.stopBeforeNewWork() {
 		return callSuspendSentinel
 	}

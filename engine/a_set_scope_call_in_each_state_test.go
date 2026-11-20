@@ -10,9 +10,10 @@ package engine
 //	replaying one    over a recorded run of failed attempts and then the acquisition, over a record that names another scope, and over a run that
 //	                 is followed by something that is not this call's.
 //
-// The last group has rows that record behaviour the move CHANGES, marked "(today)" in their names. They are here so the change is a diff to a table
-// that says what it was, not a rewrite of a test that said nothing: a first record that names another scope is accepted, and a failed run followed
-// by a foreign record is answered with a bare error that consumes the failed attempts and counts nothing.
+// The last group has three rows the move CHANGED, and their names keep what each was ("(was: ...)"). They were written as "(today)" rows on the old
+// code, so the change is a diff to a table that said what the behaviour was: a first record that names another scope was accepted as this call's,
+// and a failed run followed by another scope's record, or by another type, was answered with a bare error that consumed the failed attempts and
+// counted nothing. All three are now a divergence, counted once, with nothing consumed, like every other replay's.
 
 import (
 	"context"
@@ -177,8 +178,9 @@ func scopeRec(step int, key, errText string) EventRecord {
 	return EventRecord{Step: step, EventType: EventTypeScopeAcquired, ScopeKey: key, Err: errText}
 }
 
-// The replay of a run of recorded acquisitions, row by row. "(today)" rows are the behaviour the move changes; see the header.
-func TestSetScopeReplaysARecordedRunAsItDoesToday(t *testing.T) {
+// The replay of a run of recorded acquisitions, row by row. The three rows that say "(was: ...)" are the behaviour the move changed, and the
+// names keep what each was: this file was written on the old code, and these rows are the diff the move makes to it.
+func TestSetScopeReplaysARecordedRun(t *testing.T) {
 	const mine = "vo:order:o1"
 	const other = "vo:order:o2"
 	rows := []struct {
@@ -195,11 +197,11 @@ func TestSetScopeReplaysARecordedRunAsItDoesToday(t *testing.T) {
 	}{
 		{"a failed attempt then the acquisition adopts it and acquires nothing", []EventRecord{scopeRec(0, mine, "boom"), scopeRec(1, mine, "")}, 0, 2, true, 0, true, 0, 2},
 		{"history ending inside the failed run goes fresh and acquires once", []EventRecord{scopeRec(0, mine, "boom"), scopeRec(1, mine, "boom")}, 0, 3, false, 0, true, 1, 3},
-		{"(today) a first record naming another scope is accepted as this call's", []EventRecord{scopeRec(0, other, "")}, 0, 1, true, 0, true, 0, 1},
-		{"(today) a failed run then another scope's acquisition answers a bare error, consumes the failure and counts nothing",
-			[]EventRecord{scopeRec(0, mine, "boom"), scopeRec(1, other, "")}, 1, 1, true, 0, false, 0, 2},
-		{"(today) a failed run then a record of another type answers a bare error, consumes the failure and counts nothing",
-			[]EventRecord{scopeRec(0, mine, "boom"), {Step: 1, EventType: EventTypeCreatePromise, PromiseID: "p"}}, 1, 1, true, 0, false, 0, 2},
+		{"a first record naming another scope is a divergence, counted once, and consumes nothing (was: accepted as this call's)", []EventRecord{scopeRec(0, other, "")}, 1, 0, true, 1, false, 0, 1},
+		{"a failed run then another scope's acquisition is a divergence, counted once, and consumes nothing (was: a bare error that consumed the failure and counted nothing)",
+			[]EventRecord{scopeRec(0, mine, "boom"), scopeRec(1, other, "")}, 1, 0, true, 1, false, 0, 2},
+		{"a failed run then a record of another type is a divergence, counted once, and consumes nothing (was: a bare error that consumed the failure and counted nothing)",
+			[]EventRecord{scopeRec(0, mine, "boom"), {Step: 1, EventType: EventTypeCreatePromise, PromiseID: "p"}}, 1, 0, true, 1, false, 0, 2},
 	}
 	for _, r := range rows {
 		t.Run(r.name, func(t *testing.T) {
@@ -215,6 +217,36 @@ func TestSetScopeReplaysARecordedRunAsItDoesToday(t *testing.T) {
 			}
 			if n := replayFailureCount(t, m); n != r.counted {
 				t.Fatalf("cleat_replay_failures_total = %d, want %d", n, r.counted)
+			}
+		})
+	}
+}
+
+// An attempt that did not get the scope is recorded as a FAILED attempt, carrying its error and the scope it was for. The error is what makes it a
+// prefix record on replay: a record without one reads as the acquisition itself, and a replay would adopt a scope that was never taken. Only a real
+// store round trip noticed a contended attempt recorded without it (step_dispatcher_scope_roundtrip_test.go), so this holds it where no database is needed.
+func TestAScopeAttemptThatDidNotAcquireIsRecordedWithItsErrorAndItsScope(t *testing.T) {
+	for _, r := range []struct {
+		name  string
+		store ConcurrencyKeyStore
+		err   string
+	}{
+		{"held by another workflow", &acquireNotAcquiredStore{}, "scope held by another workflow"},
+		{"a store failure", &acquireErrorStore{}, "store error"},
+	} {
+		t.Run(r.name, func(t *testing.T) {
+			s := newTestExecSession()
+			s.engine.concurrencyKeyStore = r.store
+			s.SetScope(context.Background(), nil, "order", "o1", 0, 0)
+			if len(s.history) != 1 {
+				t.Fatalf("want one recorded attempt, got %d", len(s.history))
+			}
+			ev := s.history[0]
+			if ev.EventType != EventTypeScopeAcquired || ev.ScopeKey != "vo:order:o1" || ev.Err != r.err {
+				t.Fatalf("the attempt was recorded as %+v, want a scope_acquired for vo:order:o1 carrying the error %q", ev, r.err)
+			}
+			if s.scopeSet || len(s.heldScopes) != 0 || s.suspendErr == nil {
+				t.Fatalf("a failed attempt must leave no scope held and must suspend: scopeSet %v, held %v, suspended %v", s.scopeSet, s.heldScopes, s.suspendErr != nil)
 			}
 		})
 	}

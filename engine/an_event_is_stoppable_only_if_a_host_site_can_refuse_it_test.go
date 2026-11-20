@@ -65,7 +65,7 @@ var stopSiteNotStoppable = map[string]string{
 	"CreatePromise": "the host refuses it in a segment (cleat#4091), but its WIT function returns a plain string " +
 		"(reasonWitReturnsAPlainString in stopSurfaces), so a component guest receives the refusal as an empty string and cannot be " +
 		"told to stop at it: it would carry on past the refused call, back into the loop the kill interrupted",
-	"freshSetScope": "the host refuses it in a segment (cleat#4091), but its WIT function returns a plain string " +
+	"SetScope": "the host refuses it in a segment (cleat#4091), but its WIT function returns a plain string " +
 		"(reasonWitReturnsAPlainString in stopSurfaces), so a component guest cannot be told to stop at it, for the same reason as " +
 		"CreatePromise",
 	"DurableCompleteUpdate": "no WIT function (reasonNotInTheComponentWorld in stopSurfaces): a component guest cannot call it, so " +
