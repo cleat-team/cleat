@@ -133,7 +133,7 @@ func main() {
 		fs.StringVar(&outDir, "o", "", "output directory for generated files")
 
 		fs.IntVar(&workflowVersion, "version", 1, "workflow version number embedded in WASM metadata")
-		fs.StringVar(&target, "target", "go", "compilation target: go (standard Go, default), rust, java, python, ts or csharp (tier 2: see tiers.yaml for what is claimed). csharp builds a project directory or .csproj in a pinned linux/amd64 docker container")
+		fs.StringVar(&target, "target", "go", "compilation target: go (standard Go, default), rust, java, python, ts or csharp (tier 2: see tiers.yaml for what is claimed). csharp builds a project directory or .csproj in a pinned linux docker container (amd64, or arm64 natively on an arm64 host)")
 		fs.StringVar(&entry, "entry", "", "entry point in 'file.py:func_name' format (for Python target) or 'file.ts:entry_name[,entry_name]' (for the ts target)")
 		fs.StringVar(&runtime, "runtime", "", "WASM runtime: wasmtime, wazero (default: the component, as for wasmtime)")
 		fs.StringVar(&buildChannel, "channel", "", "child version resolution channel: stable, latest, canary, or custom tag name")

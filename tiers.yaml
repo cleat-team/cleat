@@ -799,7 +799,7 @@ tier2:
            dynamic mode only, which is out of scope"
 
     - id: sdk-csharp
-      decision: DECIDED 2026-11-19    # owner: C# is a tier-2 language; promotion in C# PR 7 of cleat#4080, after the determinism vet (PR 6)
+      decision: DECIDED 2026-11-19    # owner: C# is a tier-2 language; recorded at https://github.com/cleat-team/cleat/issues/4080#issuecomment-7034279024; promotion in C# PR 7 of cleat#4080, after the determinism vet (PR 6)
       why: |
         C# guests as Component Model components built with componentize-dotnet against the
         existing `cleat-workflow` world in python-sdk/wit/cleat.wit (Route B of the cleat#4077
@@ -873,7 +873,7 @@ tier2:
            packages/cleat-csharp/README.md says never to swallow it; the determinism vet is the
            mechanism that flags it"
         - "async/await over host calls works only because every awaited task is already complete;
-           Task.Delay, Task.Yield, Task.Run and a blocking wait on an incomplete task throw
+           Task.Delay, Task.Run and a blocking wait on an incomplete task throw
            PlatformNotSupportedException. To wait, call HostCalls.Sleep"
         - "typed (record) entries go through a source-generated JsonSerializerContext the author
            writes, and the first typed record costs about 1.6 MB and about 140 ms of first

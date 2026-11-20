@@ -111,8 +111,15 @@ func TestACSharpBuildStampsTheComponentAndWritesIt(t *testing.T) {
 	if got := wasm.DetectLanguage(componentHeader); got == "csharp" {
 		t.Errorf("DetectLanguage(unstamped) = %q: the control is meaningless if the unstamped component already reads as csharp", got)
 	}
-	if !strings.Contains(msg, "not supported") {
-		t.Errorf("the build does not say C# is not supported:\n%s", msg)
+	// The banner says what C# is TODAY: a tier-2 target on a prerelease toolchain. It used to say "in development and not supported", and a
+	// build that keeps saying that after the promotion tells every reader of the quick start the opposite of tiers.yaml.
+	if !strings.Contains(msg, "tier-2 target on a prerelease toolchain") {
+		t.Errorf("the build does not say C# is a tier-2 target on a prerelease toolchain:\n%s", msg)
+	}
+	for _, stale := range []string{"not supported", "in development"} {
+		if strings.Contains(msg, stale) {
+			t.Errorf("the build still says %q about C#, which tiers.yaml no longer does:\n%s", stale, msg)
+		}
 	}
 }
 

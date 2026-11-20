@@ -13,8 +13,8 @@ namespace Cleat;
 /// <para>
 /// Every method is <b>synchronous</b>. A workflow may be written with <c>async</c>/<c>await</c>, because every
 /// task it awaits over these methods is already complete (measured, cleat#4077), but nothing here yields: the
-/// runtime has no threads and no scheduler. <c>Task.Delay</c>, <c>Task.Yield</c>, <c>Task.Run</c> and a blocking
-/// wait on an incomplete task throw <see cref="PlatformNotSupportedException"/>. To wait, use
+/// runtime has no threads and no scheduler. <c>Task.Delay</c>, <c>Task.Run</c> and a blocking
+/// wait on an incomplete task throw <see cref="PlatformNotSupportedException"/> (<c>Task.Yield</c> returns). To wait, use
 /// <see cref="Sleep(TimeSpan)"/>, which is durable.
 /// </para>
 /// <para>

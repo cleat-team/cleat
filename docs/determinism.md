@@ -157,7 +157,7 @@ alone: `DateTime.UtcNow`, `Random` and `Guid.NewGuid()` replay, because the engi
 clock to the workflow's start and seeds entropy from the workflow's identity. A catch that can
 swallow `CleatSuspendException` is a warning, not an error. The reasoning and the limits (no type
 information, aliases, `.Result`) are in `docs/contributor/design/csharp-determinism-checker.md`.
-C# remains in development and is not a supported language (`tiers.yaml`).
+C# is a tier-2 language on a prerelease toolchain (`tiers.yaml`, entry `sdk-csharp`, lists what is and is not claimed).
 
 ## Why there is no `RegisterQueryHandler`
 

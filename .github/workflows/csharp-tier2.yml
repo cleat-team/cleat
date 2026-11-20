@@ -1,6 +1,6 @@
 name: C# Tier 2
 
-# The C# guest (cleat#4080) is IN DEVELOPMENT and NOT SUPPORTED: see tiers.yaml. This workflow is where its toolchain runs in CI:
+# The C# guest (cleat#4080) is a tier-2 language: see tiers.yaml for what is claimed and what is not. This workflow is where its toolchain runs in CI:
 # the SDK's managed unit tests and the Go-side tests in tests/csharp, both in the digest-pinned .NET SDK container, with the toolchain
 # DECLARED to the tests (CLEAT_REQUIRE_TOOLCHAINS) so a missing docker is a failure here and a skip on a laptop.
 #

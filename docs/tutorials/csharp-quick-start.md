@@ -2,7 +2,7 @@
 
 > **Status: tier 2** (`tiers.yaml`, entry `sdk-csharp`; owner decision 2026-11-19). This page describes a workflow that is built and run by
 > a test in this repository (`TestCSharpQuickStartExampleSuspendsResumesFromHistoryAndRunsItsDefer`), so it cannot drift from one that works.
-> Tier 2 means the tests must run and may fail without blocking a merge. Read "What has not been run" before depending on it.
+> Tier 2 means the C# tests must run and pass: they are in the required Tier 2 Gate, and `tiers.yaml` lists no known failures. It is not the same as tier 1: read "What has not been run" before depending on it.
 
 Cleat runs a C# workflow as a WebAssembly Component: your code is compiled ahead of time with the .NET NativeAOT-LLVM toolchain
 (through `componentize-dotnet`) and runs inside the same engine and wasmtime backend that run Go, Rust, Python, Java and TypeScript
@@ -48,8 +48,8 @@ the guest is replayed and each call answers from history instead of repeating it
 
 Three rules the example follows, and one the build enforces:
 
-- **To wait, call `HostCalls.Sleep`.** `Task.Delay`, `Task.Yield`, `Task.Run`, a thread, and a blocking wait on an incomplete task throw
-  `PlatformNotSupportedException`. `async`/`await` over host calls works only because every awaited task is already complete.
+- **To wait, call `HostCalls.Sleep`.** `Task.Delay`, `Task.Run`, a thread, and a blocking wait on an incomplete task throw
+  `PlatformNotSupportedException` (`Task.Yield` returns). `async`/`await` over host calls works only because every awaited task is already complete.
 - **A suspension is an exception, and it can be caught.** A `catch (Exception)` that swallows `CleatSuspendException` does not change the
   run's outcome, but the workflow keeps running past it and the host calls it then makes are real. Do not swallow it; the vet warns (`CV101`).
 - **The determinism vet** runs as part of the build (`cleat vet --lang csharp <project>` runs it alone). It is a text scan with no type
