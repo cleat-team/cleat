@@ -4,13 +4,20 @@ package engine
 // unmodified code, so that after the move a changed row can only be a deliberate one. Like DurableAwaitSignals it is an accreted wait (cleat#814,
 // #3383, #4105, #4144, #4153, #4177, #4178, #4079), and its comments are the record of those bugs.
 //
+// THE MOVE (this file after W4): the rows that the move deliberately CHANGES were removed from here and now live in
+// an_await_promise_move_tightens_only_these_test.go, each stating what the old code did. Every row left passes on the old code AND the moved code (checked by
+// running this file on both), so a row that changes later is a change somebody chose. Three rows left (a resolution of another promise consumed as this
+// one's, and the two first-record-of-another-type rows) and two came in (the no-promise-store rows, which hold on both).
+//
 // What makes it different from the signal await, and what the table is for: it has NO stopBeforeNewWork refusal at all (a defer segment, a worker
 // shutting down and a session that has already suspended all record and suspend as usual), it matches a recorded resolution by event TYPE alone,
 // it looks one record AHEAD after a recorded await and stays in replay, and a first record that is none of its three types is not a divergence:
 // the old code falls through to the FRESH path with history still unread. Rows pin each of those as they are, whether or not they are right.
 //
 // It uses a fake promise store because the question is what the CALL does with a store, not what a database does. It measures the deadline against
-// time.Now(), as the code does (and not the engine's clock), so the histories are anchored to the real clock with a margin of an hour either way.
+// time.Now(), as the code does (and not the engine's clock), so the histories are anchored to the real clock with a margin of an hour either way. The engine is given the REAL clock (WithClock below), because the moved call
+// measures against the engine's real clock (realNowMs, which is time.Now in every build that does not set WithClock, so only tests can tell the two apart)
+// and the old code read time.Now directly: with a real clock the table is the same table on both.
 
 import (
 	"context"
@@ -47,6 +54,7 @@ type promiseWant struct {
 	timedOut   bool   // the word says timed out
 	errCode    uint16 // the word's error code
 	result     string // what was written to the guest's buffer
+	resultHas  string // when set, the written result must CONTAIN this instead of equal result (a divergence message)
 	rejected   bool   // lastAwaitPromiseRejected after the call
 	events     []EventType
 	recordedAs string // PromiseResult or PromiseError of the first recorded event, when it records an outcome
@@ -78,7 +86,7 @@ type promiseRow struct {
 
 func runPromiseRow(t *testing.T, r promiseRow) {
 	w := &promiseWorld{status: r.status, result: r.result, errMsg: r.errMsg, getErr: r.getErr}
-	opts := append([]EngineOption{WithClock(func() int64 { return promiseT }), WithWorkflowID("wf-promise")}, r.opts...)
+	opts := append([]EngineOption{WithClock(func() int64 { return time.Now().UnixMilli() }), WithWorkflowID("wf-promise")}, r.opts...)
 	if !r.noStore {
 		opts = append(opts, WithPromiseStore(w))
 	}
@@ -115,7 +123,11 @@ func runPromiseRow(t *testing.T, r promiseRow) {
 		if errCode != want.errCode {
 			t.Errorf("errCode = %d, want %d (result %#x)", errCode, want.errCode, got)
 		}
-		if gotRes := string(buf[:resultLen]); gotRes != want.result {
+		if gotRes := string(buf[:resultLen]); want.resultHas != "" {
+			if !strings.Contains(gotRes, want.resultHas) {
+				t.Errorf("result written = %q, want it to contain %q", gotRes, want.resultHas)
+			}
+		} else if gotRes != want.result {
 			t.Errorf("result written = %q, want %q", gotRes, want.result)
 		}
 	}
@@ -209,13 +221,14 @@ func TestAnAwaitPromiseBehavesAsRecordedBeforeTheDispatcher(t *testing.T) {
 			want: promiseWant{result: "v", step: 1, replaying: true}},
 		{name: "replay: a recorded rejection replays its error, with errCode 1 and the rejection flag", hist: []EventRecord{rejected(0, "p1", "boom")}, timeoutMs: 60000,
 			want: promiseWant{result: "boom", errCode: 1, rejected: true, step: 1, replaying: true}},
-		{name: "replay: a recorded resolution of ANOTHER promise is consumed too (matched by type alone)", hist: []EventRecord{resolved(0, "other", "v")}, timeoutMs: 60000,
-			want: promiseWant{result: "v", step: 1, replaying: true}},
 		{name: "replay: a result that does not fit reports the truncation", hist: []EventRecord{resolved(0, "p1", longResult)}, timeoutMs: 60000, resMax: 10,
 			want: promiseWant{result: longResult[:10], errCode: uint16(callErrorOutputTruncated), step: 1, replaying: true}},
 
 		// ---- replay: an await record, and what follows it ----
 		{name: "replay: an await then its resolution", hist: []EventRecord{await(now-10_000, hour), resolved(1, "p1", "v")}, timeoutMs: 60000,
+			want: promiseWant{result: "v", step: 2, replaying: true}},
+		{name: "replay: an await recorded WITH a timeout, resumed by a no-wait call, still pairs with its resolution (only a record that is ALSO no-wait is a run of one)",
+			hist: []EventRecord{await(now-10_000, hour), resolved(1, "p1", "v")}, timeoutMs: 0,
 			want: promiseWant{result: "v", step: 2, replaying: true}},
 		{name: "replay: an await then its rejection", hist: []EventRecord{await(now-10_000, hour), rejected(1, "p1", "boom")}, timeoutMs: 60000,
 			want: promiseWant{result: "boom", errCode: 1, rejected: true, step: 2, replaying: true}},
@@ -224,6 +237,8 @@ func TestAnAwaitPromiseBehavesAsRecordedBeforeTheDispatcher(t *testing.T) {
 		{name: "replay: an await then a settlement the WORKFLOW made itself (Service promise, Op resolve): it timed out (cleat#4178)",
 			hist:      []EventRecord{await(now-10_000, hour), {Step: 1, EventType: EventTypePromiseResolved, PromiseID: "p1", PromiseResult: "v", Service: PromiseEventService, Op: PromiseOpResolve}},
 			timeoutMs: 60000, want: promiseWant{timedOut: true, step: 1, replaying: true}},
+		{name: "replay: an await then ANOTHER await of the same promise (a polling loop): it timed out ALONE and leaves the second", hist: []EventRecord{await(now-10_000, hour), {Step: 1, EventType: EventTypeAwaitPromise, PromiseID: "p1", TimeoutMs: hour, TimestampMs: now - 5_000}}, timeoutMs: 60000,
+			want: promiseWant{timedOut: true, step: 1, replaying: true}},
 		{name: "replay: an await then any other event: it timed out", hist: []EventRecord{await(now-10_000, hour), {Step: 1, EventType: fakeEvent}}, timeoutMs: 60000,
 			want: promiseWant{timedOut: true, step: 1, replaying: true}},
 		{name: "replay: a recorded no-wait await replays as the timeout it was, from the record alone (cleat#4144)", hist: []EventRecord{await(now-10_000, 0)}, timeoutMs: 0,
@@ -247,22 +262,23 @@ func TestAnAwaitPromiseBehavesAsRecordedBeforeTheDispatcher(t *testing.T) {
 		{name: "replay: ... a recorded timeout of 0 under a positive argument keeps waiting from now, with no record", status: "pending",
 			hist: []EventRecord{await(now-10_000, 0)}, timeoutMs: 60000,
 			want: promiseWant{sentinel: true, reason: reason, untilNear: 60000, gets: 1, step: 1}},
+		{name: "replay: ... a record with NO TIMESTAMP has a deadline a few seconds past the epoch, so it is a timeout at once (await_signals treats that shape as having no deadline; this call never did)", status: "pending",
+			hist: []EventRecord{await(0, hour)}, timeoutMs: 60000,
+			want: promiseWant{timedOut: true, gets: 1, step: 1}},
 		{name: "replay: ... a recorded timeout of math.MaxInt64 does not wrap into the past (cleat#4105)", status: "pending",
 			hist: []EventRecord{await(now-10_000, math.MaxInt64)}, timeoutMs: math.MaxInt64,
 			want: promiseWant{sentinel: true, reason: reason, untilFar: true, gets: 1, step: 1}},
 		{name: "replay: ... with no promise store configured it reports the error", noStore: true, hist: []EventRecord{await(now-10_000, hour)}, timeoutMs: 60000,
 			want: promiseWant{result: errNoPromiseStore, errCode: 1, step: 1}},
 
-		// ---- replay: a first record that is none of the three types. (The two rows below are KNOWN DEFECTS: a row marked so pins what the code does TODAY so the
-		// move cannot change it silently; it is not a claim that it is right, and the W4 move decides each by name.)
-		// ---- replay: a first record that is none of the three types. NOT a divergence: the old code falls through to the FRESH path with history
-		// still unread and replay still on (the cleat#4157 class), so the call records at a step that already holds an event. ----
-		{name: "KNOWN DEFECT (cleat#947: records at a step history already holds): a first record of another type runs the FRESH path with history unread, a resolved promise is recorded and delivered",
-			status: "resolved", result: "v", hist: []EventRecord{{Step: 0, EventType: fakeEvent}}, timeoutMs: 60000,
-			want: promiseWant{result: "v", events: []EventType{EventTypePromiseResolved}, recordedAs: "v", gets: 1, step: 1, replaying: true}},
-		{name: "KNOWN DEFECT (cleat#947: records at a step history already holds): a first record of another type, a pending promise: the await is recorded and the run suspends, still replaying",
-			status: "pending", hist: []EventRecord{{Step: 0, EventType: fakeEvent}}, timeoutMs: 60000,
-			want: promiseWant{sentinel: true, events: []EventType{EventTypeAwaitPromise}, awaitTO: 60000, awaitTOSet: true, reason: reason, untilMs: promiseT + 60000, gets: 1, step: 1, replaying: true}},
+		// ---- replay: a first record that is none of the three types, with NO promise store. The call records nothing without a store (it returns the error), so the
+		// record at its step belongs to the NEXT call, and the old code answered the error, consumed nothing and stayed in replay. The move keeps exactly that (the
+		// no-store exception in AwaitPromise); with a store the same history is a divergence (the tightening table; the cleat#4157 class). A history holding the call's OWN
+		// records still replays without a store: a CLI replay of a real history must keep answering from it. ----
+		{name: "no store: a first record of another type answers the error, consumes nothing and stays replaying", noStore: true, hist: []EventRecord{{Step: 0, EventType: fakeEvent}}, timeoutMs: 60000,
+			want: promiseWant{result: errNoPromiseStore, errCode: 1, step: 0, replaying: true}},
+		{name: "no store: a first record that IS the call's own type still replays from history", noStore: true, hist: []EventRecord{resolved(0, "p1", "v")}, timeoutMs: 60000,
+			want: promiseWant{result: "v", step: 1, replaying: true}},
 
 		// ---- replay ENDED: the session is replaying and has consumed all of history, so there is nothing left to replay and the call leaves replay. This
 		// is the `else { s.exitReplay() }` arm, reached only when stepCount == len(history); the first-record rows above have a record AT step 0 and
