@@ -152,11 +152,47 @@ Off by default, per worker (`--resident-window 0` is today's behaviour), so a ca
 
 WS-cleat1 will run the fuller latency benchmark; these are the numbers the design depends on, in the order they decide things:
 1. **What the per-claim 0.4 to 0.7 s is made of** (claim, history load, instantiation, replay, finalize) for Go, Python and C#, on all three databases: the `setup_ms`/`replay_ms`/`finalize_ms` debug log is the starting point. This decides whether PARK or WARM RE-ENTRY buys the most, and it fixes the cost model for policy B.
-2. **Memory of one parked instance** for Go, Python and C# (resident set before and after parking N runs).
+2. **Memory of one parked instance** for Go, Python and C# (resident set before and after parking N runs). **Measured, section 9a.**
 3. **Blocked host time against the Python instance fence** (4.5): park a Python run for 40 s with `--wasm-instance-timeout 30s`.
-4. **Blocked cgo calls**: how many parked host calls a worker tolerates before scheduling suffers (4.6).
+4. **Blocked cgo calls**: how many parked host calls a worker tolerates before scheduling suffers (4.6). **Measured up to 1024 parked, section 9a.**
 5. **The MySQL and SQL Server batched-check cost** per resident set size.
 6. **The hit rate**: of real waits in a representative workload, what fraction wake inside 10 s, 1 minute and 5 minutes. This is the number that chooses between options A and B and it needs real wait-length data, which I do not have.
+
+## 9a. Stage-0 results: what a parked instance costs (measured 2026-11-19)
+
+Items 2 and 4 of section 9, measured. **This is the cost of an instance blocked in a host call, which is what a parked run is.** It is not a measurement of PARK itself (nothing here parks a run; the instances simply never return from their first durable call until released), and the guests are minimal, so read the per-instance figures as what a parked instance costs BEFORE the workflow has built up state of its own, plus the garbage case below.
+
+**Method.** One process per configuration (so the allocator's retention from one run cannot leak into the next), in the Python toolchain container (Linux, Docker on a macOS host, 10 CPUs, 12.6 GB). The engine runs with a wasmtime backend with an EXPLICIT per-store memory cap (so a language's default floor does not apply), and each of N guests makes one durable call to a service that does not answer until released. One instance is first run to completion, which compiles and caches the component; then the baseline RSS is read from `/proc/self/status`; then N instances are started and, when all N are blocked in the call, RSS, thread count and a scheduling probe (a 1 ms ticker over 3 s) are read. **Per-instance cost = (RSS with N parked minus the baseline) / N.** The probe is a scratch test, not in the tree; it is described here so it can be rebuilt. Its source, the churn guests and the raw output of every run behind the tables below are kept in the cleat-internal checkout under `stage0-probe/` (`results/` holds the nine raw outputs).
+
+**Parked instance, minimal guest (one durable call, nothing else):**
+
+| guest | cost per parked instance | N measured | process RSS after one warm-up run (shared, not per instance) |
+|---|---|---|---|
+| Go core module | **2.5 MiB** (3.0 to 3.2 at N=1) | 1, 16, 64, 256, 512, 1024 | about 160 MiB |
+| Python component | **9 to 10 MiB** at N up to 16 (9.9 at N=1, 9.0 at N=8 and 16); **12 MiB** at N=64 and 128 | 1, 8, 16, 64, 128 | about 510 to 580 MiB (the 19 MB component, compiled and cached) |
+| C# component | **49 to 50 MiB** | 1, 16, 64 | about 170 MiB |
+
+**The memory cap does not change those figures.** At N=16, Python is 8.99 MiB at a 32 MiB cap and 9.00 at 256; C# is 49.53 at a 64 MiB cap and 49.48 at 256; Go is 2.68 at 32 and 2.67 at 256. A C# guest does not start at an EXPLICIT 32 MiB cap (`.NET runtime failed to initialize`, as the engine's language floor documents); a stock worker, with no limit set, gives a C# store the 64 MiB language floor (`engine.languageMemoryFloorBytes`) rather than 32. In the raw outputs the C# rows print as `"lang":"file"` (the probe's mode for a prebuilt component).
+
+**A guest that has made garbage does depend on the cap, for C# only.** Each guest allocated and dropped about 256 MiB in 4 MiB chunks, then made its durable call and parked (N=16):
+
+| guest | small cap | large cap |
+|---|---|---|
+| Python | 16.2 MiB (cap 32) | 16.2 MiB (cap 256) |
+| Go | 19.6 MiB (cap 32) | 19.6 MiB (cap 256) |
+| **C#** | 49.5 MiB (cap 64) | **65.7 MiB (cap 256)** |
+
+So the suspicion that a garbage-collected runtime sizes its heap to the limit is **true of C#** (about 16 MiB, a third, more per parked instance at a four times larger cap, after this much churn) and **not true of Python or Go**. A parked guest does not run, so it never collects what it left behind. Two things this does not tell us: how far C# retention grows with more churn or a cap above 256 (one churn size and two caps were measured), and whether a collection requested just before parking would recover it (not tried; it is the obvious thing to try, and it would belong in the SDK's park path).
+
+**Threads and scheduling.** A parked instance holds one OS thread, because the guest is blocked inside a cgo callback: **1053 threads for 1024 parked Go instances, 147 for 128 Python, 80 for 64 C#**, so about one per instance. **No trend in a 1 ms ticker's lateness with the number of parked instances was visible, up to 1024**: across all 28 configurations the p99 lateness was 4 to 12 ms (the ticker's own median is 1 to 3 ms in this container), and Go at 256, 512 and 1024 parked gave a p99 of 4.1, 5.0 and 5.0 ms and a worst single gap of 16, 12 and 6 ms. **One outlier is unexplained**: the Go churn run at a 32 MiB cap with N=16 had a p99 of 12.0 ms and a worst single gap of 117 ms (the next worst gap in any run is 38 ms); at N=16 it does not bear on a trend in N, but it was not investigated. On this evidence the limit on resident runs is **memory, not threads or scheduling**.
+
+**What this does not cover.** It is the Go scheduler's responsiveness, not claim or database throughput under load while instances are parked. It is a 10-CPU Linux VM; the thread count at several thousand and a real worker with a database were not tried. The Python figure rose from 9 to 12 MiB between N=16 and N=64 and was not explained. The C# guest is the conformance component (a small program); a real C# workflow holding state would cost more. The cost of a workflow that has built up its own state is its own state plus the figures above, bounded by the cap.
+
+**Consequences for the starting constants (recommendations, not decisions).**
+- **Worst case for a resident-count limit** at the measured costs after churn: 64 resident runs would hold about 1.2 GiB of Go instances, 1.0 GiB of Python, or **4.1 GiB of C# at a 256 MiB cap** (3.1 GiB at a 64 MiB cap), on top of the shared baselines above. A count limit in the tens is affordable for Go and Python; C# is the expensive one and the one a higher cap makes more expensive.
+- **`--memory-soft-limit` (`MemoryController` over `MemoryMonitor`, which stops claiming at a fraction of memory) sees a parked instance's memory only on some hosts.** `MemoryMonitor` reads cgroup v2 `memory.current` when it exists (the worker's own container, which includes wasmtime's linear memory), otherwise the host-wide `/proc/meminfo` (everything on the machine), and otherwise the Go heap (`readGoHeap`), which cannot see wasmtime's memory at all: parked instances are invisible to it there, which includes macOS. So it is an aggregate guard for the worker's own parked memory only on cgroup v2; whether residency should account for parked instances itself, by their measured cost, is a question for the design of the limit.
+- **Raising `--wasm-memory-max-mb` to 256 costs Go and Python nothing here and C# about a third more per parked instance after churn.** Together with the point above, that argues for a per-language or per-workflow-type memory limit rather than one number (cleat#4171 is the decision; the per-workflow-type limit is a separate design).
+- **The worker only passes the memory limit to the engine when `--wasm-memory-max-mb` was explicitly set** (`wasmtimeMemoryLimitFromFlags`), so changing the flag's default alone would leave a stock worker on the engine's own 32 MiB. The engine constant has to change for the default to take effect.
 
 ## 10. Staging if approved
 
