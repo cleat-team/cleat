@@ -197,14 +197,51 @@ func TestEverySpecIsRegisteredAndNoPureSpecRecords(t *testing.T) {
 		"no Decode":                       {NoIdentity: "x", Name: "x", Want: fakeEvent, Fresh: func(*stepCtx) int64 { return 0 }},
 		"both Identity and NoIdentity":    {Name: "x", Want: fakeEvent, Identity: func(stepArgs, *EventRecord) string { return "" }, NoIdentity: "x", Decode: func(*stepCtx, *EventRecord) int64 { return 0 }, Fresh: func(*stepCtx) int64 { return 0 }},
 		"neither Identity nor NoIdentity": {Name: "x", Want: fakeEvent, Decode: func(*stepCtx, *EventRecord) int64 { return 0 }, Fresh: func(*stepCtx) int64 { return 0 }},
-		"Refuse on a Pure step":           {NoIdentity: "x", Name: "x", Want: fakeEvent, Effect: effectPure, Refuse: func(*execSession) bool { return true }, Decode: func(*stepCtx, *EventRecord) int64 { return 0 }, Fresh: func(*stepCtx) int64 { return 0 }},
-		"stays in replay but records one": {NoIdentity: "x", Name: "x", Want: fakeEvent, Effect: effectEffect, Records: recordsOne, StaysInReplayAtFrontier: true, Decode: func(*stepCtx, *EventRecord) int64 { return 0 }, Fresh: func(*stepCtx) int64 { return 0 }},
-		"stays in replay but is Pure":     {NoIdentity: "x", Name: "x", Want: fakeEvent, Effect: effectPure, StaysInReplayAtFrontier: true, Decode: func(*stepCtx, *EventRecord) int64 { return 0 }, Fresh: func(*stepCtx) int64 { return 0 }},
 		"Pure but records one":            {NoIdentity: "x", Name: "x", Want: fakeEvent, Effect: effectPure, Records: recordsOne, Decode: func(*stepCtx, *EventRecord) int64 { return 0 }, Fresh: func(*stepCtx) int64 { return 0 }},
 	} {
 		bad := bad
 		if bad.validate() == nil {
 			t.Errorf("CONTROL: validate accepted a spec with %s", name)
+		}
+	}
+	// The hooks' rules, each with a fixture that reaches ITS rule and no earlier one, and the error asserted by TEXT. A fixture that leaves Records
+	// unset gets recordsOne (the iota zero), which the older "Pure and records" rule rejects first, so the new rule would decide nothing and its
+	// removal would go unseen (cleat-review3, measured on this test's first version: both mutants stayed green).
+	noop := func(*stepCtx, *EventRecord) int64 { return 0 }
+	nofresh := func(*stepCtx) int64 { return 0 }
+	for name, c := range map[string]struct {
+		spec stepSpec
+		want string
+	}{
+		"Refuse on a Pure step": {
+			stepSpec{NoIdentity: "x", Name: "x", Want: fakeEvent, Effect: effectPure, Records: recordsNone, Refuse: func(*execSession) bool { return true }, Decode: noop, Fresh: nofresh},
+			"is Pure and has a Refuse",
+		},
+		"stays in replay but records one": {
+			stepSpec{NoIdentity: "x", Name: "x", Want: fakeEvent, Effect: effectEffect, Records: recordsOne, StaysInReplayAtFrontier: true, Decode: noop, Fresh: nofresh},
+			"stays in replay at the frontier",
+		},
+		"stays in replay but is Pure": {
+			stepSpec{NoIdentity: "x", Name: "x", Want: fakeEvent, Effect: effectPure, Records: recordsNone, StaysInReplayAtFrontier: true, Decode: noop, Fresh: nofresh},
+			"stays in replay at the frontier",
+		},
+	} {
+		c := c
+		err := c.spec.validate()
+		if err == nil {
+			t.Errorf("CONTROL: validate accepted a spec with %s", name)
+		} else if !strings.Contains(err.Error(), c.want) {
+			t.Errorf("CONTROL: a spec with %s was refused for the wrong reason: %q does not name %q", name, err.Error(), c.want)
+		}
+	}
+	// CONTROL for the controls: the same two valid shapes, with the hook the rule is about removed, validate.
+	for name, good := range map[string]stepSpec{
+		"a Pure step with no Refuse":                     {NoIdentity: "x", Name: "x", Want: fakeEvent, Effect: effectPure, Records: recordsNone, Decode: noop, Fresh: nofresh},
+		"a non-Pure recording-nothing lookup that stays": {NoIdentity: "x", Name: "x", Want: fakeEvent, Effect: effectEffect, Records: recordsNone, StaysInReplayAtFrontier: true, Decode: noop, Fresh: nofresh},
+	} {
+		good := good
+		if err := good.validate(); err != nil {
+			t.Errorf("CONTROL: %s was refused: %v", name, err)
 		}
 	}
 	// The registry is checked against the SOURCE, in the other direction too, or a new spec nobody registered would be on no list.
