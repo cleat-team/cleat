@@ -64,9 +64,10 @@ const (
 )
 
 // stepArgs is the per-call data a spec needs. A spec is a package-level value and holds no closure over the call, so a step costs no
-// allocation beyond this struct (section 9, risk 5, of the design); two strings cover the promise calls and the next groups add fields.
+// allocation beyond this struct (section 9, risk 5, of the design); two strings cover the promise calls, and G1b adds the third and fourth that
+// signal_workflow and durable_send (three) and fetch (four) need.
 type stepArgs struct {
-	s1, s2 string
+	s1, s2, s3, s4 string
 	// i1 is an integer argument: a lock's time to live in milliseconds.
 	i1 int64
 	// outPtr and outMaxLen are where a divergence message is written, and where the call's own output goes; zero when it has none.
@@ -152,7 +153,7 @@ type stepSpec struct {
 // stepSpecs lists every spec in the engine. It exists for the dispatcher's tests (step_dispatcher_test.go), which run each property over every
 // spec on it and check the list against the `var x = stepSpec{` declarations in the source, so a spec nobody registered is on no list and is
 // caught. A host call moved onto step adds its spec here in the same change.
-var stepSpecs = []*stepSpec{&createPromiseStep, &resolvePromiseStep, &rejectPromiseStep, &acquireLockStep, &releaseLockStep, &sideEffectStep, &sideEffectRecordedStep, &deferStep}
+var stepSpecs = []*stepSpec{&createPromiseStep, &resolvePromiseStep, &rejectPromiseStep, &acquireLockStep, &releaseLockStep, &sideEffectStep, &sideEffectRecordedStep, &deferStep, &scheduleCronStep, &deleteCronStep, &listCronsStep}
 
 // validate says whether a spec is well-formed: it names a replay event, can decode it and can run fresh, and a step that declares itself Pure
 // (and so is never refused in a segment) records nothing.

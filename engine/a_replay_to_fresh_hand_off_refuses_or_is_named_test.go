@@ -48,7 +48,6 @@ var handOffsThatNeedNoRefusal = map[string]string{
 		"these three child waits are not stop sites, which stopSiteNotStoppable records.",
 	"AwaitAnyChild":          "see AwaitChild.",
 	"replayAwaitAllChildren": "see AwaitChild.",
-	"ListCrons":              "a read of the schedule table, recorded as one event. It performs nothing outside the workflow.",
 	"RegisterUpdateHandler":  "registers a handler in the session and records the registration. It performs nothing outside the workflow.",
 }
 
