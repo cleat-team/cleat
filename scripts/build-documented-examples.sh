@@ -81,8 +81,32 @@ fi
 # long compiler diagnostic and small enough not to bury the other examples.
 FAIL_LOG_LINES="${BDE_FAIL_LOG_LINES:-400}"
 
+# A TRANSIENT DEPENDENCY FETCH IS RETRIED, AND NOTHING ELSE IS. cleat#4254.
+#
+# examples/java-workflow's Gradle build fetches the TeaVM plugin's own dependencies (teavm-core, teavm-tooling) through the Gradle Plugin
+# Portal, which reaches Maven Central. Measured 2026-11-20: four completed failures of this job in one day, all of them that example and those
+# two artifacts; one log says `Received status code 429 from server: Too Many Requests` from repo.maven.apache.org, three say `Could not find
+# org.teavm:teavm-core:0.10.2` at plugins.gradle.org with no status shown. Nothing in the repository changed between a green run and a red
+# one. Gradle does not retry these, and a cache cannot help (this job is excluded from the develop push, so nothing seeds one).
+#
+# THE SIGNATURE IS NARROW ON PURPOSE. A compile error, a vet failure, a determinism-gate refusal or a missing toolchain must fail on the first
+# attempt, exactly as before: retrying "any failure" would turn this job into one that cannot go red. The signature is a failed FETCH: an HTTP
+# 429 or 5xx status from a repository, or `Could not find <group>:<name>:<version>`. That second form also matches a dependency that really does
+# not exist (a typo in a version), which is retried and then fails after the cap -- the cost is the backoff, not a wrong answer.
+#
+# NO SILENT FLAKES. Every retry prints the lines that matched, so the cause of the first failure is in the log whether or not the build later
+# passes, and an example that needed a retry is listed in the summary even when it is OK. A run that recovered is not the same as a run that
+# never failed, and the job's output must not say they are.
+#
+# BDE_FETCH_RETRIES is the number of retries after the first attempt (0 disables them); BDE_RETRY_SLEEP is the base wait in seconds, multiplied
+# by the attempt number. Defaults: 2 retries, 30s -- at most 90s of waiting per example, inside the job's 10 minute timeout.
+FETCH_RETRIES="${BDE_FETCH_RETRIES:-2}"
+RETRY_SLEEP="${BDE_RETRY_SLEEP:-30}"
+TRANSIENT_FETCH='Received status code (429|5[0-9][0-9])|Could not find [^[:space:]]+:[^[:space:]]+:[^[:space:]]+'
+
 examined=0 built=0 failed=0 skipped=0
 declare -a FAILURES=()
+declare -a RETRIED=()
 
 while IFS= read -r readme; do
   dir="$(dirname "$readme")"
@@ -113,11 +137,33 @@ while IFS= read -r readme; do
   out="$(mktemp -d)"
   run="${cmd/cleat build/$CLEAT_BIN build}"
   run="${run/-o \/tmp\/out/-o $out}"
-  if (cd "$workdir" && eval "$run") >/tmp/bde.log 2>&1; then
-    echo "OK    $dir"
+  attempt=1
+  while :; do
+    (cd "$workdir" && eval "$run") >/tmp/bde.log 2>&1 && ok=1 || ok=0
+    if (( ok == 1 )); then break; fi
+    if (( attempt <= FETCH_RETRIES )) && grep -qE "$TRANSIENT_FETCH" /tmp/bde.log; then
+      wait_s=$((RETRY_SLEEP * attempt))
+      echo "RETRY $dir (attempt $((attempt + 1)) of $((FETCH_RETRIES + 1)), after ${wait_s}s): the build failed fetching a dependency, which is retried. The failure:"
+      grep -E "$TRANSIENT_FETCH" /tmp/bde.log | sed 's/^/      /' | head -4
+      sleep "$wait_s"
+      attempt=$((attempt + 1))
+      continue
+    fi
+    break
+  done
+  if (( ok == 1 )); then
+    if (( attempt > 1 )); then
+      echo "OK    $dir (after $((attempt - 1)) retry(ies): see the RETRY lines above)"
+      RETRIED+=("$dir")
+    else
+      echo "OK    $dir"
+    fi
     built=$((built + 1))
   else
     echo "FAIL  $dir"
+    if (( attempt > 1 )); then
+      echo "      failed after $attempt attempts; the last attempt's log follows (the first failure's cause is in the RETRY lines above)"
+    fi
     echo "      \$ $cmd"
     # The log, not its last eight lines (cleat#3592). Gradle prints the cause
     # ABOVE its own epilogue -- the compiler error, then `* What went wrong:` and
@@ -137,7 +183,11 @@ while IFS= read -r readme; do
 done < <(git ls-files 'examples/*/README.md')
 
 echo
-echo "examples with a documented build: $examined   built: $built   skipped: $skipped   failed: $failed"
+echo "examples with a documented build: $examined   built: $built   skipped: $skipped   failed: $failed   needed a retry: ${#RETRIED[@]}"
+if (( ${#RETRIED[@]} > 0 )); then
+  echo "RETRIED and then built (a transient dependency fetch failed; not a clean run for these):"
+  printf '  %s\n' "${RETRIED[@]}"
+fi
 
 # A run that examined nothing is a broken check, not a clean tree. Ten READMEs
 # document a build today; a scan finding none means the pattern or the path
