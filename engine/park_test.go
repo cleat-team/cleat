@@ -5,6 +5,11 @@ package engine
 
 import (
 	"context"
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -228,5 +233,53 @@ func TestADurableSleepThatIsParkedCompletesOnWake(t *testing.T) {
 	declining.nowMs = T
 	if got := declining.DurableSleep(context.Background(), nil, 5000); got != packSleepResult(sleepStatusSuspend, 5000) || declining.suspendErr == nil {
 		t.Errorf("CONTROL: a declined park returned %#x (suspension %v), want suspend", got, declining.suspendErr)
+	}
+}
+
+// The stop-site guards exempt canPark from being a host stop site, on the ground that it answers the helper with a bool and refuses no guest
+// (stop_correspondence_guard_test.go). That is a claim about its CALLERS, and it holds only while parkOrSuspend is the one: a function that used
+// canPark to refuse a guest would consult canPark and never stopBeforeNewWork, so the scan would not see it. leaveReplay carries the same
+// exemption for the same reason, with the same kind of test (step_dispatcher_test.go).
+func TestCanParkIsCalledOnlyByParkOrSuspend(t *testing.T) {
+	files, err := filepath.Glob("*.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	callers := map[string]bool{}
+	fset := token.NewFileSet()
+	for _, f := range files {
+		if strings.HasSuffix(f, "_test.go") {
+			continue
+		}
+		file, err := parser.ParseFile(fset, f, nil, 0)
+		if err != nil {
+			t.Fatalf("parsing %s: %v", f, err)
+		}
+		for _, d := range file.Decls {
+			fn, ok := d.(*ast.FuncDecl)
+			if !ok || fn.Body == nil {
+				continue
+			}
+			ast.Inspect(fn.Body, func(n ast.Node) bool {
+				if call, ok := n.(*ast.CallExpr); ok {
+					if sel, ok := call.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "canPark" {
+						callers[fn.Name.Name] = true
+					}
+				}
+				return true
+			})
+		}
+	}
+	got := make([]string, 0, len(callers))
+	for c := range callers {
+		got = append(got, c)
+	}
+	sort.Strings(got)
+	// CONTROL: the scan finds the real caller. If it found nothing, "only parkOrSuspend calls it" would be true of a scan that sees nothing.
+	if len(got) == 0 {
+		t.Fatal("the scan found no caller of canPark at all, so it cannot be trusted to find a second one")
+	}
+	if len(got) != 1 || got[0] != "parkOrSuspend" {
+		t.Errorf("canPark is called from %v, want exactly [parkOrSuspend]: the stop-site guards exempt canPark on the ground that it refuses no guest, which a second caller would make unverifiable", got)
 	}
 }
