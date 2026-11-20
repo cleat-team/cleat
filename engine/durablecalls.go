@@ -906,15 +906,23 @@ func (s *execSession) DurableSleep(ctx context.Context, m api.Module, durationMs
 		return packSleepResult(sleepStatusCompleted, 0)
 	}
 
-	// The park-or-suspend choice is the helper's (cleat#4152, W2b). A refusal sets exactly the suspension this call set inline before. A timer has
-	// nothing to re-poll but the clock, so a wake or a passed deadline both mean the wait is over.
-	if s.parkOrSuspend(ctx, parkRequest{
+	// The park-or-suspend choice is the helper's (cleat#4152, W2b). A refusal sets exactly the suspension this call set inline before.
+	//
+	// A timer's outcome is ADVISORY and the CLOCK decides. A sleep records nothing and is served by the clock on replay (above), so completing it
+	// before its deadline would let the run go on and record events after a sleep that a replay, reading the same clock, still finds waiting: the
+	// replay would suspend at the sleep with those events unread behind it. So a wake or a passed deadline completes the sleep only if the clock
+	// agrees; a wake that came early suspends with the same request, as a refusal would have.
+	req := parkRequest{
 		Kind:       wakeTimer,
 		DeadlineMs: s.nowMs,
 		Reason:     fmt.Sprintf("cleat_sleep(%dms)", durationMs),
 		Until:      time.UnixMilli(s.nowMs),
-	}) != parkRefused {
-		return packSleepResult(sleepStatusCompleted, 0)
+	}
+	if s.parkOrSuspend(ctx, req) != parkRefused {
+		if s.nowMs <= s.engine.realNowMs() {
+			return packSleepResult(sleepStatusCompleted, 0)
+		}
+		s.suspendFor(req) // woken early: the clock says it is not time
 	}
 
 	return packSleepResult(sleepStatusSuspend, durationMs)

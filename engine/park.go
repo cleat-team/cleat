@@ -50,6 +50,9 @@ type parkOutcome int
 const (
 	// parkRefused: the run was not parked. The suspension has been set; the caller returns its suspend result. Every call returns this today.
 	parkRefused parkOutcome = iota
+	// For a TIMER (wakeTimer) the outcome is advisory and the CLOCK decides: a caller completes only when the clock says the deadline has passed,
+	// and an early wake suspends as a refusal would. A timer has no store to re-poll, and a sleep is served by the clock on replay.
+	//
 	// parkWoke: something may have changed. The caller RE-POLLS the live store through the same read a replay uses, and the poll may find nothing
 	// (a wake for another wait, a batched check that saw another run's sequence move), in which case it parks again with the same deadline and an
 	// updated Baseline. The wake carries no payload, so it cannot disagree with the store.

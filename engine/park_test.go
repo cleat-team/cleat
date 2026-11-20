@@ -203,20 +203,23 @@ func TestAWakeKindsNamesAreTheMetricsLabels(t *testing.T) {
 	}
 }
 
-// DurableSleep on the helper, with a wake source: a wake (or a passed deadline) ends the wait with nothing suspended and nothing recorded, and the
-// source was asked for the sleep's own deadline and reason. The characterization table covers the refusal side.
-func TestADurableSleepThatIsParkedCompletesOnWake(t *testing.T) {
+// DurableSleep on the helper, with a wake source. A timer's outcome is ADVISORY and the CLOCK decides: a sleep records nothing and is served by
+// the clock on replay, so completing it before its deadline would let the run record events after a sleep that a replay still finds waiting
+// (cleat-review3's condition on the first version of this test, which pinned exactly that early completion: clock at T, deadline at T+5000).
+func TestADurableSleepIsCompletedByTheClockAndNotByTheWakeAlone(t *testing.T) {
 	const T = int64(1_800_000_000_000)
 	for name, answer := range map[string]parkOutcome{"woke": parkWoke, "deadline passed": parkDeadline} {
-		ws := &scriptedWake{answer: always(answer)}
-		s := parkSession(ws, WithClock(func() int64 { return T }))
+		// The source advances the clock to the deadline BEFORE it answers, as a real timer wake does, so the sleep is served.
+		now := T
+		ws := &scriptedWake{answer: func(int, parkRequest) parkOutcome { now = T + 5000; return answer }}
+		s := parkSession(ws, WithClock(func() int64 { return now }))
 		s.nowMs = T
 		got := s.DurableSleep(context.Background(), nil, 5000)
 		if got != packSleepResult(sleepStatusCompleted, 0) {
-			t.Errorf("%s: a parked sleep that resumed returned %#x, want completed", name, got)
+			t.Errorf("%s, clock at the deadline: a parked sleep returned %#x, want completed", name, got)
 		}
 		if s.suspendErr != nil {
-			t.Errorf("%s: a parked sleep that resumed set a suspension: %+v", name, s.suspendErr)
+			t.Errorf("%s, clock at the deadline: a completed parked sleep set a suspension: %+v", name, s.suspendErr)
 		}
 		if len(ws.reqs) != 1 {
 			t.Fatalf("%s: the wake source was asked %d times, want 1", name, len(ws.reqs))
@@ -228,11 +231,33 @@ func TestADurableSleepThatIsParkedCompletesOnWake(t *testing.T) {
 			t.Errorf("%s: a sleep recorded %d events; it records none", name, s.eventCount)
 		}
 	}
-	// CONTROL: the same sleep with a source that declines still suspends, so the completions above came from the wake and not from the clock.
-	declining := parkSession(&scriptedWake{answer: always(parkRefused)}, WithClock(func() int64 { return T }))
-	declining.nowMs = T
-	if got := declining.DurableSleep(context.Background(), nil, 5000); got != packSleepResult(sleepStatusSuspend, 5000) || declining.suspendErr == nil {
-		t.Errorf("CONTROL: a declined park returned %#x (suspension %v), want suspend", got, declining.suspendErr)
+
+	// A wake or a passed deadline that arrives while the CLOCK still says it is early does not complete the sleep: it suspends with the same request,
+	// exactly as a refusal would have. Both outcomes, because each is a way a source could be wrong.
+	for name, answer := range map[string]parkOutcome{"an early wake": parkWoke, "an early deadline": parkDeadline} {
+		ws := &scriptedWake{answer: always(answer)} // the clock never moves
+		s := parkSession(ws, WithClock(func() int64 { return T }))
+		s.nowMs = T
+		got := s.DurableSleep(context.Background(), nil, 5000)
+		if got != packSleepResult(sleepStatusSuspend, 5000) {
+			t.Errorf("%s: returned %#x, want suspend: the clock is at T and the deadline at T+5000", name, got)
+		}
+		if s.suspendErr == nil || s.suspendErr.Reason != "cleat_sleep(5000ms)" || !s.suspendErr.Until.Equal(time.UnixMilli(T+5000)) {
+			t.Errorf("%s: suspension = %+v, want the sleep's own (cleat_sleep(5000ms), until T+5000)", name, s.suspendErr)
+		}
+		if len(ws.reqs) != 1 {
+			t.Errorf("%s: the wake source was asked %d times, want 1 (no loop: the clock decides, and a replay serves the sleep)", name, len(ws.reqs))
+		}
+	}
+
+	// CONTROL: a source that advances the clock to the deadline and then DECLINES still suspends. The clock decides only a non-refused outcome; a
+	// refusal is the helper's answer, so the completions above came from a wake the clock agreed with and not from the clock alone.
+	declNow := T
+	declining := &scriptedWake{answer: func(int, parkRequest) parkOutcome { declNow = T + 5000; return parkRefused }}
+	ds := parkSession(declining, WithClock(func() int64 { return declNow }))
+	ds.nowMs = T
+	if got := ds.DurableSleep(context.Background(), nil, 5000); got != packSleepResult(sleepStatusSuspend, 5000) || ds.suspendErr == nil {
+		t.Errorf("CONTROL: a declined park with the clock at the deadline returned %#x (suspension %v), want suspend", got, ds.suspendErr)
 	}
 }
 
