@@ -221,6 +221,17 @@ and `ListCrons` are all refused, unless the harness shows a case that needs one,
 **None of the waits' or `ReleaseLock`'s refusals has been measured**; the rule is argued, not observed, and the PR that
 adds each says so. The dispatcher makes each a one-field change (`Effect:`), which is what makes the rule cheap to follow.
 
+**`ReleaseLock` measured, cleat#4211, 2026-11-20: the rule is wrong for it, and the argument above was from a segment's body alone.**
+`stopBeforeNewWork` is true in three situations, not one: a segment's body, after a worker shutdown, and after an event that could not be
+written. Measured on develop before the move (`a_lock_call_in_each_stop_state_test.go`, 12 cases, each fresh and at the replay frontier),
+`AcquireLock` is refused in all four states that matter (a segment's body, a shutdown, **a defer draining on a shutting-down worker**, an
+unwritable event) and `ReleaseLock` in none. The third is the case that decides it: `inDeferDrain` exempts a defer's own calls from the first
+condition and from nothing else, so a cleanup draining on a shutting-down worker cannot take a lock but can give one back today, and the
+blanket rule would leave it held until its lease ran out, which is the leak the exemption was written to prevent. So `ReleaseLock` moved
+onto the dispatcher with its own effect class, `effectRelease`, which is never refused, and the exemption entry in
+`a_replay_to_fresh_hand_off_refuses_or_is_named_test.go` was deleted because the class says it where the spec is declared. Whether a segment's
+BODY should release a lock is a separate decision, not made here; the other calls in the list above are still unmeasured.
+
 **One coupling to write down, because it is easy to miss: refusal and stoppability are linked.** The stoppable set
 (`engine/stop_at_last_stoppable.go`, `stoppableByOp`, `TestEveryHostStopSiteIsClassifiedForTheStoppableSet`) is derived from the
 refusing sites intersected with the component world's typed outcomes, so **every new refusal can move the stop point later and
