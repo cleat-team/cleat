@@ -1793,7 +1793,7 @@ func uleb128(b []byte) (uint64, int) {
 // already true at the one call site; this comment exists because the ordering
 // is invisible at a glance and reversing it produces no error, only a guest
 // that keeps the real clock.
-func (b *wasmtimeBackend) registerWasiDeterminismImports(linker *C.wasmtime_component_linker_t, versions []string) error {
+func (b *wasmtimeBackend) registerWasiDeterminismImports(linker *C.wasmtime_component_linker_t, versions []string, scope *cbScope) error {
 	root := C.wasmtime_component_linker_root(linker)
 	if root == nil {
 		return fmt.Errorf("component linker root is nil")
@@ -1809,7 +1809,7 @@ func (b *wasmtimeBackend) registerWasiDeterminismImports(linker *C.wasmtime_comp
 			}
 			for fnName, fnType := range funcs {
 				fnBytes := []byte(fnName)
-				cbID := registerCB(b, fnType)
+				cbID := scope.register(b, fnType)
 				if err := C.wasmtime_component_linker_instance_add_func(
 					sub, (*C.char)(unsafe.Pointer(&fnBytes[0])), C.size_t(len(fnName)),
 					C.wasmtime_component_func_callback_t(C.goComponentCallback),
@@ -1832,7 +1832,7 @@ func componentErrorMessage(err *C.wasmtime_error_t) string {
 	return s
 }
 
-func (b *wasmtimeBackend) registerCleatComponentImports(linker *C.wasmtime_component_linker_t) error {
+func (b *wasmtimeBackend) registerCleatComponentImports(linker *C.wasmtime_component_linker_t, scope *cbScope) error {
 	root := C.wasmtime_component_linker_root(linker)
 	if root == nil {
 		return fmt.Errorf("component linker root is nil")
@@ -1866,7 +1866,7 @@ func (b *wasmtimeBackend) registerCleatComponentImports(linker *C.wasmtime_compo
 			if len(fnBytes) > 0 {
 				fnPtr = (*C.char)(unsafe.Pointer(&fnBytes[0]))
 			}
-			cbID := registerCB(b, fnType)
+			cbID := scope.register(b, fnType)
 			err := C.wasmtime_component_linker_instance_add_func(sub, fnPtr, C.size_t(len(witFuncName)), C.wasmtime_component_func_callback_t(C.goComponentCallback), C.cbid_as_env(C.uintptr_t(cbID)), nil)
 			if err != nil {
 				var msg C.wasm_byte_vec_t

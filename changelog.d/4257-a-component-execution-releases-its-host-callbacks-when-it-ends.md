@@ -1,0 +1,4 @@
+---
+section: fixed
+---
+- **A Python or C# workflow execution no longer leaves its host-function registrations behind (cleat#4257).** Every component execution registered one registry entry per linked host function (57 on a minimal guest: 50 cleat imports, 7 WASI determinism) and nothing ever removed them, so each execution kept its per-execution backend, and through it the execution session, reachable for the life of the process. An execution now removes exactly the entries it registered when it returns, by any path, after its store and linker are released. Ids are now minted from a counter and never from the registry's size, which would have collided as soon as anything was removed. Also removed: two write-only registry fields and three dead C statics in the component path. Core-module (Go, Rust, AssemblyScript, TinyGo) executions were not affected.
