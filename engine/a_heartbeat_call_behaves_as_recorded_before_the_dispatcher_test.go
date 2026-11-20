@@ -27,33 +27,29 @@ const g3hBufLen = 1024
 // implements IdempotentCaller. It is self-contained on purpose: the retry table (a sibling PR) has a caller of the same shape, and the two files
 // must not depend on each other, so each carries its own.
 type g3hCaller struct {
-	mode     string // "ok", "error" or "block" (until the call's context is cancelled)
-	attempts int    // calls to svc.op
-	others   int    // every other call
-	keys     []string
+	mode      string         // "ok", "error" or "block" (until the call's context is cancelled)
+	attempts  int            // calls to svc.op
+	others    int            // every other call
+	stepOfKey map[string]int // the key of each of steps 0..9, learned from the engine's own call path before the call (learnKeys)
+	steps     []int          // the step each svc.op call's key was derived from; -1 for a key that matches none; the key itself is not kept
 }
 
-// stepsOf maps each recorded key to the step it was derived from (steps 0..9; -1 for a key that matches none). The key for each step is learned from
-// the engine's own call path (callService) and NOT by calling DurableCallIdempotencyKey from this file: that direct call made golangci-lint's gosec
-// G701 report an unrelated line of production code (engine/mysql_lifecycle.go) that it does not report without it.
-func (c *g3hCaller) stepsOf(workflowID string) []int {
+// learnKeys fills stepOfKey: the idempotency key for each of steps 0..9, learned from the engine's own call path (callService) and NOT by calling
+// DurableCallIdempotencyKey from this file. THE CALLER KEEPS THE STEP AND NOT THE KEY, deliberately: golangci-lint's gosec G701 (SQL taint analysis)
+// can report an UNRELATED line of production code (engine/mysql_lifecycle.go:114) when a test type that implements IdempotentCaller stores the key
+// argument it is handed, and whether it does depends on the base as well as on the file (the retry table, a sibling PR, linted clean on one develop
+// and failed CI's lint-go on the next with the key stored). Storing only the step linted clean on the merge with develop 0678b1cb.
+func (c *g3hCaller) learnKeys(workflowID string) {
 	probe := newRecordingCaller()
 	ps := &execSession{engine: NewEngine(nil, probe), workflowID: workflowID}
-	stepOfKey := map[string]int{}
+	c.stepOfKey = map[string]int{}
 	for n := 0; n < 10; n++ {
 		_, _ = ps.callService(context.Background(), "probe", "probe", `{}`, n)
-		stepOfKey[probe.keys[n]] = n
+		c.stepOfKey[probe.keys[n]] = n
 	}
-	out := make([]int, 0, len(c.keys))
-	for _, k := range c.keys {
-		step, ok := stepOfKey[k]
-		if !ok {
-			step = -1
-		}
-		out = append(out, step)
-	}
-	return out
 }
+
+func (c *g3hCaller) stepsOf(string) []int { return c.steps }
 
 func (c *g3hCaller) Call(ctx context.Context, service, operation, req string) (string, error) {
 	return c.CallWithIdempotencyKey(ctx, service, operation, req, "")
@@ -65,7 +61,11 @@ func (c *g3hCaller) CallWithIdempotencyKey(ctx context.Context, service, operati
 		return `{"ok":true}`, nil
 	}
 	c.attempts++
-	c.keys = append(c.keys, key)
+	step, ok := c.stepOfKey[key]
+	if !ok {
+		step = -1
+	}
+	c.steps = append(c.steps, step)
 	switch c.mode {
 	case "error":
 		return "", errors.New("the service is unavailable")
@@ -91,6 +91,7 @@ type g3hCase struct {
 
 func (c g3hCase) observe() string {
 	caller := &g3hCaller{mode: c.mode}
+	caller.learnKeys("wf-g3h")
 	opts := []EngineOption{WithWorkflowID("wf-g3h")}
 	if c.deferPhase {
 		opts = append(opts, WithDeferPhase())
