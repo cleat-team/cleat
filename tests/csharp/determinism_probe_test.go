@@ -137,6 +137,10 @@ func runProbe(t *testing.T, b []byte, entry, wfID string, startMs int64, replay 
 // since the instance started, so a run and its replay read the same number whenever the two instance start-ups take the same time. Over nine
 // recorded probe runs seven differed and two coincided, and spacing five readings 7 ms apart made no difference (the offset is what coincides).
 // It is NOT pinned by the engine: the other clock in the same entry, Stopwatch.GetTimestamp (nanoseconds), differs on every run.
+// So its row allows every verdict except THREW: NOT REPLAYED (the run and its replay read different numbers), REPLAYS (they coincide, and A may or
+// may not differ from the other identity's run) and constant (all four start-ups landed on the same millisecond, A=B=C=R). The same jitter produces all
+// three, so no one of them is a measurement of anything. The row stays asserted so that a toolchain change that made the call throw is still noticed.
+// "constant" was missing from this row until a run on #4179 read A=B=C=R="21,28,35,42,49" and failed it.
 var probeWant = map[string]map[string]string{
 	"probe_async": {
 		"both":   "constant",
@@ -178,7 +182,7 @@ var probeWant = map[string]map[string]string{
 		"File.WriteAllText":             "THREW",
 	},
 	"probe_monotonic": {
-		"Environment.TickCount64": "NOT REPLAYED|REPLAYS, and follows the identity", // coincides by chance: see the comment on probeWant
+		"Environment.TickCount64": "NOT REPLAYED|REPLAYS|constant", // any verdict but THREW: see the comment on probeWant
 		"Stopwatch.GetTimestamp":  "NOT REPLAYED",
 	},
 	"probe_tasks": {
