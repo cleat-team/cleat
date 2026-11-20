@@ -50,7 +50,7 @@ func allEventTypes(t *testing.T) []EventType {
 // nothing, so a later replay leaves replay at the await and a recorded call after it runs again (2 calls, want 1). The entry stays only because
 // removing it fails the probe for the right reason, and cleat#4177 owns the fix; when it lands, delete the entry and let the guard cover it.
 //
-// The other pending-resume sites this guard's neighbours exempt (AwaitChild, AwaitAnyChild, replayAwaitAllChildren, replaySetScope's retry) are
+// The other pending-resume sites this guard's neighbours exempt (AwaitChild, AwaitAnyChild, replayAwaitAllChildren) are
 // NOT MEASURED either: whether a defer segment's drain can append events after the pending record has not been tried. Each is a grant, and an
 // entry added to silence a failure is the next duplicate effect.
 var resumesItsOwnPendingEvent = map[string]EventType{

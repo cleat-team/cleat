@@ -68,7 +68,8 @@ const (
 // signal_workflow and durable_send (three) and fetch (four) need.
 type stepArgs struct {
 	s1, s2, s3, s4 string
-	// i1 is an integer argument: a lock's time to live in milliseconds.
+	// i1 is an integer argument: a lock's time to live in milliseconds, or SetScope's previous-scope result, packed (the write into the guest's
+	// buffer happens before the step).
 	i1 int64
 	// outPtr and outMaxLen are where a divergence message is written, and where the call's own output goes; zero when it has none.
 	outPtr, outMaxLen uint32
@@ -168,7 +169,7 @@ type stepSpec struct {
 // stepSpecs lists every spec in the engine. It exists for the dispatcher's tests (step_dispatcher_test.go), which run each property over every
 // spec on it and check the list against the `var x = stepSpec{` declarations in the source, so a spec nobody registered is on no list and is
 // caught. A host call moved onto step adds its spec here in the same change.
-var stepSpecs = []*stepSpec{&createPromiseStep, &resolvePromiseStep, &rejectPromiseStep, &acquireLockStep, &releaseLockStep, &sideEffectStep, &sideEffectRecordedStep, &deferStep, &scheduleCronStep, &deleteCronStep, &listCronsStep, &awaitSignalsStep}
+var stepSpecs = []*stepSpec{&createPromiseStep, &resolvePromiseStep, &rejectPromiseStep, &acquireLockStep, &releaseLockStep, &sideEffectStep, &sideEffectRecordedStep, &deferStep, &scheduleCronStep, &deleteCronStep, &listCronsStep, &awaitSignalsStep, &setScopeStep}
 
 // validate says whether a spec is well-formed: it names a replay event, can decode it and can run fresh, and a step that declares itself Pure
 // (and so is never refused in a segment) records nothing.

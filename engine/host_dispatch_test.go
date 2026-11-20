@@ -343,7 +343,7 @@ func TestSetScopeReplayPastEnd(t *testing.T) {
 
 	result := s.SetScope(context.Background(), nil, "account", "acct-123", 0, 0)
 
-	// Past end: exitReplay then freshSetScope.
+	// Past end: the step leaves replay and runs fresh.
 	if s.isReplay {
 		t.Error("expected isReplay=false after exitReplay")
 	}

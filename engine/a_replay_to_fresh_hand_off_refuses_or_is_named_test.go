@@ -234,7 +234,10 @@ func TestEveryReplayToFreshHandOffReachesARefusalOrIsNamed(t *testing.T) {
 	if examined < 20 {
 		t.Fatalf("the scan found %d functions that call exitReplay(); it is reading the wrong thing and would pass whatever the tree said", examined)
 	}
-	for _, canary := range []string{"replayCall", "replaySetScope", "replayPluginCall"} {
+	// replaySetScope was the third canary until SetScope moved onto the dispatcher (cleat#4211), which now owns that hand-off, and replaySideEffect before it
+	// (cleat#4152, G1a). replayPluginCall and replayCallWithHeartbeat are replay halves of the same kind as replayCall that still call exitReplay themselves.
+	// When one of these moves, replace it with another that does, and the failure below names which one went.
+	for _, canary := range []string{"replayCall", "replayPluginCall", "replayCallWithHeartbeat"} {
 		if !callsInCode(bodies[canary], "exitReplay") {
 			t.Fatalf("canary %s was not seen calling exitReplay(); the scan is reading the wrong thing", canary)
 		}
