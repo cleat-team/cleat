@@ -222,10 +222,10 @@ func g3hCases() map[string]g3hCase {
 //
 // KNOWN-BAD ROWS, recorded so the migration moves them on purpose and not by accident:
 //
-//   - replay_mid_heartbeat_resumes_the_call and replay_mid_heartbeat_after_a_plain_call (cleat#4247): a history that ends inside the call resumes it
-//     with an idempotency key derived from a LATER step than the first incarnation's (keysFromStep=[2] where the call started at step 0, and [3]
-//     where it started at 1), because the replay consumes the heartbeats before the fresh call takes its step. The retry call keeps the first
-//     incarnation's step for exactly this reason (cleat#1145); this one does not.
+//   - (fixed in cleat#4247, and now pinned as correct) replay_mid_heartbeat_resumes_the_call and replay_mid_heartbeat_after_a_plain_call: a history
+//     that ends inside the call resumes it with the idempotency key of the step the FIRST incarnation started at (keysFromStep=[0] and [1]). They
+//     recorded [2] and [3] before the fix, a key derived from a LATER step because the replay consumed the heartbeats before the fresh call took its
+//     step; the retry call keeps the first incarnation's step for the same reason (cleat#1145).
 //   - replay_divergence_wrong_event_type and replay_divergence_other_operation end at step 1: a divergence CONSUMED the record before reporting it
 //     (the #4152 defect), so the call that owns it loses it.
 //
@@ -254,8 +254,8 @@ var g3hGolden = map[string]string{
 	"replay_error_event":                                     "res=0x1a0000000201 wrote=\"the service is unavailable\" isReplay=true step=1 recorded=[] calls=0 others=0 keysFromStep=[]",
 	"replay_error_event_non_retryable":                       "res=0x120000000001 wrote=\"workflow cancelled\" isReplay=true step=1 recorded=[] calls=0 others=0 keysFromStep=[]",
 	"replay_heartbeats_then_call":                            "res=0xb0000000000 wrote=\"{\\\"ok\\\":true}\" isReplay=true step=3 recorded=[] calls=0 others=0 keysFromStep=[]",
-	"replay_mid_heartbeat_after_a_plain_call":                "res=0xb0000000000 wrote=\"{\\\"ok\\\":true}\" isReplay=false step=4 recorded=[call/step=3/svc.op/err=\"\"/nonretry=false/code=\"\"] calls=1 others=0 keysFromStep=[3]",
-	"replay_mid_heartbeat_resumes_the_call":                  "res=0xb0000000000 wrote=\"{\\\"ok\\\":true}\" isReplay=false step=3 recorded=[call/step=2/svc.op/err=\"\"/nonretry=false/code=\"\"] calls=1 others=0 keysFromStep=[2]",
+	"replay_mid_heartbeat_after_a_plain_call":                "res=0xb0000000000 wrote=\"{\\\"ok\\\":true}\" isReplay=false step=4 recorded=[call/step=3/svc.op/err=\"\"/nonretry=false/code=\"\"] calls=1 others=0 keysFromStep=[1]",
+	"replay_mid_heartbeat_resumes_the_call":                  "res=0xb0000000000 wrote=\"{\\\"ok\\\":true}\" isReplay=false step=3 recorded=[call/step=2/svc.op/err=\"\"/nonretry=false/code=\"\"] calls=1 others=0 keysFromStep=[0]",
 	"replay_pending_intent_is_reported_ambiguous":            "res=0xb40000000001 wrote=\"[AMBIGUOUS] call outcome unknown at step 0: the external call to svc.op was dispatched but the response was not recorded before a crash. Check the external service before retrying.\" isReplay=true step=1 recorded=[] calls=0 others=0 keysFromStep=[]",
 	"replay_quit":                                            "res=0x0 wrote=\"\" isReplay=true step=1 recorded=[] calls=0 others=0 keysFromStep=[]",
 	"replay_terminal_call":                                   "res=0xb0000000000 wrote=\"{\\\"ok\\\":true}\" isReplay=true step=1 recorded=[] calls=0 others=0 keysFromStep=[]",
