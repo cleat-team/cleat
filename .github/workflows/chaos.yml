@@ -161,6 +161,19 @@ jobs:
           set -euo pipefail
           CLEAT_CHAOS_SEED="$CHAOS_SEED" CLEAT_CHAOS_MODE="$CHAOS_MODE" CLEAT_CHAOS_SCRIPTS=8 \
             go test -json -tags chaos -count=1 -timeout 180m ./tests/chaos -run 'TestChaosSeeded' 2>&1 | tee chaos-seeded.log
+      # Timing-dependent rows that must not gate a pull request. They sit behind the `timing` build tag (so the Tier 1 gate, which counts a skip as a failure,
+      # never sees them as skipped: they are not compiled there), and they size their work from a measurement on the machine, so a heavily loaded runner can end
+      # one PRECONDITION FAILED. That is an honest "this measured nothing", never a pass, and it belongs here and not in a required job. Runs even if an earlier
+      # sweep step failed, so a red sweep cannot hide it.
+      - name: Timing rows (build tag timing)
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          go test -json -tags timing -count=1 -timeout 30m ./engine/ \
+            -run 'TestAHeldWaitRestartsTheExecutionFenceOnRealWasmtime' 2>&1 | tee chaos-timing.log
+          # `go test -run` that selects nothing exits 0 ("no tests to run"), so a renamed test would leave this step green having run nothing. Require its pass event.
+          grep -E '"Action":"pass","Package":"[^"]*","Test":"TestAHeldWaitRestartsTheExecutionFenceOnRealWasmtime"' chaos-timing.log > /dev/null \
+            || { echo "::error::the timing row reported no pass: the -run pattern selected nothing, or it never finished"; exit 1; }
       - uses: actions/upload-artifact@v7
         if: always()
         with:

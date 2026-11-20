@@ -1670,6 +1670,9 @@ func (b *wasmtimeBackend) ExecuteComponentCGo(
 	}
 	// Guest execution time, not wall clock: see the bracket in goComponentCallback (cleat#4174). Armed below, immediately before the guest runs.
 	b.budget = newHostBudget(store, execTimeout)
+	// A run held through a wait gets fresh limits when it wakes, and this fence is one of them (the core path registers the same, backend_wasmtime.go). Latent today
+	// because only Go is admitted to be held, and that is exactly why it is registered now: the admission table changes in one place and this one would not.
+	onLimitsRestart(ctx, func() { b.restartFence(ctx) })
 	wasiConfig := wasmtime.NewWasiConfig()
 	wasiConfig.InheritStderr()
 	wasiConfig.SetEnv([]string{"PYTHONHOME", "PYTHONPATH"}, []string{"/", "/"})

@@ -574,7 +574,7 @@ func TestEveryExecutionContextTheExecutorBuildsIsHandedToTheSession(t *testing.T
 		t.Fatalf("read executor.go: %v", err)
 	}
 	src := string(raw)
-	ceilings := strings.Count(src, "execCtx, cancel = context.WithTimeout(execCtx, ceiling)")
+	ceilings := strings.Count(src, "execCtx, cancel = withRestartableTimeout(execCtx, ceiling)")
 	handed := strings.Count(src, "session.execCtx = execCtx")
 	if ceilings < 2 {
 		t.Fatalf("found %d place(s) the ceiling is applied, want at least 2: this test reads the wrong thing", ceilings)
@@ -583,7 +583,7 @@ func TestEveryExecutionContextTheExecutorBuildsIsHandedToTheSession(t *testing.T
 		t.Errorf("the ceiling is applied at %d place(s) and the context is handed to the session at %d", ceilings, handed)
 	}
 	// And after, not before: a hand-off before the ceiling carries a context without it.
-	for _, seg := range strings.Split(src, "execCtx, cancel = context.WithTimeout(execCtx, ceiling)")[1:] {
+	for _, seg := range strings.Split(src, "execCtx, cancel = withRestartableTimeout(execCtx, ceiling)")[1:] {
 		next := strings.Index(seg, "session.execCtx = execCtx")
 		if next < 0 || next > 400 {
 			t.Errorf("a ceiling is not followed by the hand-off within the same block")
@@ -683,5 +683,129 @@ func TestHoldsInOneExecutionAddUpAgainstOneDeadlineAndTheLastIsRefused(t *testin
 	}
 	if n := residentCounter(t, m, "cleat_resident_refusals_total", `reason="deadline"`); n != 1 {
 		t.Errorf("counted %d deadline refusal(s), want exactly the last one", n)
+	}
+}
+
+// The wake source against the REAL restartable limits (execution_limits.go): the paths the backend rows cannot reach one at a time.
+
+func limitedSetCtx(t *testing.T, d time.Duration) (context.Context, context.CancelFunc) {
+	t.Helper()
+	base := withExecutionLimits(context.Background(), &executionLimits{})
+	ctx, cancel := withRestartableTimeout(base, d)
+	if _, ok := ctx.(*restartableDeadline); !ok {
+		t.Fatal("PRECONDITION FAILED: the limit is not restartable")
+	}
+	return ctx, cancel
+}
+
+func TestAHoldPausesTheRunsLimitsAndRestartsThemWhenItEnds(t *testing.T) {
+	clock := newFakeResidentClock(residentT)
+	set := newTestResidentSet(t, residentTestConfig(clock, nil))
+	ctx, cancel := limitedSetCtx(t, 150*time.Millisecond)
+	defer cancel()
+	out := park(set.ForRun(ResidentRunInfo{Language: "go"}), ctx, timerReq(residentT+5000))
+	awaitArmed(t, clock)
+	// The hold lasts three times the limit's whole duration, in real time. A limit that kept running would have ended it.
+	time.Sleep(450 * time.Millisecond)
+	if ctx.Err() != nil {
+		t.Fatalf("the limit expired during the hold: %v", ctx.Err())
+	}
+	clock.fireAll()
+	mustOutcome(t, out, parkDeadline, "the timer")
+	// Restarted: about the FULL 150ms is left, not what was left when the hold began (which was about 150ms too, so the control is the next row).
+	if dl, ok := ctx.Deadline(); !ok || time.Until(dl) < 100*time.Millisecond {
+		t.Errorf("after the hold the limit has %v left, want about its full 150ms", time.Until(dl))
+	}
+}
+
+func TestAHoldThatWasUsedPartOfALimitGivesItBackInFullAtTheWake(t *testing.T) {
+	clock := newFakeResidentClock(residentT)
+	set := newTestResidentSet(t, residentTestConfig(clock, nil))
+	ctx, cancel := limitedSetCtx(t, 400*time.Millisecond)
+	defer cancel()
+	time.Sleep(300 * time.Millisecond) // only 100ms of the limit is left when the wait starts
+	out := park(set.ForRun(ResidentRunInfo{Language: "go"}), ctx, timerReq(residentT+5000))
+	awaitArmed(t, clock)
+	clock.fireAll()
+	mustOutcome(t, out, parkDeadline, "the timer")
+	if dl, ok := ctx.Deadline(); !ok || time.Until(dl) < 300*time.Millisecond {
+		t.Errorf("after the wake the limit has %v left; a suspension's next segment would have its full 400ms, and so must this (it had 100ms when paused)", time.Until(dl))
+	}
+}
+
+func TestAWaitRefusedAfterThePauseLeavesTheLimitRunningWithItsRemainingTime(t *testing.T) {
+	clock := newFakeResidentClock(residentT)
+	m := newReplayMetrics(t)
+	// MaxRuns 1 and one run already held: the second run's wait is refused for the COUNT, which is decided after its limits were paused.
+	set := newTestResidentSet(t, residentTestConfig(clock, func(c *ResidencyConfig) { c.MaxRuns = 1; c.Metrics = m }))
+	first, cancelFirst := limitedSetCtx(t, time.Hour)
+	defer cancelFirst()
+	held := park(set.ForRun(ResidentRunInfo{Language: "go"}), first, timerReq(residentT+5000))
+	awaitArmed(t, clock)
+
+	ctx, cancel := limitedSetCtx(t, 250*time.Millisecond)
+	defer cancel()
+	time.Sleep(100 * time.Millisecond)
+	start := time.Now()
+	if got := set.ForRun(ResidentRunInfo{Language: "go"}).Wait(ctx, timerReq(residentT+5000)); got != parkRefused {
+		t.Fatalf("the second run's wait returned %d, want the refusal", got)
+	}
+	// It was never held, so its limit must carry on with the ~150ms it had, NOT be handed a fresh 250ms (which is what a restart would do).
+	if !limitDoneWithin(ctx, 400*time.Millisecond) {
+		t.Fatal("the refused run's limit never expired: the pause was not undone")
+	}
+	if got := time.Since(start); got > 220*time.Millisecond {
+		t.Errorf("the refused run's limit lasted %s more after the refusal, want about 150ms: a refusal must not restart the limits", got)
+	}
+	clock.fireAll()
+	mustOutcome(t, held, parkDeadline, "the first run's timer")
+}
+
+func limitDoneWithin(ctx context.Context, d time.Duration) bool {
+	select {
+	case <-ctx.Done():
+		return true
+	case <-time.After(d):
+		return false
+	}
+}
+
+func TestAWaitWhoseLimitHasAlreadyEndedIsRefusedNotHeld(t *testing.T) {
+	clock := newFakeResidentClock(residentT)
+	m := newReplayMetrics(t)
+	set := newTestResidentSet(t, residentTestConfig(clock, func(c *ResidencyConfig) { c.Metrics = m }))
+	ctx, cancel := limitedSetCtx(t, 5*time.Millisecond)
+	defer cancel()
+	if !limitDoneWithin(ctx, 2*time.Second) {
+		t.Fatal("PRECONDITION FAILED: the limit did not expire")
+	}
+	if got := set.ForRun(ResidentRunInfo{Language: "go"}).Wait(ctx, timerReq(residentT+5000)); got != parkRefused {
+		t.Fatalf("returned %d, want the refusal", got)
+	}
+	if n := residentCounter(t, m, "cleat_resident_parks_total"); n != 0 {
+		t.Errorf("a run whose limit had already ended was HELD (%d)", n)
+	}
+	if n := residentCounter(t, m, "cleat_resident_refusals_total", `reason="deadline"`); n != 1 {
+		t.Errorf("counted %d deadline refusal(s), want 1", n)
+	}
+}
+
+func TestACancelEndsAHeldRunWhoseLimitsArePaused(t *testing.T) {
+	clock := newFakeResidentClock(residentT)
+	set := newTestResidentSet(t, residentTestConfig(clock, nil))
+	parent, cancelParent := context.WithCancel(context.Background())
+	base := withExecutionLimits(parent, &executionLimits{})
+	ctx, cancel := withRestartableTimeout(base, time.Hour)
+	defer cancel()
+	out := park(set.ForRun(ResidentRunInfo{Language: "go"}), ctx, timerReq(residentT+5000))
+	awaitArmed(t, clock)
+	cancelParent()
+	select {
+	case got := <-out:
+		if got != parkRefused {
+			t.Errorf("a held run that was cancelled returned %d, want the refusal (it suspends)", got)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("a cancel did not end a held run whose limits were paused")
 	}
 }

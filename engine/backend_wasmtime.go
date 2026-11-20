@@ -665,6 +665,29 @@ func (b *wasmtimeBackend) interruptError(callErr error, execTimeout time.Duratio
 	return b.timeLimitError(callErr, execTimeout)
 }
 
+// restartFence gives the guest its full execution budget again, by the rule configureStore applies at the start of an invocation. It runs from inside a host
+// call (the wait that was held), where the budget is not running and leaveHost re-arms it from what is set here, so nothing else needs to move.
+func (b *wasmtimeBackend) restartFence(ctx context.Context) {
+	if b.budget == nil {
+		return
+	}
+	full := b.limits.executionTimeout
+	if full <= 0 {
+		full = DefaultWasmtimeExecutionTimeout
+	}
+	b.epochBoundByDeadline = false
+	if deadline, ok := ctx.Deadline(); ok {
+		if remaining := time.Until(deadline); remaining < full {
+			if remaining < epochTickInterval {
+				remaining = epochTickInterval // the floor configureStore and setDeadline apply: an exhausted guest stops at the next tick
+			}
+			full = remaining
+			b.epochBoundByDeadline = true
+		}
+	}
+	b.budget.restart(full)
+}
+
 // timeLimitError names the wall-clock bound that stopped the guest.
 //
 // Which bound it was decides which flag to point at. When it was ctx's remaining deadline
@@ -772,6 +795,9 @@ func (b *wasmtimeBackend) Execute(ctx context.Context, wasmBytes []byte, entryPo
 	// The fence bounds guest execution, not wall clock. IMPROVEMENT-PLAN 3.90,
 	// engine/wasmtime_hostbudget.go.
 	b.budget = newHostBudget(store, execTimeout)
+	// A run that is held through a wait gets fresh limits when it wakes, as a suspended one would on its next claim (execution_limits.go), and this fence is
+	// one of them: it is bounded by the earlier of --wasm-instance-timeout and what the context has left, and both start again.
+	onLimitsRestart(ctx, func() { b.restartFence(ctx) })
 	b.interruptMarginTime = DefaultWasmtimeInterruptMarginTime
 	if execTimeout > 0 {
 		if b.interruptMarginTime > execTimeout/10 {
