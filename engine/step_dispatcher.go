@@ -50,6 +50,18 @@ const (
 	recordsMany                    // one or more (Multi, Stream, Wait); the spec says how many in its own test
 )
 
+// recordRole says how one record relates to a multi-record step: the role it plays in the run of records the step owns.
+type recordRole int
+
+const (
+	// roleForeign: not this step's record. It ends the run, and what that means depends on what came before it (see replayRun).
+	roleForeign recordRole = iota
+	// rolePrefix: a record that continues the step without finishing it: a failed attempt of a retried call, a pending await.
+	rolePrefix
+	// roleFinal: the record that finishes the step: the call's outcome, the acquisition, the await's resolution.
+	roleFinal
+)
+
 // stepArgs is the per-call data a spec needs. A spec is a package-level value and holds no closure over the call, so a step costs no
 // allocation beyond this struct (section 9, risk 5, of the design); two strings cover the promise calls and the next groups add fields.
 type stepArgs struct {
@@ -66,6 +78,10 @@ type stepCtx struct {
 	args stepArgs
 	// recorded counts events recorded through Record, so the dispatcher can check them against the spec's declared shape.
 	recorded int
+	// Prefix is the run of prefix records a multi-record step consumed when history ENDED INSIDE its run, handed to Fresh so it can continue
+	// from there. It is data: the spec decides what it means (a retried call reads len(Prefix) as attempts already spent; a heartbeat
+	// ignores it). nil for a step that did not end inside a run.
+	Prefix []EventRecord
 }
 
 // Record records an event where the call records it today. It is the only way a spec's Fresh writes history, which is what lets the
@@ -101,8 +117,21 @@ type stepSpec struct {
 	// NoIdentity says why a call has no identifying field, when it has none: exactly one of Identity and NoIdentity is set, so "no identity"
 	// is a decision with a reason that a reviewer can read, not an omission.
 	NoIdentity string
-	// Decode turns the consumed record into the call's result. It must not touch the world.
+	// Decode turns the consumed record into the call's result. It must not touch the world. A single-record step sets Decode; a multi-record
+	// step (Role set) sets DecodeRun instead.
 	Decode func(c *stepCtx, rec *EventRecord) int64
+	// Role makes this a MULTI-RECORD step: one call whose history is a run of consecutive records, any number of rolePrefix records ending in a
+	// roleFinal one (a retried call's failed attempts then its outcome; SetScope's failed acquisitions then the acquisition; an await's
+	// pending record then its resolution). nil means a single-record step. Role classifies a record by its type and shape only; WHAT it
+	// names (the key, the service and op) is Identity's, applied to every record of the run. See replayRun for what each ending means.
+	Role func(a stepArgs, rec *EventRecord) recordRole
+	// DecodeRun turns a complete run into the call's result: the records in order, the last of them the roleFinal one, or, for a spec with
+	// EndsWithoutFinal, prefix records only. It may keep a replay-time write its call made today (a pending call's ambiguity record) and
+	// the spec's comment says so; otherwise it must not touch the world.
+	DecodeRun func(c *stepCtx, run []EventRecord) int64
+	// EndsWithoutFinal says a run of prefix records followed by a FOREIGN record is a complete run with no final: an await that was recorded
+	// and then not answered (it timed out). Without it that shape is a divergence, as for a retried call or SetScope.
+	EndsWithoutFinal bool
 	// Fresh does the work and records, through c.Record, where the call records. It is called only once the dispatcher has decided
 	// fresh work is allowed.
 	Fresh func(c *stepCtx) int64
@@ -121,8 +150,14 @@ func (sp *stepSpec) validate() error {
 		return fmt.Errorf("a step spec has no name")
 	case sp.Want == "":
 		return fmt.Errorf("step spec %q has no Want: it names no event to consume on replay", sp.Name)
-	case sp.Decode == nil || sp.Fresh == nil:
-		return fmt.Errorf("step spec %q is missing its Decode or its Fresh", sp.Name)
+	case sp.Fresh == nil:
+		return fmt.Errorf("step spec %q is missing its Fresh", sp.Name)
+	case sp.Role == nil && (sp.Decode == nil || sp.DecodeRun != nil || sp.EndsWithoutFinal):
+		return fmt.Errorf("step spec %q is a single-record step and needs exactly a Decode (no DecodeRun, no EndsWithoutFinal)", sp.Name)
+	case sp.Role != nil && (sp.DecodeRun == nil || sp.Decode != nil):
+		return fmt.Errorf("step spec %q is a multi-record step (it has a Role) and needs exactly a DecodeRun, not a Decode", sp.Name)
+	case sp.Role != nil && sp.Records == recordsNone:
+		return fmt.Errorf("step spec %q is a multi-record step that records nothing: a run is made of recorded events", sp.Name)
 	case (sp.Identity == nil) == (sp.NoIdentity == ""):
 		return fmt.Errorf("step spec %q must set exactly one of Identity and NoIdentity: a call either names what identifies it or says why it has nothing to compare", sp.Name)
 	case sp.Refuse != nil && sp.Effect == effectPure:
@@ -156,7 +191,13 @@ func init() {
 func (s *execSession) step(ctx context.Context, m api.Module, sp *stepSpec, args stepArgs) int64 {
 	c := &stepCtx{ctx: ctx, m: m, s: s, args: args}
 	if s.isReplay {
-		if s.stepCount < len(s.history) {
+		if s.stepCount < len(s.history) && sp.Role != nil {
+			// A multi-record step reads its whole run. It returns unless the history ENDED INSIDE the run, in which case the prefix is consumed
+			// and the step falls through to leave replay and run fresh with c.Prefix.
+			if res, endedInside := s.replayRun(ctx, m, sp, c); !endedInside {
+				return res
+			}
+		} else if s.stepCount < len(s.history) {
 			rec := s.history[s.stepCount]
 			if rec.EventType != sp.Want {
 				// Not consumed: replayDivergence leaves the record for the call it belongs to (cleat#4157).
