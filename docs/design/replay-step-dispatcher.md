@@ -72,7 +72,7 @@ What the two readings agree on:
 
 - **34 of 54** methods record an event; **20 do not** (appendix A, "records").
 - **26** methods call `stopBeforeNewWork()` directly or through a helper. Of the 34 that record, **nine do not**:
-  `ContinueAsNew` and `ContinueAsNewWithVersion` (fixed by #4161, not yet on develop at the time of the scan),
+  `ContinueAsNew` and `ContinueAsNewWithVersion` (fixed by #4161, merged; not on develop at the time of the scan),
   `AwaitChild`, `AwaitAllChildren`, `AwaitAnyChild`, `AwaitPromise`, `RegisterUpdateHandler`, `ReleaseLock` and `ListCrons`.
   Whether each *should* is a separate question per call (section 5): a wait that only reads a recorded outcome is not "new
   work". The point is that nothing but a reader decides it, and a reader decided it nine different ways.
@@ -139,6 +139,8 @@ and the dispatcher is, in full:
       s.countStep()                                                                         -- (5)
       return res
 
+**Superseded in two places by Revision 2 (end of this document):** `Fresh` is handed a recorder (`st.Record`) and does not return records, because several calls record first and act second; and `stepSpec` carries a park field from the start.
+
 The five questions become five lines. The properties the bugs violated become properties of this function, not of 54 callers:
 
 - **No refusal is skippable.** A step with `Effect != Pure` is refused in a defer segment's body whichever way it arrived,
@@ -158,7 +160,7 @@ The five questions become five lines. The properties the bugs violated become pr
   the store tests hand-wrote the completing record at the same step as the pending one, which is the shape the code did not produce.
 - **A divergence has one shape**: one message, one metric, one place a replay tester hooks.
 - **A recorded event's write failing stops the guest, without a per-step check.** The first draft of this design put a
-  `persistenceFailure` hook after every record. WS-cleat-2's #4166 (stacked on #4151, **in review, not on develop**) chose the
+  `persistenceFailure` hook after every record. WS-cleat-2's #4166 (stacked on #4151; **both merged**, checked 2026-11-20) chose the
   #4160 policy differently and better: a failed write (other than `ErrFenceLost`) sets `s.eventWriteFailure` and suspends the run,
   and `stopBeforeNewWork` returns true while it is set, so **the next fresh step is refused by the refusal in line (3)**. The
   dispatcher needs no extra code for #4160; it needs line (3) to be on every non-`Pure` step, which is its main property. A quota
@@ -228,11 +230,11 @@ the call, and the cleanup must see the call before it).
 
 **Event cap (5).** On develop (`1157baf3`) only `freshCall` counts toward `maxEventsPerWorkflow` and triggers auto-ContinueAsNew
 (`grep -n 's.eventCount\|maxEventsPerWorkflow' engine/*.go`: three sites, all in `DurableCall`). **WS-cleat-2 reports this is already
-changing:** on #4151 (head `35f9eec0`, in review, not merged) the no-wait `await_signals` and `await_promise` record an event, count
+changing:** on #4151 (head `35f9eec0`; **merged**, the no-wait awaits now count) the no-wait `await_signals` and `await_promise` record an event, count
 toward the cap and stop at it (`refuseAtEventCap`, `triggerEventCapContinueAsNew`), after a poll loop at `--max-quota-events 25`
 failed at the 30 s fence. Counting *every* recorded event in the dispatcher would still be **a behaviour change** (a workflow of
 plugin calls would start hitting the cap), so the migration does not do it silently: PR 1 keeps the count where it is on the day it
-is written (`DurableCall`, plus the two no-wait awaits if #4151 has merged), through a spec field, and a later, separately
+is written (`DurableCall`, plus the two no-wait awaits, since #4151 has merged), through a spec field, and a later, separately
 announced PR decides whether to widen it.
 
 ---
@@ -246,8 +248,8 @@ check.
 | PR | change | checked by |
 |---|---|---|
 | 0 | **Characterization fixtures, no production change.** For each host call, on current develop: run it fresh, then replay each prefix of its history, and record `(result bytes, events recorded, isReplay after, stepCount after)` as a golden table, plus the same for a defer segment and a defer body. Written once, from the *old* code. | the fixtures themselves, with a known-positive (mutate a host call, watch its row fail) |
-| 1 | The dispatcher and its spec types, with **no users**, plus property tests over a fake spec table: leave-replay asserts history is read; a non-`Pure` step is refused in a segment on both arrival paths; one message for a divergence; the outcome round trip above over every spec in the fake table; a session with a recorded write failure refuses the next non-`Pure` step (the #4160 policy, once #4166 is on develop). | the property tests; the existing guards untouched |
-| 2 | `DurableCall` through the dispatcher. It is the reference: simplest shape, the event-cap counter, and the most guards already pointing at it. | PR 0's rows for `DurableCall`; `replay_fresh_parity_test`; the harness's golden run for `call` |
+| 1 | The dispatcher and its spec types, with **no users**, plus property tests over a fake spec table: leave-replay asserts history is read; a non-`Pure` step is refused in a segment on both arrival paths; one message for a divergence; the outcome round trip above over every spec in the fake table; a session with a recorded write failure refuses the next non-`Pure` step (the #4160 policy, #4166, merged). | the property tests; the existing guards untouched |
+| 2 | ~~`DurableCall` through the dispatcher, as the reference: simplest shape.~~ **Superseded by Revision 2: `DurableCall` is the heaviest step, not the simplest.** The first users are the three promise singles; `DurableCall` follows with pre-check fields. It keeps the event-cap counter and the most guards pointing at it. | PR 0's rows for `DurableCall`; `replay_fresh_parity_test`; the harness's golden run for `call` |
 | 3 | The `Single` effect calls in two or three batches, ordered by how many guards cover them: `SideEffect`+`SideEffectRecorded`, `CreatePromise`+`ResolvePromise`+`RejectPromise`, locks and scope, crons, `SignalWorkflow`, `DurableSend`, `DurableDefer`, `Fetch` | PR 0 rows; the harness's per-op kill/terminate rows |
 | 4 | `Multi`: `DurableCallWithRetry`, `DurableCallWithHeartbeat` | PR 0 rows plus #4156's and #4168's tables (the mid-retry rows are exactly this kind's hard case) |
 | 5 | `PluginCall`; then `Stream` (`PluginCallStreaming`) on its own, because it is the kind that does not fit "record after Fresh" | #4165's tests; the live-reader tests (`a_live_reader_never_stalls_a_workflow_test`, `stream_chunk_tail_test`) |
@@ -287,7 +289,7 @@ Guards that check a **cross-language** fact stay, because the dispatcher cannot 
 | guard (develop, 2026-11-19) | after | why |
 |---|---|---|
 | `a_replay_to_fresh_hand_off_refuses_or_is_named_test` (the frontier-answer scan, `frontierAnswersThatNeedNoRefusal`) | **replaced by a test of `step`**: any spec with `Effect != Pure` is refused | the scan reads host-call source for a refusal; the property is now a fact about one function |
-| `a_host_call_never_leaves_replay_with_history_unread_test` (#4163, **open, not yet on develop**; it also adds `engine/replay_divergence.go`, a first shared divergence helper) | replaced by the `leaveReplay` assertion; the helper becomes `step`'s divergence path | one assertion, not a scan |
+| `a_host_call_never_leaves_replay_with_history_unread_test` (#4163, **merged**; it also added `engine/replay_divergence.go`, a first shared divergence helper) | replaced by the `leaveReplay` assertion; the helper becomes `step`'s divergence path | one assertion, not a scan |
 | `engine/stop_correspondence_guard_test.go` (the engine-side half) | **stays**, shrinks | the SDK side (every SDK treats a stop as a stop) is cross-language, and so are the Java/Rust parity counts: `stopSitesOn20260904` counts engine *stop sites*, and the dispatcher turns many hand-written sites into one check per effect step, so how that guard derives its count has to be re-pointed at the specs. I have not worked out how; it is the part of this section I am least sure of. |
 | `an_event_is_stoppable_only_if_a_host_site_can_refuse_it_test` | stays, reads `Effect` instead of scanning | the inventory of "which event types can a stop point land on" is about event types, not call sites |
 | the per-call frontier tests (`replay_frontier_test`, `a_retry_policy_applies_at_the_replay_frontier_test`) | stay as behavioural tests; their *reason for existing* moves into PR 1's properties | they are the characterization that PR 0 starts from |
@@ -340,7 +342,7 @@ nothing else, which a count of effects cannot.
 
 **Still open, for me:** how the Java/Rust stop-site count is re-derived from the specs (section 8); and, from WS-cleat-2, that
 the transitional guard `engine/every_recorded_event_site_is_classified_test.go` (every function that calls `recordEvent` either
-checks `stopBeforeNewWork` or carries a written reason, on #4166, not yet on develop) becomes, when the dispatcher lands, "every
+checks `stopBeforeNewWork` or carries a written reason, on develop since #4166) becomes, when the dispatcher lands, "every
 `HostHandler` method is stepped through `step()` or is on the `Pure`/`Live` list". I agree, and PR 8 should say so.
 
 ---
@@ -349,26 +351,43 @@ checks `stopBeforeNewWork` or carries a written reason, on #4166, not yet on dev
 
 What changed, and what did not.
 
-- **#4160 no longer needs a hook.** #4166 (open) chose a policy that stops the guest through the existing refusal; the
+- **#4160 no longer needs a hook.** #4166 (since merged) chose a policy that stops the guest through the existing refusal; the
   `persistenceFailure` step is gone from the dispatcher (section 3).
 - **Wait is where residency attaches**, so it records before it blocks, and its suspension is a *park-or-suspend* stage; sleep's
   stop goes through the same helper (section 4).
 - **Section 5 is a rule, not nine answers**, and it names the refusal/stoppability coupling and the kill-after-it test it needs.
-- **The event cap is already moving** on #4151 (open); the migration's PR 1 is written against whichever is on develop.
+- **The event cap moved** with #4151 (since merged); the migration's PR 1 is written against develop.
 - **Unchanged:** the dispatcher shape, the nine kinds (WS-cleat-2 agreed `Spawn` and `Poll` stay), the migration order, and
   section 7.
 - **Facts taken from WS-cleat-2 about open PRs (#4151, #4166, #4162) are theirs and have not been re-measured here.**
 
-## Appendix A. Inventory (generated; 2026-11-19, develop `1157baf3`)
+## Revision 2 (2026-11-20): after reading the code the first migrations touch, and WS-cleat-2's review of sections 3 to 6
+
+**What I found building the core, and what it changes.** Section 6 said PR 2 migrates `DurableCall` first because it is "the reference: simplest shape". That was wrong, and I wrote it from the inventory and not from the function. Read now, `DurableCall` is the *heaviest* step: its fresh path polls for cancellation, checks `canStartNewWork` (cleat#2008), applies the event cap, branches on write-ahead intent, handles a hard stop mid-call and opens a telemetry span; its replay path resolves a pending call intent through idempotency-key replay and an ambiguity resolver and records the ambiguity. None of that belongs in a first migration, and none of it fits the sketch in section 3 without pre-check hooks in the spec.
+
+- **The core PR migrates the three promise singles, `CreatePromise`, `ResolvePromise` and `RejectPromise`.** Each is one event, replayed by type (`CreatePromise` and `ResolvePromise` by type alone: **neither checks Service/Op on replay today, and the migration keeps that as it is**, the discriminator being the stop-point's business and not the replay's, cleat#4079), then `exitReplay`, then the refusal, then record, then act. `DurableCall` moves later, as its own PR, with the pre-checks as explicit spec fields (`Pre []stepPre`: cancel poll, start-new-work, event cap), and the ambiguity resolution as a `Decode` extension. `SetScope` is also later: it is stateful (scope fields, releasing the old key, store calls) and is the real `AtNext` retry shape, so its place is the group that owns locks and scope.
+- **`Fresh` gets a recorder and does not return records.** The sketch had `Fresh` return `(result, []EventRecord)` and the dispatcher record after. `CreatePromise` records the event FIRST and then writes the promise store, and reports a store failure to the guest while the event stays recorded; `ResolvePromise` and `RejectPromise` do the same. Recording after would change that order, which is a behaviour change, and this migration changes where code lives and nothing else. So the spec's `Fresh(ctx, st *stepCtx)` calls `st.Record(rec)` where the call records today, and the dispatcher checks afterwards that it recorded what the spec declared (`Records: One | None | Many`), which is also what the round trip pins. This also removes "Stream and Wait record inside `Fresh`" as a special case: every kind records through the handle, and `Stream` and `Wait` only declare `Many`.
+- **Failure handling stays inside `recordEvent`** (WS-cleat-2). On a quota refusal `stopAfterFailedEventWrite` runs `triggerEventCapContinueAsNew` BEFORE it sets `eventWriteFailure`, behind a re-entrancy latch (`handlingEventWriteFailure`), because ContinueAsNew refuses once the failure is set and its own write fails on the quota again. A dispatcher that moved or reordered that would reintroduce the first version's bug found in review of #4166. The dispatcher calls `recordEvent` and nothing else.
+- **After a failed write inside a `Many` step the loop stops** (WS-cleat-2's question, decided here and not tested here): `st.Record` returns the persistence outcome, a `Many` spec's `Fresh` stops at the first failed write, and the next fresh step is refused by line (3). Its round-trip row, a write failing mid-step, belongs to PR 4 and 5 (`Multi`, `Stream`), where it can be measured.
+- **Line (3) refuses on three conditions, not two** (WS-cleat-2): a defer segment's body, a recorded-event write failure, and **graceful shutdown** (`shutdownObserved()`, `engine/durablecalls.go`). The round trip needs a shutdown row, or a refusal-by-shutdown is read as a refusal-by-segment.
+- **The round trip must cover both outcome shapes** (WS-cleat-2). The three core calls are all "record IS the outcome"; `OverPending` (`await_child`, `await_all_children`) and `AtNext` (`await_promise`, the `set_scope` retry) are Wait and scope shapes that arrive in later groups. In the core PR the round trip therefore runs over a **fake spec table with one spec of each shape**, and each later group adds its real calls to the table. A shape with no real call in the table is a gap the PR says so about.
+- **Park-or-suspend is a spec field, named here and built with PR 6** (WS-cleat-2): section 9 names it and section 3's pseudocode does not, so `stepSpec` carries `Park *parkSpec` from PR 1, unused until `Wait` migrates.
+- **Migration order is changed**: PR 0 (characterization of the calls a PR migrates, from the OLD code, in the same PR as the migration, since the table is that PR's evidence), PR 1 (dispatcher, spec types, fake-table property tests), then the three promise singles in the same PR as the first users, so the dispatcher is never unused code. Each later group adds its calls, its characterization rows and its harness scripts.
+
+**Facts taken from WS-cleat-2 and re-checked against develop 7d1d0e20 on 2026-11-20:** #4151, #4163 and #4166 are merged; `stopBeforeNewWork` has the third condition; `stopAfterFailedEventWrite` orders the quota path as described. Appendix A (generated at `1157baf3`) is regenerated in this revision or its date says it is not.
+
+## Appendix A. Inventory (generated; regenerated 2026-11-20, develop `7d1d0e20`; the 2026-11-19 table was `1157baf3`)
 
 Columns: **replay-aware** the body reads `s.isReplay`; **consumes** reaches `advanceReplayStep`; **exits replay** reaches
 `exitReplay`; **refuses in segment** reaches `stopBeforeNewWork`; **records** reaches `recordEvent`; **reads persistence**
 mentions the flush outcome; **divergence** mentions a divergence report. "Reaches" means in the body or in an `execSession`
 method it calls, two levels deep. A text scan: a map, not a proof.
 
+**What changed against the 2026-11-19 table** (8 of 54 rows, re-derived by diffing the two script outputs): `ContinueAsNew` and `ContinueAsNewWithVersion` now reach `stopBeforeNewWork` (#4161); `DurableCall`, `DurableCallWithRetry`, `SetScope`, `SideEffect`, `AwaitAllChildren` and the two `ContinueAsNew*` rows now read the persistence outcome (#4166); `AcquireLock` no longer does, by this scan. The last is a text-scan result and I have not read why.
+
 | host call | file | replay-aware | consumes | exits replay | refuses in segment | records | reads persistence | divergence |
 |---|---|---|---|---|---|---|---|---|
-| `DurableCall` | durablecalls.go | x | x | x | x | x |  | x |
+| `DurableCall` | durablecalls.go | x | x | x | x | x | x | x |
 | `DurableSleep` | durablecalls.go |  |  |  |  |  |  |  |
 | `DurableAwaitSignals` | signaller.go | x | x | x | x | x | x | x |
 | `DurableDefer` | durablecalls.go | x | x | x | x | x | x | x |
@@ -376,15 +395,15 @@ method it calls, two levels deep. A text scan: a map, not a proof.
 | `DurableLog` | durablecalls.go | x |  |  |  |  |  |  |
 | `PollCancellation` | signaller.go | x |  |  |  |  |  |  |
 | `PollSignal` | signaller.go |  |  |  |  |  |  |  |
-| `ContinueAsNew` | lifecycle.go | x | x | x |  | x | x | x |
-| `ContinueAsNewWithVersion` | lifecycle.go | x | x | x |  | x | x | x |
+| `ContinueAsNew` | lifecycle.go | x | x | x | x | x | x | x |
+| `ContinueAsNewWithVersion` | lifecycle.go | x | x | x | x | x | x | x |
 | `ChildWorkflow` | children.go | x | x | x | x | x | x | x |
 | `ChildWorkflowWithOptions` | children.go | x | x | x | x | x | x | x |
 | `AwaitChild` | children.go | x | x | x |  | x | x | x |
-| `AwaitAllChildren` | children.go | x | x | x |  | x |  | x |
+| `AwaitAllChildren` | children.go | x | x | x |  | x | x | x |
 | `PollChild` | children.go |  |  |  |  |  |  |  |
 | `AwaitAnyChild` | children.go | x | x | x |  | x | x | x |
-| `DurableCallWithRetry` | durablecalls.go | x | x | x | x | x |  | x |
+| `DurableCallWithRetry` | durablecalls.go | x | x | x | x | x | x | x |
 | `DurableCallWithHeartbeat` | heartbeats.go | x | x | x | x | x |  | x |
 | `Version` | lifecycle.go |  |  |  |  |  |  |  |
 | `MinVersion` | lifecycle.go |  |  |  |  |  |  |  |
@@ -400,12 +419,12 @@ method it calls, two levels deep. A text scan: a map, not a proof.
 | `DurablePollUpdate` | updater.go | x | x | x | x | x | x | x |
 | `DurableCompleteUpdate` | updater.go | x | x | x | x | x | x | x |
 | `SignalWorkflow` | signaller.go | x | x | x | x | x | x | x |
-| `SetScope` | scope.go | x | x | x | x | x |  | x |
+| `SetScope` | scope.go | x | x | x | x | x | x | x |
 | `GetScope` | scope.go |  |  |  |  |  |  |  |
 | `UUID` | lifecycle.go |  |  |  |  |  |  |  |
-| `AcquireLock` | locking.go | x | x | x | x | x | x | x |
+| `AcquireLock` | locking.go | x | x | x | x | x |  | x |
 | `ReleaseLock` | locking.go | x | x | x |  | x | x | x |
-| `SideEffect` | lifecycle.go | x | x | x | x | x |  | x |
+| `SideEffect` | lifecycle.go | x | x | x | x | x | x | x |
 | `SideEffectRecorded` | lifecycle.go | x | x | x | x |  |  | x |
 | `WorkflowID` | lifecycle.go |  |  |  |  |  |  |  |
 | `RunID` | lifecycle.go |  |  |  |  |  |  |  |
