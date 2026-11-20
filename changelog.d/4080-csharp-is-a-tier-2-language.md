@@ -1,0 +1,4 @@
+---
+section: added
+---
+- **C# is a tier-2 language (cleat#4080; owner decision 2026-11-19).** `cleat build --target csharp` builds a C# workflow into a WebAssembly component that runs on the engine's wasmtime backend, with a determinism vet (`cleat vet --lang csharp`), an SDK covering every host call but the one no SDK has, conformance components driven through the real engine, and a quick start (`docs/tutorials/csharp-quick-start.md`) whose example is built and run by a test. Tier 2 means the tests must run and may fail. **Not claimed:** a C# workflow on a real `cleat-worker` against a database, MySQL and SQL Server, a NuGet package (the SDK is a source package imported from a checkout), or typed plugin clients. The toolchain is a prerelease, pinned by digest. See `tiers.yaml`, entry `sdk-csharp`, for the claim and its open items.

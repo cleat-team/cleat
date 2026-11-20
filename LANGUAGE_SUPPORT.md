@@ -257,7 +257,7 @@ crates/cleat-macro/src/*.rs`) — grown substantially from the original
 | **C** | clang (mature) | Not built | 10-50 KB (design estimate) | — |
 | **Zig** | zig build-exe (mature) | Not built | 5-30 KB (design estimate) | — |
 | **TypeScript** (real) | Javy/QuickJS | Shipped (tier 2; known differences from Node in `packages/cleat-ts/DIVERGENCES.md`) | ~1.45 MB (measured 2026-11-17, the example module; see below) | 2 |
-| **C#/.NET** | componentize-dotnet (NativeAOT-LLVM, Component Model) | In development, not supported (cleat#4080) | 0.7-1 MB (measured in the cleat#4077 spike: a hello and a 9-mode test workflow) | — |
+| **C#/.NET** | componentize-dotnet (NativeAOT-LLVM, Component Model; **prerelease toolchain**) | Shipped (tier 2; prerelease toolchain and other limits in the section below) | 0.7-1.05 MB (measured in the cleat#4077 spike: a hello and a 9-mode test workflow); 1.35 MB for the SDK fixture (2026-11-18, `packages/cleat-csharp/README.md`) | 2 |
 
 ### TypeScript (real): tier 2
 
@@ -284,6 +284,32 @@ mapping needs the UTS46 table the shim refuses rather than mis-encode: those are
 The binary-size cell is one measurement: the example module in `examples/ts-workflow` is 1,446,426 bytes and the Javy plugin it
 embeds is 1,296,266 bytes (2026-11-17, macOS arm64; `cleat build --target ts -o <dir> examples/ts-workflow/workflow.ts:greet`).
 The evidence behind the claim, and the open items, are in `tiers.yaml` under `sdk-typescript`.
+
+
+### C#/.NET: tier 2
+
+`tiers.yaml` lists C# under tier 2 as a supported language (owner decision 2026-11-19). It carried **IN DEVELOPMENT -- NOT SUPPORTED** from its
+first commit until the last of the seven PRs tracked in cleat#4080. The language can be built, tested and run, and
+[the getting-started page](docs/tutorials/csharp-quick-start.md) is where to start. What a reader has to know, stated plainly:
+
+- **The toolchain is a prerelease.** `Microsoft.DotNet.ILCompiler.LLVM` is a release candidate (`10.0.0-rc.1.*`) from the `dotnet-experimental`
+  feed, not from nuget.org, and `componentize-dotnet` is `0.8.0-preview`. Both are pinned by digest and hash (`packages/cleat-csharp/toolchain.env`,
+  `toolchain.packages.tsv`) and a build refuses anything else, but a pin is not a support commitment from upstream. **Builds are not byte-reproducible**
+  (same size, different bytes).
+- **There is no NuGet package.** The SDK is a source package a project imports by path from a cleat checkout, so a C# workflow is built inside a
+  checkout, in a pinned linux container (`cleat build --target csharp`; the compiler does not run on macOS), amd64 or arm64.
+- **No C# workflow has been run on a real worker against a database.** The tests drive the engine in process; `tests/crash` has no C# client, and
+  MySQL and SQL Server have not been measured for C# at all.
+- **A suspension is an exception and it can be caught.** A `catch (Exception)` that swallows `CleatSuspendException` lets the workflow keep running,
+  and the host calls it then makes are real. The determinism vet warns on it (`CV101`); do not swallow it.
+- **`async`/`await` works over host calls only because every awaited task is already complete.** `Task.Delay`, `Task.Run` and a blocking wait on
+  an incomplete task throw `PlatformNotSupportedException` (`Task.Yield` returns); to wait, call `HostCalls.Sleep`.
+- **Typed (record) entries** go through a source-generated `JsonSerializerContext` the author writes, and the first one costs about 1.6 MB and 140 ms
+  of first execution (measured 2026-11-18, amd64 emulation).
+- **`cleat-gen-plugin` has no C# target.** One host call, `register-query-handler`, is deliberately not bound in any SDK.
+
+CI runs the C# tests in the required Tier 2 Gate and in a non-required workflow (`.github/workflows/csharp-tier2.yml`) that also runs the SDK's
+managed unit tests and a native arm64 build. The evidence behind the claim, and the open items, are in `tiers.yaml` under `sdk-csharp`.
 
 ---
 

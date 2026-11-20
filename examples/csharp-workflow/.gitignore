@@ -1,0 +1,3 @@
+# Build output of `cleat build --target csharp examples/csharp-workflow` (the SDK directory ignores the same).
+obj/
+bin/
