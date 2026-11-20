@@ -52,6 +52,20 @@ cases pass on develop (#4143, #4152) and on #4166 (#4160).
 
 `scripts/chaos-failed-cases.py` reads the failed cases out of a `go test -json` job log; its known-positive is a real failing CI log in `testdata/`.
 
+## Promise ops (cleat#4207)
+
+`promise_create`, `promise_resolve` and `promise_reject` (both guests) create a promise `p-<name>` and, for the last two, settle it. The recording service
+cannot see a promise-store write, so the oracle is the `workflow_promises` rows after the run (`promiseRows`, `promiseViolations`): **each op's promise exists
+exactly once, in the scripted status** (pending, resolved, rejected). Two rows under one name is a create that ran twice; the wrong status is a settle that did
+not take. The fault-free run asserts it unconditionally, so an op that did not do what it claims reads as a failed precondition, not a green; a run that ended
+`done` after a fault asserts it too. The scenario `promises` (call, resolve, reject, create, call) puts the kill boundaries on the calls AROUND the three ops,
+so a kill after them and before the last call forces a replay of all three.
+
+**What this cannot reach, stated so it is not discovered later:** a fault INSIDE one of the three calls (between its event being recorded and its store
+write). The boundaries are service requests, and these calls make none. A mutant where a replayed `CreatePromise` runs fresh was caught here, but by the
+final-status check (a replay divergence), not by the row check; the row check's two branches were each proven by a guest mutant (a resolve that never happens;
+a create made twice).
+
 ## Not yet
 
 Signal and promise polls (#4153), `continue_as_new` (#4159), cancel, kill while resident, the Python guest, a slow-service op (a response longer

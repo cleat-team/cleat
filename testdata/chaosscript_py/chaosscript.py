@@ -69,6 +69,13 @@ def chaos_script(h: HostCalls, run: str, ops: list) -> str:
             branch = o["miss"] if res.timed_out else o["hit"]
             h.call("chaos", branch, _request(run, branch))
             seen[branch] = "1"
+        elif kind in ("promise_create", "promise_resolve", "promise_reject"):
+            # Same effect as the Go guest's op of the name: a promise "p-<name>" the harness reads from workflow_promises after the run.
+            pid = h.create_promise("p-" + o["name"])
+            if kind == "promise_resolve":
+                h.resolve_promise(pid, '"ok"')
+            elif kind == "promise_reject":
+                h.reject_promise(pid, "rejected")
         elif kind == "continue_as_new":
             h.continue_as_new(
                 {

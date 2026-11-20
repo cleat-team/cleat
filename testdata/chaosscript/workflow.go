@@ -138,6 +138,23 @@ func Script(h cleat.HostCalls, input string) (string, error) {
 				return "", err
 			}
 			seen[branch] = "1"
+		case "promise_create", "promise_resolve", "promise_reject":
+			// A promise operation the recording service cannot see: the promise store is the only place its effect lands, so the harness reads
+			// the workflow_promises rows after the run (cleat#4207, #4152). The promise is named "p-<name>"; a rerun that created it twice leaves
+			// two rows under that name, and a resolve or reject that did not take leaves it pending.
+			pid, err := h.CreatePromise("p-" + o.Name)
+			if err != nil {
+				return "", err
+			}
+			switch o.Op {
+			case "promise_resolve":
+				err = h.ResolvePromise(pid, `"ok"`)
+			case "promise_reject":
+				err = h.RejectPromise(pid, "rejected")
+			}
+			if err != nil {
+				return "", err
+			}
 		case "set_scope":
 			// Enter the virtual object ("chaos", o.Name): the host takes its concurrency key, or suspends the run while another run holds it.
 			h.SetScope("chaos", o.Name)
