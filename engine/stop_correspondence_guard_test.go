@@ -405,17 +405,27 @@ func hostStopSites(t *testing.T) map[string]bool {
 			if i+1 < len(locs) {
 				end = locs[i+1][0]
 			}
-			if name == "stopBeforeNewWork" || name == "suspendingAwaitResult" {
+			// step is the dispatcher (cleat#4152): it consults stopBeforeNewWork for every host call that goes through it, so it is not a host
+			// call and counting it would name a site no guest can reach. The host calls that go through it ARE sites, and are found below.
+			if name == "stopBeforeNewWork" || name == "suspendingAwaitResult" || name == "step" {
 				continue
 			}
 			body := src[loc[0]:end]
-			if callsInCode(body, "stopBeforeNewWork") || callsInCode(body, "suspendingAwaitResult") {
+			if callsInCode(body, "stopBeforeNewWork") || callsInCode(body, "suspendingAwaitResult") || goesThroughStep(body) {
 				sites[name] = true
 			}
 		}
 	}
 	return sites
 }
+
+// stepCall matches the dispatcher call a host call makes in code: s.step(ctx, m, &someStep, ...).
+var stepCall = regexp.MustCompile(`\bs\.step\(`)
+
+// goesThroughStep reports whether a host call's text (the method and the spec value that follows it, up to the next method) calls the
+// dispatcher, which refuses every non-Pure step. A call that went through step with a Pure spec would be wrongly counted a stop site; the
+// dispatcher's own tests assert no spec declares Pure and records (cleat#4152).
+func goesThroughStep(body string) bool { return stepCall.MatchString(blankComments(body)) }
 
 // callsInCode reports whether src contains a call `name()` in CODE: the three
 // tokens name ( ) as the Go scanner reads them, which skips comments and keeps a

@@ -16,80 +16,76 @@ const errNoPromiseStore = "no promise store configured on this engine (engine.Wi
 	"a durable promise cannot be created, awaited or settled without one"
 
 func (s *execSession) CreatePromise(ctx context.Context, m api.Module, name string, promiseIDPtr, promiseIDMaxLen uint32) int64 {
-	if s.isReplay {
-		if s.stepCount < len(s.history) {
-			rec := s.history[s.stepCount]
-			if rec.EventType == EventTypeCreatePromise {
-				if !s.advanceReplayStep(ctx, &rec) {
-					return 0
-				}
+	return s.step(ctx, m, &createPromiseStep, stepArgs{s1: name, outPtr: promiseIDPtr, outMaxLen: promiseIDMaxLen})
+}
 
-				written, writtenEC := s.writeOut(ctx, m, promiseIDPtr, rec.PromiseID, promiseIDMaxLen)
-				return packSimpleResult(writtenEC, written)
-			}
-			return s.replayDivergence(ctx, m, EventTypeCreatePromise, promiseIDPtr, promiseIDMaxLen)
+// createPromiseStep is CreatePromise as a step (cleat#4152). The refusal below is the one the dispatcher applies to every non-Pure step:
+// a fresh create_promise is new work, it appends an event that finishDeferPhase writes into the terminal transaction and writes a
+// promise row at once. In a defer segment that is the workflow BODY running past its recorded history, so it is refused; a defer body
+// still gets through (inDeferDrain). Measured against a real store, cleat#4079 audit row create_promise.
+var createPromiseStep = stepSpec{
+	Name:    "create_promise",
+	Effect:  effectEffect,
+	Records: recordsOne,
+	Want:    EventTypeCreatePromise,
+	Decode: func(c *stepCtx, rec *EventRecord) int64 {
+		written, writtenEC := c.s.writeOut(c.ctx, c.m, c.args.outPtr, rec.PromiseID, c.args.outMaxLen)
+		return packSimpleResult(writtenEC, written)
+	},
+	Fresh: func(c *stepCtx) int64 {
+		s, ctx, m, name := c.s, c.ctx, c.m, c.args.s1
+		promiseIDPtr, promiseIDMaxLen := c.args.outPtr, c.args.outMaxLen
+
+		// Fresh execution: generate promise ID.
+		id, err := uuid.NewRandom()
+		var promiseID string
+		if err != nil {
+			promiseID = fmt.Sprintf("prom-%s-%d", s.workflowID, s.stepCount)
+		} else {
+			promiseID = id.String()
 		}
-		s.exitReplay()
-	}
 
-	// A fresh create_promise is new work: it appends an event that finishDeferPhase writes into the
-	// terminal transaction and writes a promise row at once. In a defer segment that is the workflow
-	// BODY running past its recorded history, so it is refused; a defer body still gets through
-	// (inDeferDrain). Measured against a real store, cleat#4079 audit row create_promise.
-	if s.stopBeforeNewWork() {
-		return callSuspendSentinel
-	}
+		c.Record(EventRecord{
+			Step:        s.stepCount,
+			EventType:   EventTypeCreatePromise,
+			PromiseName: name,
+			PromiseID:   promiseID,
+		})
 
-	// Fresh execution: generate promise ID.
-	id, err := uuid.NewRandom()
-	var promiseID string
-	if err != nil {
-		promiseID = fmt.Sprintf("prom-%s-%d", s.workflowID, s.stepCount)
-	} else {
-		promiseID = id.String()
-	}
+		// Persist to the promise store, and REPORT A FAILURE rather than logging it.
+		//
+		// This used to log and continue, returning errCode 0 to the guest. The
+		// consequence was not "history and the store disagree" -- it was a hang.
+		// The event above already asserts the promise exists, the guest gets an ID
+		// and proceeds, and the later AwaitPromise calls GetPromise, finds nothing,
+		// falls past both the resolved and rejected branches, and SUSPENDS. It
+		// waits for a promise no external caller can ever resolve, because the row
+		// they would resolve against was never written. Nothing errors and the log
+		// line is the only trace. IMPROVEMENT-PLAN 3.218.
+		//
+		// The ABI has always had somewhere to put this: cleat_create_promise
+		// returns errCode in bits 0-31 (ABI.md 2.34). The failure was not
+		// unreportable, it was unreported.
+		// A MISSING store is the same failure as a failing one, and until now only
+		// the second was reported. 3.218 fixed the error branch below and left the
+		// nil branch returning success -- which is the exact defect its own comment
+		// names, one line up. The engine offers WithPromiseStore and the worker did
+		// not call it (3.231), so on a real deployment this branch was ALWAYS the
+		// nil one: every create returned success and every await hung.
+		if s.engine.promiseStore == nil {
+			s.engine.log().ErrorContext(ctx, "create_promise: no promise store configured", "workflow_id", s.workflowID, "tenant_id", s.tenantID)
+			written, _ := s.writeResult(ctx, m, promiseIDPtr, errNoPromiseStore, promiseIDMaxLen)
+			return packSimpleResult(1, written)
+		}
+		if err := s.engine.promiseStore.CreatePromise(ctx, s.workflowID, name, promiseID); err != nil {
+			s.engine.log().ErrorContext(ctx, "create_promise failed", "workflow_id", s.workflowID, "tenant_id", s.tenantID, "error", err)
+			written, _ := s.writeResult(ctx, m, promiseIDPtr, err.Error(), promiseIDMaxLen)
+			return packSimpleResult(1, written)
+		}
 
-	rec := EventRecord{
-		Step:        s.stepCount,
-		EventType:   EventTypeCreatePromise,
-		PromiseName: name,
-		PromiseID:   promiseID,
-	}
-	s.recordEvent(rec)
-
-	// Persist to the promise store, and REPORT A FAILURE rather than logging it.
-	//
-	// This used to log and continue, returning errCode 0 to the guest. The
-	// consequence was not "history and the store disagree" -- it was a hang.
-	// The event above already asserts the promise exists, the guest gets an ID
-	// and proceeds, and the later AwaitPromise calls GetPromise, finds nothing,
-	// falls past both the resolved and rejected branches, and SUSPENDS. It
-	// waits for a promise no external caller can ever resolve, because the row
-	// they would resolve against was never written. Nothing errors and the log
-	// line is the only trace. IMPROVEMENT-PLAN 3.218.
-	//
-	// The ABI has always had somewhere to put this: cleat_create_promise
-	// returns errCode in bits 0-31 (ABI.md 2.34). The failure was not
-	// unreportable, it was unreported.
-	// A MISSING store is the same failure as a failing one, and until now only
-	// the second was reported. 3.218 fixed the error branch below and left the
-	// nil branch returning success -- which is the exact defect its own comment
-	// names, one line up. The engine offers WithPromiseStore and the worker did
-	// not call it (3.231), so on a real deployment this branch was ALWAYS the
-	// nil one: every create returned success and every await hung.
-	if s.engine.promiseStore == nil {
-		s.engine.log().ErrorContext(ctx, "create_promise: no promise store configured", "workflow_id", s.workflowID, "tenant_id", s.tenantID)
-		written, _ := s.writeResult(ctx, m, promiseIDPtr, errNoPromiseStore, promiseIDMaxLen)
-		return packSimpleResult(1, written)
-	}
-	if err := s.engine.promiseStore.CreatePromise(ctx, s.workflowID, name, promiseID); err != nil {
-		s.engine.log().ErrorContext(ctx, "create_promise failed", "workflow_id", s.workflowID, "tenant_id", s.tenantID, "error", err)
-		written, _ := s.writeResult(ctx, m, promiseIDPtr, err.Error(), promiseIDMaxLen)
-		return packSimpleResult(1, written)
-	}
-
-	written, writtenEC := s.writeOut(ctx, m, promiseIDPtr, promiseID, promiseIDMaxLen)
-	return packSimpleResult(writtenEC, written)
+		written, writtenEC := s.writeOut(ctx, m, promiseIDPtr, promiseID, promiseIDMaxLen)
+		return packSimpleResult(writtenEC, written)
+	},
 }
 
 func (s *execSession) AwaitPromise(ctx context.Context, m api.Module, promiseID string, timeoutMs int64, resultPtr, resultMaxLen uint32) int64 {
@@ -365,101 +361,94 @@ const (
 )
 
 func (s *execSession) ResolvePromise(ctx context.Context, m api.Module, promiseID, value string) int64 {
-	if s.isReplay {
-		if s.stepCount < len(s.history) {
-			rec := s.history[s.stepCount]
-			if rec.EventType != EventTypePromiseResolved {
-				// Not consumed: this used to advance past ANY event and then leave replay, swallowing an event that belongs to
-				// another call and running the rest fresh (cleat#4157).
-				return s.replayDivergence(ctx, m, EventTypePromiseResolved, 0, 0)
-			}
-			if !s.advanceReplayStep(ctx, &rec) {
-				return 0
-			}
-			return 0
+	return s.step(ctx, m, &resolvePromiseStep, stepArgs{s1: promiseID, s2: value})
+}
+
+// resolvePromiseStep is ResolvePromise as a step (cleat#4152). Replay matches by event TYPE alone, as it always did: a promise_resolved
+// that carries no Service/Op (what AwaitPromise records for a promise that was already settled) is accepted here, which a characterization
+// row keeps visible (resolve_promise/replay_by_type_alone). The Service/Op discriminator is the stop point's business, not replay's (cleat#4079).
+//
+// The refusal the dispatcher applies: a defer segment's body must not settle a promise, that is an effect another run may be waiting on, and
+// a segment exists to run cleanup, not to make new calls (cleat#4079, the same refusal DeleteCron got in cleat#4083). It is decided before
+// anything is recorded, so a refused call leaves no event.
+var resolvePromiseStep = stepSpec{
+	Name:    "resolve_promise",
+	Effect:  effectEffect,
+	Records: recordsOne,
+	Want:    EventTypePromiseResolved,
+	// Consumed and answered with success, whatever the original run was told by the store (see the characterization row
+	// resolve_promise/store_error_then_replay: nothing in the event says the store write failed).
+	Decode: func(*stepCtx, *EventRecord) int64 { return 0 },
+	Fresh: func(c *stepCtx) int64 {
+		s, ctx, promiseID, value := c.s, c.ctx, c.args.s1, c.args.s2
+
+		// Fresh execution: record and dispatch.
+		c.Record(EventRecord{
+			Step:      s.stepCount,
+			EventType: EventTypePromiseResolved,
+			// Service and Op are the discriminator that tells this event from the one AwaitPromise records for a promise that was
+			// already resolved: the two have the same event type and the same PromiseID and PromiseResult, and only this one is an
+			// effect. A stop point for a defer segment may be placed at this one and never at that one (stoppableFirstEvents).
+			// Histories written before cleat#4079 lack it, which is the safe direction: such an event is not a stop point.
+			Service:       PromiseEventService,
+			Op:            PromiseOpResolve,
+			PromiseID:     promiseID,
+			PromiseResult: value,
+		})
+
+		// Reported, not logged-and-swallowed. cleat_resolve_promise's adapter
+		// already decodes `errCode := uint32(result)` and turns a non-zero into an
+		// error, so the ABI has always had somewhere to put this -- the same
+		// sentence 3.218 wrote about CreatePromise, still true here afterwards.
+		// A resolve that silently did nothing leaves every awaiter suspended.
+		if s.engine.promiseStore == nil {
+			s.engine.log().ErrorContext(ctx, "resolve_promise: no promise store configured", "workflow_id", s.workflowID, "tenant_id", s.tenantID)
+			return packSimpleResult(1, 0)
 		}
-		s.exitReplay()
-	}
-
-	// A defer segment's body must not settle a promise: that is an effect another run may be waiting on, and a segment exists to
-	// run cleanup, not to make new calls (cleat#4079, the same refusal DeleteCron got in cleat#4083). Tested before anything
-	// is recorded, so a refused call leaves no event.
-	if s.stopBeforeNewWork() {
-		return callSuspendSentinel
-	}
-
-	// Fresh execution: record and dispatch.
-	rec := EventRecord{
-		Step:      s.stepCount,
-		EventType: EventTypePromiseResolved,
-		// Service and Op are the discriminator that tells this event from the one AwaitPromise records for a promise that was
-		// already resolved: the two have the same event type and the same PromiseID and PromiseResult, and only this one is an
-		// effect. A stop point for a defer segment may be placed at this one and never at that one (stoppableFirstEvents).
-		// Histories written before cleat#4079 lack it, which is the safe direction: such an event is not a stop point.
-		Service:       PromiseEventService,
-		Op:            PromiseOpResolve,
-		PromiseID:     promiseID,
-		PromiseResult: value,
-	}
-	s.recordEvent(rec)
-
-	// Reported, not logged-and-swallowed. cleat_resolve_promise's adapter
-	// already decodes `errCode := uint32(result)` and turns a non-zero into an
-	// error, so the ABI has always had somewhere to put this -- the same
-	// sentence 3.218 wrote about CreatePromise, still true here afterwards.
-	// A resolve that silently did nothing leaves every awaiter suspended.
-	if s.engine.promiseStore == nil {
-		s.engine.log().ErrorContext(ctx, "resolve_promise: no promise store configured", "workflow_id", s.workflowID, "tenant_id", s.tenantID)
-		return packSimpleResult(1, 0)
-	}
-	if err := s.engine.promiseStore.ResolvePromise(ctx, promiseID, value); err != nil {
-		s.engine.log().ErrorContext(ctx, "resolve_promise failed", "workflow_id", s.workflowID, "tenant_id", s.tenantID, "error", err)
-		return packSimpleResult(1, 0)
-	}
-	return 0
+		if err := s.engine.promiseStore.ResolvePromise(ctx, promiseID, value); err != nil {
+			s.engine.log().ErrorContext(ctx, "resolve_promise failed", "workflow_id", s.workflowID, "tenant_id", s.tenantID, "error", err)
+			return packSimpleResult(1, 0)
+		}
+		return 0
+	},
 }
 
 func (s *execSession) RejectPromise(ctx context.Context, m api.Module, promiseID, errMsg string) int64 {
-	if s.isReplay {
-		if s.stepCount < len(s.history) {
-			rec := s.history[s.stepCount]
-			if rec.EventType != EventTypePromiseRejected {
-				return s.replayDivergence(ctx, m, EventTypePromiseRejected, 0, 0)
-			}
-			if !s.advanceReplayStep(ctx, &rec) {
-				return 0
-			}
-			return 0
+	return s.step(ctx, m, &rejectPromiseStep, stepArgs{s1: promiseID, s2: errMsg})
+}
+
+// rejectPromiseStep is RejectPromise as a step (cleat#4152). Refused in a defer segment's body, for the reason resolvePromiseStep gives;
+// replay matches by event type alone, as it always did.
+var rejectPromiseStep = stepSpec{
+	Name:    "reject_promise",
+	Effect:  effectEffect,
+	Records: recordsOne,
+	Want:    EventTypePromiseRejected,
+	Decode:  func(*stepCtx, *EventRecord) int64 { return 0 },
+	Fresh: func(c *stepCtx) int64 {
+		s, ctx, promiseID, errMsg := c.s, c.ctx, c.args.s1, c.args.s2
+
+		// Fresh execution: record and dispatch. Service and Op: see resolvePromiseStep.
+		c.Record(EventRecord{
+			Step:         s.stepCount,
+			EventType:    EventTypePromiseRejected,
+			Service:      PromiseEventService,
+			Op:           PromiseOpReject,
+			PromiseID:    promiseID,
+			PromiseError: errMsg,
+		})
+
+		// Same as resolvePromiseStep above, and for the same reason.
+		if s.engine.promiseStore == nil {
+			s.engine.log().ErrorContext(ctx, "reject_promise: no promise store configured", "workflow_id", s.workflowID, "tenant_id", s.tenantID)
+			return packSimpleResult(1, 0)
 		}
-		s.exitReplay()
-	}
-
-	// Refused in a defer segment's body, for the reason ResolvePromise gives.
-	if s.stopBeforeNewWork() {
-		return callSuspendSentinel
-	}
-
-	// Fresh execution: record and dispatch. Service and Op: see ResolvePromise.
-	rec := EventRecord{
-		Step:         s.stepCount,
-		EventType:    EventTypePromiseRejected,
-		Service:      PromiseEventService,
-		Op:           PromiseOpReject,
-		PromiseID:    promiseID,
-		PromiseError: errMsg,
-	}
-	s.recordEvent(rec)
-
-	// Same as ResolvePromise above, and for the same reason.
-	if s.engine.promiseStore == nil {
-		s.engine.log().ErrorContext(ctx, "reject_promise: no promise store configured", "workflow_id", s.workflowID, "tenant_id", s.tenantID)
-		return packSimpleResult(1, 0)
-	}
-	if err := s.engine.promiseStore.RejectPromise(ctx, promiseID, errMsg); err != nil {
-		s.engine.log().ErrorContext(ctx, "reject_promise failed", "workflow_id", s.workflowID, "tenant_id", s.tenantID, "error", err)
-		return packSimpleResult(1, 0)
-	}
-	return 0
+		if err := s.engine.promiseStore.RejectPromise(ctx, promiseID, errMsg); err != nil {
+			s.engine.log().ErrorContext(ctx, "reject_promise failed", "workflow_id", s.workflowID, "tenant_id", s.tenantID, "error", err)
+			return packSimpleResult(1, 0)
+		}
+		return 0
+	},
 }
 
 // setAwaitRejected records whether the AwaitPromise call in progress ended in a

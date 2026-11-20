@@ -749,6 +749,10 @@ type execSession struct {
 	// persists the event if the database is back.
 	eventWriteFailure error
 
+	// stepViolations are the spec disagreements step() noted (a spec that recorded other than it declared, a step that left replay with history
+	// unread). Production only logs them; the dispatcher's tests assert there are none. cleat#4152.
+	stepViolations []string
+
 	// handlingEventWriteFailure is set while stopAfterFailedEventWrite is acting on a failure, so the continue-as-new it triggers for a
 	// refused quota cannot re-enter it through its own failed write (the quota refuses that event too).
 	handlingEventWriteFailure bool

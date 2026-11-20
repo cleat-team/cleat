@@ -26,6 +26,7 @@ import (
 // the replay-to-fresh hand-off that reaches these without the check is cleat#4143 and cleat#4157, not this guard's subject. (cleat#4150 moved the
 // check INSIDE freshCall, freshCallWithHeartbeat, freshSideEffect and freshPluginCallStreaming, and this list failed until their entries were removed.)
 var recordedEventSitesWithoutOwnStopCheck = map[string]string{
+	"step_dispatcher.go:Record":          "DISPATCHER: reached only from a spec's Fresh, which step runs after it has applied stopBeforeNewWork to every non-Pure step",
 	"children.go:AwaitAnyChild":          "OBSERVATION: records which child finished",
 	"children.go:AwaitChild":             "OBSERVATION: records a child's result",
 	"children.go:freshAwaitAllChildren":  "FRESH HALF: an await of children that already ran; entry points AwaitAllChildren and its replay half",
