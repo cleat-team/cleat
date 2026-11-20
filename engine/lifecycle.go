@@ -582,95 +582,85 @@ func (s *execSession) RegisterQueryHandler(ctx context.Context, m api.Module, na
 // without adding synchronisation to IncrState.
 
 func (s *execSession) Fetch(ctx context.Context, m api.Module, method, url, headersJSON, body string, responsePtr, responseMaxLen uint32) int64 {
+	return s.step(ctx, m, &fetchStep, stepArgs{s1: method, s2: url, s3: headersJSON, s4: body, outPtr: responsePtr, outMaxLen: responseMaxLen})
+}
 
-	if s.isReplay {
-		if s.stepCount < len(s.history) {
-			rec := s.history[s.stepCount]
-			if !s.advanceReplayStep(ctx, &rec) {
-				return 0
-			}
-			if rec.EventType != EventTypeFetch || rec.FetchMethod != method || rec.FetchURL != url || rec.FetchBody != body {
-				if s.engine.Metrics != nil {
-					s.engine.Metrics.RecordReplayFailure(ctx)
-				}
-				errMsg := fmt.Sprintf("replay divergence at step %d: Fetch mismatch.\n  workflow: %s %s\n  history: %s %s\n  actual body: %s\n  expected body: %s\n  expected response: %s\nRun 'cleat vet' on your workflow code to check for common non-determinism issues (time.Now(), random values, map iteration, goroutines).",
-					rec.Step,
-					method, url,
-					rec.FetchMethod, rec.FetchURL,
-					truncateWithHash(body, maxPayloadLen),
-					truncateWithHash(rec.FetchBody, maxPayloadLen),
-					truncateWithHash(rec.FetchResponse, maxPayloadLen))
-				written, _ := s.writeResult(ctx, m, responsePtr, errMsg, responseMaxLen)
-				return packSimpleResult(1, written)
-			}
-			if rec.Err != "" {
-				written, _ := s.writeResult(ctx, m, responsePtr, rec.Err, responseMaxLen)
-				return packSimpleResult(1, written)
-			}
-			written, writtenEC := s.writeOut(ctx, m, responsePtr, rec.FetchResponse, responseMaxLen)
-			return packSimpleResult(writtenEC, written)
+// fetchStep is Fetch as a step (cleat#4152, G1b). Past the frontier in a defer segment an outbound HTTP request is new work, and the most
+// externally visible kind there is -- it leaves a side effect on someone else's server that no amount of unwinding takes back (IMPROVEMENT-PLAN
+// 3.84 guarded six fresh paths and this was the seventh it did not list) -- so the dispatcher refuses it, with the same universal sentinel.
+//
+// TWO BEHAVIOUR CHANGES, both the cleat#4152 defect and both named in the PR. (1) The old replay CONSUMED the record before comparing it, so a
+// Fetch whose method, url or body differed from the recorded one lost the record and every later step read the history one place late; it
+// now consumes nothing. (2) The divergence text is the shared one, whose why-string names the method and url and says whether the body
+// differs; the old text quoted both bodies and the recorded response. The identity is what the old code compared (method, url, body); the
+// headers are NOT compared, as before.
+var fetchStep = stepSpec{
+	Name:    "fetch",
+	Effect:  effectEffect,
+	Records: recordsOne,
+	Want:    EventTypeFetch,
+	Identity: func(a stepArgs, rec *EventRecord) string {
+		if rec.FetchMethod != a.s1 || rec.FetchURL != a.s2 {
+			return fmt.Sprintf("%s %s, recorded %s %s", a.s1, a.s2, rec.FetchMethod, rec.FetchURL)
 		}
-		s.exitReplay()
-	}
+		if rec.FetchBody != a.s4 {
+			return fmt.Sprintf("%s %s with a different body: %q, recorded %q", a.s1, a.s2, truncateWithHash(a.s4, maxPayloadLen), truncateWithHash(rec.FetchBody, maxPayloadLen))
+		}
+		return ""
+	},
+	Decode: func(c *stepCtx, rec *EventRecord) int64 {
+		if rec.Err != "" {
+			written, _ := c.s.writeResult(c.ctx, c.m, c.args.outPtr, rec.Err, c.args.outMaxLen)
+			return packSimpleResult(1, written)
+		}
+		written, writtenEC := c.s.writeOut(c.ctx, c.m, c.args.outPtr, rec.FetchResponse, c.args.outMaxLen)
+		return packSimpleResult(writtenEC, written)
+	},
+	Fresh: func(c *stepCtx) int64 {
+		s, ctx, m := c.s, c.ctx, c.m
+		method, url, headersJSON, body := c.args.s1, c.args.s2, c.args.s3, c.args.s4
+		responsePtr, responseMaxLen := c.args.outPtr, c.args.outMaxLen
 
-	// Past the frontier in a defer segment: an outbound HTTP request is new
-	// work, and the most externally visible kind there is -- it leaves a side
-	// effect on someone else's server that no amount of unwinding takes back.
-	//
-	// IMPROVEMENT-PLAN 3.84 guarded six fresh paths and this is the seventh it
-	// did not list. Its table was built by reading the entry points a guest
-	// uses to reach a *service*, and Fetch reaches one without going through
-	// the durable-call family, so it was not in the inventory to begin with.
-	//
-	// packSimpleResult, which is what every return below uses, has bit 31 free
-	// -- TestStopSentinelBitsAcrossEveryLayout measures it as free=ff000000ffffff00
-	// -- so the same universal sentinel works here with no new layout question.
-	if s.stopBeforeNewWork() {
-		return callSuspendSentinel
-	}
+		var response string
+		var fetchErr error
+		if s.engine.fetcher != nil {
+			// Scoped to this execution's tenant, as callService does for a durable call: the worker's fetcher answers to the tenant's egress
+			// allowlist, and without a tenant in context that list denies everything.
+			response, fetchErr = s.engine.fetcher.Fetch(s.tenantScopedContext(ctx), method, url, headersJSON, body)
+		} else {
+			// Not a failure of the guest's request: this engine was built without a Fetcher. On a cleat-worker that is the default, and the
+			// operator turns it on (IMPROVEMENT-PLAN.d 3.317, cleat#3377); in an embedding host it is engine.WithFetcher. Name both, so the
+			// reader is sent to whichever applies instead of to a flag that does not exist where they are.
+			fetchErr = fmt.Errorf(
+				"cleat_fetch is disabled: this engine has no Fetcher. A cleat-worker "+
+					"serves cleat_fetch only when started with --enable-workflow-fetch "+
+					"(off by default; docs/operations/egress-policy.md); an embedding "+
+					"host supplies engine.WithFetcher(...). Workflow %s attempted %s %s",
+				s.engine.workflowID, method, url)
+		}
 
-	var response string
-	var fetchErr error
-	if s.engine.fetcher != nil {
-		// Scoped to this execution's tenant, as callService does for a durable
-		// call: the worker's fetcher answers to the tenant's egress allowlist,
-		// and without a tenant in context that list denies everything.
-		response, fetchErr = s.engine.fetcher.Fetch(s.tenantScopedContext(ctx), method, url, headersJSON, body)
-	} else {
-		// Not a failure of the guest's request: this engine was built without a
-		// Fetcher. On a cleat-worker that is the default, and the operator turns
-		// it on (IMPROVEMENT-PLAN.d 3.317, cleat#3377); in an embedding host it
-		// is engine.WithFetcher. Name both, so the reader is sent to whichever
-		// applies instead of to a flag that does not exist where they are.
-		fetchErr = fmt.Errorf(
-			"cleat_fetch is disabled: this engine has no Fetcher. A cleat-worker "+
-				"serves cleat_fetch only when started with --enable-workflow-fetch "+
-				"(off by default; docs/operations/egress-policy.md); an embedding "+
-				"host supplies engine.WithFetcher(...). Workflow %s attempted %s %s",
-			s.engine.workflowID, method, url)
-	}
+		rec := EventRecord{
+			Step:          s.stepCount,
+			EventType:     EventTypeFetch,
+			FetchMethod:   method,
+			FetchURL:      url,
+			FetchHeaders:  headersJSON,
+			FetchBody:     body,
+			FetchResponse: response,
+		}
+		if fetchErr != nil {
+			rec.Err = fetchErr.Error()
+		}
+		c.Record(rec)
 
-	rec := EventRecord{
-		Step:          s.stepCount,
-		EventType:     EventTypeFetch,
-		FetchMethod:   method,
-		FetchURL:      url,
-		FetchHeaders:  headersJSON,
-		FetchBody:     body,
-		FetchResponse: response,
-	}
-	if fetchErr != nil {
-		rec.Err = fetchErr.Error()
-	}
-	s.recordEvent(rec)
+		if fetchErr != nil {
+			written, _ := s.writeResult(ctx, m, responsePtr, fetchErr.Error(), responseMaxLen)
+			return packSimpleResult(1, written)
+		}
 
-	if fetchErr != nil {
-		written, _ := s.writeResult(ctx, m, responsePtr, fetchErr.Error(), responseMaxLen)
-		return packSimpleResult(1, written)
-	}
-
-	written, writtenEC := s.writeOut(ctx, m, responsePtr, response, responseMaxLen)
-	return packSimpleResult(writtenEC, written)
+		written, writtenEC := s.writeOut(ctx, m, responsePtr, response, responseMaxLen)
+		return packSimpleResult(writtenEC, written)
+	},
 }
 
 // JsonParse validates and canonicalises input using the host's encoding/json.

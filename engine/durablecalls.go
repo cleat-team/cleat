@@ -1072,110 +1072,68 @@ func (s *execSession) DurableLog(ctx context.Context, m api.Module, message stri
 }
 
 func (s *execSession) DurableSend(ctx context.Context, m api.Module, service, operation, requestJSON string) int64 {
-	if s.isReplay {
-		// On replay, skip: fire-and-forget is recorded but not re-executed.
-		if s.stepCount < len(s.history) {
-			rec := s.history[s.stepCount]
-			// CHECK WHAT WE ARE CONSUMING. cleat#1507.
-			//
-			// This block used to advance past whatever record sat at this step
-			// and return success, without looking at its type. A divergence
-			// here was not merely unreported: the record belonging to some
-			// OTHER operation was consumed, so every subsequent step read the
-			// wrong history entry, and the run reported success throughout.
-			// That is worse than the silent re-execution cleat#1506 fixed for
-			// the child spawn, because the damage propagates rather than being
-			// confined to one duplicated call.
-			//
-			// Not retryable, as in replayCall: a divergence is a bug in the
-			// workflow code, and running it again diverges again.
-			if rec.EventType != EventTypeDurableSend {
-				if s.engine.Metrics != nil {
-					s.engine.Metrics.RecordReplayFailure(ctx)
-				}
-				s.engine.log().ErrorContext(ctx,
-					"replay divergence: expected durable_send, got a different event",
-					"workflow_id", s.workflowID, "step", rec.Step,
-					"expected", EventTypeDurableSend, "actual", rec.EventType,
-					"service", service, "operation", operation)
-				// errCode 1, not callErrorUnknown -- which is 0, i.e. SUCCESS.
-				// wasm/adapter_metadata.go decodes this return as
-				// `errCode := uint32(result)` and raises an error only when it
-				// is non-zero, so the guest would have been told the send
-				// succeeded. Matches the divergence code AwaitChild and
-				// AwaitAnyChild use.
-				return packSimpleResult(1)
-			}
-			if !s.advanceReplayStep(ctx, &rec) {
-				return 0
-			}
-			return 0
+	return s.step(ctx, m, &durableSendStep, stepArgs{s1: service, s2: operation, s3: requestJSON})
+}
+
+// durableSendStep is DurableSend as a step (cleat#4152, G1b). A fresh send is new work: it dispatches a request to an external service
+// through s.engine.caller, on a goroutine that outlives this call, and a terminated workflow would cause a side effect after its own
+// end, so the dispatcher refuses it where the call did.
+//
+// IDENTITY IS NEW. The old replay consumed any durable_send record, so a send to another service or operation replayed as the recorded
+// one. A send is identified by its service and operation (the design's "target and message name"); the request text is not compared,
+// which the old code did not either.
+var durableSendStep = stepSpec{
+	Name:    "durable_send",
+	Effect:  effectEffect,
+	Records: recordsOne,
+	Want:    EventTypeDurableSend,
+	Identity: func(a stepArgs, rec *EventRecord) string {
+		if rec.Service != a.s1 || rec.Op != a.s2 {
+			return fmt.Sprintf("send %s.%s, recorded %s.%s", a.s1, a.s2, rec.Service, rec.Op)
 		}
-		// Past recorded history -- switch to fresh execution.
-		//
-		// The `return 0` used to sit outside the bounds check, so a send whose
-		// step was past the end of history returned SUCCESS having recorded no
-		// event and dispatched nothing. Every send after a workflow's first
-		// suspension took that path, because the resumed segment replays the
-		// recorded steps and then runs on with isReplay still set until some
-		// other call crosses the frontier.
-		//
-		// Measured 2026-09-06: a workflow that sleeps and then sends reached
-		// the service 0 times in 3 runs, while the same send before the sleep
-		// arrived every time. A defer's send never arrived at all -- defers run
-		// at the end by definition, so they are always past the frontier.
-		//
-		// DurableDefer, two functions above, is the shape this should have had.
-		s.exitReplay()
-	}
+		return ""
+	},
+	// fire-and-forget is recorded and not re-executed: a replayed send answers success and dispatches nothing.
+	Decode: func(c *stepCtx, rec *EventRecord) int64 { return 0 },
+	Fresh: func(c *stepCtx) int64 {
+		s, ctx, service, operation, requestJSON := c.s, c.ctx, c.args.s1, c.args.s2, c.args.s3
 
-	// A fresh send is new work: it dispatches a request to an external service
-	// through s.engine.caller, in a goroutine that outlives this call. A
-	// terminated workflow would cause a side effect after its own end.
-	if s.stopBeforeNewWork() {
-		return callSuspendSentinel
-	}
+		rec := EventRecord{
+			Step:      s.stepCount,
+			EventType: EventTypeDurableSend,
+			Service:   service,
+			Op:        operation,
+			Request:   requestJSON,
+		}
+		c.Record(rec)
 
-	rec := EventRecord{
-		Step:      s.stepCount,
-		EventType: EventTypeDurableSend,
-		Service:   service,
-		Op:        operation,
-		Request:   requestJSON,
-	}
-	s.recordEvent(rec)
+		// Capture the step before the goroutine starts. Reading s.stepCount from inside it would race with the session advancing, and
+		// would key the call to whatever step happened to be current when the goroutine was scheduled.
+		sendStep := rec.Step
 
-	// Capture the step before the goroutine starts. Reading s.stepCount from
-	// inside it would race with the session advancing, and would key the call to
-	// whatever step happened to be current when the goroutine was scheduled.
-	sendStep := rec.Step
-
-	// Execute the fire-and-forget call through the caller.
-	// Wrap in a timeout context to bound goroutine lifetime in case
-	// the external Call blocks indefinitely.
-	if s.engine.caller != nil {
-		go func() {
-			if ctx.Err() != nil {
-				return
-			}
-			// cleat#2020: ctx is context.Background()-derived, so ctx.Err()
-			// above can never observe a real worker shutdown; this is the
-			// channel that does. Checked once, like ctx.Err(), because this
-			// is a pre-dispatch guard, not a wait -- an event was already
-			// recorded above, so a shutdown after this point is the same
-			// unsent-request case the surrounding fire-and-forget contract
-			// already accepts.
-			select {
-			case <-s.engine.shutdownRequested:
-				return
-			default:
-			}
-			callCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
-			defer cancel()
-			_, _ = s.callService(callCtx, service, operation, requestJSON, sendStep)
-		}()
-	}
-	return 0
+		// Execute the fire-and-forget call through the caller. Wrapped in a timeout context to bound the goroutine's lifetime in case the
+		// external Call blocks indefinitely.
+		if s.engine.caller != nil {
+			go func() {
+				if ctx.Err() != nil {
+					return
+				}
+				// cleat#2020: ctx is context.Background()-derived, so ctx.Err() above can never observe a real worker shutdown; this is
+				// the channel that does. Checked once, like ctx.Err(), because this is a pre-dispatch guard, not a wait -- an event was
+				// already recorded above, so a shutdown after this point is the same unsent-request case the surrounding fire-and-forget
+				// contract already accepts.
+				select {
+				case <-s.engine.shutdownRequested:
+					return
+				default:
+				}
+				callCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+				defer cancel()
+				_, _ = s.callService(callCtx, service, operation, requestJSON, sendStep)
+			}()
+		}
+		return 0
+	},
 }
 
 func (s *execSession) DurableScheduleInvoke(ctx context.Context, m api.Module, service, operation, requestJSON string, delayMs int64) int64 {

@@ -475,52 +475,62 @@ func (s *execSession) deliverSignal(ctx context.Context, targetRunID, signalName
 // error live, handle it, and carry on, while replay found no event at this step, re-ran the delivery, possibly succeeded, and
 // diverged from the history the guest's later events were recorded against.
 func (s *execSession) SignalWorkflow(ctx context.Context, m api.Module, targetRunID, signalName, payload string) int64 {
-	if s.isReplay {
-		if s.stepCount < len(s.history) {
-			rec := s.history[s.stepCount]
-			if rec.EventType == EventTypeSignalReceived {
-				if !s.advanceReplayStep(ctx, &rec) {
-					return 0
-				}
-				return signalSendOutcomeCode(rec)
+	return s.step(ctx, m, &signalWorkflowStep, stepArgs{s1: targetRunID, s2: signalName, s3: payload})
+}
+
+// signalWorkflowStep is SignalWorkflow as a step (cleat#4152, G1b). A fresh signal_workflow is new work: it delivers a signal to another
+// workflow, which can wake it and start a run, so the dispatcher refuses it in a defer segment's body, after a refused event write and on
+// shutdown, as the call did by hand.
+//
+// IDENTITY IS NEW. The old replay consumed whatever signal_received record sat at the step, so a send to another target, or of another
+// signal, replayed as the send the history recorded and the guest was told it had been delivered. A send now names the target and the
+// signal, and a record that names others is a divergence. A record WITHOUT the cleat#4102 discriminator (Service/Op) is a delivery, or a
+// send recorded before that change, and is accepted unchecked, as the promise settlements accept theirs.
+var signalWorkflowStep = stepSpec{
+	Name:    "signal_workflow",
+	Effect:  effectEffect,
+	Records: recordsOne,
+	Want:    EventTypeSignalReceived,
+	Identity: func(a stepArgs, rec *EventRecord) string {
+		if rec.Service != SignalEventService || rec.Op != SignalOpSend {
+			return ""
+		}
+		if rec.RunID != a.s1 || rec.SignalName != a.s2 {
+			return fmt.Sprintf("signal %q to %q, recorded %q to %q", a.s2, a.s1, rec.SignalName, rec.RunID)
+		}
+		return ""
+	},
+	Decode: func(c *stepCtx, rec *EventRecord) int64 { return signalSendOutcomeCode(*rec) },
+	Fresh: func(c *stepCtx) int64 {
+		s, ctx, targetRunID, signalName, payload := c.s, c.ctx, c.args.s1, c.args.s2, c.args.s3
+
+		outcome := ""
+		refused := false
+		// Check signal authorization before delivering.
+		if s.engine.requireSignalAuth && s.engine.signalAuthCheck != nil {
+			if err := s.engine.signalAuthCheck(ctx, targetRunID, s.defName); err != nil {
+				s.engine.log().ErrorContext(ctx, "signal_auth failed", "workflow_id", s.workflowID, "tenant_id", s.tenantID, "error", err)
+				outcome = signalOutcomeAuthRequired
+				refused = true
 			}
-			return s.replayDivergence(ctx, m, EventTypeSignalReceived, 0, 0)
 		}
-		s.exitReplay()
-	}
-
-	// A fresh signal_workflow is new work: it delivers a signal to another
-	// workflow, which can wake it and start a run. A defer segment exists to run
-	// a terminated workflow's cleanup, not to start something on its behalf.
-	if s.stopBeforeNewWork() {
-		return callSuspendSentinel
-	}
-
-	outcome := ""
-	refused := false
-	// Check signal authorization before delivering.
-	if s.engine.requireSignalAuth && s.engine.signalAuthCheck != nil {
-		if err := s.engine.signalAuthCheck(ctx, targetRunID, s.defName); err != nil {
-			s.engine.log().ErrorContext(ctx, "signal_auth failed", "workflow_id", s.workflowID, "tenant_id", s.tenantID, "error", err)
-			outcome = signalOutcomeAuthRequired
-			refused = true
+		if !refused {
+			outcome = s.deliverSignal(ctx, targetRunID, signalName, payload)
 		}
-	}
-	if !refused {
-		outcome = s.deliverSignal(ctx, targetRunID, signalName, payload)
-	}
 
-	s.recordEvent(EventRecord{
-		Step:          s.stepCount,
-		EventType:     EventTypeSignalReceived,
-		Service:       SignalEventService,
-		Op:            SignalOpSend,
-		Response:      outcome,
-		SignalName:    signalName,
-		SignalPayload: payload,
-		RunID:         targetRunID,
-	})
-	return signalOutcomeCode(outcome)
+		// Delivered FIRST, recorded after: see the contract above SignalWorkflow. The spec records through c.Record where the call did.
+		c.Record(EventRecord{
+			Step:          s.stepCount,
+			EventType:     EventTypeSignalReceived,
+			Service:       SignalEventService,
+			Op:            SignalOpSend,
+			Response:      outcome,
+			SignalName:    signalName,
+			SignalPayload: payload,
+			RunID:         targetRunID,
+		})
+		return signalOutcomeCode(outcome)
+	},
 }
 
 // consumeDelivered removes a delivery from this workflow's queue, after the
