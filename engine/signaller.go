@@ -484,7 +484,7 @@ func (s *execSession) SignalWorkflow(ctx context.Context, m api.Module, targetRu
 //
 // IDENTITY IS NEW. The old replay consumed whatever signal_received record sat at the step, so a send to another target, or of another
 // signal, replayed as the send the history recorded and the guest was told it had been delivered. A send now names the target and the
-// signal, and a record that names others is a divergence. A record WITHOUT the cleat#4102 discriminator (Service/Op) is a delivery, or a
+// signal, and a record that names others is a divergence (the target only where the record has one: see the Identity below). A record WITHOUT the cleat#4102 discriminator (Service/Op) is a delivery, or a
 // send recorded before that change, and is accepted unchecked, as the promise settlements accept theirs.
 var signalWorkflowStep = stepSpec{
 	Name:    "signal_workflow",
@@ -495,7 +495,12 @@ var signalWorkflowStep = stepSpec{
 		if rec.Service != SignalEventService || rec.Op != SignalOpSend {
 			return ""
 		}
-		if rec.RunID != a.s1 || rec.SignalName != a.s2 {
+		// The TARGET is compared only when the record carries one. Compaction keeps a signal send's name and not its RunID
+		// (extractCompactionStateFrom copies SignalName, SignalPayload, Service, Op and Response for signal_received), so an expanded history
+		// reads "" there, and comparing it would report a divergence on every replay of a compacted send
+		// (TestACompactedHistoryReplaysTheCallsThatCheckAnIdentity measured exactly that, res=0x1 step=0, before this condition). The cost is
+		// that on a compacted history only the signal NAME is checked.
+		if rec.SignalName != a.s2 || (rec.RunID != "" && rec.RunID != a.s1) {
 			return fmt.Sprintf("signal %q to %q, recorded %q to %q", a.s2, a.s1, rec.SignalName, rec.RunID)
 		}
 		return ""
