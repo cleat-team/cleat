@@ -3,6 +3,10 @@ package engine
 import (
 	"context"
 	"errors"
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"os"
 	"sync"
 	"testing"
 	"time"
@@ -263,4 +267,95 @@ func TestPausingUnderTheRaceDetector(t *testing.T) {
 		}()
 	}
 	wg.Wait()
+}
+
+// Every function that builds the fence budget must register its restart, or a held run on that path keeps a fence that counts the work before the wait and the work
+// after it together. The component path (ExecuteComponentCGo) cannot be run without a Python or C# toolchain, which is why this reads the source: by FUNCTION, parsed
+// and not counted as text, because a raw count of constructions is wrong the moment a construction is one that never holds a run. The two defer passes are exactly
+// that: they run after the guest has stopped, and canPark is false while draining defers, so nothing is ever held there and a restart there would be meaningless.
+var fenceBudgetBuildersThatNeverHold = map[string]string{
+	"runGuestDefersAfterSuspend": "a post-run defer pass: canPark() is false while draining defers (park.go), so no wait in it is ever held",
+	"runGuestDefersAfterKill":    "a post-run defer pass over a killed guest: the same",
+}
+
+// fenceBuildersIn returns, for each function in src that assigns b.budget = newHostBudget(...), whether it also calls onLimitsRestart.
+func fenceBuildersIn(t *testing.T, name, src string) map[string]bool {
+	t.Helper()
+	file, err := parser.ParseFile(token.NewFileSet(), name, src, 0)
+	if err != nil {
+		t.Fatalf("parse %s: %v", name, err)
+	}
+	out := map[string]bool{}
+	for _, decl := range file.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if !ok || fn.Body == nil {
+			continue
+		}
+		builds, registers := false, false
+		ast.Inspect(fn.Body, func(n ast.Node) bool {
+			switch x := n.(type) {
+			case *ast.AssignStmt:
+				for i, rhs := range x.Rhs {
+					call, ok := rhs.(*ast.CallExpr)
+					if !ok || i >= len(x.Lhs) {
+						continue
+					}
+					if id, ok := call.Fun.(*ast.Ident); ok && id.Name == "newHostBudget" {
+						if sel, ok := x.Lhs[i].(*ast.SelectorExpr); ok && sel.Sel.Name == "budget" {
+							builds = true
+						}
+					}
+				}
+			case *ast.CallExpr:
+				if id, ok := x.Fun.(*ast.Ident); ok && id.Name == "onLimitsRestart" {
+					registers = true
+				}
+			}
+			return true
+		})
+		if builds {
+			out[fn.Name.Name] = registers
+		}
+	}
+	return out
+}
+
+func TestEveryFunctionThatBuildsTheFenceBudgetRegistersItsRestartOrNamesWhyNot(t *testing.T) {
+	all := map[string]bool{}
+	for _, f := range []string{"backend_wasmtime.go", "component_cgo.go"} {
+		raw, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatalf("read %s: %v", f, err)
+		}
+		for fn, reg := range fenceBuildersIn(t, f, string(raw)) {
+			all[fn] = reg
+		}
+	}
+	// Vacuity, by name: the scan must SEE the two paths that hold, or it is reading the wrong thing.
+	for _, want := range []string{"Execute", "ExecuteComponentCGo"} {
+		if _, ok := all[want]; !ok {
+			t.Fatalf("the scan did not see %s build the fence budget: it is reading the wrong thing", want)
+		}
+	}
+	for fn, registers := range all {
+		_, exempt := fenceBudgetBuildersThatNeverHold[fn]
+		switch {
+		case !registers && !exempt:
+			t.Errorf("%s builds the fence budget and does not register its restart: a held run on that path would be killed for the work of both segments. Register it, or name it in fenceBudgetBuildersThatNeverHold with the reason it can never hold", fn)
+		case registers && exempt:
+			t.Errorf("%s is listed as never holding and registers a restart: the entry is stale", fn)
+		}
+	}
+	// Negative controls: the scan must say "does not register" for a builder that does not, and "registers" for one that does.
+	const synthetic = "package engine\nfunc a(b *wasmtimeBackend) { b.budget = newHostBudget(nil, 0) }\nfunc c(b *wasmtimeBackend) { b.budget = newHostBudget(nil, 0); onLimitsRestart(nil, nil) }\nfunc d(b *wasmtimeBackend) { onLimitsRestart(nil, nil) }\n"
+	got := fenceBuildersIn(t, "synthetic.go", synthetic)
+	if reg, ok := got["a"]; !ok || reg {
+		t.Errorf("scan control: a builder with no registration was reported as %v (seen=%v)", reg, ok)
+	}
+	if reg, ok := got["c"]; !ok || !reg {
+		t.Errorf("scan control: a builder that registers was reported as %v (seen=%v)", reg, ok)
+	}
+	if _, ok := got["d"]; ok {
+		t.Error("scan control: a function that only registers was reported as a builder")
+	}
 }
