@@ -31,6 +31,7 @@ func (s *execSession) replayRun(ctx context.Context, m api.Module, sp *stepSpec,
 	args := c.args
 	var run []EventRecord
 	final := false
+	prefixes := 0
 	foreign := -1
 	unknown := -1 // a Role value that is none of the three: kept apart from foreign, because a foreign record can legitimately end a run and this cannot
 read:
@@ -44,6 +45,14 @@ read:
 			if sp.EndsWithoutFinal && len(run) > 0 && sp.Identity != nil && sp.Identity(args, &rec) != "" {
 				foreign = i
 				break read
+			}
+			// A spec that bounds its prefix records (an await holds one) treats one past the bound as the next call's.
+			if role == rolePrefix && sp.MaxPrefix > 0 && prefixes >= sp.MaxPrefix {
+				foreign = i
+				break read
+			}
+			if role == rolePrefix {
+				prefixes++
 			}
 			run = append(run, rec)
 			if role == roleFinal {

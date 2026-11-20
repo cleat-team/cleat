@@ -145,6 +145,12 @@ type stepSpec struct {
 	// next call's. (Measured by cleat-review3 on the first version, with two such awaits: a divergence with an Identity, and b's record
 	// consumed by a's step without one.)
 	EndsWithoutFinal bool
+	// MaxPrefix, when above zero, is the most prefix records one run may hold: a prefix record past it is FOREIGN and ends the run (cleat#4152,
+	// W5). An await's run holds at most one, and Identity cannot say so: a polling loop that times out records [await, await, ...] with the
+	// SAME names each time, so by type and identity alone the first call's run swallows the second call's record, and the pair of them reads as
+	// one delivery (measured on the old code by a_await_signals_behaves_as_recorded_before_the_dispatcher_test.go: the first call times out and
+	// the second one pairs). 0 means unlimited, which is a retried call's or SetScope's shape. Needs a Role.
+	MaxPrefix int
 	// Fresh does the work and records, through c.Record, where the call records. It is called only once the dispatcher has decided
 	// fresh work is allowed.
 	Fresh func(c *stepCtx) int64
@@ -171,6 +177,8 @@ func (sp *stepSpec) validate() error {
 		return fmt.Errorf("step spec %q is a multi-record step (it has a Role) and needs exactly a DecodeRun, not a Decode", sp.Name)
 	case sp.Role != nil && sp.Records == recordsNone:
 		return fmt.Errorf("step spec %q is a multi-record step that records nothing: a run is made of recorded events", sp.Name)
+	case sp.MaxPrefix < 0 || (sp.MaxPrefix > 0 && sp.Role == nil):
+		return fmt.Errorf("step spec %q has MaxPrefix %d: it bounds the prefix records of a run, so it needs a Role and cannot be negative", sp.Name, sp.MaxPrefix)
 	case sp.EndsWithoutFinal && sp.Identity == nil:
 		return fmt.Errorf("step spec %q has EndsWithoutFinal but no Identity: a run that can end without a final is bounded by Identity, and without one it cannot tell its own records from the next call's", sp.Name)
 	case (sp.Identity == nil) == (sp.NoIdentity == ""):
