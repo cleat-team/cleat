@@ -999,18 +999,21 @@ on every call.
 
 | Type | Default | Description |
 |------|---------|-------------|
-| int | `32` | Max WASM linear memory per module in MB |
+| int | `256` | Max WASM linear memory per module in MB |
 
-Corresponds to 512 WASM pages at 32 MB (64 KiB per page). Enforced by the
-wasmtime store limiter; set to `0` to use the built-in default
-(`DefaultWasmtimeMemoryLimitBytes`, `engine/wasmtime_options.go`). Increasing
-this allows workflows with larger memory requirements to execute.
+Corresponds to 4096 WASM pages at 256 MiB (64 KiB per page). It is a **ceiling, not a reservation**: a guest may grow up to it and no
+further, and a small workflow pays nothing for a higher number. Enforced by the wasmtime store limiter; set to `0` to use the built-in
+default (`DefaultWasmtimeMemoryLimitBytes`, `engine/wasmtime_options.go`). Lowering it limits the memory one workflow can take; raising it
+allows workflows with larger memory requirements to execute.
 
-The `32` is a default and not a decision: when the flag is not passed, the limit is raised for a guest language whose
-runtime cannot start in 32 MiB (C#: 64 MiB, `languageMemoryFloorBytes` in `engine/wasmtime_options.go`). When the flag
-IS passed, its value applies to every language as given, including a value too small for the guest. (This said
-"the wazero default" until 2026-09-06; wazero has not been a backend since
-#459.)
+The value applies to every language as given, including a value too small for the guest. A .NET (C#) guest cannot start below 52 MiB
+(measured on a hello-world); under that it dies at startup with `.NET runtime failed to initialize`, which names neither the limit nor the cause.
+
+**Changed in cleat#4171 (owner decision, 2026-11-19): the default was 32 MiB and is now 256 MiB.** The 32 came from the old wazero default with
+no sizing rationale. Until then, a stock worker ran on 32 MiB and a per-language floor (`languageMemoryFloorBytes`) raised it to 64 MiB for
+C# only when the flag was not passed; the default now clears every runtime's minimum, so the floor, and the worker's practice of passing a
+limit only when the flag was set, were removed. A worker running many workflows at once can in the worst case use this much for each of them,
+so size `--concurrency` and the machine's memory together. `--memory-soft-limit` stops claiming new work at a fraction of memory. It sees a guest's memory when the worker reads cgroup v2 `memory.current` or `/proc/meminfo` (host-wide, so it also counts everything else on the machine), and is blind only on its last-resort Go-heap source, which macOS falls back to (cleat#4196).
 
 ---
 
@@ -1082,15 +1085,17 @@ deadline, and the epoch tick.
 
 ### --wasm-output-buffer-size
 
-> Corrected 2026-08-09: was documented as `1048576` (1 MiB). The actual
-> `flag.Int` default in `cmd/cleat-worker/config.go:119` is `32768` (32 KB).
-
 | Type | Default | Description |
 |------|---------|-------------|
-| int | `32768` (32 KB) | WASM output buffer size in bytes |
+| int | `1048576` (1 MiB) | WASM output buffer size in bytes |
 
-Controls the size of the buffer used to read output from WASM guest modules.
-Larger values support workflows that produce more output data.
+For a **core-module** guest's direct export call, the host places an input area and an output area, each this size, past the end of the guest's
+memory and grows the memory to fit (so each such call needs twice this value of headroom under `--wasm-memory-max-mb`); a result larger than the
+output area fails with `output overflow`. Python and C# components take the value and do not use it.
+
+**Changed in cleat#4171 (owner decision, 2026-11-19): the default was 32768 (32 KiB) and is now 1 MiB**, the engine's own default
+(`DefaultOutBufSize`, `engine/memory.go`) and the figure `ABI.md` states. (An earlier version of this page, until 2026-08-09, said `1048576`
+while the flag was `32768`; the flag, the engine and this page now agree, and a test fails if they stop agreeing.)
 
 ---
 

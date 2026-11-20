@@ -42,9 +42,11 @@ WIT
   echo "probe-$V.wasm: $(wc -c < "probe-$V.wasm") bytes, imports: $(wasm-tools component wit "probe-$V.wasm" | grep -oE 'import wasi:[a-z/-]+@[0-9.]+' | tr '\n' ' ')"
 done
 
-# bigmem.wasm: needs 44 MiB at instantiation, imports nothing. Tests the per-language memory default.
-work=$(mktemp -d); mkdir -p "$work/wit"
-cat > "$work/wit/world.wit" <<WIT
+# bigmem.wasm needs 44 MiB at instantiation (the least a runtime needs to start, the default must clear it); bigmem-over-default.wasm needs
+# 260 MiB, more than the 256 MiB default (the default must refuse it). Both import nothing.
+for NAME in bigmem bigmem-over-default; do
+  work=$(mktemp -d); mkdir -p "$work/wit"
+  cat > "$work/wit/world.wit" <<WIT
 package test:bigmem;
 world bigmem {
   variant run-outcome { completed(string), suspended, failed(string) }
@@ -52,7 +54,8 @@ world bigmem {
   export run-deferred: func() -> u32;
 }
 WIT
-wasm-tools component embed "$work/wit" bigmem.wat --world bigmem -o "$work/core.wasm"
-wasm-tools component new "$work/core.wasm" -o bigmem.wasm
-rm -rf "$work"
-echo "bigmem.wasm: $(wc -c < bigmem.wasm) bytes"
+  wasm-tools component embed "$work/wit" "$NAME.wat" --world bigmem -o "$work/core.wasm"
+  wasm-tools component new "$work/core.wasm" -o "$NAME.wasm"
+  rm -rf "$work"
+  echo "$NAME.wasm: $(wc -c < "$NAME.wasm") bytes"
+done

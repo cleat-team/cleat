@@ -2276,12 +2276,12 @@ func main() {
 	// IMPROVEMENT-PLAN.md 1.5) and StoreLimits (memory/table/instance
 	// ceilings), plus optional fuel-based instruction metering when
 	// --wasm-instruction-limit is set.
-	// 0 => wasmtimeBackend applies its own default, per language. See wasmtimeMemoryLimitFromFlags.
-	wasmtimeMemoryLimitBytes := wasmtimeMemoryLimitFromFlags(flag.CommandLine, *wasmMemoryMaxMB)
+	// 0 => the engine's default (256 MiB). See wasmtimeMemoryLimitBytes.
+	memoryLimitBytes := wasmtimeMemoryLimitBytes(*wasmMemoryMaxMB)
 	wt, wasmtimeErr := engine.NewWasmtimeBackend(ctx,
 		engine.WithWasmtimeExecutionTimeout(*wasmInstanceTimeout),
 		engine.WithWasmtimeInstructionLimit(uint64(*wasmInstructionLimit)),
-		engine.WithWasmtimeMemoryLimits(wasmtimeMemoryLimitBytes, 0, 0),
+		engine.WithWasmtimeMemoryLimits(memoryLimitBytes, 0, 0),
 		engine.WithWasmtimeDeferBudget(*wasmDeferBudget),
 		engine.WithWasmtimeModuleCacheMaxEntries(*wasmModuleCacheMaxEntries),
 		engine.WithWasmtimeModuleCacheMaxBytes(int64(*wasmModuleCacheMaxMB)<<20),
@@ -2307,7 +2307,7 @@ func main() {
 	}
 
 	var wasmtimeBackend engine.WasmBackend = wt
-	logger.InfoContext(context.Background(), "wasmtime backend registered for Go WASM", "worker_id", workerID, "instance_timeout", *wasmInstanceTimeout, "wall_clock_ceiling", *wasmWallClockCeiling, "instruction_limit", *wasmInstructionLimit, "memory_limit_bytes", wasmtimeMemoryLimitBytes, "defer_budget", *wasmDeferBudget)
+	logger.InfoContext(context.Background(), "wasmtime backend registered for Go WASM", "worker_id", workerID, "instance_timeout", *wasmInstanceTimeout, "wall_clock_ceiling", *wasmWallClockCeiling, "instruction_limit", *wasmInstructionLimit, "memory_limit_bytes", memoryLimitBytes, "defer_budget", *wasmDeferBudget)
 
 	// Start PostgreSQL NOTIFY listener for low-latency dispatch wake-up.
 	var notifyCh chan struct{}
@@ -3164,25 +3164,16 @@ func flushRetryWindowAdvice(flushWindow, reclaim, heartbeat time.Duration) strin
 		flushWindow, window, flushWindow)
 }
 
-// wasmtimeMemoryLimitFromFlags is the per-store memory limit to hand the wasmtime backend, in bytes, or 0 for "the
-// operator chose none, so the backend applies its own default, per language".
+// wasmtimeMemoryLimitBytes is the per-store memory limit to hand the wasmtime backend, in bytes: the flag's value, or the engine's own default
+// for 0 (so what is logged and what is enforced are the same number, never an ambiguous 0).
 //
-// Only a limit the operator SET is passed. The flag's own default (32) is not a decision, and passing it would pin every
-// language to 32 MiB: a .NET guest needs more than that just to start, and the backend raises the default for it
-// (engine.languageMemoryFloorBytes) only when it is told no limit was chosen. cleat#4077.
-//
-// A function of a FlagSet and a value, not inline in main, because the gate is the whole fix and nothing else exercised
-// it: with the condition reverted to "always pass the flag's value" every engine test still passed, since they build the
-// backend directly, and a real worker would have pinned every C# guest to 32 MiB.
-func wasmtimeMemoryLimitFromFlags(fs *flag.FlagSet, mb int) int64 {
-	set := false
-	fs.Visit(func(f *flag.Flag) {
-		if f.Name == "wasm-memory-max-mb" {
-			set = true
-		}
-	})
-	if mb > 0 && set {
+// A stock worker passes the flag's default, which is engine.DefaultWasmtimeMemoryLimitBytes (256 MiB, cleat#4171). This used to pass
+// a limit only when the flag was explicitly SET, because the flag's old default (32) was not a decision and passing it would have pinned
+// a C# guest to 32 MiB, under the 52 MiB it needs to start; the engine raised the default for C# through a per-language floor. The
+// default is now above every runtime's minimum, so the floor and the gate were both removed.
+func wasmtimeMemoryLimitBytes(mb int) int64 {
+	if mb > 0 {
 		return int64(mb) * 1024 * 1024
 	}
-	return 0
+	return engine.DefaultWasmtimeMemoryLimitBytes
 }

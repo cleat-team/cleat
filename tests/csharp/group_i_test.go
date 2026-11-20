@@ -102,19 +102,19 @@ func TestCSharpGroupICallRequestsOverTheLimitAreRefusedBeforeTheServiceIsAsked(t
 	}
 }
 
-// The memory limit (the engine's wasmtime default, 32 MiB of linear memory) ends a runaway allocation as a FAILED RUN naming the guest's
-// OutOfMemoryException, not a host crash or a hang. The exact edge depends on the guest's garbage collector, so only the two ends are pinned:
-// 1 MiB works and 64 MiB does not.
+// The memory limit (the engine's wasmtime default, 256 MiB of linear memory since cleat#4171; it was 32 MiB, raised to 64 for C#) ends a runaway
+// allocation as a FAILED RUN naming the guest's OutOfMemoryException, not a host crash or a hang. The exact edge depends on the guest's garbage
+// collector, so only the two ends are pinned: 1 MiB works and 512 MiB (twice the limit) does not.
 func TestCSharpGroupIMemoryLimit(t *testing.T) {
 	ok := objectResult(t, runConformanceEntry(t, "i_alloc", entryRun{Input: `{"mebibytes":1}`}))
 	if ok["allocatedMebibytes"] != float64(1) {
 		t.Errorf("a 1 MiB allocation = %v, want it to succeed", ok)
 	}
-	res := runConformanceEntry(t, "i_alloc", entryRun{Input: `{"mebibytes":64}`})
+	res := runConformanceEntry(t, "i_alloc", entryRun{Input: `{"mebibytes":512}`})
 	if res.Err == nil {
-		t.Fatalf("a 64 MiB allocation succeeded (%q): the memory limit did not apply", res.Result)
+		t.Fatalf("a 512 MiB allocation succeeded (%q): the memory limit did not apply", res.Result)
 	}
 	if !strings.Contains(res.Err.Error(), "OutOfMemoryException") || !strings.Contains(res.Err.Error(), `"i_alloc"`) {
-		t.Errorf("a 64 MiB allocation failed as %v, want the guest's OutOfMemoryException naming the entry", res.Err)
+		t.Errorf("a 512 MiB allocation failed as %v, want the guest's OutOfMemoryException naming the entry", res.Err)
 	}
 }

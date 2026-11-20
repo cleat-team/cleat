@@ -31,34 +31,17 @@ const DefaultWasmWallClockCeiling = 5 * time.Minute
 
 // DefaultWasmtimeMemoryLimitBytes bounds linear memory per wasmtime store
 // when the caller has not configured a tighter one via
-// WithWasmtimeMemoryLimits. It matches DefaultMemoryLimitPages (32 MiB),
+// WithWasmtimeMemoryLimits. It matches DefaultMemoryLimitPages (256 MiB),
 // the wazero backend's default (engine/runtime.go), so an operator sees the
 // same memory ceiling regardless of which backend happens to run a given
 // workflow.
-const DefaultWasmtimeMemoryLimitBytes = int64(DefaultMemoryLimitPages) * int64(wasmPageSize)
-
-// languageMemoryFloorBytes is the memory a language's runtime needs before it runs any of the author's code, for a
-// language whose need is above DefaultWasmtimeMemoryLimitBytes. It applies ONLY when the operator set no limit.
 //
-// A global default is a bound chosen for the guests that existed when it was chosen. A .NET guest compiled with
-// NativeAOT-LLVM needs more than 32 MiB just to start: measured on a 704 KB hello-world, 52 MiB is the smallest limit
-// at which it runs, and below that it dies at startup with ".NET runtime failed to initialize" and nothing that
-// names the limit (cleat#4077). Raising the global default would hand every other language's guest 2x the memory;
-// this raises it for the one that cannot start without. 64 MiB is the measured minimum with headroom, not a tuned figure.
-var languageMemoryFloorBytes = map[string]int64{
-	"csharp": 64 << 20,
-}
-
-// memoryLimitFor resolves the per-store memory ceiling for a guest of the given language.
-func (l wasmtimeLimits) memoryLimitFor(language string) int64 {
-	if l.memoryLimitExplicit {
-		return l.memoryLimitBytes
-	}
-	if floor := languageMemoryFloorBytes[language]; floor > l.memoryLimitBytes {
-		return floor
-	}
-	return l.memoryLimitBytes
-}
+// It is a ceiling, not a reservation, and it must stay above the least memory any supported guest runtime needs to START: a .NET guest
+// compiled with NativeAOT-LLVM dies at startup with ".NET runtime failed to initialize" below 52 MiB (measured on a 704 KB hello-world,
+// cleat#4077), a message that names neither the limit nor the cause. Until cleat#4171 the default was 32 MiB and a per-language floor
+// raised it for C#; that floor could never fire once the default is above it, so it was removed rather than left as a tested mechanism that
+// reaches nothing. TestTheDefaultMemoryLimitClearsTheLargestRuntime is what stops the default being lowered below that minimum again.
+const DefaultWasmtimeMemoryLimitBytes = int64(DefaultMemoryLimitPages) * int64(wasmPageSize)
 
 // DefaultWasmtimeTableElementsLimit bounds indirect-function-table growth
 // per wasmtime store.
@@ -158,17 +141,12 @@ const interruptUnwindGrant = 100 * time.Millisecond
 // where 0 legitimately means "fuel metering disabled" — this matches the
 // existing --wasm-instruction-limit flag semantics ("0 = no limit").
 type wasmtimeLimits struct {
-	executionTimeout time.Duration
-	instructionLimit uint64
-	memoryLimitBytes int64
-	// memoryLimitExplicit is true when the operator passed a positive memory limit. Only then is memoryLimitBytes a
-	// decision rather than the engine's default, and only the default may be raised for a language whose runtime
-	// needs more (languageMemoryFloorBytes). An explicit value is honoured as given, even when it is too small for
-	// the guest.
-	memoryLimitExplicit bool
-	tableElementsLimit  int64
-	instancesLimit      int64
-	deferBudget         time.Duration
+	executionTimeout   time.Duration
+	instructionLimit   uint64
+	memoryLimitBytes   int64
+	tableElementsLimit int64
+	instancesLimit     int64
+	deferBudget        time.Duration
 
 	// interruptMargin is the fuel reserve the soft kill stops at (cleat#3922). Zero takes
 	// DefaultWasmtimeInterruptMarginFuel; it is only consulted when instructionLimit > 0.
@@ -258,7 +236,6 @@ func WithWasmtimeInstructionLimit(n uint64) WasmtimeOption {
 func WithWasmtimeMemoryLimits(memoryBytes, tableElements, instances int64) WasmtimeOption {
 	return func(c *wasmtimeConfig) {
 		c.limits.memoryLimitBytes = memoryBytes
-		c.limits.memoryLimitExplicit = memoryBytes > 0
 		c.limits.tableElementsLimit = tableElements
 		c.limits.instancesLimit = instances
 	}
