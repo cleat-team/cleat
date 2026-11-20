@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -137,5 +138,27 @@ func TestOwnerPID(t *testing.T) {
 		if ok != c.wantOK || pid != c.pid {
 			t.Errorf("%s: ownerPID(%q) = %d, %v; want %d, %v", name, c.in, pid, ok, c.pid, c.wantOK)
 		}
+	}
+}
+
+// TestOwnedTempDirKeepsADirectoryWhoseOwnerWeMayNotSignal pins the EPERM branch of processExists (cleat#4234). kill(pid, 0) answers EPERM for a
+// live process this user may not signal, and a sweep that read that as "no such process" would remove a directory belonging to a running
+// binary. Every other test here uses a pid this user CAN signal (its parent, itself), so reading EPERM as dead left all of them green.
+//
+// Process 1 is the live process that is not ours. The test checks that it really answers EPERM before relying on it, and says so when it does
+// not: as root, signal 0 to it succeeds, and the case then measures nothing about EPERM.
+func TestOwnedTempDirKeepsADirectoryWhoseOwnerWeMayNotSignal(t *testing.T) {
+	if err := syscall.Kill(1, 0); err != syscall.EPERM {
+		t.Skipf("kill(1, 0) = %v here, not EPERM (running as root, or no pid 1 we can see): this case measures nothing about the EPERM branch", err)
+	}
+	root := t.TempDir()
+	t.Setenv("TMPDIR", root)
+	const prefix = "owned-eperm-"
+	kept := mark(t, root, prefix+"p1-live")
+	if _, err := OwnedTempDir(prefix); err != nil {
+		t.Fatal(err)
+	}
+	if !exists(kept) {
+		t.Errorf("the directory of a live process this user may not signal was swept: EPERM was read as \"no such process\"")
 	}
 }
