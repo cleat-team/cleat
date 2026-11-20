@@ -253,12 +253,14 @@ func TestAnAwaitPromiseBehavesAsRecordedBeforeTheDispatcher(t *testing.T) {
 		{name: "replay: ... with no promise store configured it reports the error", noStore: true, hist: []EventRecord{await(now-10_000, hour)}, timeoutMs: 60000,
 			want: promiseWant{result: errNoPromiseStore, errCode: 1, step: 1}},
 
+		// ---- replay: a first record that is none of the three types. (The two rows below are KNOWN DEFECTS: a row marked so pins what the code does TODAY so the
+		// move cannot change it silently; it is not a claim that it is right, and the W4 move decides each by name.)
 		// ---- replay: a first record that is none of the three types. NOT a divergence: the old code falls through to the FRESH path with history
 		// still unread and replay still on (the cleat#4157 class), so the call records at a step that already holds an event. ----
-		{name: "replay: a first record of another type runs the FRESH path with history unread: a resolved promise is recorded and delivered",
+		{name: "KNOWN DEFECT (cleat#947: records at a step history already holds): a first record of another type runs the FRESH path with history unread, a resolved promise is recorded and delivered",
 			status: "resolved", result: "v", hist: []EventRecord{{Step: 0, EventType: fakeEvent}}, timeoutMs: 60000,
 			want: promiseWant{result: "v", events: []EventType{EventTypePromiseResolved}, recordedAs: "v", gets: 1, step: 1, replaying: true}},
-		{name: "replay: a first record of another type, a pending promise: the await is recorded and the run suspends, still replaying",
+		{name: "KNOWN DEFECT (cleat#947: records at a step history already holds): a first record of another type, a pending promise: the await is recorded and the run suspends, still replaying",
 			status: "pending", hist: []EventRecord{{Step: 0, EventType: fakeEvent}}, timeoutMs: 60000,
 			want: promiseWant{sentinel: true, events: []EventType{EventTypeAwaitPromise}, awaitTO: 60000, awaitTOSet: true, reason: reason, untilMs: promiseT + 60000, gets: 1, step: 1, replaying: true}},
 
@@ -288,12 +290,10 @@ func TestAnAwaitPromiseBehavesAsRecordedBeforeTheDispatcher(t *testing.T) {
 			want: promiseWant{result: "v", events: []EventType{EventTypePromiseResolved}, recordedAs: "v", gets: 1, step: 1}},
 		{name: "fresh: a worker that is shutting down is NOT refused", opts: []EngineOption{WithShutdownSignal(closed)}, status: "pending", timeoutMs: 60000,
 			want: promiseWant{sentinel: true, events: []EventType{EventTypeAwaitPromise}, awaitTO: 60000, awaitTOSet: true, reason: reason, untilMs: promiseT + 60000, gets: 1, step: 1}},
-		{name: "fresh: a second await in a session that has already suspended is NOT refused: it records a second await and replaces the suspension",
+		{name: "KNOWN DEFECT (cleat#933 shape): a second await in a session that has already suspended is NOT refused, it records a second await and replaces the suspension",
 			mod:    func(s *execSession) { s.suspendErr = &SuspendError{Reason: "earlier"} },
 			status: "pending", timeoutMs: 60000,
 			want: promiseWant{sentinel: true, events: []EventType{EventTypeAwaitPromise}, awaitTO: 60000, awaitTOSet: true, reason: reason, untilMs: promiseT + 60000, gets: 1, step: 1}},
-		{name: "fresh: arriving at the frontier of a replay leaves replay and behaves as fresh", status: "pending", hist: []EventRecord{{Step: 0, EventType: fakeEvent}}, timeoutMs: 60000,
-			want: promiseWant{sentinel: true, events: []EventType{EventTypeAwaitPromise}, awaitTO: 60000, awaitTOSet: true, reason: reason, untilMs: promiseT + 60000, gets: 1, step: 1, replaying: true}},
 	}
 	for _, r := range rows {
 		t.Run(r.name, func(t *testing.T) { runPromiseRow(t, r) })
