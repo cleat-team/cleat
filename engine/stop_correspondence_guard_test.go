@@ -127,7 +127,7 @@ var stopSurfaces = map[string]stopSurface{
 		wit:      []string{"durable-reject-promise"},
 		py:       []string{"reject_promise"},
 	},
-	"freshAcquireLock": {
+	"AcquireLock": {
 		// The first stop site whose WIT function returns a SCALAR rather than
 		// result<string, call-failure>, which is why witCallOutcomeFuncs now
 		// reports a third category. §3.113 recorded the rule as wrong for
@@ -394,6 +394,7 @@ func hostStopSites(t *testing.T) map[string]bool {
 		t.Fatalf("reading engine/: %v", err)
 	}
 	decl := regexp.MustCompile(`(?m)^func \(s \*execSession\) ([A-Za-z_]\w*)\(`)
+	unrefused := neverRefusedSpecs(t)
 	sites := map[string]bool{}
 	for _, e := range entries {
 		if e.IsDir() || !strings.HasSuffix(e.Name(), ".go") || strings.HasSuffix(e.Name(), "_test.go") {
@@ -417,7 +418,7 @@ func hostStopSites(t *testing.T) map[string]bool {
 				continue
 			}
 			body := src[loc[0]:end]
-			if callsInCode(body, "stopBeforeNewWork") || callsInCode(body, "suspendingAwaitResult") || goesThroughStep(body) {
+			if callsInCode(body, "stopBeforeNewWork") || callsInCode(body, "suspendingAwaitResult") || goesThroughStep(body, unrefused) {
 				sites[name] = true
 			}
 		}
@@ -428,13 +429,68 @@ func hostStopSites(t *testing.T) map[string]bool {
 // stepCall matches the dispatcher call a host call makes in code: s.step(ctx, m, &someStep, ...).
 var stepCall = regexp.MustCompile(`\bs\.step\(`)
 
+// stepCallSpec reads which spec a host call hands to the dispatcher: s.step(ctx, m, &someStep, ...).
+var stepCallSpec = regexp.MustCompile(`\bs\.step\(\s*[^,()]+,\s*[^,()]+,\s*&(\w+)`)
+
+// specDecl finds the package-level `var x = stepSpec{ ... }` declarations; the body ends at the first closing brace in column 0, which a
+// declaration's own closures (indented with tabs) never contain.
+var specDecl = regexp.MustCompile(`(?s)\nvar (\w+) = stepSpec\{(.*?)\n\}`)
+
+// neverRefusedSpecs names the specs declared `Refuse: neverRefuse`: steps the dispatcher does NOT refuse (cleat#4211). A host call that goes
+// through step is a stop site only if its spec can be refused, so counting every s.step caller one (as this scan did while every non-Pure
+// step was refused) reports ReleaseLock as a call the SDKs must guard, and the Java count one too high. Reading the declaration, not a list kept
+// here, means a new spec that says `Refuse: neverRefuse` is understood the day it is written. A spec with any OTHER Refuse is not in this set
+// and so counts as a site: the scan cannot prove an arbitrary Refuse never refuses, and over-counting fails loudly.
+func neverRefusedSpecs(t *testing.T) map[string]bool {
+	t.Helper()
+	entries, err := os.ReadDir(".")
+	if err != nil {
+		t.Fatalf("reading engine/: %v", err)
+	}
+	out := map[string]bool{}
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".go") || strings.HasSuffix(e.Name(), "_test.go") {
+			continue
+		}
+		b, err := os.ReadFile(e.Name())
+		if err != nil {
+			t.Fatalf("reading %s: %v", e.Name(), err)
+		}
+		for _, m := range specDecl.FindAllStringSubmatch(blankComments(string(b)), -1) {
+			if regexp.MustCompile(`\bRefuse:\s*neverRefuse\b`).MatchString(m[2]) {
+				out[m[1]] = true
+			}
+		}
+	}
+	return out
+}
+
 // goesThroughStep reports whether a host call's text (the method and the spec value that follows it, up to the next method) calls the
-// dispatcher, which refuses every non-Pure step. A call that went through step with a Pure spec would be wrongly counted a stop site; the
-// dispatcher's own tests assert no spec declares Pure and records (cleat#4152).
+// dispatcher with a spec the dispatcher can refuse. A call that went through step with a Pure spec would be wrongly counted a stop site; the
+// dispatcher's own tests assert no spec declares Pure and records (cleat#4152). A call to a spec in unrefused (`Refuse: neverRefuse`) is not a site.
+//
+// A step call whose spec this cannot read counts as a site: that over-reports, and an over-count fails loudly (the Java count's equality), where
+// an under-count would pass a call the SDKs do not guard.
 //
 // The text it reads runs from a method to the NEXT method, so a package-level helper (not a method) that calls s.step and sits between two
 // methods is attributed to the one before it. That can only ADD a site, and the Java count's equality then fails loudly: the safe direction.
-func goesThroughStep(body string) bool { return stepCall.MatchString(blankComments(body)) }
+func goesThroughStep(body string, unrefused map[string]bool) bool {
+	code := blankComments(body)
+	calls := stepCall.FindAllStringIndex(code, -1)
+	if len(calls) == 0 {
+		return false
+	}
+	named := stepCallSpec.FindAllStringSubmatch(code, -1)
+	if len(named) < len(calls) {
+		return true
+	}
+	for _, m := range named {
+		if !unrefused[m[1]] {
+			return true
+		}
+	}
+	return false
+}
 
 // callsInCode reports whether src contains a call `name()` in CODE: the three
 // tokens name ( ) as the Go scanner reads them, which skips comments and keeps a

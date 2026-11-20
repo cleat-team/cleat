@@ -98,7 +98,7 @@ var javaCallsTheHostCanRefuse = []sdkRefusableCall{
 	// waitForEventMs, not waitForEvent: the latter delegates, so the stop guard
 	// lives in the _ms form -- the same shape as awaitSignalsMs above.
 	{"waitForEventMs", "WaitForEvent"},
-	{"acquireLockMs", "freshAcquireLock"},
+	{"acquireLockMs", "AcquireLock"},
 	// deleteCron joined in cleat#4083: a terminated workflow's defer segment
 	// could delete a schedule the workflow never reached. The refusal reads as
 	// errCode 0 in the simple layout, which is a successful delete.
@@ -249,10 +249,15 @@ func TestTheRequiredJavaGuardsCoverEveryHostStopSite(t *testing.T) {
 	stopSites := 0
 	call := regexp.MustCompile(`(?m)^\s*if s\.stopBeforeNewWork\(\) \{`)
 	// A host call that goes through the dispatcher (cleat#4152) has no `if s.stopBeforeNewWork() {` of its own: step applies it to every
-	// non-Pure step. Each such call is still one stop site a guest must check, so it counts here, and the count of the three calls moved
+	// effectEffect step. Each such call is still one stop site a guest must check, so it counts here, and the count of the calls moved
 	// onto step is the same as before they were. Matched at the start of a code line so a comment quoting the call is not counted; a
 	// call written any other way is missed, which makes the count LOWER and fails this test, the safe direction.
-	viaStep := regexp.MustCompile(`(?m)^\s*return s\.step\(`)
+	//
+	// A call whose spec says `Refuse: neverRefuse` (ReleaseLock, cleat#4211) is NOT a stop site: step never refuses it, so there is no refusal for
+	// an SDK to check. Counting every `return s.step(` line gave 29 when the true number was 28, and the constant below was one edit from
+	// recording the wrong one. The spec is read from the call, as stop_correspondence_guard_test.go's neverRefusedSpecs reads the declaration.
+	viaStep := regexp.MustCompile(`(?m)^\s*return s\.step\(\s*[^,()]+,\s*[^,()]+,\s*&(\w+)`)
+	unrefused := neverRefusedSpecs(t)
 	for _, e := range entries {
 		if e.IsDir() || !strings.HasSuffix(e.Name(), ".go") || strings.HasSuffix(e.Name(), "_test.go") {
 			continue
@@ -263,7 +268,11 @@ func TestTheRequiredJavaGuardsCoverEveryHostStopSite(t *testing.T) {
 		}
 		stopSites += len(call.FindAll(b, -1))
 		if e.Name() != "step_dispatcher.go" {
-			stopSites += len(viaStep.FindAll(b, -1))
+			for _, m := range viaStep.FindAllSubmatch(b, -1) {
+				if !unrefused[string(m[1])] {
+					stopSites++
+				}
+			}
 		}
 	}
 	if stopSites == 0 {

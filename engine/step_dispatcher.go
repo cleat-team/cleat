@@ -37,7 +37,8 @@ const (
 	// effectPure: derived from the session and the history; no event, no world access. Pure calls do not go through step at all; the value
 	// exists so that validate can refuse a spec that declares it and records, and so a spec table can say so.
 	effectPure stepEffect = iota
-	// effectEffect: reaches the outside world or changes durable state. Refused in a segment's body.
+	// effectEffect: reaches the outside world or changes durable state. Refused when stopBeforeNewWork: in a segment's body, after a worker
+	// shutdown, and after an event that could not be written.
 	effectEffect
 )
 
@@ -66,6 +67,8 @@ const (
 // allocation beyond this struct (section 9, risk 5, of the design); two strings cover the promise calls and the next groups add fields.
 type stepArgs struct {
 	s1, s2 string
+	// i1 is an integer argument: a lock's time to live in milliseconds.
+	i1 int64
 	// outPtr and outMaxLen are where a divergence message is written, and where the call's own output goes; zero when it has none.
 	outPtr, outMaxLen uint32
 }
@@ -149,7 +152,7 @@ type stepSpec struct {
 // stepSpecs lists every spec in the engine. It exists for the dispatcher's tests (step_dispatcher_test.go), which run each property over every
 // spec on it and check the list against the `var x = stepSpec{` declarations in the source, so a spec nobody registered is on no list and is
 // caught. A host call moved onto step adds its spec here in the same change.
-var stepSpecs = []*stepSpec{&createPromiseStep, &resolvePromiseStep, &rejectPromiseStep}
+var stepSpecs = []*stepSpec{&createPromiseStep, &resolvePromiseStep, &rejectPromiseStep, &acquireLockStep, &releaseLockStep}
 
 // validate says whether a spec is well-formed: it names a replay event, can decode it and can run fresh, and a step that declares itself Pure
 // (and so is never refused in a segment) records nothing.
@@ -191,11 +194,22 @@ func init() {
 	}
 }
 
+// neverRefuse is a Refuse for a step that gives back something the workflow holds (a lock): it is NEVER refused, not in a segment's body, not
+// after a worker shutdown and not after an event that could not be written. It is the one use of the hook that says "never", and the reason is
+// measured and not argued. AcquireLock is refused in all four of those states and ReleaseLock in none (a_lock_call_in_each_stop_state_test.go,
+// taken before the move), and a defer draining on a shutting-down worker is the case that needs it: it cannot take a lock but must be able to
+// give one back, or the lock stays held until its lease runs out. The design's blanket rule was argued from a segment's body alone, which is only
+// one of the three states stopBeforeNewWork covers. Whether a segment's BODY should release is a separate decision; this keeps what the call did
+// before it moved. The scans that count host stop sites (stop_correspondence_guard_test.go, java_sdk_stop_bit_parity_test.go) read the spec
+// declaration for exactly `Refuse: neverRefuse` and do not count such a call; any other Refuse counts as a site, because they cannot prove it
+// never refuses and an over-count fails loudly where an under-count would pass a call the SDKs do not guard.
+func neverRefuse(*execSession) bool { return false }
+
 // step runs one host call as a step.
 //
 //	replay, at a record  -> the record must be Want, else a divergence; consume it; Decode
 //	replay, at the end   -> leave replay (asserting the history was all read), then as fresh
-//	any non-Pure step    -> refused (callSuspendSentinel) when stopBeforeNewWork, on BOTH arrival paths
+//	any non-Pure step    -> refused (callSuspendSentinel) when its Refuse says so (nil: stopBeforeNewWork), on BOTH arrival paths
 //	fresh                -> Fresh
 //
 // The refusal lives here and not in each caller, so it cannot be skipped by reaching a call by the second path (the #4143 shape).

@@ -29,7 +29,7 @@ func TestFreshAcquireLock_Success(t *testing.T) {
 	s := newTestExecSession()
 	s.engine.concurrencyKeyStore = newMockConcurrencyKeyStore()
 
-	result := s.freshAcquireLock(context.Background(), nil, "my-lock", 60000)
+	result := s.AcquireLock(context.Background(), nil, "my-lock", 60000)
 
 	acquired := (result>>8)&1 != 0
 	errCode := byte(result & 0xFF)
@@ -51,7 +51,7 @@ func TestFreshAcquireLock_StoreError(t *testing.T) {
 	s := newTestExecSession()
 	s.engine.concurrencyKeyStore = &acquireErrorStore{}
 
-	result := s.freshAcquireLock(context.Background(), nil, "my-lock", 60000)
+	result := s.AcquireLock(context.Background(), nil, "my-lock", 60000)
 
 	acquired := (result>>8)&1 != 0
 	if acquired {
@@ -69,7 +69,7 @@ func TestFreshAcquireLock_AlreadyLocked(t *testing.T) {
 	s := newTestExecSession()
 	s.engine.concurrencyKeyStore = &acquireNotAcquiredStore{}
 
-	result := s.freshAcquireLock(context.Background(), nil, "my-lock", 60000)
+	result := s.AcquireLock(context.Background(), nil, "my-lock", 60000)
 
 	acquired := (result>>8)&1 != 0
 	if acquired {
@@ -90,7 +90,7 @@ func TestFreshAcquireLock_AlreadyLocked(t *testing.T) {
 func TestFreshAcquireLock_NoStore(t *testing.T) {
 	s := newTestExecSession()
 
-	result := s.freshAcquireLock(context.Background(), nil, "my-lock", 60000)
+	result := s.AcquireLock(context.Background(), nil, "my-lock", 60000)
 
 	acquired := (result>>8)&1 != 0
 	if acquired {
@@ -115,7 +115,7 @@ func TestFreshReleaseLock_Success(t *testing.T) {
 	s := newTestExecSession()
 	s.engine.concurrencyKeyStore = newMockConcurrencyKeyStore()
 
-	result := s.freshReleaseLock(context.Background(), nil, "my-lock")
+	result := s.ReleaseLock(context.Background(), nil, "my-lock")
 
 	if result != 0 {
 		t.Errorf("expected 0 for successful release, got %d", result)
@@ -132,7 +132,7 @@ func TestFreshReleaseLock_StoreError(t *testing.T) {
 	s := newTestExecSession()
 	s.engine.concurrencyKeyStore = &releaseLockErrorStore{}
 
-	result := s.freshReleaseLock(context.Background(), nil, "my-lock")
+	result := s.ReleaseLock(context.Background(), nil, "my-lock")
 
 	if result != 1 {
 		t.Errorf("expected 1 for failed release, got %d", result)
@@ -148,7 +148,7 @@ func TestFreshReleaseLock_StoreError(t *testing.T) {
 func TestFreshReleaseLock_NoStore(t *testing.T) {
 	s := newTestExecSession()
 
-	result := s.freshReleaseLock(context.Background(), nil, "my-lock")
+	result := s.ReleaseLock(context.Background(), nil, "my-lock")
 
 	if result != 0 {
 		t.Errorf("expected 0 for release with no store, got %d", result)

@@ -207,7 +207,7 @@ func (s *execSession) replaySetScope(ctx context.Context, m api.Module, objectTy
 
 	if s.stepCount < len(s.history) {
 		rec := s.history[s.stepCount]
-		// Type first, then consume: see replayAcquireLock (cleat#4201).
+		// Type first, then consume, as step does for every call on it (cleat#4201).
 		if rec.EventType != EventTypeScopeAcquired {
 			return s.replayDivergence(ctx, m, EventTypeScopeAcquired, 0, 0)
 		}

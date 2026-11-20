@@ -43,8 +43,6 @@ var handOffsThatNeedNoRefusal = map[string]string{
 	"leaveReplay": "the dispatcher's one exit from replay (cleat#4152). Its only caller is step, which applies stopBeforeNewWork to every non-Pure step on the next lines, so the refusal is not skipped by reaching a call this way; that is the property the dispatcher exists to have.",
 	"fastForwardToStop": "the mechanism that makes a stop-at-last-stoppable segment refuse: it leaves replay so that the guest's NEXT call " +
 		"takes the non-replay half, where the refusal is.",
-	"replayReleaseLock": "deliberately unrefused. A defer body that holds a lock must be able to release it, and a cleanup that cannot " +
-		"release leaves the lock held for its lease; freshReleaseLock is the cleanup path.",
 	"AwaitChild": "a read of an existing child's result, recorded as one await event. It performs nothing outside the workflow. Whether a " +
 		"segment's body should be stopped at a child wait is a separate decision (see the PR for cleat#4143); until it is made " +
 		"these three child waits are not stop sites, which stopSiteNotStoppable records.",
@@ -234,7 +232,7 @@ func TestEveryReplayToFreshHandOffReachesARefusalOrIsNamed(t *testing.T) {
 	if examined < 20 {
 		t.Fatalf("the scan found %d functions that call exitReplay(); it is reading the wrong thing and would pass whatever the tree said", examined)
 	}
-	for _, canary := range []string{"replayCall", "replayAcquireLock", "replaySideEffect"} {
+	for _, canary := range []string{"replayCall", "replaySetScope", "replaySideEffect"} {
 		if !callsInCode(bodies[canary], "exitReplay") {
 			t.Fatalf("canary %s was not seen calling exitReplay(); the scan is reading the wrong thing", canary)
 		}

@@ -42,7 +42,7 @@ var stopSiteEvents = map[string]stopEvent{
 	"DurableSend":              {typ: EventTypeDurableSend},
 	"DurableScheduleInvoke":    {typ: EventTypeDurableScheduleInvoke},
 	"ScheduleCron":             {typ: EventTypeScheduleCron},
-	"freshAcquireLock":         {typ: EventTypeAcquireLock},
+	"AcquireLock":              {typ: EventTypeAcquireLock},
 	"SignalWorkflow":           {typ: EventTypeSignalReceived, op: SignalOpSend},
 	"ResolvePromise":           {typ: EventTypePromiseResolved, op: PromiseOpResolve},
 	"RejectPromise":            {typ: EventTypePromiseRejected, op: PromiseOpReject},
