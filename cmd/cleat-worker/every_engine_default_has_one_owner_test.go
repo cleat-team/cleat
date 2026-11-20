@@ -37,7 +37,6 @@ var engineDefaultsTheWorkerDoesNotUse = map[string]string{
 	"DefaultGCOffset":                    "no worker flag: version GC's own offset, reached through engine.DefaultGCOptions",
 	"DefaultMaxCompactedEvents":          "no worker flag: a bound inside compaction itself",
 	"DefaultMemoryLimitPages":            "the wazero Runtime's default (developer tooling); the worker's limit is DefaultWasmtimeMemoryLimitBytes",
-	"DefaultOutBufSize":                  "OVERRIDDEN by --wasm-output-buffer-size: see flagsThatOverrideAnEngineDefault (cleat#4171)",
 	"DefaultScheduleTimezone":            "a per-schedule setting, set through the schedule API",
 	"DefaultWasmtimeInstancesLimit":      "no worker flag: a wasmtime resource limit set by the engine",
 	"DefaultWasmtimeInterruptMarginFuel": "no worker flag: an engine-internal margin for the interruption mechanism",
@@ -54,8 +53,6 @@ var flagsThatOverrideAnEngineDefault = map[string]struct {
 	was         string
 	reason      string
 }{
-	"wasm-output-buffer-size": {"DefaultOutBufSize", "32768", func() string { return strconv.Itoa(engine.DefaultOutBufSize) }, "1048576",
-		"a stock worker runs with a 32 KiB output buffer while ABI.md and the engine say 1 MiB. DECIDED 2026-11-19 (cleat#4171): the default becomes 1 MiB, as a separate PR because it is a behaviour change; this entry is deleted by that PR"},
 	"compaction-threshold": {"DefaultCompactionThreshold", "100", func() string { return strconv.Itoa(engine.DefaultCompactionThreshold) }, "1000",
 		"every worker runs 100; the engine's constant says 1000 and its own comment says nothing reads it. DECIDED 2026-11-19 (cleat#4171): workers keep 100, a DELIBERATE override of the engine's 1000, which stays the number the engine's own tests use"},
 }
@@ -66,6 +63,7 @@ var flagsThatRestateAnEngineValue = map[string]func() string{
 	"wasm-wall-clock-ceiling": func() string { return engine.DefaultWasmWallClockCeiling.String() },
 	"wasm-memory-max-mb":      func() string { return strconv.FormatInt(engine.DefaultWasmtimeMemoryLimitBytes>>20, 10) },
 	"wasm-max-string-len":     func() string { return strconv.Itoa(engine.DefaultMaxWasmStringLen) },
+	"wasm-output-buffer-size": func() string { return strconv.Itoa(engine.DefaultOutBufSize) },
 	"wasm-defer-budget":       func() string { return engine.DefaultWasmtimeDeferBudget.String() },
 	"host-retry-budget":       func() string { return engine.DefaultHostRetryBudget.String() },
 	"max-retries":             func() string { return strconv.Itoa(engine.MaxRetryAttempts) },

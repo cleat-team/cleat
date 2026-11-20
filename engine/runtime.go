@@ -28,8 +28,13 @@ type cleatComplete struct {
 
 var cleatCompleteKey struct{}
 
-// DefaultMemoryLimitPages is the default max WASM linear memory (512 pages = 32 MB).
-const DefaultMemoryLimitPages = 512
+// DefaultMemoryLimitPages is the default max WASM linear memory (4096 pages = 256 MiB).
+//
+// It was 512 pages (32 MiB) until cleat#4171 (owner decision, 2026-11-19). The 32 came from the old wazero default and had no sizing
+// rationale; it is a CEILING on what a guest may grow to, not a reservation, so a small workflow pays nothing for the higher number.
+// It is also what a .NET guest needs room under: it cannot start below 52 MiB (measured on a 704 KB hello-world, cleat#4077), which the
+// old default only cleared through a per-language floor that this change retired because the default now clears it for every language.
+const DefaultMemoryLimitPages = 4096
 
 var wazeroInitOnce sync.Once
 

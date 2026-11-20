@@ -196,8 +196,11 @@ Three memory controls work together:
 total_wasm_memory ≈ concurrent_workflows × wasm_memory_max_mb × 1.2 (overhead factor)
 ```
 
-Example: 10 concurrent workflows × 32 MB per module × 1.2 = ~384 MB WASM memory.
-Add ~256 MB for the Go runtime and caches → ~640 MB total recommended.
+Example: 10 concurrent workflows × 256 MB per module × 1.2 = ~3 GB WASM memory.
+Add ~256 MB for the Go runtime and caches → ~3.3 GB total, **as a worst case**: `--wasm-memory-max-mb` is a
+ceiling and not a reservation, so a workflow uses only what it allocates, and most use far less. The default
+was 32 MB until cleat#4171 (then the same example came to ~640 MB). If the machine cannot hold the worst case,
+lower the flag or `--concurrency`; do not size to the ceiling unless every workflow may really grow to it.
 
 ### Recommendations
 
