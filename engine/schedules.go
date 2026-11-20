@@ -61,66 +61,65 @@ func scheduleIDFor(tenantID, workflowID string, step int) string {
 
 // ScheduleCron registers a recurring trigger and returns its schedule ID.
 func (s *execSession) ScheduleCron(ctx context.Context, m api.Module, workflowName, cronExpr, timezone, inputJSON string, idPtr, idMaxLen uint32) int64 {
-	if s.isReplay {
-		if s.stepCount < len(s.history) {
-			rec := s.history[s.stepCount]
-			if !s.advanceReplayStep(ctx, &rec) {
-				return 0
-			}
-			// All four arguments, not just the two that name the schedule.
-			// A run that changed only the timezone would otherwise be handed
-			// the recorded schedule's ID and carry on believing it had
-			// scheduled in the new zone -- which is precisely the class of
-			// thing this check exists to catch.
-			if rec.EventType != EventTypeScheduleCron ||
-				rec.CronWorkflowName != workflowName || rec.CronExpr != cronExpr ||
-				rec.CronTimezone != timezone || rec.CronInput != inputJSON {
-				return s.cronReplayDivergence(ctx, m, rec,
-					fmt.Sprintf("ScheduleCron mismatch.\n  workflow: %s %q tz=%q input=%s\n  history:  %s %q tz=%q input=%s",
-						workflowName, cronExpr, timezone, truncateWithHash(inputJSON, maxPayloadLen),
-						rec.CronWorkflowName, rec.CronExpr, rec.CronTimezone, truncateWithHash(rec.CronInput, maxPayloadLen)),
-					idPtr, idMaxLen)
-			}
-			if rec.Err != "" {
-				written, _ := s.writeResult(ctx, m, idPtr, rec.Err, idMaxLen)
-				return packSimpleResult(1, written)
-			}
-			written, writtenEC := s.writeOut(ctx, m, idPtr, rec.CronScheduleID, idMaxLen)
-			return packSimpleResult(writtenEC, written)
+	return s.step(ctx, m, &scheduleCronStep, stepArgs{s1: workflowName, s2: cronExpr, s3: timezone, s4: inputJSON, outPtr: idPtr, outMaxLen: idMaxLen})
+}
+
+// scheduleCronStep is ScheduleCron on the dispatcher (cleat#4152, G1c).
+//
+// A fresh schedule_cron is new work with the longest reach of any call in this family: it registers a RECURRING trigger, so a terminated
+// workflow would keep starting new runs on a cron schedule indefinitely. The dispatcher refuses it where the call did.
+//
+// IDENTITY is all four arguments, not just the two that name the schedule, and that is today's check carried over unchanged (the design's
+// table says "the cron name"; this is stricter, and loosening it would be a behaviour change). A run that changed only the timezone would
+// otherwise be handed the recorded schedule's ID and carry on believing it had scheduled in the new zone, which is precisely the class of
+// thing the check exists to catch.
+var scheduleCronStep = stepSpec{
+	Name:    "schedule_cron",
+	Effect:  effectEffect,
+	Records: recordsOne,
+	Want:    EventTypeScheduleCron,
+	Identity: func(a stepArgs, rec *EventRecord) string {
+		if rec.CronWorkflowName != a.s1 || rec.CronExpr != a.s2 || rec.CronTimezone != a.s3 || rec.CronInput != a.s4 {
+			return fmt.Sprintf("schedule %q %q tz=%q input=%s, recorded %q %q tz=%q input=%s",
+				a.s1, a.s2, a.s3, truncateWithHash(a.s4, maxPayloadLen),
+				rec.CronWorkflowName, rec.CronExpr, rec.CronTimezone, truncateWithHash(rec.CronInput, maxPayloadLen))
 		}
-		s.exitReplay()
-	}
+		return ""
+	},
+	Decode: func(c *stepCtx, rec *EventRecord) int64 {
+		if rec.Err != "" {
+			written, _ := c.s.writeResult(c.ctx, c.m, c.args.outPtr, rec.Err, c.args.outMaxLen)
+			return packSimpleResult(1, written)
+		}
+		written, writtenEC := c.s.writeOut(c.ctx, c.m, c.args.outPtr, rec.CronScheduleID, c.args.outMaxLen)
+		return packSimpleResult(writtenEC, written)
+	},
+	Fresh: func(c *stepCtx) int64 {
+		s, ctx := c.s, c.ctx
+		scheduleID, err := s.createCronSchedule(ctx, c.args.s1, c.args.s2, c.args.s3, c.args.s4)
 
-	// A fresh schedule_cron is new work with the longest reach of any call in
-	// this family: it registers a RECURRING trigger, so a terminated workflow
-	// would keep starting new runs on a cron schedule indefinitely.
-	if s.stopBeforeNewWork() {
-		return callSuspendSentinel
-	}
+		rec := EventRecord{
+			Step:             s.stepCount,
+			EventType:        EventTypeScheduleCron,
+			CronWorkflowName: c.args.s1,
+			CronExpr:         c.args.s2,
+			CronTimezone:     c.args.s3,
+			CronInput:        c.args.s4,
+			CronScheduleID:   scheduleID,
+		}
+		if err != nil {
+			rec.Err = err.Error()
+		}
+		c.Record(rec)
 
-	scheduleID, err := s.createCronSchedule(ctx, workflowName, cronExpr, timezone, inputJSON)
-
-	rec := EventRecord{
-		Step:             s.stepCount,
-		EventType:        EventTypeScheduleCron,
-		CronWorkflowName: workflowName,
-		CronExpr:         cronExpr,
-		CronTimezone:     timezone,
-		CronInput:        inputJSON,
-		CronScheduleID:   scheduleID,
-	}
-	if err != nil {
-		rec.Err = err.Error()
-	}
-	s.recordEvent(rec)
-
-	if err != nil {
-		s.engine.log().ErrorContext(ctx, "schedule_cron failed", "workflow_id", s.workflowID, "tenant_id", s.tenantID, "error", err)
-		written, _ := s.writeResult(ctx, m, idPtr, err.Error(), idMaxLen)
-		return packSimpleResult(1, written)
-	}
-	written, writtenEC := s.writeOut(ctx, m, idPtr, scheduleID, idMaxLen)
-	return packSimpleResult(writtenEC, written)
+		if err != nil {
+			s.engine.log().ErrorContext(ctx, "schedule_cron failed", "workflow_id", s.workflowID, "tenant_id", s.tenantID, "error", err)
+			written, _ := s.writeResult(ctx, c.m, c.args.outPtr, err.Error(), c.args.outMaxLen)
+			return packSimpleResult(1, written)
+		}
+		written, writtenEC := s.writeOut(ctx, c.m, c.args.outPtr, scheduleID, c.args.outMaxLen)
+		return packSimpleResult(writtenEC, written)
+	},
 }
 
 // createCronSchedule does the live half of ScheduleCron: validate, enforce the
@@ -202,75 +201,78 @@ func (s *execSession) createCronSchedule(ctx context.Context, workflowName, cron
 
 // DeleteCron removes a recurring trigger by schedule ID.
 func (s *execSession) DeleteCron(ctx context.Context, m api.Module, scheduleID string) int64 {
-	if s.isReplay {
-		if s.stepCount < len(s.history) {
-			rec := s.history[s.stepCount]
-			if !s.advanceReplayStep(ctx, &rec) {
-				return 0
-			}
-			if rec.EventType != EventTypeDeleteCron || rec.CronScheduleID != scheduleID {
-				if s.engine.Metrics != nil {
-					s.engine.Metrics.RecordReplayFailure(ctx)
-				}
-				return packSimpleResult(1)
-			}
-			if rec.Err != "" {
-				return packSimpleResult(1)
-			}
-			return packSimpleResult(0)
+	return s.step(ctx, m, &deleteCronStep, stepArgs{s1: scheduleID})
+}
+
+// deleteCronStep is DeleteCron on the dispatcher (cleat#4152, G1c).
+//
+// A fresh delete_cron is work the workflow BODY is doing past the end of its recorded history. In a defer segment that is a terminated
+// workflow's body running on, and it would delete a schedule the workflow never reached, measured against a real store in cleat#4083,
+// where it removed the row. The dispatcher refuses it where the call did. A defer BODY still gets through: inDeferDrain is how
+// stopBeforeNewWork tells cleanup that deletes its own workflow's schedule from the body.
+//
+// IDENTITY is the schedule id, as before. A divergence still carries no MESSAGE to the guest, and that is not a choice made here: the ABI
+// gives delete_cron no output buffer (outMaxLen 0), and the dispatcher's reporter writes a message only when there is one. It is counted
+// (the replay-failure metric) and answers error code 1, as it did.
+var deleteCronStep = stepSpec{
+	Name:    "delete_cron",
+	Effect:  effectEffect,
+	Records: recordsOne,
+	Want:    EventTypeDeleteCron,
+	Identity: func(a stepArgs, rec *EventRecord) string {
+		if rec.CronScheduleID != a.s1 {
+			return fmt.Sprintf("delete schedule %q, recorded %q", a.s1, rec.CronScheduleID)
 		}
-		s.exitReplay()
-	}
-
-	// A fresh delete_cron is work the workflow BODY is doing past the end of its
-	// recorded history. In a defer segment that is a terminated workflow's body
-	// running on, and it would delete a schedule the workflow never reached --
-	// measured against a real store in cleat#4083, where it removed the row.
-	// A defer BODY still gets through: inDeferDrain is how stopBeforeNewWork
-	// tells cleanup that deletes its own workflow's schedule from the body.
-	if s.stopBeforeNewWork() {
-		return callSuspendSentinel
-	}
-
-	var err error
-	if store := s.engine.workflowStore; store != nil {
-		// Deleting a schedule that is not there is the success a retry should
-		// see: workflow execution is at-least-once, so a replayed delete of a
-		// schedule the first attempt already removed must not fail the
-		// workflow.
-		//
-		// This used to hold by accident. The stores discarded the statement
-		// result, so zero rows matched was indistinguishable from one and
-		// every delete reported success -- including a delete of a name that
-		// never existed, which is what cleat#1297 fixed for the HTTP API.
-		// Now that the store reports it, the idempotence is DELIBERATE and
-		// stated here, which is where it belongs: the store's job is to say
-		// what happened, and the caller's job is to decide what it means.
-		// The same not-found that is a 404 to an operator who mistyped a name
-		// is a success to a retry that already did the work.
-		err = store.DeleteSchedule(ctx, scheduleID)
-		if errors.Is(err, ErrScheduleNotFound) {
-			err = nil
+		return ""
+	},
+	Decode: func(c *stepCtx, rec *EventRecord) int64 {
+		if rec.Err != "" {
+			return packSimpleResult(1)
 		}
-	} else {
-		err = fmt.Errorf("no workflow store configured: workflow %s cannot delete schedule %q", s.workflowID, scheduleID)
-	}
+		return packSimpleResult(0)
+	},
+	Fresh: func(c *stepCtx) int64 {
+		s, ctx, scheduleID := c.s, c.ctx, c.args.s1
+		var err error
+		if store := s.engine.workflowStore; store != nil {
+			// Deleting a schedule that is not there is the success a retry should
+			// see: workflow execution is at-least-once, so a replayed delete of a
+			// schedule the first attempt already removed must not fail the
+			// workflow.
+			//
+			// This used to hold by accident. The stores discarded the statement
+			// result, so zero rows matched was indistinguishable from one and
+			// every delete reported success -- including a delete of a name that
+			// never existed, which is what cleat#1297 fixed for the HTTP API.
+			// Now that the store reports it, the idempotence is DELIBERATE and
+			// stated here, which is where it belongs: the store's job is to say
+			// what happened, and the caller's job is to decide what it means.
+			// The same not-found that is a 404 to an operator who mistyped a name
+			// is a success to a retry that already did the work.
+			err = store.DeleteSchedule(ctx, scheduleID)
+			if errors.Is(err, ErrScheduleNotFound) {
+				err = nil
+			}
+		} else {
+			err = fmt.Errorf("no workflow store configured: workflow %s cannot delete schedule %q", s.workflowID, scheduleID)
+		}
 
-	rec := EventRecord{
-		Step:           s.stepCount,
-		EventType:      EventTypeDeleteCron,
-		CronScheduleID: scheduleID,
-	}
-	if err != nil {
-		rec.Err = err.Error()
-	}
-	s.recordEvent(rec)
+		rec := EventRecord{
+			Step:           s.stepCount,
+			EventType:      EventTypeDeleteCron,
+			CronScheduleID: scheduleID,
+		}
+		if err != nil {
+			rec.Err = err.Error()
+		}
+		c.Record(rec)
 
-	if err != nil {
-		s.engine.log().ErrorContext(ctx, "delete_cron failed", "workflow_id", s.workflowID, "tenant_id", s.tenantID, "error", err)
-		return packSimpleResult(1)
-	}
-	return packSimpleResult(0)
+		if err != nil {
+			s.engine.log().ErrorContext(ctx, "delete_cron failed", "workflow_id", s.workflowID, "tenant_id", s.tenantID, "error", err)
+			return packSimpleResult(1)
+		}
+		return packSimpleResult(0)
+	},
 }
 
 // ListCrons returns the tenant's schedules as a JSON array.
@@ -279,46 +281,58 @@ func (s *execSession) DeleteCron(ctx context.Context, m api.Module, scheduleID s
 // set of schedules changes over time, so a replay that re-read it would see a
 // different answer than the run recorded.
 func (s *execSession) ListCrons(ctx context.Context, m api.Module, outPtr, outMaxLen uint32) int64 {
-	if s.isReplay {
-		if s.stepCount < len(s.history) {
-			rec := s.history[s.stepCount]
-			if !s.advanceReplayStep(ctx, &rec) {
-				return 0
-			}
-			if rec.EventType != EventTypeListCrons {
-				return s.cronReplayDivergence(ctx, m, rec,
-					fmt.Sprintf("ListCrons mismatch.\n  history has: %s", rec.EventType),
-					outPtr, outMaxLen)
-			}
-			if rec.Err != "" {
-				written, _ := s.writeResult(ctx, m, outPtr, rec.Err, outMaxLen)
-				return packSimpleResult(1, written)
-			}
-			written, writtenEC := s.writeOut(ctx, m, outPtr, rec.CronResult, outMaxLen)
-			return packSimpleResult(writtenEC, written)
+	return s.step(ctx, m, &listCronsStep, stepArgs{outPtr: outPtr, outMaxLen: outMaxLen})
+}
+
+// listCronsStep is ListCrons on the dispatcher (cleat#4152, G1c).
+//
+// IT IS NEVER REFUSED (Refuse: neverRefuse), which is what the call did before it moved and not what the design's section 5 would have it do.
+// The design's rule is "refuse every non-Pure step at the frontier of a segment's body, unless the harness shows a case that needs one", and
+// names ListCrons among the calls it refuses. Today it lists, records the answer and reaches the store in all four states stopBeforeNewWork
+// covers (a defer segment's body, at its frontier, after an event write was refused, and after a worker shutdown), measured in the golden
+// table (a_cron_single_steps_behave_as_recorded_before_the_dispatcher_test.go, rows segment_*, write_failed_* and shutdown_fresh) and not
+// argued. Whether it SHOULD be refused is a separate decision with a cost: a refusal makes it a host stop site that every SDK must check for
+// bit 31 (cleat#4239), and nothing here shows a workflow that needs it refused. neverRefuse also keeps the stop-site scans from counting it.
+//
+// The dispatcher has no Read effect class yet (see stepEffect), so it is declared effectEffect, which only matters for the refusal this
+// overrides.
+var listCronsStep = stepSpec{
+	Name:       "list_crons",
+	Effect:     effectEffect,
+	Refuse:     neverRefuse,
+	Records:    recordsOne,
+	Want:       EventTypeListCrons,
+	NoIdentity: "the result is the event: a list of the tenant's schedules at that moment, which differs between a run and its replay by construction, and the call has no argument that could identify it",
+	Decode: func(c *stepCtx, rec *EventRecord) int64 {
+		if rec.Err != "" {
+			written, _ := c.s.writeResult(c.ctx, c.m, c.args.outPtr, rec.Err, c.args.outMaxLen)
+			return packSimpleResult(1, written)
 		}
-		s.exitReplay()
-	}
+		written, writtenEC := c.s.writeOut(c.ctx, c.m, c.args.outPtr, rec.CronResult, c.args.outMaxLen)
+		return packSimpleResult(writtenEC, written)
+	},
+	Fresh: func(c *stepCtx) int64 {
+		s, ctx := c.s, c.ctx
+		listJSON, err := s.listCronSchedules(ctx)
 
-	listJSON, err := s.listCronSchedules(ctx)
+		rec := EventRecord{
+			Step:       s.stepCount,
+			EventType:  EventTypeListCrons,
+			CronResult: listJSON,
+		}
+		if err != nil {
+			rec.Err = err.Error()
+		}
+		c.Record(rec)
 
-	rec := EventRecord{
-		Step:       s.stepCount,
-		EventType:  EventTypeListCrons,
-		CronResult: listJSON,
-	}
-	if err != nil {
-		rec.Err = err.Error()
-	}
-	s.recordEvent(rec)
-
-	if err != nil {
-		s.engine.log().ErrorContext(ctx, "list_crons failed", "workflow_id", s.workflowID, "tenant_id", s.tenantID, "error", err)
-		written, _ := s.writeResult(ctx, m, outPtr, err.Error(), outMaxLen)
-		return packSimpleResult(1, written)
-	}
-	written, writtenEC := s.writeOut(ctx, m, outPtr, listJSON, outMaxLen)
-	return packSimpleResult(writtenEC, written)
+		if err != nil {
+			s.engine.log().ErrorContext(ctx, "list_crons failed", "workflow_id", s.workflowID, "tenant_id", s.tenantID, "error", err)
+			written, _ := s.writeResult(ctx, c.m, c.args.outPtr, err.Error(), c.args.outMaxLen)
+			return packSimpleResult(1, written)
+		}
+		written, writtenEC := s.writeOut(ctx, c.m, c.args.outPtr, listJSON, c.args.outMaxLen)
+		return packSimpleResult(writtenEC, written)
+	},
 }
 
 func (s *execSession) listCronSchedules(ctx context.Context) (string, error) {
@@ -353,16 +367,4 @@ func (s *execSession) listCronSchedules(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("list_crons: %w", err)
 	}
 	return string(out), nil
-}
-
-// cronReplayDivergence reports a history entry that does not match the call
-// being replayed, in the same shape the other host calls use.
-func (s *execSession) cronReplayDivergence(ctx context.Context, m api.Module, rec EventRecord, detail string, outPtr, outMaxLen uint32) int64 {
-	if s.engine.Metrics != nil {
-		s.engine.Metrics.RecordReplayFailure(ctx)
-	}
-	msg := fmt.Sprintf("replay divergence at step %d: %s\nRun 'cleat vet' on your workflow code to check for common non-determinism issues (time.Now(), random values, map iteration, goroutines).",
-		rec.Step, detail)
-	written, _ := s.writeResult(ctx, m, outPtr, msg, outMaxLen)
-	return packSimpleResult(1, written)
 }
