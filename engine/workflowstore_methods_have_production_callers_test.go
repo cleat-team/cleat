@@ -189,12 +189,14 @@ func productionCallers(t *testing.T, methods []string) map[string][]string {
 		// but the worker calls AppendEventHistory, so it reaches the batch
 		// method every time. A sibling calling a sibling is a real caller;
 		// only the method's own body is not.
+		//
+		// EVERY top-level declaration is walked, not only functions: a host call moved onto the step dispatcher (cleat#4152) keeps its work in
+		// a stepSpec's Fresh and Decode closures, which live in a package-level var, so a walk of FuncDecls alone reports a method whose only
+		// production caller is a spec as uncalled. That is how the guard first read GetConcurrencyKeyCount after AcquireLock moved (cleat#4211).
+		// The recursion exemption below applies to a method's own body, which only a FuncDecl has.
 		for _, d := range f.Decls {
-			fd, ok := d.(*ast.FuncDecl)
-			if !ok {
-				continue
-			}
-			ast.Inspect(fd, func(n ast.Node) bool {
+			fd, isFunc := d.(*ast.FuncDecl)
+			ast.Inspect(d, func(n ast.Node) bool {
 				call, ok := n.(*ast.CallExpr)
 				if !ok {
 					return true
@@ -207,7 +209,7 @@ func productionCallers(t *testing.T, methods []string) map[string][]string {
 				if !want[name] {
 					return true
 				}
-				if fd.Recv != nil && fd.Name.Name == name {
+				if isFunc && fd.Recv != nil && fd.Name.Name == name {
 					return true // recursion inside its own implementation
 				}
 				out[name] = append(out[name], path)
