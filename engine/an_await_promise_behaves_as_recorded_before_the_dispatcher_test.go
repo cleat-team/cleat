@@ -264,6 +264,19 @@ func TestAnAwaitPromiseBehavesAsRecordedBeforeTheDispatcher(t *testing.T) {
 			status: "pending", hist: []EventRecord{{Step: 0, EventType: fakeEvent}}, timeoutMs: 60000,
 			want: promiseWant{sentinel: true, events: []EventType{EventTypeAwaitPromise}, awaitTO: 60000, awaitTOSet: true, reason: reason, untilMs: promiseT + 60000, gets: 1, step: 1, replaying: true}},
 
+		// ---- replay ENDED: the session is replaying and has consumed all of history, so there is nothing left to replay and the call leaves replay. This
+		// is the `else { s.exitReplay() }` arm, reached only when stepCount == len(history); the first-record rows above have a record AT step 0 and
+		// never reach it (cleat-review3 found that deleting the exitReplay left every row green). It is the cleat#933 persistence line: a record written
+		// with replay still on skips the checksum chain, so the move has to keep leaving replay here. ----
+		{name: "replay ended: a session that has consumed all of history leaves replay, records the await and suspends",
+			mod:    func(s *execSession) { s.stepCount = 1 },
+			status: "pending", hist: []EventRecord{{Step: 0, EventType: fakeEvent}}, timeoutMs: 60000,
+			want: promiseWant{sentinel: true, events: []EventType{EventTypeAwaitPromise}, awaitTO: 60000, awaitTOSet: true, reason: reason, untilMs: promiseT + 60000, gets: 1, step: 2}},
+		{name: "replay ended: ... and a settled promise is recorded and delivered with replay off",
+			mod:    func(s *execSession) { s.stepCount = 1 },
+			status: "resolved", result: "v", hist: []EventRecord{{Step: 0, EventType: fakeEvent}}, timeoutMs: 60000,
+			want: promiseWant{result: "v", events: []EventType{EventTypePromiseResolved}, recordedAs: "v", gets: 1, step: 2}},
+
 		// ---- fresh ----
 		{name: "fresh: a resolved promise is recorded and delivered", status: "resolved", result: "v", timeoutMs: 60000,
 			want: promiseWant{result: "v", events: []EventType{EventTypePromiseResolved}, recordedAs: "v", gets: 1, step: 1}},
