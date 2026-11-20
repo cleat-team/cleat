@@ -702,7 +702,7 @@ func TestSideEffectRecorded_ADifferentEventIsADivergenceAndIsNotConsumed(t *test
 	if recordedStatus(got) != 1 {
 		t.Fatalf("status = %d, want 1 (error)", recordedStatus(got))
 	}
-	if msg := extractStringFromSimplePacked(got, buf); !strings.Contains(msg, "expected side_effect event, got") {
+	if msg := extractStringFromSimplePacked(got, buf); !strings.Contains(msg, "expected side_effect, got") {
 		t.Errorf("message = %q, want a replay divergence naming the event types", msg)
 	}
 	if s.stepCount != 0 {

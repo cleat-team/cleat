@@ -179,7 +179,7 @@ var stopSurfaces = map[string]stopSurface{
 	// signature change rather than the scalar rule §3.301 introduced. No `py`
 	// field: once the return is result<...>, the component guest cannot misread
 	// a stop, which is the guarantee `py` exists to substitute for.
-	"freshSideEffect": {
+	"SideEffect": {
 		adapters: []string{"SideEffect"},
 		wit:      []string{"side-effect"},
 	},

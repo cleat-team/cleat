@@ -130,7 +130,7 @@ var rustCallsTheHostCanRefuse = []sdkRefusableCall{
 	//	  awk "/func \(s \*execSession\) $f\(/,/^}$/" engine/promises.go \
 	//	    engine/signaller.go | grep -c stopBeforeNewWork; done
 	//	# 0 0 0 1
-	{"side_effect", "freshSideEffect"},
+	{"side_effect", "SideEffect"},
 	{"cleat_fetch", "Fetch"},
 	// Both detached entry points name the UNEXPORTED runDetached, which is
 	// where stopBeforeNewWork is consulted; RunDetached and StartDetached are

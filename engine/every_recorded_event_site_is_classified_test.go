@@ -24,7 +24,7 @@ import (
 // The reasons are of three kinds. OBSERVATION: the event records what a read returned, nothing was done, and the next fresh call is stopped.
 // TERMINAL: the event ends the run's segment. FRESH HALF: the fresh half of a host call whose entry point checks (DurableCall, SideEffect...);
 // the replay-to-fresh hand-off that reaches these without the check is cleat#4143 and cleat#4157, not this guard's subject. (cleat#4150 moved the
-// check INSIDE freshCall, freshCallWithHeartbeat, freshSideEffect and freshPluginCallStreaming, and this list failed until their entries were removed.)
+// check INSIDE freshCall, freshCallWithHeartbeat, freshSideEffect (since moved onto step, cleat#4152) and freshPluginCallStreaming, and this list failed until their entries were removed.)
 var recordedEventSitesWithoutOwnStopCheck = map[string]string{
 	"step_dispatcher.go:Record":          "DISPATCHER: reached only from a spec's Fresh, which step runs after it has applied stopBeforeNewWork to every effectEffect step; the one spec that is never refused, ReleaseLock (`Refuse: neverRefuse`), says why where neverRefuse is declared",
 	"children.go:AwaitAnyChild":          "OBSERVATION: records which child finished",
