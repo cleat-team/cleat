@@ -207,6 +207,11 @@ func g3hCases() map[string]g3hCase {
 	otherSvc := call(0)
 	otherSvc.Op = "another"
 	cases["replay_divergence_other_operation"] = g3hCase{mode: "ok", replaying: true, history: []EventRecord{otherSvc}, intervalMs: g3hHour}
+	// A call record with no outcome: the call was dispatched and the worker was lost before the outcome was recorded. Reported as ambiguous. See the
+	// header for what this row does NOT pin (the absence of a resolution attempt).
+	pending := call(0)
+	pending.Response, pending.Pending = "", true
+	cases["replay_pending_intent_is_reported_ambiguous"] = g3hCase{mode: "ok", replaying: true, history: []EventRecord{pending}, intervalMs: g3hHour}
 	cases["replay_quit"] = g3hCase{mode: "ok", replaying: true, quit: true, history: []EventRecord{call(0)}, intervalMs: g3hHour}
 	return cases
 }
@@ -223,6 +228,14 @@ func g3hCases() map[string]g3hCase {
 //     incarnation's step for exactly this reason (cleat#1145); this one does not.
 //   - replay_divergence_wrong_event_type and replay_divergence_other_operation end at step 1: a divergence CONSUMED the record before reporting it
 //     (the #4152 defect), so the call that owns it loses it.
+//
+// replay_pending_intent_is_reported_ambiguous: a call record with no outcome (dispatched, the worker lost before the outcome was recorded) is reported
+// to the guest as ambiguous, with no service call and replay left on (cleat-review2, on #4248). WHAT THIS ROW DOES NOT PIN, and an earlier name for
+// it claimed to: that the heartbeat call makes no attempt to RESOLVE the record. replayCall tries idempotency-key replay and the configured resolver
+// first; the heartbeat call does not. This table configures no replayer, so a resolution attempt would decline either way and the row cannot see the
+// difference (a mutant that makes the heartbeat call try key-replay leaves it green). Pinning that needs a configured replayer, a declared operation
+// and a store that reports its own clock, which is the migration PR's real-store round trip; until then the difference is established by reading
+// heartbeats.go (no call to resolveAmbiguityViaKeyReplay) and not by this table.
 //
 // Worth reading in the rest: fresh_interval_zero_is_refused_and_records_nothing and the negative one show the interval is refused with nothing
 // recorded and no call made (cleat#4105); fresh_cancelled_mid_call is reported and recorded as a NON-retryable cancellation, and
@@ -243,6 +256,7 @@ var g3hGolden = map[string]string{
 	"replay_heartbeats_then_call":                            "res=0xb0000000000 wrote=\"{\\\"ok\\\":true}\" isReplay=true step=3 recorded=[] calls=0 others=0 keysFromStep=[]",
 	"replay_mid_heartbeat_after_a_plain_call":                "res=0xb0000000000 wrote=\"{\\\"ok\\\":true}\" isReplay=false step=4 recorded=[call/step=3/svc.op/err=\"\"/nonretry=false/code=\"\"] calls=1 others=0 keysFromStep=[3]",
 	"replay_mid_heartbeat_resumes_the_call":                  "res=0xb0000000000 wrote=\"{\\\"ok\\\":true}\" isReplay=false step=3 recorded=[call/step=2/svc.op/err=\"\"/nonretry=false/code=\"\"] calls=1 others=0 keysFromStep=[2]",
+	"replay_pending_intent_is_reported_ambiguous":            "res=0xb40000000001 wrote=\"[AMBIGUOUS] call outcome unknown at step 0: the external call to svc.op was dispatched but the response was not recorded before a crash. Check the external service before retrying.\" isReplay=true step=1 recorded=[] calls=0 others=0 keysFromStep=[]",
 	"replay_quit":                                            "res=0x0 wrote=\"\" isReplay=true step=1 recorded=[] calls=0 others=0 keysFromStep=[]",
 	"replay_terminal_call":                                   "res=0xb0000000000 wrote=\"{\\\"ok\\\":true}\" isReplay=true step=1 recorded=[] calls=0 others=0 keysFromStep=[]",
 	"segment_fresh":                                          "res=0x80000000 wrote=\"\" isReplay=false step=0 recorded=[] calls=0 others=0 keysFromStep=[]",
@@ -268,7 +282,7 @@ func TestG3hHeartbeatCallBehavesAsRecordedBeforeTheDispatcher(t *testing.T) {
 			t.Errorf("%s: a situation with no golden row", name)
 		}
 	}
-	if len(g3hGolden) != 20 {
-		t.Errorf("the table has %d rows; this was recorded with 20, so a row was added or removed without saying so", len(g3hGolden))
+	if len(g3hGolden) != 21 {
+		t.Errorf("the table has %d rows; this was recorded with 21, so a row was added or removed without saying so", len(g3hGolden))
 	}
 }
