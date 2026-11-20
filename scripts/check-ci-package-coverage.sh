@@ -136,10 +136,8 @@ echo "OK: all $count top-level Go package dirs are covered or exempt."
 # why here.
 # Adding a name here requires saying why, immediately below this line.
 #
-# chaos: the fault-injection harness (cleat#4169), step 1. Every file in it carries the `chaos` build tag, so no ordinary `go test` runs it, and
-# it needs a PostgreSQL owner DSN and a real cleat-worker. Step 2 is its workflow (a seeded sample on pull requests and a nightly full sweep);
-# until that lands nothing runs it in CI. Remove the name when the workflow does: this guard then prints a NOTE that it can be dropped.
-UNWIRED_SUITES="chaos"
+# Empty: every suite under tests/ is now run by a workflow (tests/chaos by chaos.yml, cleat#4169). Keep it that way.
+UNWIRED_SUITES=""
 
 unreferenced=""
 regressed=""

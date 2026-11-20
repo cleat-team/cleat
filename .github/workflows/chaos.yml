@@ -1,0 +1,169 @@
+# ---------------------------------------------------------------------------
+# Fault-injection harness (cleat#4169): tests/chaos
+#
+# For every step boundary of a scripted workflow, inject a fault (SIGKILL then reclaim, SIGKILL then terminate, a refused event write, a signal
+# arriving while the worker is dead) against a real cleat-worker and a real PostgreSQL, and compare what a recording service received with a
+# fault-free run. See tests/chaos/README.md.
+#
+# Two tiers, as decided for 0.6.0:
+#   chaos-sample  a SEEDED random sample, bounded to a few minutes, on every pull request that touches the replay machinery.
+#   chaos-full    every boundary x every fault, on a schedule and on demand. This is the pre-release sweep and a 0.6.0 gate.
+#
+# NOT A REQUIRED CHECK: Chaos sample
+# Not required yet. Making `Chaos sample` required is a branch-protection change, which is the owner's to make (tiers.yaml's required_contexts
+# block). It runs on every matching PR so its record exists before anyone is asked to depend on it.
+#
+# A failure prints the seed, the script and the fault, and a one-line command that replays exactly that case.
+# ---------------------------------------------------------------------------
+name: Chaos
+
+run-name: >-
+  ${{ github.event.pull_request.title || github.event.head_commit.message || github.ref_name }}${{ github.event.action && format(' [{0}]', github.event.action) || '' }}
+
+on:
+  pull_request:
+    branches: [main, develop, "release/**"]
+    # `edited` is required: it is the activity type a BASE CHANGE fires (scripts/check-workflow-pr-triggers.sh).
+    types: [opened, synchronize, reopened, edited]
+    paths:
+      - "engine/**"
+      - "wasm/**"
+      - "cmd/cleat-worker/**"
+      - "migrations/**"
+      - "crates/cleat-sdk/**"
+      - "python-sdk/**"
+      - "tests/chaos/**"
+      - "testdata/chaosscript*/**"
+      - ".github/workflows/chaos.yml"
+  schedule:
+    # Every night at 03:30 UTC.
+    - cron: "30 3 * * *"
+  workflow_dispatch:
+    inputs:
+      seed:
+        description: "Seed for the generated scripts"
+        required: false
+        default: "1"
+      mode:
+        description: "sample (bounded) or full (every boundary x every fault)"
+        required: false
+        default: "full"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && (github.event.action == 'edited' && !github.event.changes.base && github.run_id || github.ref) || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  chaos-sample:
+    name: Chaos sample
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    # The sample is sized to finish in about seven minutes (measured: 24 runs took 3m05s in the first CI run, cleat#4188; 60 is ~7 min); the step's own go test -timeout is 20m, so a hung worker reaches its goroutine dump
+    # before this cap.
+    timeout-minutes: 30
+    services:
+      postgres:
+        # See tier1-engine's postgres service in ci.yml for the pin rationale.
+        image: mirror.gcr.io/library/postgres:16.14@sha256:95206741a5b214807675e14165369d05b93a9cf692223b616d07cca227e74b0b
+        env:
+          POSTGRES_USER: cleat
+          POSTGRES_PASSWORD: cleat
+          POSTGRES_DB: cleat
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      # An OWNER DSN: the harness creates its own database and applies the schema as owner, as tests/crash does.
+      CLEAT_CRASH_DB: postgres://cleat:cleat@localhost:5432/cleat?sslmode=disable
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      # The flake log's parser has a known-positive (a real failing job log); a parser that silently found nothing would make the stability call
+      # meaningless, so it is checked here on every run.
+      - name: Failed-case parser and flake-log self-tests
+        run: |
+          python3 scripts/chaos-failed-cases.py --self-test
+          python3 scripts/chaos-flake-log.py --self-test
+      # ONE go test process: the worker build and the database migration cost ~50 s and happen once per process, so the whole sample runs in this
+      # single invocation (setup-go's cache keeps the Go build cache between jobs). The seed is the PR number, so each PR samples differently and
+      # a re-run of the same PR repeats. A failure prints the seed, the script and a one-line command that replays it.
+      - name: Seeded sample
+        run: |
+          set -euo pipefail
+          # dbwrite is EXCLUDED from the PR sample until #4166 (the fix for #4160) is on develop: until then that fault finds a real, known defect on
+          # every PR that draws it. REMOVE the exclusion in the PR that follows #4166's merge (tracked: cleat#4192). The nightly full sweep still runs it.
+          CLEAT_CHAOS_SKIP_FAULTS=dbwrite CLEAT_CHAOS_SEED="${{ github.event.pull_request.number }}" CLEAT_CHAOS_MODE=sample CLEAT_CHAOS_SAMPLE=60 CLEAT_CHAOS_SCRIPTS=4 \
+            go test -json -tags chaos -count=1 -timeout 20m ./tests/chaos -run 'TestChaosSeeded' 2>&1 | tee chaos-sample.log
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: chaos-sample-logs
+          path: chaos-sample.log
+          retention-days: 14
+
+  chaos-full:
+    name: Chaos full sweep
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 340
+    services:
+      postgres:
+        image: mirror.gcr.io/library/postgres:16.14@sha256:95206741a5b214807675e14165369d05b93a9cf692223b616d07cca227e74b0b
+        env:
+          POSTGRES_USER: cleat
+          POSTGRES_PASSWORD: cleat
+          POSTGRES_DB: cleat
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      CLEAT_CRASH_DB: postgres://cleat:cleat@localhost:5432/cleat?sslmode=disable
+      CHAOS_SEED: ${{ github.event.inputs.seed || '1' }}
+      CHAOS_MODE: ${{ github.event.inputs.mode || 'full' }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - name: Every fixed scenario, every boundary, every fault
+        run: |
+          set -euo pipefail
+          go test -json -tags chaos -count=1 -timeout 120m ./tests/chaos -skip 'TestChaosSeeded' 2>&1 | tee chaos-fixed.log
+      # The Python guest: without these steps CI never runs it, and the slow-service case (which only bites on the component path) could not fail.
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Install componentize-py and the Python SDK
+        run: |
+          pip install --upgrade pip
+          pip install componentize-py
+          pip install -e python-sdk
+      - name: Python guest, kill-and-reclaim and the slow-service call
+        run: |
+          set -euo pipefail
+          CLEAT_CHAOS_GUEST=python CLEAT_CHAOS_SCENARIO=calls go test -json -tags chaos -count=1 -timeout 60m ./tests/chaos \
+            -run 'TestChaosSigkillThenReclaimAtEveryBoundary|TestChaosASlowServiceCallIsNotKilledByTheInstanceTimeout' 2>&1 | tee chaos-python.log
+      - name: Seeded scripts
+        run: |
+          set -euo pipefail
+          CLEAT_CHAOS_SEED="$CHAOS_SEED" CLEAT_CHAOS_MODE="$CHAOS_MODE" CLEAT_CHAOS_SCRIPTS=8 \
+            go test -json -tags chaos -count=1 -timeout 180m ./tests/chaos -run 'TestChaosSeeded' 2>&1 | tee chaos-seeded.log
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: chaos-full-logs
+          path: chaos-*.log
+          retention-days: 30

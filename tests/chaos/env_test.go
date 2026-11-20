@@ -173,6 +173,10 @@ func build(t *testing.T) (string, []byte) {
 			buildErr = fmt.Errorf("building the chaosscript guest in %s: %v\n%s", root, err, out)
 			return
 		}
+		if guestLanguage() == "python" {
+			guestWasm, buildErr = buildPythonGuest(root, dir)
+			return
+		}
 		guestWasm, buildErr = os.ReadFile(filepath.Join(guestDir, "workflow.wasm"))
 	})
 	if buildErr != nil {
@@ -181,18 +185,49 @@ func build(t *testing.T) (string, []byte) {
 	return workerBin, guestWasm
 }
 
+// guestLanguage is the language of the script guest under test: "go" (the default, a core module) or "python" (a component), chosen with
+// CLEAT_CHAOS_GUEST. The scenarios and the oracles are the same for both: that is the point of a guest that interprets a list.
+func guestLanguage() string {
+	if g := os.Getenv("CLEAT_CHAOS_GUEST"); g != "" {
+		return g
+	}
+	return "go"
+}
+
+// buildPythonGuest compiles testdata/chaosscript_py to a component with componentize-py (through cleat build --target python). The toolchain
+// must be on PATH; when the Python guest is asked for and it is not, that is a failure, never a skip.
+func buildPythonGuest(root, dir string) ([]byte, error) {
+	src := filepath.Join(root, "testdata", "chaosscript_py", "chaosscript.py")
+	out := filepath.Join(dir, "guest-py")
+	_ = os.MkdirAll(out, 0o755)
+	cmd := exec.Command("go", "run", "./cmd/cleat", "build", "--target", "python", "--entry", src+":chaos_script", "-o", out, src)
+	cmd.Dir = root
+	cmd.Env = append(os.Environ(), "PYTHONPATH="+filepath.Join(root, "python-sdk"))
+	if b, err := cmd.CombinedOutput(); err != nil {
+		return nil, fmt.Errorf("building the Python script guest (CLEAT_CHAOS_GUEST=python needs componentize-py on PATH): %v\n%s", err, b)
+	}
+	return os.ReadFile(filepath.Join(out, "chaos_script.wasm"))
+}
+
+func entryPoints() string {
+	if guestLanguage() == "python" {
+		return "chaos_script"
+	}
+	return "script"
+}
+
 func deploy(t *testing.T, db *sql.DB, wasm []byte, taskQueue string) {
 	t.Helper()
 	if _, err := db.Exec(`
 		INSERT INTO workflow_defs
 			(name, version, wasm_bytes, entry_points, min_version,
 			 max_history_length, dag_spec, task_queue, abi_version, plugin_deps, tenant_id)
-		VALUES ('chaosscript', 1, $1, ARRAY['script'], 1, 10000, NULL, $2, 1, '{}', $3)
+		VALUES ('chaosscript', 1, $1, ARRAY[$4], 1, 10000, NULL, $2, 1, '{}', $3)
 		ON CONFLICT (tenant_id, name, version) DO UPDATE SET
 			wasm_bytes = EXCLUDED.wasm_bytes, entry_points = EXCLUDED.entry_points, min_version = EXCLUDED.min_version,
 			max_history_length = EXCLUDED.max_history_length, dag_spec = EXCLUDED.dag_spec, task_queue = EXCLUDED.task_queue,
 			abi_version = EXCLUDED.abi_version, plugin_deps = EXCLUDED.plugin_deps`,
-		wasm, taskQueue, defaultTenant); err != nil {
+		wasm, taskQueue, defaultTenant, entryPoints()); err != nil {
 		t.Fatalf("deploying the chaosscript definition: %v", err)
 	}
 }
@@ -314,5 +349,42 @@ func grantEventWrites(t *testing.T, db *sql.DB) {
 	t.Helper()
 	if _, err := db.Exec(`GRANT INSERT ON event_history TO cleat_app, cleat_tenant_00000000_0000_0000_0000_000000000000`); err != nil {
 		t.Fatalf("restoring INSERT on event_history: %v", err)
+	}
+}
+
+// deliverSignal sends a signal to the run the way the API does: a row in workflow_signals and the lease's signal sequence advanced.
+func deliverSignal(t *testing.T, db *sql.DB, id, name string) {
+	t.Helper()
+	if _, err := db.Exec(`INSERT INTO workflow_signals (workflow_id, signal_name, payload, tenant_id) VALUES ($1, $2, '{}'::jsonb, $3)`, id, name, defaultTenant); err != nil {
+		t.Fatalf("delivering signal %q to %s: %v", name, id, err)
+	}
+	if _, err := db.Exec(`UPDATE workflow_leases SET signal_seq = signal_seq + 1 WHERE id = $1`, id); err != nil {
+		t.Fatalf("advancing the signal sequence of %s: %v", id, err)
+	}
+}
+
+// resolveWhenSuspended resolves the run's promise once the run has parked on it (a parked run reads status 'ready' with its wake time at the
+// await's deadline, well in the future), the way the API does: the promise row, the lease's promise
+// sequence advanced, and the wake time brought forward.
+func resolveWhenSuspended(db *sql.DB, run string) {
+	deadline := time.Now().Add(runBudget)
+	for time.Now().Before(deadline) {
+		var n int
+		_ = db.QueryRow(`SELECT count(*) FROM workflow_promises p JOIN workflow_leases l ON l.id = p.workflow_id
+			WHERE p.workflow_id = $1 AND p.status = 'pending' AND l.status = 'ready' AND l.next_wake_at > now() + interval '5 seconds'`, run).Scan(&n)
+		if n > 0 {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	_, _ = db.Exec(`UPDATE workflow_promises SET status = 'resolved', result = '"ok"'::jsonb, resolved_at = now() WHERE workflow_id = $1`, run)
+	_, _ = db.Exec(`UPDATE workflow_leases SET promise_seq = promise_seq + 1,
+		next_wake_at = CASE WHEN status IN ('ready', 'suspended') THEN now() ELSE next_wake_at END WHERE id = $1`, run)
+}
+
+func ownerExec(t *testing.T, db *sql.DB, q string) {
+	t.Helper()
+	if _, err := db.Exec(q); err != nil {
+		t.Fatalf("%v\n%s", err, q)
 	}
 }
