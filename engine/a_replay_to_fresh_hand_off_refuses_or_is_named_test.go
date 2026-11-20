@@ -157,9 +157,12 @@ func answersAtTheFrontier(body string) bool {
 // function-wide check is satisfied by the layer that was never the problem: remove the frontier refusal and the scan would stay green. For a
 // function that spells the predicate, every such branch must itself call stopBeforeNewWork() (or suspendingAwaitResult()) or hand off to a
 // s.fresh*() callee that does. A function that only answers a *NotRecorded status, with no predicate to locate, is checked as a whole.
-func unrefusedFrontierAnswers(bodies map[string]string) (unrefused []string, examined int) {
+func unrefusedFrontierAnswers(bodies map[string]string, neverRefused map[string]bool) (unrefused []string, examined int) {
 	refuses := func(text string) bool {
-		return callsInCode(text, "stopBeforeNewWork") || callsInCode(text, "suspendingAwaitResult")
+		// A call that goes through the step dispatcher is refused THERE, on both arrival paths, for every non-Pure step (step_dispatcher.go; the
+		// dispatcher's property tests run that over every spec on stepSpecs, each falsified), so it needs no stopBeforeNewWork() of its own
+		// (cleat#4152, G1a: SideEffectRecorded moved onto step and its frontier refusal with it). A MENTION of step in a comment is not a call.
+		return callsInCode(text, "stopBeforeNewWork") || callsInCode(text, "suspendingAwaitResult") || goesThroughStep(blankComments(text), neverRefused)
 	}
 	reaches := func(text string) bool {
 		if refuses(text) {
@@ -232,7 +235,7 @@ func TestEveryReplayToFreshHandOffReachesARefusalOrIsNamed(t *testing.T) {
 	if examined < 20 {
 		t.Fatalf("the scan found %d functions that call exitReplay(); it is reading the wrong thing and would pass whatever the tree said", examined)
 	}
-	for _, canary := range []string{"replayCall", "replaySetScope", "replaySideEffect"} {
+	for _, canary := range []string{"replayCall", "replaySetScope", "replayPluginCall"} {
 		if !callsInCode(bodies[canary], "exitReplay") {
 			t.Fatalf("canary %s was not seen calling exitReplay(); the scan is reading the wrong thing", canary)
 		}
@@ -310,7 +313,7 @@ func TestTheHandOffScanReportsAHandOffWithNoRefusal(t *testing.T) {
 
 func TestEveryFrontierAnswerReachesARefusalOrIsNamed(t *testing.T) {
 	bodies := engineMethodBodies(t)
-	unrefused, examined := unrefusedFrontierAnswers(bodies)
+	unrefused, examined := unrefusedFrontierAnswers(bodies, neverRefusedSpecs(t))
 
 	// Vacuity per thing: the lookup that escaped the first scan, and a function that spells the predicate and DOES refuse.
 	for _, canary := range []string{"SideEffectRecorded", "replayPluginCallStreaming"} {
@@ -338,7 +341,7 @@ func TestEveryFrontierAnswerReachesARefusalOrIsNamed(t *testing.T) {
 
 func TestEveryFrontierAnswerExemptionStillDescribesSomething(t *testing.T) {
 	bodies := engineMethodBodies(t)
-	unrefused, _ := unrefusedFrontierAnswers(bodies)
+	unrefused, _ := unrefusedFrontierAnswers(bodies, neverRefusedSpecs(t))
 	isUnrefused := map[string]bool{}
 	for _, n := range unrefused {
 		isUnrefused[n] = true
@@ -371,12 +374,16 @@ func TestTheFrontierAnswerScanReportsALookupWithNoRefusal(t *testing.T) {
 		{"the check is in the lookup", map[string]string{"lookupX": strings.Replace(lookup, "%s", "\t\tif s.stopBeforeNewWork() {\n\t\t\treturn 1\n\t\t}\n", 1)}, nil},
 		{"a comment quoting the predicate is not a frontier answer", map[string]string{
 			"quotesIt": "func (s *execSession) quotesIt() int64 {\n\t// when s.stepCount >= len(s.history) the lookup answers xNotRecorded\n\treturn 0\n}\n"}, nil},
+		{"a lookup that goes through the step dispatcher", map[string]string{
+			"lookupZ": "func (s *execSession) lookupZ() int64 {\n\treturn s.step(ctx, m, &lookupZStep, stepArgs{})\n}\n\nvar lookupZStep = stepSpec{\n\tFresh: func(*stepCtx) int64 { return packSimpleResult(zNotRecorded) },\n}\n"}, nil},
+		{"step named only in a comment is not a refusal", map[string]string{
+			"lookupW": "func (s *execSession) lookupW() int64 {\n\t// goes through s.step(ctx, m, &spec, args) in a later change\n\tif s.stepCount >= len(s.history) {\n\t\treturn packSimpleResult(wNotRecorded)\n\t}\n\treturn 0\n}\n"}, []string{"lookupW"}},
 		{"a frontier answer that hands off to a refusing fresh function", map[string]string{
 			"replayY": "func (s *execSession) replayY() int64 {\n\tif s.stepCount >= len(s.history) {\n\t\treturn s.freshY()\n\t}\n\treturn 0\n}\n",
 			"freshY":  "func (s *execSession) freshY() int64 {\n\tif s.stopBeforeNewWork() {\n\t\treturn 1\n\t}\n\treturn 2\n}\n"}, nil},
 	}
 	for _, c := range cases {
-		got, _ := unrefusedFrontierAnswers(c.bodies)
+		got, _ := unrefusedFrontierAnswers(c.bodies, nil)
 		if strings.Join(got, ",") != strings.Join(c.want, ",") {
 			t.Errorf("%s: scan reported %v, want %v", c.name, got, c.want)
 		}

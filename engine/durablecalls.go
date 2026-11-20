@@ -967,67 +967,67 @@ func (s *execSession) ServeWasiSleep(ctx context.Context, durationMs int64) time
 }
 
 func (s *execSession) DurableDefer(ctx context.Context, m api.Module, description string, deferIDPtr, deferIDMaxLen uint32) int64 {
-	if s.isReplay {
-		if s.stepCount < len(s.history) {
-			rec := s.history[s.stepCount]
-			if rec.EventType == EventTypeDefer {
-				// Recompute the ID before advanceReplayStep, which bumps
-				// stepCount. The fallback is what the fresh path below would
-				// have minted at this same step, so a history written before
-				// DeferID was recorded still reconstructs the ID the guest was
-				// originally handed.
-				deferID := rec.DeferID
-				if deferID == "" {
-					deferID = fmt.Sprintf("defer-%d", s.stepCount)
-				}
-				if !s.advanceReplayStep(ctx, &rec) {
-					return 0
-				}
+	return s.step(ctx, m, &deferStep, stepArgs{s1: description, outPtr: deferIDPtr, outMaxLen: deferIDMaxLen})
+}
 
-				// Re-register, do not just re-answer. This branch is the only
-				// one a defer registered in an earlier segment ever reaches
-				// again -- every later segment replays past its registration --
-				// so skipping the map write dropped the defer permanently. The
-				// fresh path below does both halves; replay must too.
-				desc := rec.DeferDescription
-				if desc == "" {
-					desc = description
-				}
-				s.mu.Lock()
-				s.deferrals[deferID] = desc
-				s.mu.Unlock()
-
-				written, writtenEC := s.writeOut(ctx, m, deferIDPtr, deferID, deferIDMaxLen)
-				return packSimpleResult(writtenEC, written)
-			}
-			return s.replayDivergence(ctx, m, EventTypeDefer, deferIDPtr, deferIDMaxLen)
+// deferStep is DurableDefer as a step (cleat#4152, G1a).
+//
+// REFUSED ONLY IN AN ARMED SEGMENT, NOT LIKE THE OTHER EFFECT CALLS. A segment over a killed run stops at a defer registration the same way it
+// stops at a call: the registration is in the history, so this is not a new one, it is the stop point. Only in that segment: an ordinary
+// segment's body past its frontier has always been allowed to register a defer, and refusing it is not this change's to do (cleat#4079). The
+// old code also registered after a refused event write and on shutdown, where SideEffect and every other effect call is refused; that is
+// recorded by the characterization table and kept (Refuse below), not decided here.
+//
+// A registration replayed from history RE-REGISTERS the defer, it does not just re-answer: this is the only branch a defer registered in an
+// earlier segment ever reaches again (every later segment replays past its registration), so skipping the map write dropped the defer
+// permanently. The id is recomputed before the step is consumed, and a record written before DeferID was recorded falls back to what the fresh
+// path would have minted at that step, so a history written long ago still hands the guest the id it was first given.
+//
+// Identity: NoIdentity. The description is a guest-chosen label that the record carries and replay re-registers from (the record's wins, the
+// argument is only the fallback for a record written before descriptions were recorded); it can legitimately differ between a run and its
+// replay, and the id is generated from the step. The reviewer decides (Revision 3 of the design).
+var deferStep = stepSpec{
+	Name:       "defer",
+	Effect:     effectEffect,
+	Records:    recordsOne,
+	Want:       EventTypeDefer,
+	NoIdentity: "the description is a guest-chosen label that the record carries and replay re-registers from; the id is generated from the step",
+	Refuse:     func(s *execSession) bool { return s.stopArmed && s.stopBeforeNewWork() },
+	Decode: func(c *stepCtx, rec *EventRecord) int64 {
+		s := c.s
+		// The step has been consumed when Decode runs, so the step the record held is stepCount-1; the fallback is what the fresh path below
+		// would have minted at that same step.
+		deferID := rec.DeferID
+		if deferID == "" {
+			deferID = fmt.Sprintf("defer-%d", s.stepCount-1)
 		}
-		s.exitReplay()
-	}
+		desc := rec.DeferDescription
+		if desc == "" {
+			desc = c.args.s1
+		}
+		s.mu.Lock()
+		s.deferrals[deferID] = desc
+		s.mu.Unlock()
 
-	// A segment over a killed run stops at a defer registration the same way it stops at a call: the registration is in the
-	// history, so this is not a new one, it is the stop point. Only in that segment: an ordinary segment's body past its
-	// frontier has always been allowed to register a defer, and refusing it is not this change's to do. cleat#4079.
-	if s.stopArmed && s.stopBeforeNewWork() {
-		return callSuspendSentinel
-	}
+		written, writtenEC := s.writeOut(c.ctx, c.m, c.args.outPtr, deferID, c.args.outMaxLen)
+		return packSimpleResult(writtenEC, written)
+	},
+	Fresh: func(c *stepCtx) int64 {
+		s := c.s
+		deferID := fmt.Sprintf("defer-%d", s.stepCount)
+		c.Record(EventRecord{
+			Step:             s.stepCount,
+			EventType:        EventTypeDefer,
+			DeferDescription: c.args.s1,
+			DeferID:          deferID,
+		})
+		s.mu.Lock()
+		s.deferrals[deferID] = c.args.s1
+		s.mu.Unlock()
 
-	deferID := fmt.Sprintf("defer-%d", s.stepCount)
-
-	rec := EventRecord{
-		Step:             s.stepCount,
-		EventType:        EventTypeDefer,
-		DeferDescription: description,
-		DeferID:          deferID,
-	}
-	s.recordEvent(rec)
-
-	s.mu.Lock()
-	s.deferrals[deferID] = description
-	s.mu.Unlock()
-
-	written, writtenEC := s.writeOut(ctx, m, deferIDPtr, deferID, deferIDMaxLen)
-	return packSimpleResult(writtenEC, written)
+		written, writtenEC := s.writeOut(c.ctx, c.m, c.args.outPtr, deferID, c.args.outMaxLen)
+		return packSimpleResult(writtenEC, written)
+	},
 }
 
 // DurableLog emits a guest log line. It is NOT durable, despite the name and

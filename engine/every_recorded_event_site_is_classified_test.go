@@ -24,7 +24,7 @@ import (
 // The reasons are of three kinds. OBSERVATION: the event records what a read returned, nothing was done, and the next fresh call is stopped.
 // TERMINAL: the event ends the run's segment. FRESH HALF: the fresh half of a host call whose entry point checks (DurableCall, SideEffect...);
 // the replay-to-fresh hand-off that reaches these without the check is cleat#4143 and cleat#4157, not this guard's subject. (cleat#4150 moved the
-// check INSIDE freshCall, freshCallWithHeartbeat, freshSideEffect and freshPluginCallStreaming, and this list failed until their entries were removed.)
+// check INSIDE freshCall, freshCallWithHeartbeat, freshSideEffect (since moved onto step, cleat#4152) and freshPluginCallStreaming, and this list failed until their entries were removed.)
 var recordedEventSitesWithoutOwnStopCheck = map[string]string{
 	"step_dispatcher.go:Record":          "DISPATCHER: reached only from a spec's Fresh, which step runs after it has applied stopBeforeNewWork to every effectEffect step; the one spec that is never refused, ReleaseLock (`Refuse: neverRefuse`), says why where neverRefuse is declared",
 	"children.go:AwaitAnyChild":          "OBSERVATION: records which child finished",
@@ -44,7 +44,7 @@ func TestEveryRecordedEventSiteIsClassified(t *testing.T) {
 	}
 	fset := token.NewFileSet()
 	withoutCheck := map[string]bool{}
-	recording := 0
+	recording, withCheck := 0, 0
 	for _, f := range files {
 		if strings.HasSuffix(f, "_test.go") {
 			continue
@@ -78,12 +78,19 @@ func TestEveryRecordedEventSiteIsClassified(t *testing.T) {
 			recording++
 			if stops == 0 {
 				withoutCheck[f+":"+fd.Name.Name] = true
+			} else {
+				withCheck++
 			}
 		}
 	}
-	// A scan that finds almost nothing is not a pass (measured 2026-11-19: 34 recording functions, 12 without their own check).
-	if recording < 30 {
-		t.Fatalf("only %d functions that record an event were found; the scan is not seeing the engine", recording)
+	// A scan that finds almost nothing is not a pass. This was a floor of 30 ("measured 2026-11-19: 34 recording functions, 12 without their own
+	// check"), and a floor on this population is wrong by construction: every call that moves onto the step dispatcher (cleat#4152) stops being a
+	// function that calls recordEvent, because its spec's Fresh records through stepCtx.Record, so the count falls with each migration and the floor
+	// failed the first PR that crossed it (G1b, at 29). What does not drift is that the scan sees BOTH kinds of recording function: one that checks
+	// the stop and one that does not. A scan reading the wrong thing finds neither or only one. The small number below is a sanity bound, not a census.
+	if recording < 10 || withCheck == 0 || len(withoutCheck) == 0 {
+		t.Fatalf("the scan found %d functions that record an event, %d that check the stop and %d that do not; it must see both kinds, so it is not seeing the engine",
+			recording, withCheck, len(withoutCheck))
 	}
 	var unclassified, stale []string
 	for k := range withoutCheck {

@@ -36,7 +36,7 @@ var stopSiteEvents = map[string]stopEvent{
 	"freshCallWithHeartbeat":   {typ: EventTypeCall},
 	"freshPluginCall":          {typ: EventTypePluginCall},
 	"freshPluginCallStreaming": {typ: EventTypePluginCall},
-	"freshSideEffect":          {typ: EventTypeSideEffect},
+	"SideEffect":               {typ: EventTypeSideEffect},
 	"Fetch":                    {typ: EventTypeFetch},
 	"DurableDefer":             {typ: EventTypeDefer},
 	"DurableSend":              {typ: EventTypeDurableSend},

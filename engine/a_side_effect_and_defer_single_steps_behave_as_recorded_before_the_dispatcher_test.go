@@ -172,11 +172,15 @@ func g1Characterize(t *testing.T, gc g1Call) map[string]string {
 // g1Golden is the table recorded against the code as it was (develop db2a7044), one string per (call, situation). It is the reference the
 // migration is checked against: a row that changes is a behaviour change, and the PR that changes it says so. The ones that are expected to
 // change when the calls move onto step() are named in that PR's body, not here.
+// THE THREE ROWS THE MIGRATION MOVED (G1a), each on purpose and each named in the PR: side_effect/divergence (the divergent record is no longer
+// consumed, step 1 -> 0, and the message is the shared one); side_effect_recorded/divergence (the shared message; the step was already 0); and
+// side_effect_recorded/replay_quit (the dispatcher answers 0 where the lookup answered the stop sentinel; debugger-only). Every other row, and every
+// row of defer, is byte-identical to what the old code produced.
 var g1Golden = map[string]map[string]string{
 	"side_effect": {
 		"armed_segment_fresh":    `res=0x80000000 wrote="" isReplay=false step=0 recorded=[] defers={}`,
 		"armed_segment_frontier": `res=0x80000000 wrote="" isReplay=false step=1 recorded=[] defers={}`,
-		"divergence":             `res=0x4100000001 wrote="replay divergence at step 0: expected side_effect event, got call" isReplay=true step=1 recorded=[] defers={}`,
+		"divergence":             "res=0xc500000001 wrote=\"replay divergence at step 0: expected side_effect, got call.\\nRun 'cleat vet' on your workflow code to check for common non-determinism issues (time.Now(), random values, map iteration, goroutines).\" isReplay=true step=0 recorded=[] defers={}",
 		"fresh":                  `res=0xc00000000 wrote="computed-now" isReplay=false step=1 recorded=[side_effect/step=0/value="computed-now"/defer=""/desc=""] defers={}`,
 		"frontier":               `res=0xc00000000 wrote="computed-now" isReplay=false step=2 recorded=[side_effect/step=1/value="computed-now"/defer=""/desc=""] defers={}`,
 		"replay":                 `res=0xe00000000 wrote="recorded-value" isReplay=true step=1 recorded=[] defers={}`,
@@ -190,11 +194,11 @@ var g1Golden = map[string]map[string]string{
 	"side_effect_recorded": {
 		"armed_segment_fresh":    `res=0x80000000 wrote="" isReplay=true step=0 recorded=[] defers={}`,
 		"armed_segment_frontier": `res=0x80000000 wrote="" isReplay=true step=1 recorded=[] defers={}`,
-		"divergence":             `res=0x4100000001 wrote="replay divergence at step 0: expected side_effect event, got call" isReplay=true step=0 recorded=[] defers={}`,
+		"divergence":             "res=0xc500000001 wrote=\"replay divergence at step 0: expected side_effect, got call.\\nRun 'cleat vet' on your workflow code to check for common non-determinism issues (time.Now(), random values, map iteration, goroutines).\" isReplay=true step=0 recorded=[] defers={}",
 		"fresh":                  `res=0x2 wrote="" isReplay=false step=0 recorded=[] defers={}`,
 		"frontier":               `res=0x2 wrote="" isReplay=true step=1 recorded=[] defers={}`,
 		"replay":                 `res=0xe00000000 wrote="recorded-value" isReplay=true step=1 recorded=[] defers={}`,
-		"replay_quit":            `res=0x80000000 wrote="" isReplay=true step=1 recorded=[] defers={}`,
+		"replay_quit":            "res=0x0 wrote=\"\" isReplay=true step=1 recorded=[] defers={}",
 		"segment_fresh":          `res=0x80000000 wrote="" isReplay=true step=0 recorded=[] defers={}`,
 		"segment_frontier":       `res=0x80000000 wrote="" isReplay=true step=1 recorded=[] defers={}`,
 		"shutdown_fresh":         `res=0x80000000 wrote="" isReplay=false step=0 recorded=[] defers={}`,

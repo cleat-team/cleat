@@ -449,66 +449,53 @@ func (s *execSession) UUID(ctx context.Context, m api.Module, seed string, uuidP
 }
 
 func (s *execSession) SideEffect(ctx context.Context, m api.Module, computedResult string, respPtr, respMaxLen uint32) int64 {
-	if s.isReplay {
-		return s.replaySideEffect(ctx, m, computedResult, respPtr, respMaxLen)
-	}
-	return s.freshSideEffect(ctx, m, computedResult, respPtr, respMaxLen)
+	return s.step(ctx, m, &sideEffectStep, stepArgs{s1: computedResult, outPtr: respPtr, outMaxLen: respMaxLen})
 }
 
-func (s *execSession) freshSideEffect(ctx context.Context, m api.Module, computedResult string, respPtr, respMaxLen uint32) int64 {
-	// A fresh side_effect is new work: it records a non-deterministic value into the history of a workflow that has already terminated,
-	// and any later replay would take that value as authoritative.
-	// The refusal lives HERE and not in SideEffect: this function is reached from the non-replay entry AND from replaySideEffect at the replay
-	// frontier, and a defer segment over a run that has history starts in replay, so its body's first new call arrives by the second
-	// way. A refusal only in the entry was skipped (cleat#4143, measured on a real worker: a terminate's segment made the body's next
-	// call and never ran the registered cleanup). Same placement as freshSetScope (cleat#4091); AcquireLock's refusal (cleat#4140) is now the dispatcher's, for both ways in (cleat#4211).
-	if s.stopBeforeNewWork() {
-		return callSuspendSentinel
-	}
-
-	rec := EventRecord{
-		Step:             s.stepCount,
-		EventType:        EventTypeSideEffect,
-		SideEffectResult: computedResult,
-	}
-	s.recordEvent(rec)
-
-	written, writtenEC := s.writeOut(ctx, m, respPtr, computedResult, respMaxLen)
+// sideEffectStep is SideEffect as a step (cleat#4152, G1a).
+//
+// A fresh side_effect is new work: it records a non-deterministic value into the history of a workflow that has already terminated, and any
+// later replay would take that value as authoritative, so the dispatcher refuses it in a segment's body on BOTH arrival paths (a defer segment
+// over a run that has history starts in replay, so its body's first new call arrives at the replay frontier; cleat#4143, measured on a real
+// worker: a terminate's segment made the body's next call and never ran the registered cleanup).
+//
+// THE RECORDED VALUE WINS, WHATEVER THE GUEST COMPUTED. cleat#4113 (owner decision: side_effect FREEZES a value).
+//
+// This used to compare the value the guest passed with the recorded one and fail the replay on a difference, calling it "a non-determinism
+// bug". But a side effect exists to hold a value that is NOT reproducible (a uuid, a clock read, an API answer), so on replay the two differ
+// by construction and the call that was meant to freeze the value was the one that failed the run. The migration guide's own
+// `uuid.NewString()` example failed its first replay.
+//
+// A guest built before SideEffectRecorded still computes the value on every replay, because it cannot know better, so a side effect inside its
+// function still re-executes; but it no longer fails, and it gets the value the history holds. SDKs that ask SideEffectRecorded first do not
+// run the function at all.
+//
+// WHAT THE MOVE CHANGES, and the characterization says so (a_side_effect_and_defer_single_steps_behave_as_recorded_before_the_dispatcher_test.go):
+// on a divergence the old replay consumed the record before checking its type, so the record that belonged to another call was lost and every
+// later step read the history one place late; step consumes nothing on a divergence (cleat#4157), as every other call does. The divergence
+// message is now the shared one.
+// decodeRecordedSideEffect hands the guest the value the history holds, whatever it computed: the one thing SideEffect and its lookup share on replay.
+func decodeRecordedSideEffect(c *stepCtx, rec *EventRecord) int64 {
+	written, writtenEC := c.s.writeOut(c.ctx, c.m, c.args.outPtr, rec.SideEffectResult, c.args.outMaxLen)
 	return packSimpleResult(writtenEC, written)
 }
 
-func (s *execSession) replaySideEffect(ctx context.Context, m api.Module, computedResult string, respPtr, respMaxLen uint32) int64 {
-	if s.stepCount < len(s.history) {
-		rec := s.history[s.stepCount]
-		if !s.advanceReplayStep(ctx, &rec) {
-			return 0
-		}
-
-		if rec.EventType != EventTypeSideEffect {
-			if s.engine.Metrics != nil {
-				s.engine.Metrics.RecordReplayFailure(ctx)
-			}
-			errMsg := fmt.Sprintf("replay divergence at step %d: expected side_effect event, got %s", rec.Step, rec.EventType)
-			written, _ := s.writeResult(ctx, m, respPtr, errMsg, respMaxLen)
-			return packSimpleResult(1, written)
-		}
-
-		// THE RECORDED VALUE WINS, WHATEVER THE GUEST COMPUTED. cleat#4113 (owner decision: side_effect FREEZES a value).
-		//
-		// This used to compare the value the guest passed with the recorded one and fail the replay on a difference, calling it "a
-		// non-determinism bug". But a side effect exists to hold a value that is NOT reproducible (a uuid, a clock read, an API
-		// answer), so on replay the two differ by construction and the call that was meant to freeze the value was the one that failed
-		// the run. The migration guide's own `uuid.NewString()` example failed its first replay.
-		//
-		// A guest built before SideEffectRecorded still computes the value on every replay, because it cannot know better, so a
-		// side effect inside its function still re-executes; but it no longer fails, and it gets the value the history holds.
-		// SDKs that ask SideEffectRecorded first do not run the function at all.
-		written, writtenEC := s.writeOut(ctx, m, respPtr, rec.SideEffectResult, respMaxLen)
+var sideEffectStep = stepSpec{
+	Name:       "side_effect",
+	Effect:     effectEffect,
+	Records:    recordsOne,
+	Want:       EventTypeSideEffect,
+	NoIdentity: "the value is the event: a side effect records the non-deterministic output itself, and the guest's own computation of it differs between a run and its replay by construction",
+	Decode:     decodeRecordedSideEffect,
+	Fresh: func(c *stepCtx) int64 {
+		c.Record(EventRecord{
+			Step:             c.s.stepCount,
+			EventType:        EventTypeSideEffect,
+			SideEffectResult: c.args.s1,
+		})
+		written, writtenEC := c.s.writeOut(c.ctx, c.m, c.args.outPtr, c.args.s1, c.args.outMaxLen)
 		return packSimpleResult(writtenEC, written)
-	}
-
-	s.exitReplay()
-	return s.freshSideEffect(ctx, m, computedResult, respPtr, respMaxLen)
+	},
 }
 
 // sideEffectNotRecorded is the status SideEffectRecorded returns when the history holds no value for this step. It is not an error code: a
@@ -530,45 +517,31 @@ const sideEffectNotRecorded byte = 2
 //   - fresh, or replaying past the end of history: "not recorded", with no state change, or the stop sentinel when the host has stopped
 //     the workflow. The switch from replay to fresh stays in SideEffect, where it has always been.
 func (s *execSession) SideEffectRecorded(ctx context.Context, m api.Module, respPtr, respMaxLen uint32) int64 {
-	if !s.isReplay {
-		// A fresh lookup is the step BEFORE new work, and the guest's function (which may call an API) runs between it and the SideEffect that
-		// would be refused. Refusing here keeps that function from running at all in a workflow that has already terminated.
-		if s.stopBeforeNewWork() {
-			return callSuspendSentinel
-		}
-		return packSimpleResult(sideEffectNotRecorded)
-	}
-	if s.stepCount >= len(s.history) {
-		// The replay-to-fresh boundary. SideEffect makes the switch to fresh, so the lookup leaves replay to it and only reports.
-		//
-		// THE REFUSAL HAS TO BE HERE TOO, and it was missing (cleat#4143). A segment over a run with history starts in replay, so the
-		// body's first new side effect arrives at this boundary and not on the non-replay half above. SideEffect refuses there (freshSideEffect),
-		// but an SDK that asks first runs the user's FUNCTION between the two calls, and that function may call an API: refusing only the
-		// record left the function to run for a workflow that had already terminated. Measured through the real C# SDK, a defer body saw the
-		// function run once in a segment over a history cut at the frontier, and not at all once the lookup refused.
-		//
-		// Refused before "not recorded" is answered, because that answer is what starts the function. A RECORDED value is read below
-		// this branch, not here: reading history is not new work.
-		if s.stopBeforeNewWork() {
-			return callSuspendSentinel
-		}
-		return packSimpleResult(sideEffectNotRecorded)
-	}
-	rec := s.history[s.stepCount]
-	if rec.EventType != EventTypeSideEffect {
-		if s.engine.Metrics != nil {
-			s.engine.Metrics.RecordReplayFailure(ctx)
-		}
-		errMsg := fmt.Sprintf("replay divergence at step %d: expected side_effect event, got %s", rec.Step, rec.EventType)
-		written, _ := s.writeResult(ctx, m, respPtr, errMsg, respMaxLen)
-		return packSimpleResult(1, written)
-	}
-	if !s.advanceReplayStep(ctx, &rec) {
-		// ReplayQuit: the debugger asked the replay to stop. Unwind rather than report a value that was not delivered.
-		return callSuspendSentinel
-	}
-	written, writtenEC := s.writeOut(ctx, m, respPtr, rec.SideEffectResult, respMaxLen)
-	return packSimpleResult(writtenEC, written)
+	return s.step(ctx, m, &sideEffectRecordedStep, stepArgs{outPtr: respPtr, outMaxLen: respMaxLen})
+}
+
+// sideEffectRecordedStep is SideEffectRecorded as a step: the Lookup kind of the design (cleat#4152, G1a).
+//
+// It is the step BEFORE new work: an SDK that asks first runs the guest's function, which may call an API, between this call and the SideEffect
+// that records its value. So a fresh lookup is refused when the host has stopped the workflow, and so is one at the replay frontier (a segment
+// over a run with history starts in replay, so the body's first new side effect arrives at that boundary; cleat#4143, measured through the
+// real C# SDK: a defer body saw the function run once in a segment over a history cut at the frontier, and not at all once the lookup
+// refused). A RECORDED value is read, not refused: reading history is not new work.
+//
+// StaysInReplayAtFrontier: at the frontier the lookup answers "not recorded" and does NOT leave replay; the SideEffect that follows makes the
+// switch, as it always has.
+//
+// Changes from the old code, named by the characterization: the divergence message is the shared one; and a debugger's ReplayQuit now answers
+// 0 where the lookup used to answer the stop sentinel (the dispatcher answers 0 for every spec; debugger-only).
+var sideEffectRecordedStep = stepSpec{
+	Name:                    "side_effect_recorded",
+	Effect:                  effectEffect,
+	Records:                 recordsNone,
+	Want:                    EventTypeSideEffect,
+	StaysInReplayAtFrontier: true,
+	NoIdentity:              "the value is the event: the lookup reads the same record SideEffect writes, and has no argument that could identify it",
+	Decode:                  decodeRecordedSideEffect,
+	Fresh:                   func(*stepCtx) int64 { return packSimpleResult(sideEffectNotRecorded) },
 }
 
 func (s *execSession) WorkflowID(ctx context.Context, m api.Module, idPtr, idMaxLen uint32) int64 {
