@@ -778,3 +778,17 @@ func promiseViolations(sc scenario, o outcome) []string {
 	}
 	return v
 }
+
+// continue-as-new ENDS the run, so a cleanup registered before it runs exactly once, and the continuation runs: the other side of the guard
+// defer_sleep pins (cleat#4194, #4197). Every effect exactly once, no fault injected. With the Python guest the script raises the suspend sentinel
+// after continue_as_new as the SDK says to, which is the shape a component guest does not drain on by itself.
+func TestChaosACleanupRunsExactlyOnceAtContinueAsNew(t *testing.T) {
+	e := newEnv(t)
+	sc := scenario{"defer_can", []op{{Op: "defer", Name: "D"}, {Op: "call", Name: "A"}, {Op: "continue_as_new", Name: "POST"}}, nil}
+	o, conts := executeParked(t, e, sc, 0, false, 0)
+	s, _, _, _ := tally(o.Requests)
+	if s["A"] != 1 || s["defer_D"] != 1 || s["POST"] != 1 || conts != 1 {
+		t.Fatalf("a run that registered a cleanup and continued as new: A=%d defer_D=%d POST=%d continuations=%d, want 1/1/1/1 (requests %s, status %s: %s)\n--- worker log (tail) ---\n%s",
+			s["A"], s["defer_D"], s["POST"], conts, seqOf(o.Requests), o.Status, o.ErrMsg, tail(o.Log, 2000))
+	}
+}

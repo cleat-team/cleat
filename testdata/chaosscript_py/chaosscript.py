@@ -7,7 +7,7 @@ Every effect on the outside world goes through the recording service "chaos", un
 import time
 from typing import Any
 
-from cleat_sdk import HostCalls, RetryPolicy, cleat_entry
+from cleat_sdk import HostCalls, RetryPolicy, SuspendSentinel, cleat_entry
 
 
 def _request(
@@ -84,7 +84,8 @@ def chaos_script(h: HostCalls, run: str, ops: list) -> str:
                     "__entry_point": "run",
                 }
             )
-            return "{}"
+            # As the SDK says to: raise the sentinel after continue_as_new. A component guest does not drain its defers on this path itself.
+            raise SuspendSentinel()
         else:
             raise ValueError("chaosscript: unknown op " + repr(kind))
     return str(seen)
