@@ -111,6 +111,9 @@ func (s *MySQLStore) ClaimWorkflows(ctx context.Context, workerID string, limit 
 	selArgs := make([]any, 0, len(tqArgs)+2)
 	selArgs = append(selArgs, tqArgs...)
 	selArgs = append(selArgs, s.tenantID, limit)
+	//nolint:gosec // G701: tqClause is MySQLStore.taskQueueClause(): one "?" per configured task queue, joined with ", " (mysql_store.go); the queue names
+	// are returned separately and bound through selArgs, so the only text interpolated into the query is placeholders. This is the cleat#3247 non-determinism
+	// (gosec's capped, map-ordered caller examination): the finding fires on some runs of an unmodified tree and not on others (cleat#4252).
 	rows, err := tx.QueryContext(ctx, fmt.Sprintf(`
 		SELECT w.id, w.tenant_id, w.concurrency_key, w.concurrency_key_hash,
 		       (q.name IS NOT NULL) AS registered
