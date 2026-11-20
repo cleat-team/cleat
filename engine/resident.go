@@ -67,6 +67,12 @@ type ResidencyConfig struct {
 	// ReplayFixed and ReplayPerEvent estimate what replaying the run would cost: fixed start-up plus a cost per recorded event. The first is
 	// measured (0.44 to 0.67 s); the second is not and defaults to zero.
 	ReplayFixed, ReplayPerEvent time.Duration
+	// DeadlineMargin is how much room a wait must leave before the run's own context ends (the wall-clock ceiling, the workflow deadline): a wait due
+	// later than deadline - margin is refused. The margin is for the late timer and for the run to come back as a suspension before the limit; it is NOT
+	// for the work after the wake, which admission cannot see (that is the known limit in docs/reference/worker-config.md). Measured on real wasmtime, a
+	// MINIMAL guest, 120 samples: a hold ended by a cancel was back as a suspension in a median of 0.3 ms, p90 about 1 ms and at most 9 ms (6.8 ms under
+	// -race) on a loaded machine, so 100 ms is about ten times the worst sample. It is not measured for a guest with real defers or a large history.
+	DeadlineMargin time.Duration
 	// InstanceBytes is the per-language charge; nil means defaultResidentInstanceBytes.
 	InstanceBytes map[string]uint64
 	// Pressure reports the worker's memory pressure from 0 (under the soft limit) up to 1 (at the hard limit). A park is refused while it is above
@@ -86,6 +92,7 @@ func DefaultResidencyConfig() ResidencyConfig {
 		WindowCap:        5 * time.Minute,
 		ReplayMultiplier: 10,
 		ReplayFixed:      500 * time.Millisecond,
+		DeadlineMargin:   100 * time.Millisecond,
 	}
 }
 
@@ -102,6 +109,8 @@ func (c ResidencyConfig) Validate() error {
 		return fmt.Errorf("resident replay multiplier %g must be positive", c.ReplayMultiplier)
 	case c.ReplayFixed < 0 || c.ReplayPerEvent < 0:
 		return fmt.Errorf("resident replay cost estimates must not be negative")
+	case c.DeadlineMargin < 0:
+		return fmt.Errorf("resident deadline margin %s must not be negative", c.DeadlineMargin)
 	}
 	return nil
 }
@@ -267,7 +276,9 @@ func (r *ResidentRun) Wait(ctx context.Context, req parkRequest) parkOutcome {
 	// The run's own context carries the wall-clock ceiling and the workflow deadline. A hold that outlives it is worse than a suspension: the sleep
 	// still suspends, but the executor then sees the expired context and FAILS the run with a timeout (executor.go, the DeadlineExceeded branch),
 	// where the same sleep without residency would have suspended at once. So a run too close to its limit to see its wake is not held.
-	if dl, ok := ctx.Deadline(); ok && !dl.After(time.UnixMilli(req.DeadlineMs)) {
+	// Compared as absolute times in the one wall-clock domain: DeadlineMs is unix ms and ctx.Deadline() is a wall-clock instant. A wait due at or
+	// after (deadline - DeadlineMargin) is refused, so only a deadline strictly later than wake + margin leaves room.
+	if dl, ok := ctx.Deadline(); ok && !dl.After(time.UnixMilli(req.DeadlineMs).Add(s.cfg.DeadlineMargin)) {
 		return refuse(residentRefusedDeadline)
 	}
 	if s.cfg.Pressure != nil && s.cfg.Pressure() > 0 {

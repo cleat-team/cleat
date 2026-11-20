@@ -42,6 +42,11 @@ func (o residentRunOutcome) String() string {
 
 func runResidentSleep(t *testing.T, rt *Runtime, wt *wasmtimeBackend, wasmBytes []byte, ceiling time.Duration, workflowTimeout time.Duration, resident bool, cancelAfter time.Duration) (residentRunOutcome, time.Duration, int) {
 	t.Helper()
+	return runResidentEntry(t, rt, wt, wasmBytes, "sleep_then_call", 0, ceiling, workflowTimeout, resident, cancelAfter)
+}
+
+func runResidentEntry(t *testing.T, rt *Runtime, wt *wasmtimeBackend, wasmBytes []byte, entry string, workDelay time.Duration, ceiling time.Duration, workflowTimeout time.Duration, resident bool, cancelAfter time.Duration) (residentRunOutcome, time.Duration, int) {
+	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -60,13 +65,13 @@ func runResidentSleep(t *testing.T, rt *Runtime, wt *wasmtimeBackend, wasmBytes 
 		}
 		opts = append(opts, WithResidency(set.ForRun(ResidentRunInfo{WorkflowID: "wf-resident-limits", Language: "go"})))
 	}
-	eng := NewEngine(rt, &hostWaitCaller{}, opts...)
+	eng := NewEngine(rt, &hostWaitCaller{delay: workDelay}, opts...)
 	eng.Metrics = m
 	if cancelAfter > 0 {
 		time.AfterFunc(cancelAfter, cancel)
 	}
 	t0 := time.Now()
-	res, _, suspended, _, _, execErr := eng.Execute(ctx, wasmBytes, "sleep_then_call", json.RawMessage(`{}`))
+	res, _, suspended, _, _, execErr := eng.Execute(ctx, wasmBytes, entry, json.RawMessage(`{}`))
 	elapsed := time.Since(t0)
 	holds := residentCounter(t, m, "cleat_resident_parks_total")
 
@@ -142,5 +147,52 @@ func TestAHeldRunMeetsItsOwnCeilingAndCancelOnRealWasmtime(t *testing.T) {
 				t.Errorf("%d hold(s) were recorded where none should be: a run too close to its limit must be refused, not held", holds)
 			}
 		})
+	}
+}
+
+// KNOWN LIMIT, pinned so that the change that removes it has to flip this test (cleat#4162; the coordinator's rule is that nothing is turned on until it does).
+//
+// After a held wait the rest of that execution has what is left of the ceiling: ceiling - elapsed - held. With residency OFF the sleep suspends and the work
+// after it runs in a FRESH execution with a fresh ceiling. So poll-then-act (do something, wait, then make a slow call) can fail with a timeout with
+// residency on where it finishes with it off. Admission cannot size a margin for work it cannot see.
+//
+// Work 300ms, sleep 300ms, work 300ms is 900ms of one execution against an 800ms ceiling. The sleep IS admitted (it is due 300ms from a point with about
+// 500ms left, which is outside the 100ms margin), and the run then times out. The name says what it is, and the assertion below is today's behaviour: PR 2 (held
+// time is not charged to the ceiling) makes the "on" row complete, and is expected to change it to residentRunCompleted.
+func TestKnownLimitAHeldWaitLeavesTheRestOfTheExecutionTheCeilingMinusTheHeldTime(t *testing.T) {
+	wasmBytes, err := os.ReadFile(buildFixtureWasm(t, "residentsleep"))
+	if err != nil {
+		t.Fatalf("reading fixture: %v", err)
+	}
+	ctx := context.Background()
+	rt, err := NewRuntime(ctx, 0, 0)
+	if err != nil {
+		t.Fatalf("NewRuntime: %v", err)
+	}
+	t.Cleanup(func() { rt.Close(ctx) })
+	wt, err := NewWasmtimeBackend(ctx, WithWasmtimeExecutionTimeout(30*time.Second))
+	if err != nil {
+		t.Fatalf("NewWasmtimeBackend: %v", err)
+	}
+	t.Cleanup(func() { wt.Close(ctx) })
+	if got, elapsed, _ := runResidentEntry(t, rt, wt, wasmBytes, "work_sleep_work", 0, 30*time.Second, 0, false, 0); got != residentRunSuspended {
+		t.Fatalf("PRECONDITION FAILED: the warm-up run %s in %s, want it suspended at the sleep", got, elapsed)
+	}
+	const ceiling = 800 * time.Millisecond
+	const work = 300 * time.Millisecond
+
+	off, offElapsed, offHolds := runResidentEntry(t, rt, wt, wasmBytes, "work_sleep_work", work, ceiling, 0, false, 0)
+	t.Logf("residency off: %s in %s, %d hold(s)", off, offElapsed.Round(time.Millisecond), offHolds)
+	if off != residentRunSuspended {
+		t.Errorf("residency off: %s, want suspended at the sleep (the work after it belongs to a fresh execution)", off)
+	}
+
+	on, onElapsed, onHolds := runResidentEntry(t, rt, wt, wasmBytes, "work_sleep_work", work, ceiling, 0, true, 0)
+	t.Logf("residency on: %s in %s, %d hold(s)", on, onElapsed.Round(time.Millisecond), onHolds)
+	if onHolds == 0 {
+		t.Fatalf("PRECONDITION FAILED: the sleep was not held, so this row did not exercise the limit")
+	}
+	if on != residentRunTimedOut {
+		t.Errorf("residency on: %s, want the KNOWN LIMIT (timed out). If this is now %q, the limit has been removed: flip this test and the docs that name it", on, residentRunCompleted)
 	}
 }

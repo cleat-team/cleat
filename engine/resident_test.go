@@ -590,3 +590,98 @@ func TestEveryExecutionContextTheExecutorBuildsIsHandedToTheSession(t *testing.T
 		}
 	}
 }
+
+// The margin: a wait due within DeadlineMargin of the run's deadline is refused, and the boundary is exact. Only a deadline strictly later than wake + margin
+// leaves the run room to come back as a suspension before the limit, so wake + margin is refused and one millisecond more is held. The margin is read from the
+// config the test builds, so a mutant that ignores it is caught on either side of the line.
+func TestAWaitDueWithinTheMarginOfItsDeadlineIsRefusedAndOneJustOutsideIsHeld(t *testing.T) {
+	const margin = 100 * time.Millisecond
+	for _, c := range []struct {
+		name       string
+		deadlineMs int64 // relative to the wake
+		held       bool
+	}{
+		{"deadline = wake + margin - 1ms", 99, false},
+		{"deadline = wake + margin", 100, false},
+		{"deadline = wake + margin + 1ms", 101, true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			clock := newFakeResidentClock(residentT)
+			m := newReplayMetrics(t)
+			set := newTestResidentSet(t, residentTestConfig(clock, func(cfg *ResidencyConfig) { cfg.Metrics = m; cfg.DeadlineMargin = margin }))
+			wake := residentT + 5000
+			ctx, cancel := context.WithDeadline(context.Background(), time.UnixMilli(wake+c.deadlineMs))
+			defer cancel()
+			out := park(set.ForRun(ResidentRunInfo{Language: "go"}), ctx, timerReq(wake))
+			if c.held {
+				awaitArmed(t, clock)
+				if set.Len() != 1 {
+					t.Fatalf("a wait with %dms to spare past its wake was not held", c.deadlineMs)
+				}
+				clock.fireAll()
+				mustOutcome(t, out, parkDeadline, "the timer")
+				return
+			}
+			select {
+			case got := <-out:
+				if got != parkRefused {
+					t.Fatalf("returned %d, want the refusal %d", got, parkRefused)
+				}
+			case <-time.After(2 * time.Second):
+				clock.fireAll()
+				t.Fatalf("a wait whose deadline is %dms after its wake (margin %s) was HELD", c.deadlineMs, margin)
+			}
+			if n := residentCounter(t, m, "cleat_resident_refusals_total", `reason="deadline"`); n != 1 {
+				t.Errorf("counted %d deadline refusal(s), want 1", n)
+			}
+		})
+	}
+}
+
+func TestANegativeDeadlineMarginIsRefused(t *testing.T) {
+	cfg := DefaultResidencyConfig()
+	cfg.DeadlineMargin = -time.Millisecond
+	if err := cfg.Validate(); err == nil {
+		t.Error("a negative margin was accepted")
+	}
+	if got := DefaultResidencyConfig().DeadlineMargin; got != 100*time.Millisecond {
+		t.Errorf("the default margin is %s, want 100ms (about ten times the worst measured unwind)", got)
+	}
+}
+
+// A loop of sleeps in ONE execution: each hold is admitted against the same absolute deadline, so the holds add up and the one that would not leave room is
+// refused (and suspends). That is what makes a loop of sleeps safe under a ceiling, and it is the reason a lower window cap does not remove the known limit:
+// it shortens each hold, and the holds still add up.
+func TestHoldsInOneExecutionAddUpAgainstOneDeadlineAndTheLastIsRefused(t *testing.T) {
+	clock := newFakeResidentClock(residentT)
+	m := newReplayMetrics(t)
+	set := newTestResidentSet(t, residentTestConfig(clock, func(c *ResidencyConfig) { c.Metrics = m; c.DeadlineMargin = 100 * time.Millisecond }))
+	ctx, cancel := context.WithDeadline(context.Background(), time.UnixMilli(residentT+10_000)) // the execution's one ceiling
+	defer cancel()
+	run := set.ForRun(ResidentRunInfo{Language: "go"})
+	for i, wake := range []int64{3000, 6000, 9000} { // three sleeps, each well inside the ceiling
+		out := park(run, ctx, timerReq(residentT+wake))
+		awaitArmed(t, clock)
+		clock.nowMs.Store(residentT + wake)
+		clock.fireAll()
+		mustOutcome(t, out, parkDeadline, "sleep "+strconv.Itoa(i+1))
+	}
+	// The fourth is due 400ms before the ceiling but inside what is left of it after three holds: still admitted, because the margin is 100ms.
+	out := park(run, ctx, timerReq(residentT+9_850))
+	awaitArmed(t, clock)
+	clock.fireAll()
+	mustOutcome(t, out, parkDeadline, "a sleep 150ms inside the ceiling")
+	// And one due inside the margin is refused: the execution is out of room, so the loop suspends instead of timing out.
+	select {
+	case got := <-park(run, ctx, timerReq(residentT+9_950)):
+		if got != parkRefused {
+			t.Fatalf("a wait due 50ms before the ceiling returned %d, want the refusal", got)
+		}
+	case <-time.After(2 * time.Second):
+		clock.fireAll()
+		t.Fatal("a wait due 50ms before the ceiling was held")
+	}
+	if n := residentCounter(t, m, "cleat_resident_refusals_total", `reason="deadline"`); n != 1 {
+		t.Errorf("counted %d deadline refusal(s), want exactly the last one", n)
+	}
+}
