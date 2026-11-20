@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
@@ -61,18 +63,79 @@ func TestTheRootRequireNamesAPublishedVersion(t *testing.T) {
 	// and SUCCEEDS whatever the version says. The obvious check cannot fail
 	// from the only place anyone would run it.
 	url := fmt.Sprintf("https://proxy.golang.org/github.com/cleat-team/cleat/@v/%s.info", version)
-	client := &http.Client{Timeout: 30 * time.Second}
-	resp, err := client.Get(url)
-	if err != nil {
-		t.Fatalf("cleat/go.mod requires github.com/cleat-team/cleat %s, and this test could not "+
-			"ask the module proxy whether that version exists: %v\n"+
-			"This is a failure of the check, not necessarily a finding about the tree -- "+
-			"the version may be fine. Re-run where the proxy is reachable.", version, err)
+	client := &http.Client{Timeout: proxyAttemptTimeout}
+	status, attempts, err := askProxy(client, url, proxyRetryPauses, proxyMaxRetryAfter, time.Sleep)
+	if verdict := proxyVerdict(version, url, status, attempts, err); verdict != "" {
+		t.Error(verdict)
 	}
-	defer resp.Body.Close()
+}
 
-	if resp.StatusCode != http.StatusOK {
-		t.Errorf("cleat/go.mod requires github.com/cleat-team/cleat %s, and the module proxy "+
+// proxyAttemptTimeout is ONE attempt's timeout, and proxyRetryPauses the pauses between attempts, so the call is made at most len+1 = 3 times. A pause is the
+// configured one, or the proxy's own Retry-After when that is longer, capped at proxyMaxRetryAfter, so the worst case is 3*20s + 10s + 10s = 80s (it used to be
+// one 30s attempt). The shorter per-attempt timeout is deliberate: the failure that motivated the retry
+// (cleat#4264) was a proxy that stalled awaiting headers for the whole 30s, and three independent tries beat one long wait on a proxy that is stuck.
+const proxyAttemptTimeout = 20 * time.Second
+
+var proxyRetryPauses = []time.Duration{2 * time.Second, 5 * time.Second}
+
+// proxyMaxRetryAfter caps how long a Retry-After can make the test wait. The proxy's word is honoured because it knows how long it needs, and capped because a
+// header the test cannot bound would let a misbehaving proxy hold a Tier 1 shard for as long as it liked.
+const proxyMaxRetryAfter = 10 * time.Second
+
+// askProxy returns the proxy's FIRST DEFINITE answer, retrying only what is not one: a transport error (no answer at all), a 5xx (the proxy saying it could
+// not answer) or a 429 (the proxy saying to come back later, transient by definition). A 200 and a 404 or 410 ("unknown revision") are definite and final; so
+// is any other status below 500 (a 403, say), which is not retried because it says something about the request and not about the proxy's health.
+//
+// When a retried response carries a Retry-After in seconds, the next pause is the longer of the configured one and that, capped at maxRetryAfter. The
+// HTTP-date form is not honoured (the configured pause applies): the module proxy's CDN sends seconds, and parsing a date adds a clock to a test whose
+// whole point is to have none. It never turns a transport failure into a pass: when every
+// attempt is exhausted it returns the error, and the caller fails (cleat#4264: a skip here would reopen the hole cleat#2452 is about).
+//
+// status is 0 when there was no definite answer; attempts is how many calls were made; err carries the FIRST cause and the last one, since a retry
+// that hides the first failure makes the second hard to read.
+func askProxy(client *http.Client, url string, pauses []time.Duration, maxRetryAfter time.Duration, sleep func(time.Duration)) (status, attempts int, err error) {
+	var first, last error
+	var retryAfter time.Duration // the proxy's own request for how long to wait before the NEXT attempt, from the last response
+	for i := 0; i <= len(pauses); i++ {
+		if i > 0 {
+			sleep(max(pauses[i-1], min(retryAfter, maxRetryAfter)))
+		}
+		retryAfter = 0
+		attempts++
+		resp, getErr := client.Get(url)
+		if getErr != nil {
+			last = getErr
+		} else {
+			code := resp.StatusCode
+			_ = resp.Body.Close()
+			if code < 500 && code != http.StatusTooManyRequests {
+				return code, attempts, nil
+			}
+			if secs, convErr := strconv.Atoi(strings.TrimSpace(resp.Header.Get("Retry-After"))); convErr == nil && secs > 0 {
+				retryAfter = time.Duration(secs) * time.Second
+			}
+			last = fmt.Errorf("HTTP %d", code)
+		}
+		if first == nil {
+			first = last
+		}
+	}
+	if attempts > 1 && first.Error() != last.Error() {
+		return 0, attempts, fmt.Errorf("%v (first attempt: %v)", last, first)
+	}
+	return 0, attempts, last
+}
+
+// proxyVerdict is the test's decision, separated so it can be pinned without a network: "" passes, anything else is the failure message.
+func proxyVerdict(version, url string, status, attempts int, err error) string {
+	if err != nil {
+		return fmt.Sprintf("cleat/go.mod requires github.com/cleat-team/cleat %s, and this test could not "+
+			"ask the module proxy whether that version exists after %d attempts: %v\n"+
+			"This is a failure of the check, not necessarily a finding about the tree -- "+
+			"the version may be fine. Re-run where the proxy is reachable.", version, attempts, err)
+	}
+	if status != http.StatusOK {
+		return fmt.Sprintf("cleat/go.mod requires github.com/cleat-team/cleat %s, and the module proxy "+
 			"does not serve it (HTTP %d).\n\n"+
 			"A require must name a version that is ALREADY PUBLISHED. A package's own version is "+
 			"bumped before the tag -- publish-pypi.yml refuses when the tag and pyproject.toml "+
@@ -80,6 +143,7 @@ func TestTheRootRequireNamesAPublishedVersion(t *testing.T) {
 			"until then there is nothing to resolve. The two rules read as contradictory until "+
 			"you separate them, which is how cleat#2452 got this wrong.\n\n"+
 			"Check with:\n    curl -s -o /dev/null -w '%%{http_code}\\n' %s\n"+
-			"and take a version you know exists as a control.", version, resp.StatusCode, url)
+			"and take a version you know exists as a control.", version, status, url)
 	}
+	return ""
 }
