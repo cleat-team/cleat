@@ -438,6 +438,13 @@ func payloadKeyVersionsFromFlags() payloadKeyVersions {
 func main() {
 	flag.Parse()
 
+	// The residency policy, validated where an operator reads it. Off unless --resident-max-runs is above zero, but a nonsense policy is refused either way.
+	residencyCfg, residencyErr := residencyConfigFromFlags()
+	if residencyErr != nil {
+		fmt.Fprintln(os.Stderr, residencyErr)
+		os.Exit(1)
+	}
+
 	if err := validateReclaimTimeout(*reclaimTimeout, *heartbeatInterval); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
@@ -2604,6 +2611,14 @@ func main() {
 		logger.WarnContext(context.Background(), "failed to load memory estimates", "worker_id", workerID, "error", err)
 	}
 	w.memoryController = mc
+	residencyCfg.Pressure = mc.Pressure
+	residencyCfg.Metrics = metricsInstance
+	resident, residentErr := engine.NewResidentSet(residencyCfg)
+	if residentErr != nil {
+		logger.ErrorContext(context.Background(), "residency is misconfigured", "worker_id", workerID, "error", residentErr)
+		os.Exit(1)
+	}
+	w.resident = resident
 	metricsInstance.RecordDesiredConcurrency(context.Background(), int64(*concurrency))
 	globalWorker = w
 

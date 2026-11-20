@@ -412,6 +412,90 @@ workflow starts (returns HTTP 503).
 
 ---
 
+## Residency
+
+A durable sleep that is due soon can be **held on the worker** instead of suspended: the run keeps its instance and wakes in place when the timer fires, with no claim, no instantiation and no replay (cleat#4162, design: `docs/design/resident-suspended-runs.md`). It is **off unless `--resident-max-runs` is above zero**, and a refusal is always the safe answer: the wait suspends exactly as it always has, so a wrong number here can only hold less than it could.
+
+**What is and is not measured, so you can judge the defaults.** The memory of a held instance is measured for *minimal* guests (Go 2.5 MiB, 19.6 MiB after a guest had made garbage; Python 9 to 16 MiB; C# 49 to 66 MiB), not for real workflows. The fixed cost of replaying a run is measured (0.44 to 0.67 s per claim for a minimal guest); the cost per recorded event is **not**. The multiplier, the floor and the cap are the owner's starting point and **not measured**; tuning them on real workflows is cleat#4187. So the defaults are conservative, and with the per-event cost left at 0 every run gets the floor as its window.
+
+**Only Go guests are held, and only durable sleeps so far.** A language with no measured per-instance figure is refused, and the other waits (signals, promises, children, updates) have no caller on the park helper yet. A held run is in flight, so a worker that starts to drain sends every held run back first, and at the memory hard limit it sends them back too; nothing is held while the worker is over `--memory-soft-limit`.
+
+### --resident-max-runs
+
+| Type | Default | Description |
+|------|---------|-------------|
+| int | `0` | Most runs held in memory through a wait that is due soon; 0 turns residency off |
+
+A held run keeps its instance and one OS thread (measured: about one thread per held instance, 1053 for 1024 Go instances), so keep this small. The thread cost at larger counts was not measured.
+
+**The run's own limits win, up to a point.** A wait due within **100 ms** of the run's own limit (`--wasm-wall-clock-ceiling`, or `--max-workflow-duration`) is **not held**: it suspends exactly as it does with residency off, and is counted as a refusal with reason `deadline`. The reason is a **timeout failure**: a run held through its own limit used to suspend and then be failed with `execution timed out`, where the same sleep without residency would have suspended (measured on real wasmtime at a 150 ms ceiling and a 300 ms sleep: suspended in 1 to 3 ms with residency off, held to the ceiling and failed with it on). A cancel or a terminate ends a held run at once (measured: back as a suspension in a median of 0.3 ms and at most 9 ms for a minimal guest, which is where the 100 ms margin comes from; it is not measured for a guest with real defers or a large history).
+
+**EXPERIMENTAL until PR 2 of cleat#4162 removes this limit, and not for production use before then.** **KNOWN LIMIT, not fixed in this release.** After a held wait, **the rest of that execution has the ceiling minus the held time**. With residency off the sleep suspends and the work after it runs in a *fresh* execution with a fresh ceiling; with it on the work after the wake runs in what is left of this one, so it **can fail with `execution timed out` where it would not with residency off**. Measured on real wasmtime: a call of 300 ms, a sleep of 300 ms and another 300 ms call under an 800 ms ceiling suspends at the sleep in 303 ms with residency off and, with it on, holds and then times out at 904 ms. The pattern that is exposed is poll-then-act: wait until something is ready, then make a slow call. Holds in one execution add up against one ceiling, so a shorter `--resident-window-cap` reduces how much a hold costs and does not remove the limit; a loop of sleeps is safe, because once the remaining ceiling is short the next wait is refused and suspends. The test that pins this is `TestKnownLimitAHeldWaitLeavesTheRestOfTheExecutionTheCeilingMinusTheHeldTime`; the change that charges held time to nothing (the next PR) is expected to flip it, and **nothing turns residency on by default until it does**.
+
+**Boot validation.** Every `--resident-*` flag is validated when the worker starts **even when `--resident-max-runs` is 0**: a value that cannot work (a cap below the floor, a negative number, a multiplier of 0) stops the worker with a message naming it. The defaults are all valid, so a worker that sets none of them is unaffected.
+
+---
+
+### --resident-memory-budget-mb
+
+| Type | Default | Description |
+|------|---------|-------------|
+| int | `0` | Memory the held runs may add up to, in MB; 0 means `--resident-max-runs` times the dearest measured language |
+
+Each held run is charged a per-language figure: **24 MiB for Go**, rounded up from the 19.6 MiB measured after a guest had allocated and dropped about 256 MiB (a minimal guest is 2.5 MiB).
+
+---
+
+### --resident-window-floor
+
+| Type | Default | Description |
+|------|---------|-------------|
+| duration | `10s` | The shortest a run may be held for; a wait due within this is always eligible |
+
+**Unmeasured**: the owner's starting point. The design notes that 10x a Go run's tiny replay estimate is shorter than a typical wait, which is why a floor exists at all.
+
+---
+
+### --resident-window-cap
+
+| Type | Default | Description |
+|------|---------|-------------|
+| duration | `5m` | The longest a run may be held for; a wait due later than this is never held |
+
+**Unmeasured**: the owner's starting point. A held run is still inside `--wasm-wall-clock-ceiling` (5 minutes by default), which is a context timeout around one execution.
+
+---
+
+### --resident-replay-multiplier
+
+| Type | Default | Description |
+|------|---------|-------------|
+| float | `10` | A wait is held if it is due within this many times the estimated cost of replaying the run, clamped to the floor and cap |
+
+**Unmeasured**: the owner's starting point.
+
+---
+
+### --resident-replay-fixed
+
+| Type | Default | Description |
+|------|---------|-------------|
+| duration | `500ms` | The fixed part of the estimated cost of replaying a run |
+
+Measured at 0.44 to 0.67 s per claim for a minimal guest.
+
+---
+
+### --resident-replay-per-event
+
+| Type | Default | Description |
+|------|---------|-------------|
+| duration | `0s` | The per-recorded-event part of the estimated cost of replaying a run |
+
+**Unmeasured, so 0**: until it is measured the window does not grow with a run's history, and every run's window is the floor.
+
+---
+
 ## Authentication
 
 ### --require-auth

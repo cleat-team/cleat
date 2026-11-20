@@ -791,4 +791,10 @@ type execSession struct {
 	// stepCancel cancels the execution context when the step callback returns
 	// ReplayQuit.
 	stepCancel context.CancelFunc
+
+	// execCtx is the context this execution runs under, AFTER the workflow deadline and the wall-clock ceiling were applied to it. A host call does
+	// not receive it: the wasmtime paths call the handler with context.Background() (wasmtime_hostfuncs_core.go, component_callbacks.go), so a wait
+	// that holds a run on the worker (park.go) would otherwise never see the ceiling, a cancel or a terminate. nil means "not set", and then the
+	// host call's own context is used, which is what every test that builds a session by hand gets.
+	execCtx context.Context
 }

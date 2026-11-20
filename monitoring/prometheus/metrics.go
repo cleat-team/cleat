@@ -73,6 +73,9 @@ type Metrics struct {
 	calls                   metric.Int64Counter
 	callRetries             metric.Int64Counter
 	replayFailures          metric.Int64Counter
+	residentParks           metric.Int64Counter
+	residentRefusals        metric.Int64Counter
+	residentEvictions       metric.Int64Counter
 	replayShortHistories    metric.Int64Counter
 	replayChecksumFailures  metric.Int64Counter
 	ambiguousCalls          metric.Int64Counter
@@ -107,6 +110,7 @@ type Metrics struct {
 
 	// --- UpDownCounters (Int64UpDownCounter) ---
 	workflowsActive                metric.Int64UpDownCounter
+	residentRuns                   metric.Int64UpDownCounter
 	workerCount                    metric.Int64UpDownCounter
 	eventHistorySize               metric.Int64UpDownCounter
 	wasmCacheEntries               metric.Int64UpDownCounter
@@ -275,6 +279,30 @@ func New(cfg Config) (*Metrics, error) {
 	)
 	if err != nil {
 		return nil, fmt.Errorf("cleat_replay_failures_total: %w", err)
+	}
+
+	m.residentParks, err = meter.Int64Counter(
+		"cleat_resident_parks_total",
+		metric.WithDescription("Waits that were held on the worker instead of suspended, by what they waited for and how the hold ended (deadline: the timer fired; cancelled: the run's context ended; evicted: the worker sent the run back)"),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("cleat_resident_parks_total: %w", err)
+	}
+
+	m.residentRefusals, err = meter.Int64Counter(
+		"cleat_resident_refusals_total",
+		metric.WithDescription("Waits that were NOT held and suspended as they always have, by what they waited for and why (kind, language, window, count, memory, pressure, draining)"),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("cleat_resident_refusals_total: %w", err)
+	}
+
+	m.residentEvictions, err = meter.Int64Counter(
+		"cleat_resident_evictions_total",
+		metric.WithDescription("Held runs the worker sent back before their wait was due, by reason (shutdown, pressure)"),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("cleat_resident_evictions_total: %w", err)
 	}
 
 	m.replayShortHistories, err = meter.Int64Counter(
@@ -517,6 +545,14 @@ func New(cfg Config) (*Metrics, error) {
 	}
 
 	// --- Initialise UpDownCounters ---
+
+	m.residentRuns, err = meter.Int64UpDownCounter(
+		"cleat_resident_runs",
+		metric.WithDescription("Runs held on this worker right now instead of suspended"),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("cleat_resident_runs: %w", err)
+	}
 
 	m.workflowsActive, err = meter.Int64UpDownCounter(
 		"cleat_workflows_active",
@@ -1039,6 +1075,29 @@ func (m *Metrics) RecordCallRetry(ctx context.Context, extraAttrs ...attribute.K
 func (m *Metrics) RecordReplayFailure(ctx context.Context, extraAttrs ...attribute.KeyValue) {
 	attrs := m.mergeAttrs(extraAttrs...)
 	m.replayFailures.Add(ctx, 1, metric.WithAttributes(attrs...))
+}
+
+// RecordResidentPark counts a wait that was held on the worker and says how the hold ended (cleat#4162).
+func (m *Metrics) RecordResidentPark(ctx context.Context, kind, outcome string) {
+	attrs := m.mergeAttrs(attribute.String("kind", kind), attribute.String("outcome", outcome))
+	m.residentParks.Add(ctx, 1, metric.WithAttributes(attrs...))
+}
+
+// RecordResidentRefusal counts a wait that was not held, and why. A refusal is the safe answer and is what every wait gets when residency is off.
+func (m *Metrics) RecordResidentRefusal(ctx context.Context, kind, reason string) {
+	attrs := m.mergeAttrs(attribute.String("kind", kind), attribute.String("reason", reason))
+	m.residentRefusals.Add(ctx, 1, metric.WithAttributes(attrs...))
+}
+
+// RecordResidentEviction counts a held run the worker sent back before its wait was due.
+func (m *Metrics) RecordResidentEviction(ctx context.Context, reason string) {
+	attrs := m.mergeAttrs(attribute.String("reason", reason))
+	m.residentEvictions.Add(ctx, 1, metric.WithAttributes(attrs...))
+}
+
+// AddResidentRuns moves the number of runs held right now by delta: +1 when a run is admitted, -1 when it leaves.
+func (m *Metrics) AddResidentRuns(ctx context.Context, delta int64) {
+	m.residentRuns.Add(ctx, delta, metric.WithAttributes(m.defaultAttrs...))
 }
 
 // RecordReplayShortHistory increments the replay-short-histories counter.

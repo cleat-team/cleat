@@ -330,6 +330,8 @@ func (e *Engine) executeWithBackend(
 		execCtx, cancel = context.WithTimeout(execCtx, ceiling)
 		defer cancel()
 	}
+	// The limits are all on execCtx now. A wait that holds the run needs to see them (see execSession.execCtx), and a host call does not get this context.
+	session.execCtx = execCtx
 
 	// If replaying, verify event history integrity (checksums) and
 	// validate version compatibility before proceeding.
@@ -657,6 +659,8 @@ func (e *Engine) executeCompiled(ctx context.Context, compiled wazero.CompiledMo
 		execCtx, cancel = context.WithTimeout(execCtx, ceiling)
 		defer cancel()
 	}
+	// The limits are all on execCtx now. A wait that holds the run needs to see them (see execSession.execCtx), and a host call does not get this context.
+	session.execCtx = execCtx
 
 	// If replaying, verify event history integrity (checksums) and
 	// validate version compatibility before proceeding.

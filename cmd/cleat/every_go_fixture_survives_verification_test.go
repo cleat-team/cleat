@@ -68,9 +68,10 @@ var goFixtureExpectations = map[string]string{
 	// crash scenario starts through ChildWorkflow and counts the runs of. One
 	// DurableCall and nothing exotic; listed because a fixture holding Go files
 	// that is not listed is a fixture nothing checks.
-	"summarise":    "",
-	"deferfunc":    "",
-	"hotfixmarker": "",
+	"summarise":     "",
+	"deferfunc":     "",
+	"residentsleep": "",
+	"hotfixmarker":  "",
 	// cleat#4079: a workflow that makes a call, registers a defer and then spins or fails, so the engine's failure path has a guest
 	// to be killed in. Must verify cleanly.
 	"killafterwork": "",
