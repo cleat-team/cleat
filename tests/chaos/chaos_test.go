@@ -105,7 +105,13 @@ func scriptInput(run string, sc scenario) string {
 }
 
 // terminate is phase 1 of the two-phase transition engine.preemptivelySettle writes for a run that owes a defer phase, as the crash tests do.
-func terminate(t *testing.T, db *sql.DB, id string) {
+func terminate(t *testing.T, db *sql.DB, id string) { terminateClaimableAfter(t, db, id, 0) }
+
+// terminateClaimableAfter terminates the run but makes its defer segment claimable only after `after`, the way a run terminated while its worker
+// was down, or while the queue was backed up, is claimed late. The default (0) claims it at once, so a body parked in a clock-based sleep is
+// replayed before the sleep is served and suspends there: the body never reaches the call a refusal exists for. A late claim replays PAST the
+// sleep, which is what reaches that call (cleat#4213).
+func terminateClaimableAfter(t *testing.T, db *sql.DB, id string, after time.Duration) {
 	t.Helper()
 	if _, err := db.Exec(`UPDATE workflow_payloads SET error_msg = 'chaos terminate' WHERE id = $1`, id); err != nil {
 		t.Fatal(err)
@@ -113,8 +119,8 @@ func terminate(t *testing.T, db *sql.DB, id string) {
 	if _, err := db.Exec(`UPDATE workflow_leases
 		SET status = 'terminating', pending_terminal_status = 'terminated',
 		    defer_phase_deadline = now() + interval '300 seconds',
-		    next_wake_at = now(), assigned_to = NULL, generation = generation + 1
-		WHERE id = $1`, id); err != nil {
+		    next_wake_at = now() + ($2 * interval '1 millisecond'), assigned_to = NULL, generation = generation + 1
+		WHERE id = $1`, id, after.Milliseconds()); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -570,7 +576,10 @@ func seqOf(reqs []request) string {
 
 // A run that registered a cleanup and then parks (a sleep) before a body ContinueAsNew. TERMINATING it while it is parked runs its defer
 // segment, which replays the body to the frontier: the body's ContinueAsNew must NOT be taken there, and the cleanup must run once (cleat#4159).
-var parkedScenario = scenario{"defer_sleep_can", []op{{Op: "defer", Name: "D"}, {Op: "sleep", Ms: 4000}, {Op: "continue_as_new", Name: "POST"}}, nil}
+// parkedSleepMs is the body's sleep; the terminated run is claimed after it.
+const parkedSleepMs = 4000
+
+var parkedScenario = scenario{"defer_sleep_can", []op{{Op: "defer", Name: "D"}, {Op: "sleep", Ms: parkedSleepMs}, {Op: "continue_as_new", Name: "POST"}}, nil}
 
 func continuations(db *sql.DB, id string) int {
 	var n int
@@ -578,9 +587,20 @@ func continuations(db *sql.DB, id string) int {
 	return n
 }
 
-// executeParked runs the scenario, waits until `events` events are durable (the run is parked), and then terminates it. No worker is killed:
-// the fault is the terminate landing on a parked run.
-func executeParked(t *testing.T, env *env, sc scenario, events int, terminateIt bool) (o outcome, conts int) {
+// parkedNow says the run is PARKED: no worker holds it, it is ready, and its wake time is still well ahead (a sleeping run reads exactly this,
+// the same definition resolveWhenSuspended uses for an await). The harness used to decide "parked" from an event count, and that cannot mean it:
+// a sleep records NO event, so the second event of this scenario is the body's own continue_as_new, recorded only AFTER the sleep ends. The case
+// therefore terminated the run after its body had already continued as new, and failed or passed on a race between the two (cleat#4213, measured:
+// the count reached 2 at 4.9s, 5.2s and 6.0s after the start, past the 4 s sleep, with [defer, continue_as_new] as the two events).
+func parkedNow(db *sql.DB, id string) bool {
+	var n int
+	_ = db.QueryRow(`SELECT count(*) FROM workflow_leases WHERE id = $1 AND status = 'ready' AND assigned_to IS NULL AND next_wake_at > now() + interval '2 seconds'`, id).Scan(&n)
+	return n > 0
+}
+
+// executeParked runs the scenario, waits until `events` events are durable AND the run is parked (parkedNow), and then terminates it. No
+// worker is killed: the fault is the terminate landing on a parked run.
+func executeParked(t *testing.T, env *env, sc scenario, events int, terminateIt bool, claimAfter time.Duration) (o outcome, conts int) {
 	t.Helper()
 	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
 	queue, run := "chaos-q-"+suffix, "chaos-run-"+suffix
@@ -589,12 +609,14 @@ func executeParked(t *testing.T, env *env, sc scenario, events int, terminateIt 
 	startRun(t, env.db, run, scriptInput(run, sc), queue)
 	if terminateIt {
 		deadline := time.Now().Add(runBudget)
-		for eventCount(env.db, run) < events && time.Now().Before(deadline) {
+		for (eventCount(env.db, run) < events || !parkedNow(env.db, run)) && time.Now().Before(deadline) {
 			time.Sleep(50 * time.Millisecond)
 		}
 		o.Events = eventCount(env.db, run)
-		o.Applied = o.Events >= events
-		terminate(t, env.db, run)
+		// Applied is the precondition of the whole case: the run is durable to `events` events AND parked right now. If it is not, the
+		// terminate below would be the race this case used to be, so the caller reports UNMEASURED rather than a verdict.
+		o.Applied = o.Events >= events && parkedNow(env.db, run)
+		terminateClaimableAfter(t, env.db, run, claimAfter)
 	}
 	wantDone := func(s string) bool { return s != "ready" && s != "running" && s != "terminating" }
 	status, msg, result, ok := awaitStatus(env.db, run, runBudget, wantDone)
@@ -609,21 +631,33 @@ func executeParked(t *testing.T, env *env, sc scenario, events int, terminateIt 
 	return o, continuations(env.db, run)
 }
 
+// WHAT THIS CASE MEASURES, AND WHAT IT CANNOT SEE (cleat#4213). It measures the end-to-end outcome of terminating a run that is genuinely
+// parked in a sleep and claimed after the sleep is served: status terminated, the registered cleanup run once, no POST, no continuation. It does
+// NOT detect the removal of the engine's refusal of ContinueAsNew in a defer segment: that was tried (the check deleted, three runs, the
+// mutation confirmed in the tree) and the case stayed green, because cmd/cleat-worker's `if deferPhase { finishDeferPhase }` is applied before
+// the continue_as_new branch, so a defer segment's outcome is applied whatever the body came back as. Two independent layers hold this outcome
+// and the harness sees only their conjunction; the engine-side refusal has to be pinned by an engine test, not by this one.
+//
+// IT USED TO FAIL 2 RUNS IN 4 FOR A REASON THAT WAS NOT THE ENGINE: it decided the run was parked from an event count of 2, but a sleep records
+// no event, so the second event was the body's own continue_as_new, recorded after the 4 s sleep ended. It terminated a run whose body had
+// already continued as new and raced the two. It now waits for the lease to be parked (parkedNow) and claims the terminated run late.
 func TestChaosTerminateWhileParkedBeforeABodyContinueAsNew(t *testing.T) {
 	e := newEnv(t)
 	sc := parkedScenario
 
 	// CONTROL: left alone, the run continues, the cleanup runs once and the continuation's call happens once.
-	ctl, ctlConts := executeParked(t, e, sc, 0, false)
+	ctl, ctlConts := executeParked(t, e, sc, 0, false, 0)
 	cs, _, _, _ := tally(ctl.Requests)
 	if cs["POST"] != 1 || cs["defer_D"] != 1 || ctlConts != 1 {
 		t.Fatalf("CONTROL: the undisturbed run did POST=%d defer_D=%d continuations=%d, want 1/1/1 (status %s: %s)\n%s", cs["POST"], cs["defer_D"], ctlConts, ctl.Status, ctl.ErrMsg, tail(ctl.Log, 2000))
 	}
 
-	// FAULT: terminated while parked in the sleep (defer registered and the sleep recorded: two events).
-	o, conts := executeParked(t, e, sc, 2, true)
+	// FAULT: terminated while parked in the sleep, claimed AFTER the sleep deadline (parkedSleepMs plus a margin). One durable event (the defer
+	// registration: the sleep records none) and the lease parked. Claimed at once, the defer segment would replay the body to the sleep and
+	// suspend there, so the body's ContinueAsNew would never be reached and the refusal under test would decide nothing.
+	o, conts := executeParked(t, e, sc, 1, true, (parkedSleepMs+1000)*time.Millisecond)
 	if !o.Applied {
-		t.Fatalf("UNMEASURED: the run never reached %d durable events (%d)", 2, o.Events)
+		t.Fatalf("UNMEASURED: the run never parked after %d durable event(s) (%d events recorded); a terminate now would race the wake, not test it", 1, o.Events)
 	}
 	s, _, _, _ := tally(o.Requests)
 	var v []string
