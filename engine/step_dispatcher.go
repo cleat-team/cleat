@@ -72,6 +72,8 @@ type stepArgs struct {
 	i1 int64
 	// outPtr and outMaxLen are where a divergence message is written, and where the call's own output goes; zero when it has none.
 	outPtr, outMaxLen uint32
+	// out2Ptr and out2MaxLen are a second buffer for a call that returns two things (an await's delivery: the signal's name and its payload).
+	out2Ptr, out2MaxLen uint32
 }
 
 // stepCtx is what a spec's Decode and Fresh are handed.
@@ -145,6 +147,19 @@ type stepSpec struct {
 	// next call's. (Measured by cleat-review3 on the first version, with two such awaits: a divergence with an Identity, and b's record
 	// consumed by a's step without one.)
 	EndsWithoutFinal bool
+	// MaxPrefix, when above zero, is the most prefix records one run may hold: a prefix record past it is FOREIGN and ends the run (cleat#4152,
+	// W5). An await's run holds at most one, and Identity cannot say so: a polling loop that times out records [await, await, ...] with the
+	// SAME names each time, so by type and identity alone the first call's run swallows the second call's record, and the pair of them reads as
+	// one delivery (measured on the old code by a_await_signals_behaves_as_recorded_before_the_dispatcher_test.go: the first call times out and
+	// the second one pairs). 0 means unlimited, which is a retried call's or SetScope's shape. Needs a Role.
+	MaxPrefix int
+	// ForeignFirst, for a multi-record step, answers a call whose FIRST record belongs to another call, WITHOUT consuming it and without leaving
+	// replay, instead of reporting a divergence. ok false means "not answerable", and the divergence follows as usual. It exists for one
+	// case (cleat#4152, W5): a history written before cleat#4151 recorded nothing for a no-wait poll that timed out, so the record at the
+	// poll's step is the NEXT call's, and the poll's answer was always the timeout (had a signal been found it would have been a record). Dropping
+	// that would turn a resumable history into a divergence, which a migration may not do. It is not called for a record whose Role is not
+	// one of the three (a bug in the spec is always a divergence), and it must not touch the world: it is a pure function of the arguments.
+	ForeignFirst func(a stepArgs) (res int64, ok bool)
 	// Fresh does the work and records, through c.Record, where the call records. It is called only once the dispatcher has decided
 	// fresh work is allowed.
 	Fresh func(c *stepCtx) int64
@@ -153,7 +168,7 @@ type stepSpec struct {
 // stepSpecs lists every spec in the engine. It exists for the dispatcher's tests (step_dispatcher_test.go), which run each property over every
 // spec on it and check the list against the `var x = stepSpec{` declarations in the source, so a spec nobody registered is on no list and is
 // caught. A host call moved onto step adds its spec here in the same change.
-var stepSpecs = []*stepSpec{&createPromiseStep, &resolvePromiseStep, &rejectPromiseStep, &acquireLockStep, &releaseLockStep, &sideEffectStep, &sideEffectRecordedStep, &deferStep, &scheduleCronStep, &deleteCronStep, &listCronsStep}
+var stepSpecs = []*stepSpec{&createPromiseStep, &resolvePromiseStep, &rejectPromiseStep, &acquireLockStep, &releaseLockStep, &sideEffectStep, &sideEffectRecordedStep, &deferStep, &scheduleCronStep, &deleteCronStep, &listCronsStep, &awaitSignalsStep}
 
 // validate says whether a spec is well-formed: it names a replay event, can decode it and can run fresh, and a step that declares itself Pure
 // (and so is never refused in a segment) records nothing.
@@ -171,6 +186,10 @@ func (sp *stepSpec) validate() error {
 		return fmt.Errorf("step spec %q is a multi-record step (it has a Role) and needs exactly a DecodeRun, not a Decode", sp.Name)
 	case sp.Role != nil && sp.Records == recordsNone:
 		return fmt.Errorf("step spec %q is a multi-record step that records nothing: a run is made of recorded events", sp.Name)
+	case sp.ForeignFirst != nil && sp.Role == nil:
+		return fmt.Errorf("step spec %q has a ForeignFirst but no Role: it answers a multi-record step whose first record is another call's", sp.Name)
+	case sp.MaxPrefix < 0 || (sp.MaxPrefix > 0 && sp.Role == nil):
+		return fmt.Errorf("step spec %q has MaxPrefix %d: it bounds the prefix records of a run, so it needs a Role and cannot be negative", sp.Name, sp.MaxPrefix)
 	case sp.EndsWithoutFinal && sp.Identity == nil:
 		return fmt.Errorf("step spec %q has EndsWithoutFinal but no Identity: a run that can end without a final is bounded by Identity, and without one it cannot tell its own records from the next call's", sp.Name)
 	case (sp.Identity == nil) == (sp.NoIdentity == ""):
@@ -263,7 +282,7 @@ func (s *execSession) step(ctx context.Context, m api.Module, sp *stepSpec, args
 	}
 	before := s.stepCount
 	res := sp.Fresh(c)
-	s.checkRecorded(sp, c.recorded, s.stepCount-before)
+	s.checkRecorded(sp, c.recorded, s.stepCount-before, len(c.Prefix) > 0, res == callSuspendSentinel)
 	return res
 }
 
@@ -279,7 +298,7 @@ func (s *execSession) leaveReplay(sp *stepSpec) {
 }
 
 // checkRecorded compares what a step's Fresh recorded with what its spec declared.
-func (s *execSession) checkRecorded(sp *stepSpec, recorded, stepsTaken int) {
+func (s *execSession) checkRecorded(sp *stepSpec, recorded, stepsTaken int, continuedRun, refused bool) {
 	ok := true
 	switch sp.Records {
 	case recordsOne:
@@ -287,7 +306,10 @@ func (s *execSession) checkRecorded(sp *stepSpec, recorded, stepsTaken int) {
 	case recordsNone:
 		ok = recorded == 0
 	case recordsMany:
-		ok = recorded >= 1
+		// A step that CONTINUED a run its history ended inside (c.Prefix) may record nothing new: an await whose record is already there and
+		// that suspends again, or times out at its recorded deadline, has written nothing this time. A Fresh that REFUSED (it returned the
+		// suspend sentinel) records nothing by design: an await's second-await guard and its event-cap stop are refusals inside Fresh.
+		ok = recorded >= 1 || continuedRun || refused
 	}
 	if !ok {
 		s.specViolation(sp, fmt.Sprintf("declares shape %d but recorded %d event(s)", sp.Records, recorded))
