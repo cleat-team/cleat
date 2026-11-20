@@ -82,3 +82,15 @@ func TestCSharpDeferRegisteredBeforeASleepDoesNotRunAtTheSuspension(t *testing.T
 		t.Fatalf("the resumed run made calls %v, want [svc/after svc/cleanup]: before (replayed from history, not repeated), the cleanup last and once", got)
 	}
 }
+
+// cleat#4197: the other side of the guard above. continue-as-new ENDS the run, so the cleanup registered before it runs exactly once, at that
+// suspension, as it does for a Go guest. With only the defer-phase guard it never ran: the SDK's continuation does not drain by itself.
+func TestCSharpDeferRegisteredBeforeContinueAsNewRunsExactlyOnce(t *testing.T) {
+	res := runConformanceEntry(t, "defer_then_continue_as_new", entryRun{WorkflowID: "wf-defer-can"})
+	if res.Err != nil || res.Suspended == nil || res.Suspended.Reason != "continue_as_new" {
+		t.Fatalf("the run should suspend for continue_as_new: err=%v suspended=%+v", res.Err, res.Suspended)
+	}
+	if got := opsOf(res); len(got) != 2 || got[0] != "svc/before" || got[1] != "svc/cleanup" {
+		t.Fatalf("the run made calls %v, want [svc/before svc/cleanup]: the cleanup runs exactly once when the run continues as new", got)
+	}
+}

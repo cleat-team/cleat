@@ -173,3 +173,46 @@ func TestPythonDeferRegisteredBeforeASleepDoesNotRunAtTheSuspension(t *testing.T
 		t.Fatalf("the resumed run made calls %v, want the call after the sleep, then the cleanup once", ops)
 	}
 }
+
+// cleat#4197: continue_as_new ENDS the run, so a registered cleanup belongs to it and runs exactly once -- the other side of the guard
+// TestPythonDeferRegisteredBeforeASleepDoesNotRunAtTheSuspension pins. The workflow raises SuspendSentinel after continue_as_new, as the SDK
+// docstring says to; a component guest does not drain on that path by itself, so with only the defer-phase guard the cleanup never ran at all
+// (measured by cleat-review on the real component path), where a Go guest runs it once.
+func TestPythonDeferRegisteredBeforeContinueAsNewRunsExactlyOnce(t *testing.T) {
+	if testing.Short() {
+		t.Skip("compiles a Python workflow with componentize-py")
+	}
+	h := newPythonWasmTestHelper(t)
+	if !h.toolsAvailable() {
+		if toolchainRequired("python") {
+			t.Fatalf("Python WASM prerequisites not met, but %s declares python: %s", requireToolchainEnv, h.missingTools())
+		}
+		t.Skip("Python WASM prerequisites not met: " + h.missingTools())
+	}
+	wasmBytes, err := os.ReadFile(h.compileWorkflow(t, "defer_then_continue_as_new_workflow.py", "defer_then_continue_as_new"))
+	if err != nil {
+		t.Fatalf("read Python WASM: %v", err)
+	}
+	ctx := context.Background()
+	rt, err := NewRuntime(ctx, 0, 0)
+	if err != nil {
+		t.Fatalf("NewRuntime: %v", err)
+	}
+	t.Cleanup(func() { rt.Close(ctx) })
+	wt, err := NewWasmtimeBackend(ctx)
+	if err != nil {
+		t.Fatalf("NewWasmtimeBackend: %v", err)
+	}
+	t.Cleanup(func() { wt.Close(ctx) })
+
+	caller := &mockCaller{}
+	eng := NewEngine(rt, caller, WithBackends(WasmtimeLanguages, wt), WithWorkflowID("wf-py-defer-can"))
+	_, _, susp, _, _, err := eng.Execute(ctx, wasmBytes, "run", []byte(`{}`))
+	if err != nil || susp == nil || susp.Reason != "continue_as_new" {
+		t.Fatalf("the run should suspend for continue_as_new: err=%v suspended=%v", err, susp)
+	}
+	ops := operationsCalled(caller)
+	if len(ops) != 2 || ops[0] != "before" || ops[1] != "cleanup" {
+		t.Fatalf("the run made calls %v, want [before cleanup]: the cleanup must run exactly once when the run continues as new", ops)
+	}
+}

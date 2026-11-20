@@ -36,4 +36,17 @@ public static class GroupDefer
         h.Call("svc", "after", "{}");
         return new JsonObject { ["ok"] = true };
     }
+
+    /// <summary>
+    /// A defer, a call, then continue-as-new. That ENDS the run, so the cleanup belongs to it and must run exactly once (cleat#4197). The SDK
+    /// turns the continuation into a suspension that does not drain by itself, so the host's drain is the only thing that runs it.
+    /// </summary>
+    [CleatEntry("defer_then_continue_as_new")]
+    public static JsonNode DeferThenContinueAsNew(HostCalls h, JsonElement input)
+    {
+        h.Defer("cleanup", () => { h.Call("svc", "cleanup", "{}"); });
+        h.Call("svc", "before", "{}");
+        h.ContinueAsNew("{}");
+        return new JsonObject { ["unreachable"] = true };
+    }
 }
