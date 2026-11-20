@@ -124,8 +124,8 @@ type Engine struct {
 
 	deferPassBudget time.Duration // total for one runDefers pass; see WithDeferPassBudget
 	deferPhase      bool          // this execution is a defer segment; see WithDeferPhase
-	// wakeSource resumes a parked run. nil, which is every production engine today, means no wait parks: each suspends. Assigned only by tests
-	// until the parking mechanism exists; see parkOrSuspend (park.go).
+	// wakeSource resumes a parked run. nil means no wait parks: each suspends, which is every engine unless the worker has turned residency on and
+	// handed this run a handle (WithResidency, resident.go) and every engine in a test that does not assign one; see parkOrSuspend (park.go).
 	wakeSource           wakeSource
 	stopAtLastStoppable  bool         // a defer segment over a killed run; see WithStopAtLastStoppable
 	killedWithDefersOwed atomic.Bool  // a component guest was stopped before its wrapper ran its defers; see KilledWithDefersOwed
@@ -444,6 +444,16 @@ func WithCanStartNewWork(fn func() bool) EngineOption {
 // correct for callers with no worker to shut down.
 func WithShutdownSignal(ch <-chan struct{}) EngineOption {
 	return func(e *Engine) { e.shutdownRequested = ch }
+}
+
+// WithResidency gives this run the worker's resident set as its wake source, so a wait that is due soon may be held on the worker instead of
+// suspended (cleat#4162). nil, which is what a set that is not enabled hands out, changes nothing: every wait suspends as it always has.
+func WithResidency(r *ResidentRun) EngineOption {
+	return func(e *Engine) {
+		if r != nil {
+			e.wakeSource = r
+		}
+	}
 }
 
 // WithHardStopSignal wires a worker's hard-stop context into the engine so an

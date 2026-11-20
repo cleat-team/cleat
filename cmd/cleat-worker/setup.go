@@ -2622,7 +2622,10 @@ type Worker struct {
 	versionGCMinVersions int
 	versionGCMaxAge      time.Duration
 
-	memoryController                 *MemoryController
+	memoryController *MemoryController
+	// resident holds a run through a wait that is due soon instead of suspending it (cleat#4162). It is built for every worker and is a no-op unless
+	// --resident-max-runs is above zero, so the drain and pressure paths below call it without asking whether it is on.
+	resident                         *engine.ResidentSet
 	maxRetries                       int
 	memorySampleRetention            int
 	retentionDays                    int
@@ -2836,6 +2839,8 @@ const shutdownTailDuration = 2 * time.Second
 // call.
 func (w *Worker) gracefulShutdown(grace time.Duration, force <-chan struct{}) string {
 	w.draining.Store(true)
+	// A held run is in flight, so a drain that waited for it would wait for its wake. Send every one back and refuse any that follows (cleat#4162).
+	w.resident.Drain()
 	deadline := time.NewTimer(grace)
 	defer deadline.Stop()
 	tick := time.NewTicker(50 * time.Millisecond)
@@ -3290,6 +3295,8 @@ func (w *Worker) dispatchLoop() {
 				w.draining.Store(true)
 				w.logger.InfoContext(w.ctx, "shutdown signal received; draining in-flight workflows", "worker_id", w.id)
 			}
+			// Idempotent, and here as well as in gracefulShutdown because a cordon (POST /api/admin/drain) drains without it (cleat#2285).
+			w.resident.Drain()
 			inflight := 0
 			w.inflight.Range(func(_, _ any) bool { inflight++; return true })
 			if inflight == 0 {
@@ -3326,6 +3333,11 @@ func (w *Worker) dispatchLoop() {
 		w.Metrics.RecordConcurrencyLimit(w.ctx, int64(state.DynamicConcurrency))
 		w.Metrics.SetMemoryPressure(w.ctx, state.Pressure)
 		w.Metrics.SetScalingPressure(w.ctx, state.ScalingPressure)
+		// At the memory HARD limit a held run is the cheapest thing to give back: sending it back returns the stop the host would have returned anyway.
+		// Between the soft and hard limit nothing new is held (the set asks the controller) but what is held stays. A no-op when residency is off.
+		if state.Pressure >= 1.0 {
+			w.resident.EvictAll(engine.ResidentEvictedPressure)
+		}
 		for key, bytes := range w.memoryController.DefEstimates() {
 			w.Metrics.RecordWorkflowMemoryEstimate(w.ctx, key.tenantID, key.defName, bytes)
 		}
@@ -4235,6 +4247,15 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 		// reads it, because a static reachability test passes with this block
 		// present and never run (cleat-review, cleat#3404).
 		w.logger.Debug("cleat_fetch is enabled for this execution", "workflow_id", wf.ID)
+	}
+	// Residency: only when it is on, so a worker that has not enabled it does not even read the guest's metadata for it. The handle carries what a wait
+	// is not told (which run, which language, how long its history is), and nil, which is what an off set hands out, changes nothing.
+	if w.resident.Enabled() {
+		engineOpts = append(engineOpts, engine.WithResidency(w.resident.ForRun(engine.ResidentRunInfo{
+			WorkflowID: wf.ID,
+			Language:   wasm.DetectLanguage(wasmBytes),
+			EventCount: len(history),
+		})))
 	}
 	eng := engine.NewEngine(nil, caller, engineOpts...)
 	eng.Metrics = w.Metrics

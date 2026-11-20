@@ -171,6 +171,18 @@ var (
 	memoryHardLimit       = flag.Float64("memory-hard-limit", 0.95, "Memory hard limit fraction 0.0-1.0 (reject API workflows)")
 	memoryCheckInterval   = flag.Duration("memory-check-interval", 2*time.Second, "Interval between memory readings")
 	memorySampleRetention = flag.Int("memory-sample-retention", 1000, "Max samples per workflow definition")
+
+	// Residency (cleat#4162): hold a run on this worker through a wait that is due soon, instead of suspending it and replaying it later. OFF unless
+	// --resident-max-runs is above zero, and a refusal is always the safe answer: the wait suspends exactly as it always has. The measurements behind the
+	// defaults are in docs/design/resident-suspended-runs.md; they are for MINIMAL guests and the multiplier, floor and cap are not measured at all
+	// (tuning them on real workflows is cleat#4187), so the defaults are deliberately conservative.
+	residentMaxRuns          = flag.Int("resident-max-runs", 0, "Most runs this worker holds in memory through a wait that is due soon, instead of suspending them. 0 (the default) turns residency off. A held run keeps its instance and one OS thread, so keep this small. Only Go guests are held, and only durable sleeps so far. EXPERIMENTAL until held time is excluded from --wasm-wall-clock-ceiling and --max-workflow-duration (the design says it still counts against both; not yet verified): keep --resident-window-cap well below them.")
+	residentMemoryBudgetMB   = flag.Int("resident-memory-budget-mb", 0, "Memory in MB the held runs may add up to, charged at a measured per-language figure (Go: 24 MiB, rounded up from a measured 19.6 MiB after churn). 0 = --resident-max-runs times the dearest language. --memory-soft-limit is a second guard: nothing is held while the worker is over it.")
+	residentWindowFloor      = flag.Duration("resident-window-floor", 10*time.Second, "The shortest a run may be held for: a wait due within this is always eligible. UNMEASURED: the owner's starting point.")
+	residentWindowCap        = flag.Duration("resident-window-cap", 5*time.Minute, "The longest a run may be held for: a wait due later than this is never held. Also bounded by --wasm-wall-clock-ceiling. UNMEASURED: the owner's starting point.")
+	residentReplayMultiplier = flag.Float64("resident-replay-multiplier", 10, "A wait is held if it is due within this many times the estimated cost of replaying the run, clamped to the floor and cap. UNMEASURED: the owner's starting point; with the default per-event cost of 0 the window is the floor for every run.")
+	residentReplayFixed      = flag.Duration("resident-replay-fixed", 500*time.Millisecond, "The fixed part of the estimated cost of replaying a run (measured 0.44 to 0.67 s per claim for a minimal guest).")
+	residentReplayPerEvent   = flag.Duration("resident-replay-per-event", 0, "The per-recorded-event part of the estimated cost of replaying a run. UNMEASURED, so 0: until it is measured the window does not grow with a run's history.")
 	// The help text used to read "(default: true when --api-addr is set)",
 	// which describes when auth is APPLIED and reads as a condition on the
 	// DEFAULT. It is not one: the value is true whether or not an API is
