@@ -21,8 +21,12 @@ func (s *execSession) CreatePromise(ctx context.Context, m api.Module, name stri
 
 // settlementIdentity is the identity check of resolve_promise and reject_promise: the record must name the promise the workflow is settling,
 // and when it carries the cleat#4079 Service/Op discriminator it must be the settlement of this kind. A record WITHOUT the discriminator is
-// accepted: a history written before cleat#4079 has none, and so does the record await_promise writes for a promise that was already
-// settled, which replay has always taken by type (pinned by the replay_by_type_alone characterization row).
+// accepted, and there are three sources of such a record (cleat-review3, read in the code): a history written before cleat#4079; the record
+// await_promise writes for a promise that was already settled; and the typed-event conversion in events.go, whose PromiseResolvedEvent and
+// PromiseRejectedEvent keep the promise id and the result or error and drop Service and Op. Pinned by the replay_by_type_alone row.
+//
+// What this cannot catch, and no rule can: a resolve_promise(P) that meets an await's record for the same P. The two records are the same
+// bytes in the history format, so that is a limit of the format and not of the check.
 func settlementIdentity(promiseID string, rec *EventRecord, op string) string {
 	if rec.PromiseID != promiseID {
 		return fmt.Sprintf("promise %q, recorded %q", promiseID, rec.PromiseID)
@@ -385,9 +389,12 @@ func (s *execSession) ResolvePromise(ctx context.Context, m api.Module, promiseI
 	return s.step(ctx, m, &resolvePromiseStep, stepArgs{s1: promiseID, s2: value})
 }
 
-// resolvePromiseStep is ResolvePromise as a step (cleat#4152). Replay matches by event TYPE alone, as it always did: a promise_resolved
-// that carries no Service/Op (what AwaitPromise records for a promise that was already settled) is accepted here, which a characterization
-// row keeps visible (resolve_promise/replay_by_type_alone). The Service/Op discriminator is the stop point's business, not replay's (cleat#4079).
+// resolvePromiseStep is ResolvePromise as a step (cleat#4152). Before the identity check (cleat#4211) its replay matched by event TYPE alone,
+// so a record naming ANOTHER promise was accepted, consumed and answered with success; it now compares the promise id, and the Service/Op
+// discriminator when the record carries one (settlementIdentity). A promise_resolved that carries no Service/Op is still accepted for a
+// matching id, which a characterization row keeps visible (resolve_promise/replay_by_type_alone). The discriminator tells a settlement the
+// workflow made from the one an await recorded for an already-settled promise; the stop point reads it (cleat#4079), and replay does not
+// insist on it.
 //
 // The refusal the dispatcher applies: a defer segment's body must not settle a promise, that is an effect another run may be waiting on, and
 // a segment exists to run cleanup, not to make new calls (cleat#4079, the same refusal DeleteCron got in cleat#4083). It is decided before
@@ -442,7 +449,8 @@ func (s *execSession) RejectPromise(ctx context.Context, m api.Module, promiseID
 }
 
 // rejectPromiseStep is RejectPromise as a step (cleat#4152). Refused in a defer segment's body, for the reason resolvePromiseStep gives;
-// replay matches by event type alone, as it always did.
+// its replay compares the promise id and the Service/Op when present, as resolvePromiseStep does, and before cleat#4211 matched by event
+// type alone.
 var rejectPromiseStep = stepSpec{
 	Name:    "reject_promise",
 	Effect:  effectEffect,
