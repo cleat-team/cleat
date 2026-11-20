@@ -674,6 +674,14 @@ func (s *execSession) freshCallWithRetry(ctx context.Context, m api.Module,
 	// bound on how many times a side effect may be attempted, and a crash is
 	// not consent to exceed it.
 	for attempt := attemptsSpent + 1; attempt <= maxAttempts; attempt++ {
+		// Every attempt after the first is new work that goes on top of whatever the loop has recorded so far. A failed attempt's event is written
+		// BEFORE its backoff, and a refused write (cleat#4160) marks the session stopped, but that mark is only read at a host call's entry, and this
+		// loop makes several service attempts inside ONE host call. Without this check the loop performed the next attempt for real, reported it to
+		// the guest, and left no trace of it in event_history, so a reclaim performed it again (cleat#4210, found by the fault-injection harness).
+		// The first attempt was checked at the call's entry above; the backoff's own select already returns the stop on shutdown.
+		if attempt > attemptsSpent+1 && s.stopBeforeNewWork() {
+			return callSuspendSentinel
+		}
 		resp, callErr := s.callService(ctx, service, operation, requestJSON, retryStep)
 
 		if callErr == nil {
