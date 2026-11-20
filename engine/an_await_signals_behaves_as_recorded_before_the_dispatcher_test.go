@@ -32,6 +32,11 @@ func (w *awaitWorld) DeliverSignal(context.Context, string, string, string) erro
 func (w *awaitWorld) PollSignal(_ context.Context, _ string, name string) (SignalDelivery, bool, error) {
 	w.polls = append(w.polls, name)
 	if w.pollErr != nil {
+		// An error that arrives WITH a delivery: the call reads err != nil as "nothing found" and must not hand it out. A fake that returned
+		// found=false on error could not tell that rule from its absence (cleat-review3's condition on the first version of this table).
+		if ds := w.deliveries[name]; len(ds) > 0 {
+			return ds[0], true, w.pollErr
+		}
 		return SignalDelivery{}, false, w.pollErr
 	}
 	if ds := w.deliveries[name]; len(ds) > 0 {
@@ -74,6 +79,9 @@ func evTypes(h []EventRecord, from int) []EventType {
 func TestAnAwaitSignalsBehavesAsRecordedBeforeTheDispatcher(t *testing.T) {
 	const names = `["a","b"]`
 	longPayload := strings.Repeat("x", 300)
+	longName := strings.Repeat("n", 40)
+	shortName := longName[:10] // what a 10-byte name buffer receives, with the truncation reported alongside it
+	longNames := `["` + longName + `"]`
 	await := func(ts, timeoutMs int64) EventRecord {
 		return EventRecord{Step: 0, EventType: EventTypeAwaitSignals, SignalNames: names, TimeoutMs: timeoutMs, TimestampMs: ts}
 	}
@@ -98,6 +106,8 @@ func TestAnAwaitSignalsBehavesAsRecordedBeforeTheDispatcher(t *testing.T) {
 		mod       func(s *execSession)
 		timeoutMs int64
 		payMax    uint32
+		nameMax   uint32
+		sigNames  string // the names the guest asks about; default ["a","b"]
 		want      awaitWant
 	}{
 		// ---- replay ----
@@ -137,7 +147,7 @@ func TestAnAwaitSignalsBehavesAsRecordedBeforeTheDispatcher(t *testing.T) {
 			want: awaitWant{name: "b", payl: "pb", events: []EventType{EventTypeSignalReceived}, polls: []string{"a", "b"}, consumed: []int64{2}, step: 1}},
 		{name: "fresh: nothing waiting records the await and suspends until now plus the timeout", timeoutMs: 60000,
 			want: awaitWant{sentinel: true, events: []EventType{EventTypeAwaitSignals}, polls: []string{"a", "b"}, reason: reasonFresh, until: awaitT + 60000, step: 1}},
-		{name: "fresh: a store error is read as nothing found", pollErr: fmt.Errorf("store down"), timeoutMs: 60000,
+		{name: "fresh: a store error is read as nothing found, even when it arrives with a delivery", pollErr: fmt.Errorf("store down"), deliver: map[string][]SignalDelivery{"a": {{ID: 1, Payload: "pa"}}}, timeoutMs: 60000,
 			want: awaitWant{sentinel: true, events: []EventType{EventTypeAwaitSignals}, polls: []string{"a", "b"}, reason: reasonFresh, until: awaitT + 60000, step: 1}},
 		{name: "fresh: no signal store records the await and suspends without polling", noStore: true, timeoutMs: 60000,
 			want: awaitWant{sentinel: true, events: []EventType{EventTypeAwaitSignals}, reason: reasonFresh, until: awaitT + 60000, step: 1}},
@@ -152,6 +162,32 @@ func TestAnAwaitSignalsBehavesAsRecordedBeforeTheDispatcher(t *testing.T) {
 		{name: "fresh: a worker that is shutting down refuses", opts: []EngineOption{WithShutdownSignal(closed)}, timeoutMs: 60000, want: awaitWant{sentinel: true}},
 		{name: "fresh: a delivery whose payload does not fit reports the truncation", deliver: map[string][]SignalDelivery{"a": {{ID: 1, Payload: longPayload}}}, timeoutMs: 60000, payMax: 200,
 			want: awaitWant{errNonZero: true, name: "a", events: []EventType{EventTypeSignalReceived}, polls: []string{"a"}, consumed: []int64{1}, step: 1}},
+		// ---- added on cleat-review3's condition: rows no earlier mutation reached ----
+		{name: "replay: a store error on the frontier poll is read as nothing found, even when it arrives with a delivery",
+			pollErr: fmt.Errorf("store down"), deliver: map[string][]SignalDelivery{"a": {{ID: 7, Payload: "pa"}}},
+			hist: []EventRecord{await(awaitT-10_000, 60000)}, timeoutMs: 60000,
+			want: awaitWant{sentinel: true, polls: []string{"a", "b"}, reason: reasonReplayed(60000), until: awaitT + 50_000, step: 1}},
+		{name: "replay: the frontier with no signal store at all suspends from the recorded deadline without polling",
+			noStore: true, hist: []EventRecord{await(awaitT-10_000, 60000)}, timeoutMs: 60000,
+			want: awaitWant{sentinel: true, reason: reasonReplayed(60000), until: awaitT + 50_000, step: 1}},
+		{name: "replay: an await then a delivery whose payload does not fit reports the truncation",
+			hist: []EventRecord{await(awaitT-1000, 60000), delivered(1, "b", longPayload)}, timeoutMs: 60000, payMax: 200,
+			want: awaitWant{errNonZero: true, name: "b", step: 2, replaying: true}},
+		{name: "replay: the frontier poll's delivery whose payload does not fit reports the truncation",
+			deliver: map[string][]SignalDelivery{"a": {{ID: 7, Payload: longPayload}}}, hist: []EventRecord{await(awaitT-1000, 60000)}, timeoutMs: 60000, payMax: 200,
+			want: awaitWant{errNonZero: true, name: "a", events: []EventType{EventTypeSignalReceived}, polls: []string{"a"}, consumed: []int64{7}, step: 2}},
+		{name: "replay: a delivery with no await before it: a delivery whose NAME does not fit reports the truncation",
+			hist: []EventRecord{delivered(0, longName, "pa")}, timeoutMs: 60000, nameMax: 10,
+			want: awaitWant{errNonZero: true, name: shortName, step: 1, replaying: true}},
+		{name: "replay: an await then a delivery: a delivery whose NAME does not fit reports the truncation",
+			hist: []EventRecord{await(awaitT-1000, 60000), delivered(1, longName, "pb")}, timeoutMs: 60000, nameMax: 10,
+			want: awaitWant{errNonZero: true, name: shortName, step: 2, replaying: true}},
+		{name: "replay: the frontier poll: a delivery whose NAME does not fit reports the truncation",
+			deliver: map[string][]SignalDelivery{longName: {{ID: 7, Payload: "pa"}}}, hist: []EventRecord{{Step: 0, EventType: EventTypeAwaitSignals, SignalNames: longNames, TimeoutMs: 60000, TimestampMs: awaitT - 1000}}, timeoutMs: 60000, nameMax: 10,
+			want: awaitWant{errNonZero: true, name: shortName, events: []EventType{EventTypeSignalReceived}, polls: []string{longName}, consumed: []int64{7}, step: 2}},
+		{name: "fresh: a delivery whose NAME does not fit reports the truncation",
+			deliver: map[string][]SignalDelivery{longName: {{ID: 1, Payload: "pa"}}}, sigNames: longNames, timeoutMs: 60000, nameMax: 10,
+			want: awaitWant{errNonZero: true, name: shortName, events: []EventType{EventTypeSignalReceived}, polls: []string{longName}, consumed: []int64{1}, step: 1}},
 		{name: "fresh: arriving at the frontier of a replay leaves replay and behaves as fresh", hist: []EventRecord{{Step: 0, EventType: fakeEvent}}, stepCount: 1, timeoutMs: 60000,
 			want: awaitWant{sentinel: true, events: []EventType{EventTypeAwaitSignals}, polls: []string{"a", "b"}, reason: reasonFresh, until: awaitT + 60000, step: 2}},
 	}
@@ -178,7 +214,15 @@ func TestAnAwaitSignalsBehavesAsRecordedBeforeTheDispatcher(t *testing.T) {
 			if payMax == 0 {
 				payMax = 200
 			}
-			got := s.DurableAwaitSignals(contextWithRawMemBuf(context.Background(), buf), nil, `["a","b"]`, r.timeoutMs, 0, 200, 256, payMax)
+			sigNames := r.sigNames
+			if sigNames == "" {
+				sigNames = names
+			}
+			nameMax := r.nameMax
+			if nameMax == 0 {
+				nameMax = 200
+			}
+			got := s.DurableAwaitSignals(contextWithRawMemBuf(context.Background(), buf), nil, sigNames, r.timeoutMs, 0, nameMax, 256, payMax)
 
 			nameLen, payLen, timedOut, errCode := decodeAwaitSignalsResultGuest(got)
 			w2 := r.want
