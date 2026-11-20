@@ -27,10 +27,13 @@ current and committing new bytes is not the fix.** The harness never reads these
 | `engine/a_component_is_compiled_once_test.go` (`TestTheCheckedInPythonComponentIsCompiledOnce`) | a real 19 MB component to compile; the call is *expected* to fail at link time, and the test asserts the compile count and nothing the guest does |
 | `engine/the_compiled_size_estimate_still_holds_test.go` | the file's size and compiled-size ratio |
 | `python-sdk/tests/test_stamp_metadata.py` | a real component to stamp and read metadata back from |
+| `wasm/component_header_test.go` (`TestReadWriteMetadataRoundTripsOnARealComponentBinary`, constant `componentArtifact`) | a real componentize-py component: it asserts the Component Model header and a metadata round trip, and never instantiates it. It depends on the file's exact BYTES (its comment pins the header version and section count), which is one more reason a regenerated copy is not a drop-in |
 | `engine/a_checked_in_python_component_that_cannot_link_says_why_test.go` | the link failure above |
 
 `call_all_plugins.wasm.component.wasm` is byte-identical to `call_all_plugins.wasm` (the build's own backup copy) and is read by no test; whether to delete
 the duplicate is open on cleat#4260.
+
+**After refreshing or editing the fixture, run these tests with `-count=1`.** They read it through `..`, outside the package directory, and `go test` caches on files opened INSIDE the package directory, so a cached `ok` after a change says nothing about the new bytes (the tell is the word `(cached)` where a duration should be).
 
 To run a current build of this workflow, build it: `cleat build --target python --entry plugin_harness_workflow.py:call_all_plugins -o <dir>`
 (needs `componentize-py`; the `cleat-py-toolchain` image has it).
