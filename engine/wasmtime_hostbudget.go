@@ -92,6 +92,15 @@ func (h *hostBudget) guestRemaining() time.Duration {
 	return h.remaining
 }
 
+// restart sets the guest's remaining budget to d. Like grant it is for use from INSIDE a host function, where the guest is not running; leaveHost re-arms the
+// epoch deadline from it. Used when a held wait wakes and the execution's limits start again (execution_limits.go).
+func (h *hostBudget) restart(d time.Duration) {
+	if h == nil {
+		return
+	}
+	h.remaining = d
+}
+
 // grant adds d to the guest's remaining budget. Used when the soft kill has decided to stop the
 // guest: the hard bound must not fire while the exception unwinds (cleat#3922).
 func (h *hostBudget) grant(d time.Duration) {

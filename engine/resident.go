@@ -67,11 +67,12 @@ type ResidencyConfig struct {
 	// ReplayFixed and ReplayPerEvent estimate what replaying the run would cost: fixed start-up plus a cost per recorded event. The first is
 	// measured (0.44 to 0.67 s); the second is not and defaults to zero.
 	ReplayFixed, ReplayPerEvent time.Duration
-	// DeadlineMargin is how much room a wait must leave before the run's own context ends (the wall-clock ceiling, the workflow deadline): a wait due
-	// later than deadline - margin is refused. The margin is for the late timer and for the run to come back as a suspension before the limit; it is NOT
-	// for the work after the wake, which admission cannot see (that is the known limit in docs/reference/worker-config.md). Measured on real wasmtime, a
-	// MINIMAL guest, 120 samples: a hold ended by a cancel was back as a suspension in a median of 0.3 ms, p90 about 1 ms and at most 9 ms (6.8 ms under
-	// -race) on a loaded machine, so 100 ms is about ten times the worst sample. It is not measured for a guest with real defers or a large history.
+	// DeadlineMargin is how much room a wait must leave before a deadline that CANNOT be paused: a wait due at or after (deadline - margin) is refused. The run's own
+	// limits (the workflow deadline and the ceiling) CAN be paused and are, for the hold (execution_limits.go), so this applies only to a deadline on a context the
+	// caller supplied. The margin is for the late timer and for the run to come back as a suspension before that deadline; it is not for the work after the wake,
+	// which restarts the run's own limits. Measured on real wasmtime, a MINIMAL guest, 120 samples: a hold ended by a cancel was back as a suspension in a median of
+	// 0.3 ms, p90 about 1 ms and at most 9 ms (6.8 ms under -race) on a loaded machine, so 100 ms is about ten times the worst sample. It is not measured for a guest
+	// with real defers or a large history.
 	DeadlineMargin time.Duration
 	// InstanceBytes is the per-language charge; nil means defaultResidentInstanceBytes.
 	InstanceBytes map[string]uint64
@@ -273,16 +274,23 @@ func (r *ResidentRun) Wait(ctx context.Context, req parkRequest) parkOutcome {
 	if remaining > s.cfg.window(r.info.EventCount) {
 		return refuse(residentRefusedWindow)
 	}
-	// The run's own context carries the wall-clock ceiling and the workflow deadline. A hold that outlives it is worse than a suspension: the sleep
-	// still suspends, but the executor then sees the expired context and FAILS the run with a timeout (executor.go, the DeadlineExceeded branch),
-	// where the same sleep without residency would have suspended at once. So a run too close to its limit to see its wake is not held.
-	// Compared as absolute times in the one wall-clock domain: DeadlineMs is unix ms and ctx.Deadline() is a wall-clock instant. A wait due at or
-	// after (deadline - DeadlineMargin) is refused, so only a deadline strictly later than wake + margin leaves room.
-	if dl, ok := ctx.Deadline(); ok && !dl.After(time.UnixMilli(req.DeadlineMs).Add(s.cfg.DeadlineMargin)) {
-		return refuse(residentRefusedDeadline)
-	}
 	if s.cfg.Pressure != nil && s.cfg.Pressure() > 0 {
 		return refuse(residentRefusedPressure)
+	}
+
+	// The run's own wall-clock limits (the workflow deadline and the ceiling) are PAUSED for the hold and restarted when it ends, as a suspension and its
+	// resume would give the next segment fresh ones (execution_limits.go). A limit that has already ended, or whose timer is firing, cannot be paused and the
+	// run is not held: the expiry is on its way, and a hold would end in "execution timed out" where a suspension would not.
+	resume, ok := pauseExecutionLimits(ctx)
+	if !ok {
+		return refuse(residentRefusedDeadline)
+	}
+	// What is left in ctx.Deadline() now is a deadline that CANNOT be paused (a caller's own context). A wait due within DeadlineMargin of it is refused: the
+	// hold would end in the same timeout. Compared as absolute wall-clock instants; one due at or after (deadline - margin) is refused, so only a deadline
+	// strictly later than wake + margin leaves the run room to come back as a suspension. The margin is measured (see DeadlineMargin).
+	if dl, ok := ctx.Deadline(); ok && !dl.After(time.UnixMilli(req.DeadlineMs).Add(s.cfg.DeadlineMargin)) {
+		resume(false)
+		return refuse(residentRefusedDeadline)
 	}
 
 	slot := &residentSlot{bytes: cost, evict: make(chan struct{})}
@@ -290,12 +298,15 @@ func (r *ResidentRun) Wait(ctx context.Context, req parkRequest) parkOutcome {
 	switch {
 	case s.closed:
 		s.mu.Unlock()
+		resume(false)
 		return refuse(residentRefusedDraining)
 	case len(s.parked) >= s.cfg.MaxRuns:
 		s.mu.Unlock()
+		resume(false)
 		return refuse(residentRefusedCount)
 	case s.bytes+cost > s.cfg.MemoryBudgetBytes:
 		s.mu.Unlock()
+		resume(false)
 		return refuse(residentRefusedMemory)
 	}
 	s.parked[slot] = struct{}{}
@@ -321,6 +332,9 @@ func (r *ResidentRun) Wait(ctx context.Context, req parkRequest) parkOutcome {
 	s.bytes -= cost
 	reason := slot.reason
 	s.mu.Unlock()
+	// However the hold ended, the segment it was in is over: restart the limits (and the fence), so that the work after the wake, or the unwind of a run that
+	// was sent back, has a segment's worth of time and not what was left when the run was paused.
+	resume(true)
 	if m := s.cfg.Metrics; m != nil {
 		m.AddResidentRuns(ctx, -1)
 		m.RecordResidentPark(ctx, req.Kind.String(), ended)

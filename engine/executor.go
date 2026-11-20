@@ -307,6 +307,8 @@ func (e *Engine) executeWithBackend(
 	execCtx, stepCancel := context.WithCancel(ctx)
 	session.stepCancel = stepCancel
 	execCtx = withHandler(execCtx, session)
+	// The registry the restartable limits below put themselves in, so a run that is held can pause them and a wake can restart them (execution_limits.go).
+	execCtx = withExecutionLimits(execCtx, &executionLimits{})
 
 	execCtx, workflowSpan := telemetry.WorkflowSpan(execCtx,
 		e.workflowID, e.defName, e.defVersion, e.tenantID, e.traceID)
@@ -327,7 +329,7 @@ func (e *Engine) executeWithBackend(
 	// and at the same moment.
 	if ceiling := e.wallClockCeiling(execCtx); ceiling > 0 {
 		var cancel context.CancelFunc
-		execCtx, cancel = context.WithTimeout(execCtx, ceiling)
+		execCtx, cancel = withRestartableTimeout(execCtx, ceiling)
 		defer cancel()
 	}
 	// The limits are all on execCtx now. A wait that holds the run needs to see them (see execSession.execCtx), and a host call does not get this context.
@@ -636,6 +638,8 @@ func (e *Engine) executeCompiled(ctx context.Context, compiled wazero.CompiledMo
 	execCtx, stepCancel := context.WithCancel(ctx)
 	session.stepCancel = stepCancel
 	execCtx = withHandler(execCtx, session)
+	// The registry the restartable limits below put themselves in, so a run that is held can pause them and a wake can restart them (execution_limits.go).
+	execCtx = withExecutionLimits(execCtx, &executionLimits{})
 
 	execCtx, workflowSpan := telemetry.WorkflowSpan(execCtx,
 		e.workflowID, e.defName, e.defVersion, e.tenantID, e.traceID)
@@ -656,7 +660,7 @@ func (e *Engine) executeCompiled(ctx context.Context, compiled wazero.CompiledMo
 	// and at the same moment.
 	if ceiling := e.wallClockCeiling(execCtx); ceiling > 0 {
 		var cancel context.CancelFunc
-		execCtx, cancel = context.WithTimeout(execCtx, ceiling)
+		execCtx, cancel = withRestartableTimeout(execCtx, ceiling)
 		defer cancel()
 	}
 	// The limits are all on execCtx now. A wait that holds the run needs to see them (see execSession.execCtx), and a host call does not get this context.
@@ -1102,7 +1106,7 @@ func (e *Engine) invokePerDeferExports(ctx context.Context, mod api.Module, defe
 // caller can defer unconditionally.
 func (e *Engine) withResolvedWorkflowDeadline(ctx context.Context) (context.Context, context.CancelFunc) {
 	if limit := e.maxWorkflowDuration(ctx); limit > 0 {
-		return context.WithTimeout(ctx, limit)
+		return withRestartableTimeout(ctx, limit)
 	}
 	return ctx, func() {}
 }
