@@ -1744,7 +1744,8 @@ would have been apart.
 direct edit and shipped code with no fragment. A change with nothing to tell users puts
 `no-changelog: <reason>` on a line of its own in the PR body; correcting an existing entry puts
 `changelog-edit: <reason>` there. `scripts/fold-changelog.py` folds fragments into `CHANGELOG.md`
-at release prep, and only that PR edits the file.
+at release prep. Only that PR, a `release/*` or `hotfix/*` branch, or a `changelog-edit:` correction
+edits `CHANGELOG.md` directly.
 
 **Never merge on red, and never re-run a failing job hoping it passes.** Read the log. If it is
 genuinely infrastructure, say so out loud and re-run *that*.
