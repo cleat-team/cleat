@@ -205,6 +205,12 @@ func TestAMultiRecordSpecIsValidatedForItsShape(t *testing.T) {
 	if err := good.validate(); err != nil {
 		t.Fatalf("PRECONDITION FAILED: the fake multi-record spec does not validate: %v", err)
 	}
+	// CONTROL for the EndsWithoutFinal rule below: the same spec WITH an Identity and the flag set is valid, so that rule refuses only the missing one.
+	withFlag := runSpec(&ran, &d, &p)
+	withFlag.EndsWithoutFinal = true
+	if err := withFlag.validate(); err != nil {
+		t.Fatalf("PRECONDITION FAILED: a multi-record spec with EndsWithoutFinal and an Identity does not validate: %v", err)
+	}
 	mut := func(f func(sp *stepSpec)) *stepSpec { sp := *runSpec(&ran, &d, &p); f(&sp); return &sp }
 	dec := func(*stepCtx, *EventRecord) int64 { return 0 }
 	// Each fixture is built to reach ITS rule, and the error is asserted by TEXT: a spec refused for the wrong reason is a failure, because then
@@ -219,6 +225,11 @@ func TestAMultiRecordSpecIsValidatedForItsShape(t *testing.T) {
 		"no Role but a DecodeRun":      {mut(func(sp *stepSpec) { sp.Role = nil; sp.Decode = dec }), "single-record step"},
 		"no Role but EndsWithoutFinal": {mut(func(sp *stepSpec) { sp.Role = nil; sp.DecodeRun = nil; sp.EndsWithoutFinal = true; sp.Decode = dec }), "single-record step"},
 		"no Role and no Decode either": {mut(func(sp *stepSpec) { sp.Role = nil; sp.DecodeRun = nil }), "single-record step"},
+		"EndsWithoutFinal with no Identity to bound its runs": {mut(func(sp *stepSpec) {
+			sp.EndsWithoutFinal = true
+			sp.Identity = nil
+			sp.NoIdentity = "nothing to compare"
+		}), "EndsWithoutFinal but no Identity"},
 	} {
 		err := c.spec.validate()
 		if err == nil {
@@ -226,5 +237,134 @@ func TestAMultiRecordSpecIsValidatedForItsShape(t *testing.T) {
 		} else if !strings.Contains(err.Error(), c.want) {
 			t.Errorf("CONTROL: a spec with %s was refused for the wrong reason: %q does not name %q", name, err.Error(), c.want)
 		}
+	}
+}
+
+// A Role value that is none of the three is a bug in the spec, and it is a divergence ALWAYS. On an EndsWithoutFinal spec a FOREIGN record after a
+// prefix is a legitimate end, and an unknown value used to be read the same way (returned DecodeRun's answer, consumed the prefix), so a spec
+// bug there was silently accepted (cleat-review3, #4227 condition 1).
+func TestAnUnknownRoleIsAlwaysADivergenceEvenWhereAForeignRecordEndsTheRun(t *testing.T) {
+	ctx := context.Background()
+	hist := func() []EventRecord {
+		return []EventRecord{runRec(0, runPrefixEvent, "a"), runRec(1, runOtherEvent, "a")}
+	}
+	build := func(roleOfOther recordRole, endsWithoutFinal bool) (*stepSpec, *[]EventRecord) {
+		var ran int32
+		var dec, pre []EventRecord
+		sp := runSpec(&ran, &dec, &pre)
+		sp.EndsWithoutFinal = endsWithoutFinal
+		inner := sp.Role
+		sp.Role = func(a stepArgs, rec *EventRecord) recordRole {
+			if rec.EventType == runOtherEvent {
+				return roleOfOther
+			}
+			return inner(a, rec)
+		}
+		return sp, &dec
+	}
+	for _, c := range []struct {
+		name             string
+		endsWithoutFinal bool
+	}{{"a run that must have a final", false}, {"a run that may end without one", true}} {
+		sp, dec := build(recordRole(99), c.endsWithoutFinal)
+		s := stepSession(nil, hist())
+		got := s.step(ctx, nil, sp, stepArgs{s1: "a"})
+		if got&0xFF != 1 {
+			t.Errorf("%s: an unknown role returned %#x, want a divergence (errCode 1)", c.name, got)
+		}
+		if s.stepCount != 0 || len(*dec) != 0 {
+			t.Errorf("%s: an unknown role consumed %d records and decoded %d; a divergence consumes nothing", c.name, s.stepCount, len(*dec))
+		}
+	}
+	// CONTROL: the same record classified as FOREIGN does end an EndsWithoutFinal run, so the difference above is the role and nothing else.
+	sp, dec := build(roleForeign, true)
+	s := stepSession(nil, hist())
+	if got := s.step(ctx, nil, sp, stepArgs{s1: "a"}); got != 7 || len(*dec) != 1 || s.stepCount != 1 {
+		t.Errorf("CONTROL: a foreign record on an EndsWithoutFinal spec returned %#x (decoded %d, step %d), want 7, 1, 1", got, len(*dec), s.stepCount)
+	}
+}
+
+// Two awaits in a row, each recorded and never answered, are [pending a, pending b, ...]. By record type alone step a's run swallows b's record:
+// a divergence for a spec with an Identity, and b's record consumed by a's step for one without (cleat-review3, #4227 condition 2). For an
+// EndsWithoutFinal spec Identity finds the end of a run, so these are two runs.
+func TestTwoUnansweredAwaitsInARowAreTwoRuns(t *testing.T) {
+	ctx := context.Background()
+	run := func(hist []EventRecord, calls ...string) (results []int64, decoded [][]EventRecord, finalStep int) {
+		s := stepSession(nil, hist)
+		for _, name := range calls {
+			var ran int32
+			var dec, pre []EventRecord
+			sp := runSpec(&ran, &dec, &pre)
+			sp.EndsWithoutFinal = true
+			results = append(results, s.step(ctx, nil, sp, stepArgs{s1: name}))
+			decoded = append(decoded, dec)
+		}
+		return results, decoded, s.stepCount
+	}
+	for _, c := range []struct {
+		name  string
+		hist  []EventRecord
+		calls []string
+		steps int
+		sizes []int // records each call's DecodeRun was handed
+	}{
+		{"[pending a, pending b, other]", []EventRecord{runRec(0, runPrefixEvent, "a"), runRec(1, runPrefixEvent, "b"), runRec(2, runOtherEvent, "x")}, []string{"a", "b"}, 2, []int{1, 1}},
+		// b answered at its first poll records only its outcome, so a's unanswered await is followed by b's FINAL.
+		{"[pending a, final b]", []EventRecord{runRec(0, runPrefixEvent, "a"), runRec(1, runFinalEvent, "b")}, []string{"a", "b"}, 2, []int{1, 1}},
+		// CONTROL: each run closed by its own final, the shape that always worked.
+		{"[pending a, final a, pending b, final b]", []EventRecord{runRec(0, runPrefixEvent, "a"), runRec(1, runFinalEvent, "a"), runRec(2, runPrefixEvent, "b"), runRec(3, runFinalEvent, "b")}, []string{"a", "b"}, 4, []int{2, 2}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			results, decoded, finalStep := run(c.hist, c.calls...)
+			for i := range c.calls {
+				if results[i] != 7 {
+					t.Errorf("step %q returned %#x, want DecodeRun's 7 (a legitimate history is not a divergence)", c.calls[i], results[i])
+				}
+				if len(decoded[i]) != c.sizes[i] {
+					t.Errorf("step %q was handed %d records, want %d: it must read ITS run and not the next call's", c.calls[i], len(decoded[i]), c.sizes[i])
+				}
+			}
+			if finalStep != c.steps {
+				t.Errorf("the session ended at step %d, want %d", finalStep, c.steps)
+			}
+		})
+	}
+	// A mismatch on the FIRST record is still a divergence: Identity ends a run only after the run has begun.
+	var ran int32
+	var dec, pre []EventRecord
+	sp := runSpec(&ran, &dec, &pre)
+	sp.EndsWithoutFinal = true
+	s := stepSession(nil, []EventRecord{runRec(0, runPrefixEvent, "b")})
+	buf := make([]byte, 256)
+	got := s.step(context.WithValue(ctx, wasmMemBufKey{}, buf), nil, sp, stepArgs{s1: "a", outPtr: 0, outMaxLen: 256})
+	if got&0xFF != 1 || s.stepCount != 0 {
+		t.Errorf("a first record naming another call returned %#x at step %d, want a divergence consuming nothing", got, s.stepCount)
+	}
+	// ...and it is the IDENTITY divergence (it says what was asked and what was recorded), not the type divergence a foreign first record gets:
+	// the two differ only in this message, which is what tells a reader which rule fired.
+	if msg := string(buf[:int(got>>32)]); !strings.Contains(msg, "asked for something other than") {
+		t.Errorf("a first record naming another call gave %q, want the identity divergence (\"asked for something other than ...\")", msg)
+	}
+}
+
+// Which record an identity divergence NAMES is part of what it says, and it was unpinned: naming the run's first record instead of the
+// mismatching one left every test green (cleat-review3 mutant). The mismatching record here is the MIDDLE one.
+func TestAnIdentityDivergenceNamesTheRecordThatMismatched(t *testing.T) {
+	ctx := context.Background()
+	var ran int32
+	var dec, pre []EventRecord
+	s := stepSession(nil, []EventRecord{runRec(0, runPrefixEvent, "a"), runRec(1, runPrefixEvent, "b"), runRec(2, runFinalEvent, "a")})
+	buf := make([]byte, 256)
+	ctxb := context.WithValue(ctx, wasmMemBufKey{}, buf)
+	got := s.step(ctxb, nil, runSpec(&ran, &dec, &pre), stepArgs{s1: "a", outPtr: 0, outMaxLen: 256})
+	if got&0xFF != 1 {
+		t.Fatalf("returned %#x, want a divergence", got)
+	}
+	msg := string(buf[:int(got>>32)])
+	if !strings.Contains(msg, "step 1") || strings.Contains(msg, "step 0") {
+		t.Errorf("the identity divergence message %q should name the mismatching record at step 1, not the run's first", msg)
+	}
+	if s.stepCount != 0 {
+		t.Errorf("an identity divergence consumed %d records, want 0", s.stepCount)
 	}
 }

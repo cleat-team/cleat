@@ -122,8 +122,10 @@ type stepSpec struct {
 	Decode func(c *stepCtx, rec *EventRecord) int64
 	// Role makes this a MULTI-RECORD step: one call whose history is a run of consecutive records, any number of rolePrefix records ending in a
 	// roleFinal one (a retried call's failed attempts then its outcome; SetScope's failed acquisitions then the acquisition; an await's
-	// pending record then its resolution). nil means a single-record step. Role classifies a record by its type and shape only; WHAT it
-	// names (the key, the service and op) is Identity's, applied to every record of the run. See replayRun for what each ending means.
+	// pending record then its resolution). nil means a single-record step. Role classifies a record by its type and shape; WHAT it
+	// names (the key, the service and op) is Identity's, applied to every record of the run. A value other than the three roles is a bug in
+	// the spec and is always a divergence. See replayRun for what each ending means, and EndsWithoutFinal for the one case where Identity also
+	// decides where a run ENDS.
 	Role func(a stepArgs, rec *EventRecord) recordRole
 	// DecodeRun turns a complete run into the call's result: the records in order, the last of them the roleFinal one, or, for a spec with
 	// EndsWithoutFinal, prefix records only. It may keep a replay-time write its call made today (a pending call's ambiguity record) and
@@ -131,6 +133,13 @@ type stepSpec struct {
 	DecodeRun func(c *stepCtx, run []EventRecord) int64
 	// EndsWithoutFinal says a run of prefix records followed by a FOREIGN record is a complete run with no final: an await that was recorded
 	// and then not answered (it timed out). Without it that shape is a divergence, as for a retried call or SetScope.
+	//
+	// A run that can end without its final cannot be bounded by record TYPE, because the next call's records have the same types: two awaits
+	// in a row, each never answered, are [pending a, pending b, ...], and step a's run would swallow b's record. So for such a spec Identity
+	// bounds the run: a record that fails Identity after at least one prefix record is the next call's and ends this run. The spec must
+	// therefore have an Identity (validate() refuses EndsWithoutFinal with NoIdentity), and its Identity must tell this call's records from the
+	// next call's. (Measured by cleat-review3 on the first version, with two such awaits: a divergence with an Identity, and b's record
+	// consumed by a's step without one.)
 	EndsWithoutFinal bool
 	// Fresh does the work and records, through c.Record, where the call records. It is called only once the dispatcher has decided
 	// fresh work is allowed.
@@ -158,6 +167,8 @@ func (sp *stepSpec) validate() error {
 		return fmt.Errorf("step spec %q is a multi-record step (it has a Role) and needs exactly a DecodeRun, not a Decode", sp.Name)
 	case sp.Role != nil && sp.Records == recordsNone:
 		return fmt.Errorf("step spec %q is a multi-record step that records nothing: a run is made of recorded events", sp.Name)
+	case sp.EndsWithoutFinal && sp.Identity == nil:
+		return fmt.Errorf("step spec %q has EndsWithoutFinal but no Identity: a run that can end without a final is bounded by Identity, and without one it cannot tell its own records from the next call's", sp.Name)
 	case (sp.Identity == nil) == (sp.NoIdentity == ""):
 		return fmt.Errorf("step spec %q must set exactly one of Identity and NoIdentity: a call either names what identifies it or says why it has nothing to compare", sp.Name)
 	case sp.Refuse != nil && sp.Effect == effectPure:
