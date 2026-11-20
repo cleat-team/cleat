@@ -139,14 +139,23 @@ var awaitSignalsStep = stepSpec{
 			if rec.TimestampMs > 0 && rec.TimeoutMs > 0 && s.engine.realNowMs() >= deadline {
 				return packAwaitSignalsResult(0, 0, true, 0)
 			}
-			if rec.TimestampMs == 0 || rec.TimeoutMs <= 0 {
-				deadline = s.engine.realNowMs() + clampGuestMs(rec.TimeoutMs)
-			}
-			return awaitSuspendOrPark(c, deliverIfWaiting, parkRequest{
+			req := parkRequest{
 				Kind: wakeSignal, Key: names, DeadlineMs: deadline,
 				Reason: fmt.Sprintf("await_signals(%s, %dms) [replayed]", rec.SignalNames, rec.TimeoutMs),
 				Until:  time.UnixMilli(deadline),
-			})
+			}
+			if rec.TimestampMs == 0 || rec.TimeoutMs <= 0 {
+				// The deadline above is INVENTED (a record with no timestamp, or no timeout, has none), and it lies at about now. It must not be
+				// handed to a wake source: a wait that parks until a deadline of now would time out on the first return, where the old code
+				// suspended from now. So it suspends, as it always did, and never asks the source. Reachable once a source exists: the quorum
+				// helpers recompute the timeout argument on every iteration (cleat-review3, #4249). Whether such an await should keep suspending
+				// into an immediate re-claim is a separate question and is not decided here.
+				req.DeadlineMs = s.engine.realNowMs() + clampGuestMs(rec.TimeoutMs)
+				req.Until = time.UnixMilli(req.DeadlineMs)
+				s.suspendFor(req)
+				return s.suspendingAwaitResult()
+			}
+			return awaitSuspendOrPark(c, deliverIfWaiting, req)
 		}
 
 		// Fresh: the store first, so a delivery that is already waiting is returned and no await is recorded for it.

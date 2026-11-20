@@ -181,6 +181,61 @@ func TestAnAwaitAtTheReplayFrontierParksFromItsRecordedDeadlineAndDoesNotRecordI
 	}
 }
 
+// A replayed await whose deadline would be INVENTED (the record has no timestamp, or no timeout) is never handed to a wake source: its deadline lies
+// at about now, so a park would time out on the first return where the old code suspended from now. It suspends directly, with and without a source,
+// and the two paths agree (cleat-review3 measured the difference: with a source that woke once it TIMED OUT for real). Both shapes, because
+// the invention has two inputs and either one alone triggers it.
+func TestAReplayedAwaitWithAnInventedDeadlineSuspendsAndNeverAsksTheSource(t *testing.T) {
+	cases := []struct {
+		name        string
+		rec         EventRecord
+		wantReason  string
+		wantUntilMs int64
+	}{
+		{"a timestamp and a recorded timeout of 0 under a 60s argument", EventRecord{Step: 0, EventType: EventTypeAwaitSignals, SignalNames: awaitNames, TimeoutMs: 0, TimestampMs: awaitT - 10_000},
+			`await_signals(["a","b"], 0ms) [replayed]`, awaitT},
+		{"no timestamp and a recorded timeout of 60s", EventRecord{Step: 0, EventType: EventTypeAwaitSignals, SignalNames: awaitNames, TimeoutMs: 60000, TimestampMs: 0},
+			`await_signals(["a","b"], 60000ms) [replayed]`, awaitT + 60000},
+	}
+	for _, c := range cases {
+		for _, withSource := range []bool{true, false} {
+			name := c.name + " (no source)"
+			var ws wakeSource
+			var scripted *scriptedWake
+			if withSource {
+				name = c.name + " (a source that would wake)"
+				scripted = &scriptedWake{answer: func(i int, _ parkRequest) parkOutcome {
+					if i > 5 {
+						return parkRefused
+					}
+					return parkWoke
+				}}
+				ws = scripted
+			}
+			t.Run(name, func(t *testing.T) {
+				w := &awaitWorld{deliveries: map[string][]SignalDelivery{}}
+				s := awaitParkSession(w, ws, []EventRecord{c.rec})
+				_, _, _, _, raw, _ := callAwaitSignals(s, 60000)
+				if raw != callSuspendSentinel { // the raw word: the guest-side decode of the sentinel also reads as a timeout, which is why it is never decoded
+					t.Fatalf("returned %#x, want the suspend sentinel: an invented deadline is not a timeout", raw)
+				}
+				if scripted != nil && len(scripted.reqs) != 0 {
+					t.Errorf("the source was asked %d times, want 0: an invented deadline is never handed to a source", len(scripted.reqs))
+				}
+				if s.suspendErr == nil || s.suspendErr.Reason != c.wantReason || s.suspendErr.Until.UnixMilli() != c.wantUntilMs {
+					t.Errorf("suspension %+v, want reason %q until %d", s.suspendErr, c.wantReason, c.wantUntilMs)
+				}
+				if want := []string{"a", "b"}; !awaitSameStrings(w.polls, want) {
+					t.Errorf("polled %v, want %v: once, at the frontier, before suspending", w.polls, want)
+				}
+				if len(s.history) != 1 {
+					t.Errorf("history has %d records, want the 1 recorded await and nothing new", len(s.history))
+				}
+			})
+		}
+	}
+}
+
 // A no-wait poll never parks, whatever the source would do: it records its await and returns the timeout at once.
 func TestANoWaitAwaitNeverAsksTheWakeSource(t *testing.T) {
 	w := &awaitWorld{deliveries: map[string][]SignalDelivery{}}
