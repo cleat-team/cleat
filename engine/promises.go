@@ -134,14 +134,6 @@ func (s *execSession) AwaitPromise(ctx context.Context, m api.Module, promiseID 
 	return s.step(ctx, m, &awaitPromiseStep, stepArgs{s1: promiseID, i1: timeoutMs, outPtr: resultPtr, outMaxLen: resultMaxLen})
 }
 
-// awaitPromiseWithoutAStore is the answer to an await on an engine with no promise store: with none there is nothing to await and nothing that
-// could ever resolve it, so falling through to a suspend would wait forever. Say so instead (IMPROVEMENT-PLAN 3.231). It records nothing.
-func (s *execSession) awaitPromiseWithoutAStore(ctx context.Context, m api.Module, resultPtr, resultMaxLen uint32) int64 {
-	s.engine.log().ErrorContext(ctx, "await_promise: no promise store configured", "workflow_id", s.workflowID, "tenant_id", s.tenantID)
-	written, _ := s.writeResult(ctx, m, resultPtr, errNoPromiseStore, resultMaxLen)
-	return packAwaitPromiseResult(written, false, 1)
-}
-
 // awaitPromiseIdentity is the identity check of await_promise: the record must name the promise being awaited, and must be the await's OWN
 // outcome, one WITHOUT the cleat#4079 Service/Op discriminator. resolve_promise and reject_promise record the same event types for the same
 // promise, and only Service="promise" with Op="resolve" or "reject" tells a settlement the workflow made itself from the answer to an await
@@ -311,6 +303,14 @@ var awaitPromiseStep = stepSpec{
 		until := time.UnixMilli(s.nowMs).Add(guestMsDuration(timeoutMs))
 		return awaitSuspendOrPark(c, deliverIfSettled, parkRequest{Kind: wakePromise, Key: promiseID, DeadlineMs: until.UnixMilli(), Reason: reason, Until: until}, timedOut)
 	},
+}
+
+// awaitPromiseWithoutAStore is the answer to an await on an engine with no promise store: with none there is nothing to await and nothing that
+// could ever resolve it, so falling through to a suspend would wait forever. Say so instead (IMPROVEMENT-PLAN 3.231). It records nothing.
+func (s *execSession) awaitPromiseWithoutAStore(ctx context.Context, m api.Module, resultPtr, resultMaxLen uint32) int64 {
+	s.engine.log().ErrorContext(ctx, "await_promise: no promise store configured", "workflow_id", s.workflowID, "tenant_id", s.tenantID)
+	written, _ := s.writeResult(ctx, m, resultPtr, errNoPromiseStore, resultMaxLen)
+	return packAwaitPromiseResult(written, false, 1)
 }
 
 // The discriminator values ResolvePromise and RejectPromise stamp on the events they record (cleat#4079). They are exported

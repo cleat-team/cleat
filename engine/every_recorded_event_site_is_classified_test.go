@@ -33,7 +33,6 @@ var recordedEventSitesWithoutOwnStopCheck = map[string]string{
 	"lifecycle.go:RegisterUpdateHandler": "OBSERVATION: records a registration, performs no external work",
 	"plugins.go:freshPluginCallInternal": "FRESH HALF: the plugin-call entry points check before it",
 	"plugins.go:recordStreamError":       "TERMINAL: records the failure that ends a streaming call",
-	"promises.go:AwaitPromise":           "OBSERVATION: records a promise's state, or a no-wait poll (which counts toward the event cap, cleat#4153)",
 }
 
 func TestEveryRecordedEventSiteIsClassified(t *testing.T) {

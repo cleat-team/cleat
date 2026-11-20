@@ -389,22 +389,17 @@ func repoFile(t *testing.T, rel string) string {
 // first hand-run of this scan reported 8 where the answer was 7.
 func hostStopSites(t *testing.T) map[string]bool {
 	t.Helper()
-	entries, err := os.ReadDir(".")
-	if err != nil {
-		t.Fatalf("reading engine/: %v", err)
-	}
+	return hostStopSitesIn(engineSources(t))
+}
+
+// hostStopSitesIn is the scan over sources already read (file name -> text), so the rule can be tested on text. It derives the set of specs that are
+// no stop site from the SAME sources (neverStopIn over their declarations), so there is no set to hand it wrong: a spec declared BEFORE its host call,
+// which no adjacency can attribute to that call, is how a test makes the set decide something.
+func hostStopSitesIn(sources map[string]string) map[string]bool {
+	unrefused := neverStopIn(specDeclsIn(sources))
 	decl := regexp.MustCompile(`(?m)^func \(s \*execSession\) ([A-Za-z_]\w*)\(`)
-	unrefused := neverRefusedSpecs(t)
 	sites := map[string]bool{}
-	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".go") || strings.HasSuffix(e.Name(), "_test.go") {
-			continue
-		}
-		b, err := os.ReadFile(e.Name())
-		if err != nil {
-			t.Fatalf("reading %s: %v", e.Name(), err)
-		}
-		src := string(b)
+	for _, src := range sources {
 		locs := decl.FindAllStringSubmatchIndex(src, -1)
 		for i, loc := range locs {
 			name := src[loc[2]:loc[3]]
@@ -442,18 +437,50 @@ var stepCallSpec = regexp.MustCompile(`\bs\.step\(\s*[^,()]+,\s*[^,()]+,\s*&(\w+
 // declaration's own closures (indented with tabs) never contain.
 var specDecl = regexp.MustCompile(`(?s)\nvar (\w+) = stepSpec\{(.*?)\n\}`)
 
-// neverRefusedSpecs names the specs declared `Refuse: neverRefuse`: steps the dispatcher does NOT refuse (cleat#4211). A host call that goes
-// through step is a stop site only if its spec can be refused, so counting every s.step caller one (as this scan did while every non-Pure
-// step was refused) reports ReleaseLock as a call the SDKs must guard, and the Java count one too high. Reading the declaration, not a list kept
-// here, means a new spec that says `Refuse: neverRefuse` is understood the day it is written. A spec with any OTHER Refuse is not in this set
-// and so counts as a site: the scan cannot prove an arbitrary Refuse never refuses, and over-counting fails loudly.
+// neverRefusedSpecs names the specs declared `Refuse: neverRefuse`: steps the dispatcher does NOT refuse (cleat#4211). The scans that count REFUSAL
+// sites read it (the Java parity count of `stopBeforeNewWork` sites, the hand-off test): a call that goes through step is a refusal site only if its
+// spec can be refused, so counting every s.step caller one (as this scan did while every non-Pure step was refused) reports ReleaseLock as a call
+// the SDKs must guard, and the Java count one too high. Reading the declaration, not a list kept here, means a new spec that says
+// `Refuse: neverRefuse` is understood the day it is written. A spec with any OTHER Refuse is not in this set and so counts as a site: the scan
+// cannot prove an arbitrary Refuse never refuses, and over-counting fails loudly.
 func neverRefusedSpecs(t *testing.T) map[string]bool {
+	t.Helper()
+	out := map[string]bool{}
+	for name, body := range stepSpecDecls(t) {
+		if declaresNeverRefuse(body) {
+			out[name] = true
+		}
+	}
+	return out
+}
+
+// neverStopSpecs names the specs a host call can go through WITHOUT being a host STOP site: never refused AND unable to answer the guest with the stop
+// sentinel in any other way. "Never refused" and "never a stop site" are different claims, and conflating them was the defect W4 of cleat#4152
+// found. await_promise is declared `Refuse: neverRefuse` (it never asked stopBeforeNewWork: a defer body records and suspends), and it is STILL a
+// stop site, because a suspending await answers the guest with the sentinel (cleat#3383) and every SDK has to check the stop bit on it. So a spec
+// that can return suspendingAwaitResult() or callSuspendSentinel from its own declaration is not in this set whatever its Refuse says. Without that,
+// moving the call onto the dispatcher dropped it from the host stop sites and the SDK coverage test then told the SDKs to stop guarding it. Only the
+// stop-site scan (hostStopSites) reads this; the refusal counts read neverRefusedSpecs, because await_promise is not a REFUSAL site and the Java
+// parity count is one of refusals.
+func neverStopSpecs(t *testing.T) map[string]bool {
+	t.Helper()
+	return neverStopIn(stepSpecDecls(t))
+}
+
+// stepSpecDecls reads every `var x = stepSpec{ ... }` declaration in the engine's non-test source: name -> the declaration's body, comments blanked.
+func stepSpecDecls(t *testing.T) map[string]string {
+	t.Helper()
+	return specDeclsIn(engineSources(t))
+}
+
+// engineSources reads the engine's non-test Go source: file name -> text.
+func engineSources(t *testing.T) map[string]string {
 	t.Helper()
 	entries, err := os.ReadDir(".")
 	if err != nil {
 		t.Fatalf("reading engine/: %v", err)
 	}
-	out := map[string]bool{}
+	out := map[string]string{}
 	for _, e := range entries {
 		if e.IsDir() || !strings.HasSuffix(e.Name(), ".go") || strings.HasSuffix(e.Name(), "_test.go") {
 			continue
@@ -462,10 +489,40 @@ func neverRefusedSpecs(t *testing.T) map[string]bool {
 		if err != nil {
 			t.Fatalf("reading %s: %v", e.Name(), err)
 		}
-		for _, m := range specDecl.FindAllStringSubmatch(blankComments(string(b)), -1) {
-			if regexp.MustCompile(`\bRefuse:\s*neverRefuse\b`).MatchString(m[2]) {
-				out[m[1]] = true
-			}
+		out[e.Name()] = string(b)
+	}
+	return out
+}
+
+// specDeclsIn is stepSpecDecls over sources already read.
+func specDeclsIn(sources map[string]string) map[string]string {
+	out := map[string]string{}
+	for _, src := range sources {
+		for _, m := range specDecl.FindAllStringSubmatch(blankComments(src), -1) {
+			out[m[1]] = m[2]
+		}
+	}
+	return out
+}
+
+var neverRefuseDecl = regexp.MustCompile(`\bRefuse:\s*neverRefuse\b`)
+var sentinelToken = regexp.MustCompile(`\bcallSuspendSentinel\b`)
+
+// declaresNeverRefuse says whether a spec's declaration reads `Refuse: neverRefuse`.
+func declaresNeverRefuse(body string) bool { return neverRefuseDecl.MatchString(body) }
+
+// canAnswerWithTheStop says whether a spec's declaration can hand the guest the stop sentinel, by calling suspendingAwaitResult() or naming
+// callSuspendSentinel in code. The declaration is read with comments already blanked.
+func canAnswerWithTheStop(body string) bool {
+	return callsInCode(body, "suspendingAwaitResult") || sentinelToken.MatchString(body)
+}
+
+// neverStopIn is neverStopSpecs over declarations already read, so the rule can be tested on text.
+func neverStopIn(decls map[string]string) map[string]bool {
+	out := map[string]bool{}
+	for name, body := range decls {
+		if declaresNeverRefuse(body) && !canAnswerWithTheStop(body) {
+			out[name] = true
 		}
 	}
 	return out

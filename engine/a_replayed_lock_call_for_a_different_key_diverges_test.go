@@ -131,7 +131,6 @@ func TestAStepThatNeverRefusesIsNotRefusedWhereADefaultStepIs(t *testing.T) {
 // which is what reported ReleaseLock as a call the SDKs must guard and put the Java count at 29 when the true number is 28.
 func TestTheStopSiteScanReadsNeverRefuseFromTheSpecDeclaration(t *testing.T) {
 	fromSource := neverRefusedSpecs(t)
-
 	// Function values can be compared only by their code pointer, which is what makes this a reading of the VALUES and not of the same text.
 	neverPtr := reflect.ValueOf(neverRefuse).Pointer()
 	byValue := 0
@@ -143,6 +142,31 @@ func TestTheStopSiteScanReadsNeverRefuseFromTheSpecDeclaration(t *testing.T) {
 	if len(fromSource) != byValue {
 		t.Errorf("the scan found %d never-refused spec declaration(s) in the source %v, the registry holds %d: one of the two readings is wrong", len(fromSource), fromSource, byValue)
 	}
+	// A spec that is never REFUSED but can still answer with the stop is a host STOP site (W4, cleat#4152): the two sets differ by exactly the specs that
+	// suspend. awaitPromiseStep is in the first and must NOT be in the second, which is the set hostStopSites reads; the refusal counts read the first.
+	if !fromSource["awaitPromiseStep"] || neverStopSpecs(t)["awaitPromiseStep"] {
+		t.Errorf("awaitPromiseStep: in the never-refused set %v, in the never-a-stop-site set %v; want true and false: it never refuses but it suspends, so it is a stop site, and not a refusal site",
+			fromSource["awaitPromiseStep"], neverStopSpecs(t)["awaitPromiseStep"])
+	}
+	if !neverStopSpecs(t)["releaseLockStep"] {
+		t.Errorf("releaseLockStep is not in the never-a-stop-site set: it never refuses and never suspends, so it is no stop site at all (the Java count of 28)")
+	}
+	for _, c := range []struct {
+		name  string
+		decls map[string]string
+		want  map[string]bool
+	}{
+		{"a plain neverRefuse spec is in the never-a-stop-site set", map[string]string{"a": "Refuse: neverRefuse,\n Fresh: func(c *stepCtx) int64 { return 0 }"}, map[string]bool{"a": true}},
+		{"KNOWN-POSITIVE: a neverRefuse spec that returns suspendingAwaitResult() is a site, so it is out", map[string]string{"a": "Refuse: neverRefuse,\n Fresh: func(c *stepCtx) int64 { return c.s.suspendingAwaitResult() }"}, map[string]bool{}},
+		{"a neverRefuse spec that returns the sentinel itself is a site, so it is out", map[string]string{"a": "Refuse: neverRefuse,\n Fresh: func(c *stepCtx) int64 { return callSuspendSentinel }"}, map[string]bool{}},
+		{"a spec with any other Refuse is not in the set", map[string]string{"a": "Refuse: someOther,\n Fresh: func(c *stepCtx) int64 { return 0 }"}, map[string]bool{}},
+		{"a spec that merely names the call without calling it is still in the set", map[string]string{"a": "Refuse: neverRefuse,\n Fresh: func(c *stepCtx) int64 { f := c.s.suspendingAwaitResult; _ = f; return 0 }"}, map[string]bool{"a": true}},
+	} {
+		got := neverStopIn(c.decls)
+		if len(got) != len(c.want) || got["a"] != c.want["a"] {
+			t.Errorf("%s: got %v, want %v", c.name, got, c.want)
+		}
+	}
 	if !fromSource["releaseLockStep"] {
 		t.Errorf("the scan did not find releaseLockStep, which is declared `Refuse: neverRefuse`: %v", fromSource)
 	}
@@ -153,6 +177,31 @@ func TestTheStopSiteScanReadsNeverRefuseFromTheSpecDeclaration(t *testing.T) {
 	}
 	if releaseLockStep.Refuse == nil || reflect.ValueOf(releaseLockStep.Refuse).Pointer() != neverPtr || acquireLockStep.Refuse != nil {
 		t.Errorf("the registry's values disagree with the declarations the scan read: release Refuse set %v, acquire Refuse set %v", releaseLockStep.Refuse != nil, acquireLockStep.Refuse != nil)
+	}
+
+	// THE SET MUST DECIDE SOMETHING (W4, cleat#4152). In the real tree awaitPromiseStep follows its wrapper, so the scan attributes the spec's own
+	// suspendingAwaitResult() to AwaitPromise by adjacency and the right answer comes out whichever set it reads; a check that never decides anything
+	// cannot be seen to be wrong. Here the spec is declared BEFORE the call, where no adjacency reaches it, so only the set can make the call a site:
+	// a spec that never refuses but suspends is a stop site, and one that never refuses and never suspends is not.
+	suspends := "package p\n\nvar zStep = stepSpec{\n\tRefuse: neverRefuse,\n\tFresh: func(c *stepCtx) int64 { return c.s.suspendingAwaitResult() },\n}\n\n"
+	quiet := "package p\n\nvar zStep = stepSpec{\n\tRefuse: neverRefuse,\n\tFresh: func(c *stepCtx) int64 { return 0 },\n}\n\n"
+	hostCall := "func (s *execSession) Z() int64 {\n\treturn s.step(ctx, m, &zStep, stepArgs{})\n}\n"
+	for _, c := range []struct {
+		name string
+		src  string
+		want bool
+	}{
+		{"KNOWN-POSITIVE: a never-refused spec that suspends, declared before its call, is a stop site", suspends + hostCall, true},
+		{"a never-refused spec that never suspends is not a stop site", quiet + hostCall, false},
+	} {
+		if got := hostStopSitesIn(map[string]string{"z.go": c.src})["Z"]; got != c.want {
+			t.Errorf("%s: Z is a stop site = %v, want %v", c.name, got, c.want)
+		}
+	}
+	// CONTROL: the suspending spec DECLARES neverRefuse, so a scan that read the declared set (as it did before W4) would have missed it. The two
+	// sets differ on exactly this spec, which is what the rows above are about.
+	if d := specDeclsIn(map[string]string{"z.go": suspends}); !declaresNeverRefuse(d["zStep"]) || neverStopIn(d)["zStep"] {
+		t.Errorf("the suspending spec declares neverRefuse %v and is in the never-a-stop-site set %v; want true and false", declaresNeverRefuse(d["zStep"]), neverStopIn(d)["zStep"])
 	}
 
 	call := func(spec string) string {
