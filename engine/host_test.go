@@ -1636,7 +1636,10 @@ func TestCreatePromiseReplayMatch(t *testing.T) {
 	s.history = []EventRecord{{
 		Step:      0,
 		EventType: EventTypeCreatePromise,
-		PromiseID: "abc-123",
+		// The record CreatePromise writes names the promise (every released version does), and replay compares it (cleat#4211). This record
+		// used to omit the name, which the engine never produced, and passed only because replay matched by type alone.
+		PromiseName: "my-promise",
+		PromiseID:   "abc-123",
 	}}
 	result := s.CreatePromise(context.Background(), nil, "my-promise", 0, 0)
 
