@@ -209,6 +209,9 @@ func g3rCases() map[string]g3rCase {
 	negative.maxAttempts = -1
 	cases["fresh_max_attempts_zero_is_refused"] = g3rCase{policy: zero}
 	cases["fresh_max_attempts_negative_is_refused"] = g3rCase{policy: negative}
+	cases["segment_max_attempts_zero_stop_wins"] = g3rCase{deferPhase: true, policy: zero}
+	cases["shutdown_max_attempts_zero_stop_wins"] = g3rCase{shutdown: true, policy: zero}
+	cases["write_failed_max_attempts_zero_stop_wins"] = g3rCase{writeFail: true, policy: zero}
 	long := g3rPolicy{maxAttempts: 5, initialMs: 1000, coef100: 200, maxMs: 0, nonRetryable: `[]`}
 	cases["fresh_policy_too_long_for_the_budget"] = g3rCase{budget: time.Nanosecond, policy: long}
 	cases["segment_fresh"] = g3rCase{deferPhase: true, policy: pol()}
@@ -261,6 +264,9 @@ var g3rGolden = map[string]string{
 	"fresh_unparseable_non_retryable":                   "res=0x401 wrote=\"\" isReplay=false step=0 recorded=[] attempts=0 others=0 keysFromStep=[]",
 	"fresh_max_attempts_zero_is_refused":                "res=0x401 wrote=\"\" isReplay=false step=0 recorded=[] attempts=0 others=0 keysFromStep=[]",
 	"fresh_max_attempts_negative_is_refused":            "res=0x401 wrote=\"\" isReplay=false step=0 recorded=[] attempts=0 others=0 keysFromStep=[]",
+	"segment_max_attempts_zero_stop_wins":               "res=0x80000000 wrote=\"\" isReplay=false step=0 recorded=[] attempts=0 others=0 keysFromStep=[]",
+	"shutdown_max_attempts_zero_stop_wins":              "res=0x80000000 wrote=\"\" isReplay=false step=0 recorded=[] attempts=0 others=0 keysFromStep=[]",
+	"write_failed_max_attempts_zero_stop_wins":          "res=0x80000000 wrote=\"\" isReplay=false step=0 recorded=[] attempts=0 others=0 keysFromStep=[]",
 	"replay_mid_retry_max_attempts_zero_is_refused":     "res=0x401 wrote=\"\" isReplay=true step=0 recorded=[] attempts=0 others=0 keysFromStep=[]",
 	"replay_terminal_call_max_attempts_zero_is_refused": "res=0x401 wrote=\"\" isReplay=true step=0 recorded=[] attempts=0 others=0 keysFromStep=[]",
 	"frontier_gets_its_whole_policy":                    "res=0xb0000000000 wrote=\"{\\\"ok\\\":true}\" isReplay=false step=3 recorded=[call_attempt_failed/step=1/attempt=1/svc.op/err=\"TRY_AGAIN: 503 try again\"/nonretry=false/exhausted=false/code=\"\" call/step=2/attempt=0/svc.op/err=\"\"/nonretry=false/exhausted=false/code=\"\"] attempts=2 others=0 keysFromStep=[1 1]",
@@ -298,10 +304,11 @@ func TestG3rRetriedCallBehavesAsRecordedBeforeTheDispatcher(t *testing.T) {
 			t.Errorf("%s: a situation with no golden row", name)
 		}
 	}
-	// 23 rows as recorded against the code as it was, plus four ADDED by cleat#4244's refusal of a policy that allows no attempt: zero and negative
-	// maxAttempts fresh, and zero on a resume and on a replayed terminal call. None of the 23 moved for that reason.
-	if len(g3rGolden) != 27 {
-		t.Errorf("the table has %d rows; this was recorded with 27, so a row was added or removed without saying so", len(g3rGolden))
+	// 23 rows as recorded against the code as it was, plus SEVEN ADDED by cleat#4244's refusal of a policy that allows no attempt: zero and negative
+	// maxAttempts fresh, zero on a resume and on a replayed terminal call, and zero under each of the three stops (a defer segment, a shutdown and a
+	// refused event write), which answer the suspend sentinel because bit 31 wins over a refusal. None of the 23 moved for that reason.
+	if len(g3rGolden) != 30 {
+		t.Errorf("the table has %d rows; this was recorded with 30, so a row was added or removed without saying so", len(g3rGolden))
 	}
 }
 

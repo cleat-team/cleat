@@ -469,16 +469,6 @@ func (s *execSession) DurableCallWithRetry(ctx context.Context, m api.Module,
 	nonRetryableErrorsJSON string,
 	responsePtr, responseMaxLen uint32) int64 {
 
-	// A policy that allows no attempt is refused, fresh and replay alike (cleat#4244). maxAttempts arrives across the ABI from every SDK and several
-	// pass it unvalidated: the Go SDK sends int64(policy.MaxAttempts), so a cleat.RetryPolicy with no MaxAttempts sent 0. The loop below then never
-	// ran, lastErr stayed nil, and the terminal event dereferenced it: a host panic a guest could trigger with ordinary code. The engine is the one
-	// place that covers every SDK, so it refuses here, with the status the unparseable error list below returns, and records nothing.
-	if maxAttempts < 1 {
-		s.engine.log().WarnContext(ctx, "retry policy allows no attempt (maxAttempts < 1); refusing the call",
-			"service", service, "operation", operation, "max_attempts", maxAttempts)
-		return badParamDurableCall
-	}
-
 	// Worker-enforced ceiling on retry attempts to prevent runaway retries
 	// from misconfigured WASM modules.  Use the engine-configured limit if
 	// set (it comes from --max-retries on the command line), otherwise the
@@ -561,6 +551,20 @@ func (s *execSession) DurableCallWithRetry(ctx context.Context, m api.Module,
 	// Skipped when the segment is being stopped, because ABI.md requires bit 31 to win over any field and a refusal
 	// IS a field: the stop paths below return the sentinel unchanged.
 	if !s.stopBeforeNewWork() {
+		// A POLICY THAT ALLOWS NO ATTEMPT IS REFUSED, fresh and replay alike (cleat#4244). maxAttempts arrives across the ABI from every SDK and several
+		// pass it unvalidated: the Go SDK sends int64(policy.MaxAttempts), so a cleat.RetryPolicy with no MaxAttempts sent 0. The loop in
+		// freshCallWithRetry then never ran, lastErr stayed nil, and the terminal event dereferenced it: a host panic a guest could trigger with
+		// ordinary code. The engine is the one place that covers every SDK.
+		//
+		// FIRST STATEMENT OF THIS BLOCK, which only runs when nothing is stopping the call: bit 31 wins over any field (ABI.md) and a refusal is a field,
+		// so a defer segment, a shutdown or a refused event write with a zero policy answers the suspend sentinel below, as for any call. It sits BEFORE
+		// the replay branch on purpose, so a call whose terminal event is already recorded, and a resume, are refused too and not replayed. (A call with
+		// maxAttempts < 1 panicked before it could record a terminal event, so no such history exists to be broken by that.)
+		if maxAttempts < 1 {
+			s.engine.log().WarnContext(ctx, "retry policy allows no attempt (maxAttempts < 1); refusing the call",
+				"service", service, "operation", operation, "max_attempts", maxAttempts)
+			return badParamDurableCall
+		}
 		if s.isReplay {
 			if s.stepCount < len(s.history) && s.history[s.stepCount].EventType == EventTypeCallRetryRefused {
 				rec := s.history[s.stepCount]
