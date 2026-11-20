@@ -117,6 +117,17 @@ func characterizePromiseCall(t *testing.T, pc promiseCall) map[string]string {
 	// by type alone: replay accepts a record of this call's EVENT TYPE whether or not it carries the Service/Op that marks it as this
 	// call's own effect (resolve and reject share their event types with the await's own outcome). A record of this call's type with
 	// neither Service nor Op is what await_promise writes for a promise that was already settled.
+	// mismatched identity: the record is this call's EVENT TYPE but names a different promise (cleat#4211's class: a replay that does not
+	// compare what identifies the call accepts a record that is another call's). Measured on the code before the dispatcher compared it.
+	mism := append([]EventRecord(nil), recorded...)
+	if pc.name == "create_promise" {
+		mism[0].PromiseName = "some-other-promise"
+	} else {
+		mism[0].PromiseID = "p-OTHER"
+	}
+	s10 := newSession(nil, mism)
+	got["replay_mismatched_identity"] = observe(s10, pc.call(s10), len(s10.history))
+
 	if pc.name != "create_promise" {
 		bare := append([]EventRecord(nil), recorded...)
 		bare[0].Service, bare[0].Op = "", ""
@@ -142,39 +153,42 @@ func (refusingPromiseStore) RejectPromise(context.Context, string, string) error
 // promiseGolden is what characterizePromiseCall returned on develop 7d1d0e20, before any of these calls went through step().
 var promiseGolden = map[string]map[string]string{
 	"create_promise": {
-		"divergence":              "res=0x1 isReplay=true step=0 recorded=[]",
-		"fresh":                   "res=0x0 isReplay=false step=1 recorded=[create_promise/step=0/svc=\"\"/op=\"\"/id=\"<generated>\"/name=\"n\"/result=\"\"/err=\"\"]",
-		"frontier":                "res=0x0 isReplay=false step=2 recorded=[create_promise/step=1/svc=\"\"/op=\"\"/id=\"<generated>\"/name=\"n\"/result=\"\"/err=\"\"]",
-		"no_store":                "res=0x1 isReplay=false step=1 recorded=[create_promise/step=0/svc=\"\"/op=\"\"/id=\"<generated>\"/name=\"n\"/result=\"\"/err=\"\"]",
-		"replay":                  "res=0x0 isReplay=true step=1 recorded=[]",
-		"segment_fresh":           "res=0x80000000 isReplay=false step=0 recorded=[]",
-		"segment_frontier":        "res=0x80000000 isReplay=false step=1 recorded=[]",
-		"store_error":             "res=0x1 isReplay=false step=1 recorded=[create_promise/step=0/svc=\"\"/op=\"\"/id=\"<generated>\"/name=\"n\"/result=\"\"/err=\"\"]",
-		"store_error_then_replay": "res=0x0 isReplay=true step=1 recorded=[]",
+		"divergence":                 "res=0x1 isReplay=true step=0 recorded=[]",
+		"fresh":                      "res=0x0 isReplay=false step=1 recorded=[create_promise/step=0/svc=\"\"/op=\"\"/id=\"<generated>\"/name=\"n\"/result=\"\"/err=\"\"]",
+		"frontier":                   "res=0x0 isReplay=false step=2 recorded=[create_promise/step=1/svc=\"\"/op=\"\"/id=\"<generated>\"/name=\"n\"/result=\"\"/err=\"\"]",
+		"no_store":                   "res=0x1 isReplay=false step=1 recorded=[create_promise/step=0/svc=\"\"/op=\"\"/id=\"<generated>\"/name=\"n\"/result=\"\"/err=\"\"]",
+		"replay":                     "res=0x0 isReplay=true step=1 recorded=[]",
+		"replay_mismatched_identity": "res=0x0 isReplay=true step=1 recorded=[]",
+		"segment_fresh":              "res=0x80000000 isReplay=false step=0 recorded=[]",
+		"segment_frontier":           "res=0x80000000 isReplay=false step=1 recorded=[]",
+		"store_error":                "res=0x1 isReplay=false step=1 recorded=[create_promise/step=0/svc=\"\"/op=\"\"/id=\"<generated>\"/name=\"n\"/result=\"\"/err=\"\"]",
+		"store_error_then_replay":    "res=0x0 isReplay=true step=1 recorded=[]",
 	},
 	"resolve_promise": {
-		"divergence":              "res=0x1 isReplay=true step=0 recorded=[]",
-		"fresh":                   "res=0x0 isReplay=false step=1 recorded=[promise_resolved/step=0/svc=\"promise\"/op=\"resolve\"/id=\"p-1\"/name=\"\"/result=\"v\"/err=\"\"]",
-		"frontier":                "res=0x0 isReplay=false step=2 recorded=[promise_resolved/step=1/svc=\"promise\"/op=\"resolve\"/id=\"p-1\"/name=\"\"/result=\"v\"/err=\"\"]",
-		"no_store":                "res=0x1 isReplay=false step=1 recorded=[promise_resolved/step=0/svc=\"promise\"/op=\"resolve\"/id=\"p-1\"/name=\"\"/result=\"v\"/err=\"\"]",
-		"replay":                  "res=0x0 isReplay=true step=1 recorded=[]",
-		"replay_by_type_alone":    "res=0x0 isReplay=true step=1 recorded=[]",
-		"segment_fresh":           "res=0x80000000 isReplay=false step=0 recorded=[]",
-		"segment_frontier":        "res=0x80000000 isReplay=false step=1 recorded=[]",
-		"store_error":             "res=0x1 isReplay=false step=1 recorded=[promise_resolved/step=0/svc=\"promise\"/op=\"resolve\"/id=\"p-1\"/name=\"\"/result=\"v\"/err=\"\"]",
-		"store_error_then_replay": "res=0x0 isReplay=true step=1 recorded=[]",
+		"divergence":                 "res=0x1 isReplay=true step=0 recorded=[]",
+		"fresh":                      "res=0x0 isReplay=false step=1 recorded=[promise_resolved/step=0/svc=\"promise\"/op=\"resolve\"/id=\"p-1\"/name=\"\"/result=\"v\"/err=\"\"]",
+		"frontier":                   "res=0x0 isReplay=false step=2 recorded=[promise_resolved/step=1/svc=\"promise\"/op=\"resolve\"/id=\"p-1\"/name=\"\"/result=\"v\"/err=\"\"]",
+		"no_store":                   "res=0x1 isReplay=false step=1 recorded=[promise_resolved/step=0/svc=\"promise\"/op=\"resolve\"/id=\"p-1\"/name=\"\"/result=\"v\"/err=\"\"]",
+		"replay":                     "res=0x0 isReplay=true step=1 recorded=[]",
+		"replay_by_type_alone":       "res=0x0 isReplay=true step=1 recorded=[]",
+		"replay_mismatched_identity": "res=0x0 isReplay=true step=1 recorded=[]",
+		"segment_fresh":              "res=0x80000000 isReplay=false step=0 recorded=[]",
+		"segment_frontier":           "res=0x80000000 isReplay=false step=1 recorded=[]",
+		"store_error":                "res=0x1 isReplay=false step=1 recorded=[promise_resolved/step=0/svc=\"promise\"/op=\"resolve\"/id=\"p-1\"/name=\"\"/result=\"v\"/err=\"\"]",
+		"store_error_then_replay":    "res=0x0 isReplay=true step=1 recorded=[]",
 	},
 	"reject_promise": {
-		"divergence":              "res=0x1 isReplay=true step=0 recorded=[]",
-		"fresh":                   "res=0x0 isReplay=false step=1 recorded=[promise_rejected/step=0/svc=\"promise\"/op=\"reject\"/id=\"p-1\"/name=\"\"/result=\"\"/err=\"\"]",
-		"frontier":                "res=0x0 isReplay=false step=2 recorded=[promise_rejected/step=1/svc=\"promise\"/op=\"reject\"/id=\"p-1\"/name=\"\"/result=\"\"/err=\"\"]",
-		"no_store":                "res=0x1 isReplay=false step=1 recorded=[promise_rejected/step=0/svc=\"promise\"/op=\"reject\"/id=\"p-1\"/name=\"\"/result=\"\"/err=\"\"]",
-		"replay":                  "res=0x0 isReplay=true step=1 recorded=[]",
-		"replay_by_type_alone":    "res=0x0 isReplay=true step=1 recorded=[]",
-		"segment_fresh":           "res=0x80000000 isReplay=false step=0 recorded=[]",
-		"segment_frontier":        "res=0x80000000 isReplay=false step=1 recorded=[]",
-		"store_error":             "res=0x1 isReplay=false step=1 recorded=[promise_rejected/step=0/svc=\"promise\"/op=\"reject\"/id=\"p-1\"/name=\"\"/result=\"\"/err=\"\"]",
-		"store_error_then_replay": "res=0x0 isReplay=true step=1 recorded=[]",
+		"divergence":                 "res=0x1 isReplay=true step=0 recorded=[]",
+		"fresh":                      "res=0x0 isReplay=false step=1 recorded=[promise_rejected/step=0/svc=\"promise\"/op=\"reject\"/id=\"p-1\"/name=\"\"/result=\"\"/err=\"\"]",
+		"frontier":                   "res=0x0 isReplay=false step=2 recorded=[promise_rejected/step=1/svc=\"promise\"/op=\"reject\"/id=\"p-1\"/name=\"\"/result=\"\"/err=\"\"]",
+		"no_store":                   "res=0x1 isReplay=false step=1 recorded=[promise_rejected/step=0/svc=\"promise\"/op=\"reject\"/id=\"p-1\"/name=\"\"/result=\"\"/err=\"\"]",
+		"replay":                     "res=0x0 isReplay=true step=1 recorded=[]",
+		"replay_by_type_alone":       "res=0x0 isReplay=true step=1 recorded=[]",
+		"replay_mismatched_identity": "res=0x0 isReplay=true step=1 recorded=[]",
+		"segment_fresh":              "res=0x80000000 isReplay=false step=0 recorded=[]",
+		"segment_frontier":           "res=0x80000000 isReplay=false step=1 recorded=[]",
+		"store_error":                "res=0x1 isReplay=false step=1 recorded=[promise_rejected/step=0/svc=\"promise\"/op=\"reject\"/id=\"p-1\"/name=\"\"/result=\"\"/err=\"\"]",
+		"store_error_then_replay":    "res=0x0 isReplay=true step=1 recorded=[]",
 	},
 }
 
