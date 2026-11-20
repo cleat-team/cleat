@@ -10,6 +10,9 @@ package engine
 
 import (
 	"context"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
 	"regexp"
 	"strings"
@@ -218,5 +221,128 @@ func TestEverySpecIsRegisteredAndNoPureSpecRecords(t *testing.T) {
 	}
 	if declared != len(stepSpecs) {
 		t.Errorf("%d `var x = stepSpec{` declarations in engine/ but %d specs in stepSpecs: register every spec, or the properties here do not cover it", declared, len(stepSpecs))
+	}
+}
+
+// The two exemptions the stop-site guards carry for the dispatcher say something about CALLERS ("leaveReplay's only caller is step",
+// "Record is reached only from a spec's Fresh"), and the guards' stale-entry checks look at the exempt function's BODY, not at who calls it.
+// A second caller of leaveReplay that skipped step would be legitimised by the exemption, which is the bypass the dispatcher exists to prevent
+// (WS-cleat-2, review of #4207). This reads the callers from the syntax tree, so a comment or a string cannot satisfy it.
+
+// dispatcherCallerFacts parses non-test sources (name -> source) and returns where leaveReplay is called from, and how many .Record( calls
+// there are in all and how many sit inside the Fresh function of a stepSpec literal.
+func dispatcherCallerFacts(t *testing.T, sources map[string]string) (leaveReplayCallers []string, recordCalls, recordInFresh int) {
+	t.Helper()
+	fset := token.NewFileSet()
+	for name, src := range sources {
+		f, err := parser.ParseFile(fset, name, src, 0)
+		if err != nil {
+			t.Fatalf("parsing %s: %v", name, err)
+		}
+		// The source ranges of every `Fresh: func(...) {...}` inside a stepSpec composite literal.
+		var freshRanges [][2]token.Pos
+		ast.Inspect(f, func(n ast.Node) bool {
+			cl, ok := n.(*ast.CompositeLit)
+			if !ok {
+				return true
+			}
+			if id, ok := cl.Type.(*ast.Ident); !ok || id.Name != "stepSpec" {
+				return true
+			}
+			for _, el := range cl.Elts {
+				kv, ok := el.(*ast.KeyValueExpr)
+				if !ok {
+					continue
+				}
+				if k, ok := kv.Key.(*ast.Ident); ok && k.Name == "Fresh" {
+					if fl, ok := kv.Value.(*ast.FuncLit); ok {
+						freshRanges = append(freshRanges, [2]token.Pos{fl.Pos(), fl.End()})
+					}
+				}
+			}
+			return true
+		})
+		for _, d := range f.Decls {
+			fd, ok := d.(*ast.FuncDecl)
+			if !ok || fd.Body == nil {
+				continue
+			}
+			ast.Inspect(fd, func(n ast.Node) bool {
+				call, ok := n.(*ast.CallExpr)
+				if !ok {
+					return true
+				}
+				sel, ok := call.Fun.(*ast.SelectorExpr)
+				if !ok {
+					return true
+				}
+				if sel.Sel.Name == "leaveReplay" {
+					leaveReplayCallers = append(leaveReplayCallers, fd.Name.Name)
+				}
+				return true
+			})
+		}
+		// Record calls can sit in a package-level var (the specs are vars), so they are found over the whole file, not only inside functions.
+		ast.Inspect(f, func(n ast.Node) bool {
+			call, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			sel, ok := call.Fun.(*ast.SelectorExpr)
+			if !ok || sel.Sel.Name != "Record" {
+				return true
+			}
+			recordCalls++
+			for _, r := range freshRanges {
+				if call.Pos() >= r[0] && call.End() <= r[1] {
+					recordInFresh++
+					break
+				}
+			}
+			return true
+		})
+	}
+	return leaveReplayCallers, recordCalls, recordInFresh
+}
+
+func TestTheDispatcherExemptionsAreTrueOfTheirCallers(t *testing.T) {
+	entries, err := os.ReadDir(".")
+	if err != nil {
+		t.Fatalf("reading engine/: %v", err)
+	}
+	sources := map[string]string{}
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".go") || strings.HasSuffix(e.Name(), "_test.go") {
+			continue
+		}
+		b, err := os.ReadFile(e.Name())
+		if err != nil {
+			t.Fatal(err)
+		}
+		sources[e.Name()] = string(b)
+	}
+	callers, records, inFresh := dispatcherCallerFacts(t, sources)
+
+	// Known positive: the scan must SEE the calls that exist today, or "no second caller" would be what a scan that matches nothing says.
+	if len(callers) != 1 || callers[0] != "step" {
+		t.Errorf("leaveReplay is called from %v, want exactly [step]: the exemption for leaveReplay says its only caller is step, and a second caller would skip the refusal that follows it", callers)
+	}
+	if records < 3 {
+		t.Fatalf("PRECONDITION FAILED: the scan found %d .Record( calls, want the 3 the promise specs make; it is reading nothing", records)
+	}
+	if inFresh != records {
+		t.Errorf("%d of %d .Record( calls are outside a stepSpec's Fresh function: the exemption for Record says it is reached only from there, where step has already refused", records-inFresh, records)
+	}
+
+	// Negative control: the same scan over a source with a second caller of each kind must report them.
+	badStep := `package engine
+func (s *execSession) step() { s.leaveReplay(nil) }
+func (s *execSession) sneaky() { s.leaveReplay(nil) }
+var spec = stepSpec{Fresh: func(c *stepCtx) int64 { c.Record(EventRecord{}); return 0 }}
+func (s *execSession) bypass(c *stepCtx) { c.Record(EventRecord{}) }
+`
+	cc, rr, rf := dispatcherCallerFacts(t, map[string]string{"bad.go": badStep})
+	if len(cc) != 2 || rr != 2 || rf != 1 {
+		t.Errorf("CONTROL: on a source with a second leaveReplay caller and a Record outside Fresh the scan reported callers=%v records=%d inFresh=%d, want 2 callers, 2 records, 1 in Fresh", cc, rr, rf)
 	}
 }

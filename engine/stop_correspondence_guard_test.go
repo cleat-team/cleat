@@ -425,6 +425,9 @@ var stepCall = regexp.MustCompile(`\bs\.step\(`)
 // goesThroughStep reports whether a host call's text (the method and the spec value that follows it, up to the next method) calls the
 // dispatcher, which refuses every non-Pure step. A call that went through step with a Pure spec would be wrongly counted a stop site; the
 // dispatcher's own tests assert no spec declares Pure and records (cleat#4152).
+//
+// The text it reads runs from a method to the NEXT method, so a package-level helper (not a method) that calls s.step and sits between two
+// methods is attributed to the one before it. That can only ADD a site, and the Java count's equality then fails loudly: the safe direction.
 func goesThroughStep(body string) bool { return stepCall.MatchString(blankComments(body)) }
 
 // callsInCode reports whether src contains a call `name()` in CODE: the three
