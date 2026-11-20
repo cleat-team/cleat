@@ -23,10 +23,22 @@ import (
 // belongs to the call that follows; leaving it means that call still reads its own record. A true divergence keeps diverging on each
 // later call, which is the honest answer.
 func (s *execSession) replayDivergence(ctx context.Context, m api.Module, expected EventType, outPtr, outMaxLen uint32) int64 {
-	got := s.history[s.stepCount]
-	msg := fmt.Sprintf("replay divergence at step %d: expected %s, got %s.\nRun 'cleat vet' on your workflow code to check for common non-determinism issues (time.Now(), random values, map iteration, goroutines).",
+	return s.reportReplayDivergence(ctx, m, divergenceMessage(&s.history[s.stepCount], expected), outPtr, outMaxLen)
+}
+
+// replayDivergenceAt is replayDivergence for a record that is not the next one: a multi-record step finds its foreign record part-way through
+// its run, and the message must name THAT record, not the first of the run. Nothing is consumed.
+//
+// It calls reportReplayDivergence directly, as replayDivergence does, and does not delegate to it: the parity test that finds where a handler
+// writes its result length follows callees to a fixed depth, and one more hop between a host call and the packer puts the packer out of reach.
+func (s *execSession) replayDivergenceAt(ctx context.Context, m api.Module, got *EventRecord, expected EventType, outPtr, outMaxLen uint32) int64 {
+	return s.reportReplayDivergence(ctx, m, divergenceMessage(got, expected), outPtr, outMaxLen)
+}
+
+// divergenceMessage is the one text of a type divergence: the step and both event types.
+func divergenceMessage(got *EventRecord, expected EventType) string {
+	return fmt.Sprintf("replay divergence at step %d: expected %s, got %s.\nRun 'cleat vet' on your workflow code to check for common non-determinism issues (time.Now(), random values, map iteration, goroutines).",
 		got.Step, expected, got.EventType)
-	return s.reportReplayDivergence(ctx, m, msg, outPtr, outMaxLen)
 }
 
 // replayIdentityDivergence reports that the event at the next step is the right TYPE for this call but names something else: a different
@@ -34,10 +46,18 @@ func (s *execSession) replayDivergence(ctx context.Context, m api.Module, expect
 // consumed it, and answered as though the recorded call were this one, so the history and the code had disagreed and nothing said so. Same
 // shape, metric and non-consumption as replayDivergence; what differs is the message, which names what was recorded and what was asked.
 func (s *execSession) replayIdentityDivergence(ctx context.Context, m api.Module, step string, why string, outPtr, outMaxLen uint32) int64 {
-	got := s.history[s.stepCount]
-	msg := fmt.Sprintf("replay divergence at step %d: %s asked for something other than the %s recorded there: %s.\nRun 'cleat vet' on your workflow code to check for common non-determinism issues (time.Now(), random values, map iteration, goroutines).",
+	return s.reportReplayDivergence(ctx, m, identityDivergenceMessage(&s.history[s.stepCount], step, why), outPtr, outMaxLen)
+}
+
+// replayIdentityDivergenceAt is replayIdentityDivergence for a record part-way through a run (direct to the reporter, for the reason above).
+func (s *execSession) replayIdentityDivergenceAt(ctx context.Context, m api.Module, got *EventRecord, step string, why string, outPtr, outMaxLen uint32) int64 {
+	return s.reportReplayDivergence(ctx, m, identityDivergenceMessage(got, step, why), outPtr, outMaxLen)
+}
+
+// identityDivergenceMessage is the one text of an identity divergence.
+func identityDivergenceMessage(got *EventRecord, step string, why string) string {
+	return fmt.Sprintf("replay divergence at step %d: %s asked for something other than the %s recorded there: %s.\nRun 'cleat vet' on your workflow code to check for common non-determinism issues (time.Now(), random values, map iteration, goroutines).",
 		got.Step, step, got.EventType, why)
-	return s.reportReplayDivergence(ctx, m, msg, outPtr, outMaxLen)
 }
 
 // reportReplayDivergence is the one place a divergence is counted and written to the guest: the failure metric, then error code 1 in a simple
