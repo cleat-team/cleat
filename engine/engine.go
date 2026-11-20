@@ -122,12 +122,15 @@ type Engine struct {
 	runLimitsLoaded      bool
 	runLimitsValue       TenantSettings
 
-	deferPassBudget      time.Duration // total for one runDefers pass; see WithDeferPassBudget
-	deferPhase           bool          // this execution is a defer segment; see WithDeferPhase
-	stopAtLastStoppable  bool          // a defer segment over a killed run; see WithStopAtLastStoppable
-	killedWithDefersOwed atomic.Bool   // a component guest was stopped before its wrapper ran its defers; see KilledWithDefersOwed
-	nowFn                func() int64  // wall clock for sleep-deadline decisions; see WithClock
-	workflowStartMs      int64         // workflow row's created_at; anchors an empty history, see WithWorkflowStartTime
+	deferPassBudget time.Duration // total for one runDefers pass; see WithDeferPassBudget
+	deferPhase      bool          // this execution is a defer segment; see WithDeferPhase
+	// wakeSource resumes a parked run. nil, which is every production engine today, means no wait parks: each suspends. Assigned only by tests
+	// until the parking mechanism exists; see parkOrSuspend (park.go).
+	wakeSource           wakeSource
+	stopAtLastStoppable  bool         // a defer segment over a killed run; see WithStopAtLastStoppable
+	killedWithDefersOwed atomic.Bool  // a component guest was stopped before its wrapper ran its defers; see KilledWithDefersOwed
+	nowFn                func() int64 // wall clock for sleep-deadline decisions; see WithClock
+	workflowStartMs      int64        // workflow row's created_at; anchors an empty history, see WithWorkflowStartTime
 
 	continueAsNewHandler func(ctx context.Context, currentRunID, workerID string, generation int64, defName string, defVersion int, newInput string, newEvents []EventRecord, result string, queryState map[string]string, priority int) (newRunID string, err error)
 

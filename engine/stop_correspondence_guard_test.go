@@ -414,7 +414,13 @@ func hostStopSites(t *testing.T) map[string]bool {
 			}
 			// step is the dispatcher (cleat#4152): it consults stopBeforeNewWork for every host call that goes through it, so it is not a host
 			// call and counting it would name a site no guest can reach. The host calls that go through it ARE sites, and are found below.
-			if name == "stopBeforeNewWork" || name == "suspendingAwaitResult" || name == "step" {
+			//
+			// canPark is the park helper's eligibility test (cleat#4152, W2b): it consults stopBeforeNewWork to decide whether a wait may PARK, and
+			// it answers parkOrSuspend with a bool, never a refusal to a guest, so it is not a host call and counting it would name a site no guest
+			// can reach. The exemption says something about CALLERS, like leaveReplay's: canPark is called only from parkOrSuspend, and
+			// TestCanParkIsCalledOnlyByParkOrSuspend (park_test.go) fails if another function calls it, because a caller that used it to refuse a
+			// guest would consult canPark and never stopBeforeNewWork, and this scan could not see it.
+			if name == "stopBeforeNewWork" || name == "suspendingAwaitResult" || name == "step" || name == "canPark" {
 				continue
 			}
 			body := src[loc[0]:end]
