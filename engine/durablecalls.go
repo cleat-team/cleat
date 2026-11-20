@@ -469,6 +469,16 @@ func (s *execSession) DurableCallWithRetry(ctx context.Context, m api.Module,
 	nonRetryableErrorsJSON string,
 	responsePtr, responseMaxLen uint32) int64 {
 
+	// A policy that allows no attempt is refused, fresh and replay alike (cleat#4244). maxAttempts arrives across the ABI from every SDK and several
+	// pass it unvalidated: the Go SDK sends int64(policy.MaxAttempts), so a cleat.RetryPolicy with no MaxAttempts sent 0. The loop below then never
+	// ran, lastErr stayed nil, and the terminal event dereferenced it: a host panic a guest could trigger with ordinary code. The engine is the one
+	// place that covers every SDK, so it refuses here, with the status the unparseable error list below returns, and records nothing.
+	if maxAttempts < 1 {
+		s.engine.log().WarnContext(ctx, "retry policy allows no attempt (maxAttempts < 1); refusing the call",
+			"service", service, "operation", operation, "max_attempts", maxAttempts)
+		return badParamDurableCall
+	}
+
 	// Worker-enforced ceiling on retry attempts to prevent runaway retries
 	// from misconfigured WASM modules.  Use the engine-configured limit if
 	// set (it comes from --max-retries on the command line), otherwise the

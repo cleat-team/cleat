@@ -203,6 +203,12 @@ func g3rCases() map[string]g3rCase {
 	bad := pol()
 	bad.nonRetryable = `not json`
 	cases["fresh_unparseable_non_retryable"] = g3rCase{policy: bad}
+	zero := pol()
+	zero.maxAttempts = 0
+	negative := pol()
+	negative.maxAttempts = -1
+	cases["fresh_max_attempts_zero_is_refused"] = g3rCase{policy: zero}
+	cases["fresh_max_attempts_negative_is_refused"] = g3rCase{policy: negative}
 	long := g3rPolicy{maxAttempts: 5, initialMs: 1000, coef100: 200, maxMs: 0, nonRetryable: `[]`}
 	cases["fresh_policy_too_long_for_the_budget"] = g3rCase{budget: time.Nanosecond, policy: long}
 	cases["segment_fresh"] = g3rCase{deferPhase: true, policy: pol()}
@@ -216,6 +222,8 @@ func g3rCases() map[string]g3rCase {
 	cases["replay_mid_retry_one_attempt_spent"] = g3rCase{replaying: true, history: []EventRecord{failed(0, 1)}, failFirst: 1, policy: pol()}
 	cases["replay_mid_retry_keeps_the_first_step"] = g3rCase{replaying: true, prefix: true, history: []EventRecord{plain, failed(1, 1)}, failFirst: 1, policy: pol()}
 	cases["replay_mid_retry_all_attempts_spent"] = g3rCase{replaying: true, history: []EventRecord{failed(0, 1), failed(1, 2), failed(2, 3)}, policy: pol()}
+	cases["replay_mid_retry_max_attempts_zero_is_refused"] = g3rCase{replaying: true, history: []EventRecord{failed(0, 1)}, policy: zero}
+	cases["replay_terminal_call_max_attempts_zero_is_refused"] = g3rCase{replaying: true, history: []EventRecord{terminal}, policy: zero}
 	other := failed(0, 1)
 	other.Op = "another"
 	cases["replay_mid_retry_other_operation"] = g3rCase{replaying: true, history: []EventRecord{other}, policy: pol()}
@@ -244,29 +252,33 @@ func g3rCases() map[string]g3rCase {
 // call_retry_refused and makes no attempt (cleat#4032); and the three segment rows show the refusal at the entry, at the frontier and the whole policy
 // given to a defer BODY.
 var g3rGolden = map[string]string{
-	"fresh_always_fails":                    "res=0x2b0000000201 wrote=\"retries exhausted: TRY_AGAIN: 503 try again\" isReplay=false step=3 recorded=[call_attempt_failed/step=0/attempt=1/svc.op/err=\"TRY_AGAIN: 503 try again\"/nonretry=false/exhausted=false/code=\"\" call_attempt_failed/step=1/attempt=2/svc.op/err=\"TRY_AGAIN: 503 try again\"/nonretry=false/exhausted=false/code=\"\" call/step=2/attempt=0/svc.op/err=\"retries exhausted: TRY_AGAIN: 503 try again\"/nonretry=false/exhausted=true/code=\"\"] attempts=3 others=0 keysFromStep=[0 0 0]",
-	"fresh_attempt_ceiling":                 "res=0x2b0000000201 wrote=\"retries exhausted: TRY_AGAIN: 503 try again\" isReplay=false step=4 recorded=[call_attempt_failed/step=0/attempt=1/svc.op/err=\"TRY_AGAIN: 503 try again\"/nonretry=false/exhausted=false/code=\"\" call_attempt_failed/step=1/attempt=2/svc.op/err=\"TRY_AGAIN: 503 try again\"/nonretry=false/exhausted=false/code=\"\" call_attempt_failed/step=2/attempt=3/svc.op/err=\"TRY_AGAIN: 503 try again\"/nonretry=false/exhausted=false/code=\"\" call/step=3/attempt=0/svc.op/err=\"retries exhausted: TRY_AGAIN: 503 try again\"/nonretry=false/exhausted=true/code=\"\"] attempts=4 others=0 keysFromStep=[0 0 0 0]",
-	"fresh_fails_twice_then_succeeds":       "res=0xb0000000000 wrote=\"{\\\"ok\\\":true}\" isReplay=false step=3 recorded=[call_attempt_failed/step=0/attempt=1/svc.op/err=\"TRY_AGAIN: 503 try again\"/nonretry=false/exhausted=false/code=\"\" call_attempt_failed/step=1/attempt=2/svc.op/err=\"TRY_AGAIN: 503 try again\"/nonretry=false/exhausted=false/code=\"\" call/step=2/attempt=0/svc.op/err=\"\"/nonretry=false/exhausted=false/code=\"\"] attempts=3 others=0 keysFromStep=[0 0 0]",
-	"fresh_first_attempt_succeeds":          "res=0xb0000000000 wrote=\"{\\\"ok\\\":true}\" isReplay=false step=1 recorded=[call/step=0/attempt=0/svc.op/err=\"\"/nonretry=false/exhausted=false/code=\"\"] attempts=1 others=0 keysFromStep=[0]",
-	"fresh_non_retryable_stops_at_one":      "res=0x180000000001 wrote=\"TRY_AGAIN: 503 try again\" isReplay=false step=1 recorded=[call/step=0/attempt=0/svc.op/err=\"TRY_AGAIN: 503 try again\"/nonretry=true/exhausted=false/code=\"\"] attempts=1 others=0 keysFromStep=[0]",
-	"fresh_policy_too_long_for_the_budget":  "res=0x850000000601 wrote=\"retry policy rejected: worst-case backoff exceeds the 1ns host-retry budget; run the policy in the guest, suspending between attempts\" isReplay=false step=1 recorded=[call_retry_refused/step=0/attempt=0/svc.op/err=\"\"/nonretry=false/exhausted=false/code=\"\"] attempts=0 others=0 keysFromStep=[]",
-	"fresh_unparseable_non_retryable":       "res=0x401 wrote=\"\" isReplay=false step=0 recorded=[] attempts=0 others=0 keysFromStep=[]",
-	"frontier_gets_its_whole_policy":        "res=0xb0000000000 wrote=\"{\\\"ok\\\":true}\" isReplay=false step=3 recorded=[call_attempt_failed/step=1/attempt=1/svc.op/err=\"TRY_AGAIN: 503 try again\"/nonretry=false/exhausted=false/code=\"\" call/step=2/attempt=0/svc.op/err=\"\"/nonretry=false/exhausted=false/code=\"\"] attempts=2 others=0 keysFromStep=[1 1]",
-	"replay_a_recorded_refusal":             "res=0xbd0000000601 wrote=\"retry policy rejected: this policy was refused when this call was recorded, as its worst-case backoff exceeds the host-retry budget; run the policy in the guest, suspending between attempts\" isReplay=true step=1 recorded=[] attempts=0 others=0 keysFromStep=[]",
-	"replay_mid_retry_all_attempts_spent":   "res=0x200000000201 wrote=\"retries exhausted: 503 try again\" isReplay=false step=4 recorded=[call/step=3/attempt=0/svc.op/err=\"retries exhausted: 503 try again\"/nonretry=false/exhausted=true/code=\"\"] attempts=0 others=0 keysFromStep=[]",
-	"replay_mid_retry_keeps_the_first_step": "res=0xb0000000000 wrote=\"{\\\"ok\\\":true}\" isReplay=false step=4 recorded=[call_attempt_failed/step=2/attempt=2/svc.op/err=\"TRY_AGAIN: 503 try again\"/nonretry=false/exhausted=false/code=\"\" call/step=3/attempt=0/svc.op/err=\"\"/nonretry=false/exhausted=false/code=\"\"] attempts=2 others=0 keysFromStep=[1 1]",
-	"replay_mid_retry_one_attempt_spent":    "res=0xb0000000000 wrote=\"{\\\"ok\\\":true}\" isReplay=false step=3 recorded=[call_attempt_failed/step=1/attempt=2/svc.op/err=\"TRY_AGAIN: 503 try again\"/nonretry=false/exhausted=false/code=\"\" call/step=2/attempt=0/svc.op/err=\"\"/nonretry=false/exhausted=false/code=\"\"] attempts=2 others=0 keysFromStep=[0 0]",
-	"replay_mid_retry_other_operation":      "res=0xfd0000000001 wrote=\"replay divergence at step 0: expected call event, got call_attempt_failed.\\n  actual request: {}\\n  expected request: \\nRun 'cleat vet' on your workflow code to check for common non-determinism issues (time.Now(), random values, map iteration, goroutines).\" isReplay=true step=1 recorded=[] attempts=0 others=0 keysFromStep=[]",
-	"replay_other_event_type":               "res=0xf60000000001 wrote=\"replay divergence at step 0: expected call event, got durable_send.\\n  actual request: {}\\n  expected request: \\nRun 'cleat vet' on your workflow code to check for common non-determinism issues (time.Now(), random values, map iteration, goroutines).\" isReplay=true step=1 recorded=[] attempts=0 others=0 keysFromStep=[]",
-	"replay_quit":                           "res=0x0 wrote=\"\" isReplay=true step=1 recorded=[] attempts=0 others=0 keysFromStep=[]",
-	"replay_terminal_call":                  "res=0xb0000000000 wrote=\"{\\\"ok\\\":true}\" isReplay=true step=1 recorded=[] attempts=0 others=0 keysFromStep=[]",
-	"replay_terminal_error_record":          "res=0x200000000201 wrote=\"retries exhausted: 503 try again\" isReplay=true step=1 recorded=[] attempts=0 others=0 keysFromStep=[]",
-	"segment_defer_body":                    "res=0xb0000000000 wrote=\"{\\\"ok\\\":true}\" isReplay=false step=3 recorded=[call_attempt_failed/step=1/attempt=1/svc.op/err=\"TRY_AGAIN: 503 try again\"/nonretry=false/exhausted=false/code=\"\" call/step=2/attempt=0/svc.op/err=\"\"/nonretry=false/exhausted=false/code=\"\"] attempts=2 others=0 keysFromStep=[1 1]",
-	"segment_fresh":                         "res=0x80000000 wrote=\"\" isReplay=false step=0 recorded=[] attempts=0 others=0 keysFromStep=[]",
-	"segment_frontier":                      "res=0x80000000 wrote=\"\" isReplay=false step=1 recorded=[] attempts=0 others=0 keysFromStep=[]",
-	"shutdown_fresh":                        "res=0x80000000 wrote=\"\" isReplay=false step=0 recorded=[] attempts=0 others=0 keysFromStep=[]",
-	"write_failed_between_attempts":         "res=0x80000000 wrote=\"\" isReplay=false step=1 recorded=[call_attempt_failed/step=0/attempt=1/svc.op/err=\"TRY_AGAIN: 503 try again\"/nonretry=false/exhausted=false/code=\"\"] attempts=1 others=0 keysFromStep=[0]",
-	"write_failed_fresh":                    "res=0x80000000 wrote=\"\" isReplay=false step=0 recorded=[] attempts=0 others=0 keysFromStep=[]",
+	"fresh_always_fails":                                "res=0x2b0000000201 wrote=\"retries exhausted: TRY_AGAIN: 503 try again\" isReplay=false step=3 recorded=[call_attempt_failed/step=0/attempt=1/svc.op/err=\"TRY_AGAIN: 503 try again\"/nonretry=false/exhausted=false/code=\"\" call_attempt_failed/step=1/attempt=2/svc.op/err=\"TRY_AGAIN: 503 try again\"/nonretry=false/exhausted=false/code=\"\" call/step=2/attempt=0/svc.op/err=\"retries exhausted: TRY_AGAIN: 503 try again\"/nonretry=false/exhausted=true/code=\"\"] attempts=3 others=0 keysFromStep=[0 0 0]",
+	"fresh_attempt_ceiling":                             "res=0x2b0000000201 wrote=\"retries exhausted: TRY_AGAIN: 503 try again\" isReplay=false step=4 recorded=[call_attempt_failed/step=0/attempt=1/svc.op/err=\"TRY_AGAIN: 503 try again\"/nonretry=false/exhausted=false/code=\"\" call_attempt_failed/step=1/attempt=2/svc.op/err=\"TRY_AGAIN: 503 try again\"/nonretry=false/exhausted=false/code=\"\" call_attempt_failed/step=2/attempt=3/svc.op/err=\"TRY_AGAIN: 503 try again\"/nonretry=false/exhausted=false/code=\"\" call/step=3/attempt=0/svc.op/err=\"retries exhausted: TRY_AGAIN: 503 try again\"/nonretry=false/exhausted=true/code=\"\"] attempts=4 others=0 keysFromStep=[0 0 0 0]",
+	"fresh_fails_twice_then_succeeds":                   "res=0xb0000000000 wrote=\"{\\\"ok\\\":true}\" isReplay=false step=3 recorded=[call_attempt_failed/step=0/attempt=1/svc.op/err=\"TRY_AGAIN: 503 try again\"/nonretry=false/exhausted=false/code=\"\" call_attempt_failed/step=1/attempt=2/svc.op/err=\"TRY_AGAIN: 503 try again\"/nonretry=false/exhausted=false/code=\"\" call/step=2/attempt=0/svc.op/err=\"\"/nonretry=false/exhausted=false/code=\"\"] attempts=3 others=0 keysFromStep=[0 0 0]",
+	"fresh_first_attempt_succeeds":                      "res=0xb0000000000 wrote=\"{\\\"ok\\\":true}\" isReplay=false step=1 recorded=[call/step=0/attempt=0/svc.op/err=\"\"/nonretry=false/exhausted=false/code=\"\"] attempts=1 others=0 keysFromStep=[0]",
+	"fresh_non_retryable_stops_at_one":                  "res=0x180000000001 wrote=\"TRY_AGAIN: 503 try again\" isReplay=false step=1 recorded=[call/step=0/attempt=0/svc.op/err=\"TRY_AGAIN: 503 try again\"/nonretry=true/exhausted=false/code=\"\"] attempts=1 others=0 keysFromStep=[0]",
+	"fresh_policy_too_long_for_the_budget":              "res=0x850000000601 wrote=\"retry policy rejected: worst-case backoff exceeds the 1ns host-retry budget; run the policy in the guest, suspending between attempts\" isReplay=false step=1 recorded=[call_retry_refused/step=0/attempt=0/svc.op/err=\"\"/nonretry=false/exhausted=false/code=\"\"] attempts=0 others=0 keysFromStep=[]",
+	"fresh_unparseable_non_retryable":                   "res=0x401 wrote=\"\" isReplay=false step=0 recorded=[] attempts=0 others=0 keysFromStep=[]",
+	"fresh_max_attempts_zero_is_refused":                "res=0x401 wrote=\"\" isReplay=false step=0 recorded=[] attempts=0 others=0 keysFromStep=[]",
+	"fresh_max_attempts_negative_is_refused":            "res=0x401 wrote=\"\" isReplay=false step=0 recorded=[] attempts=0 others=0 keysFromStep=[]",
+	"replay_mid_retry_max_attempts_zero_is_refused":     "res=0x401 wrote=\"\" isReplay=true step=0 recorded=[] attempts=0 others=0 keysFromStep=[]",
+	"replay_terminal_call_max_attempts_zero_is_refused": "res=0x401 wrote=\"\" isReplay=true step=0 recorded=[] attempts=0 others=0 keysFromStep=[]",
+	"frontier_gets_its_whole_policy":                    "res=0xb0000000000 wrote=\"{\\\"ok\\\":true}\" isReplay=false step=3 recorded=[call_attempt_failed/step=1/attempt=1/svc.op/err=\"TRY_AGAIN: 503 try again\"/nonretry=false/exhausted=false/code=\"\" call/step=2/attempt=0/svc.op/err=\"\"/nonretry=false/exhausted=false/code=\"\"] attempts=2 others=0 keysFromStep=[1 1]",
+	"replay_a_recorded_refusal":                         "res=0xbd0000000601 wrote=\"retry policy rejected: this policy was refused when this call was recorded, as its worst-case backoff exceeds the host-retry budget; run the policy in the guest, suspending between attempts\" isReplay=true step=1 recorded=[] attempts=0 others=0 keysFromStep=[]",
+	"replay_mid_retry_all_attempts_spent":               "res=0x200000000201 wrote=\"retries exhausted: 503 try again\" isReplay=false step=4 recorded=[call/step=3/attempt=0/svc.op/err=\"retries exhausted: 503 try again\"/nonretry=false/exhausted=true/code=\"\"] attempts=0 others=0 keysFromStep=[]",
+	"replay_mid_retry_keeps_the_first_step":             "res=0xb0000000000 wrote=\"{\\\"ok\\\":true}\" isReplay=false step=4 recorded=[call_attempt_failed/step=2/attempt=2/svc.op/err=\"TRY_AGAIN: 503 try again\"/nonretry=false/exhausted=false/code=\"\" call/step=3/attempt=0/svc.op/err=\"\"/nonretry=false/exhausted=false/code=\"\"] attempts=2 others=0 keysFromStep=[1 1]",
+	"replay_mid_retry_one_attempt_spent":                "res=0xb0000000000 wrote=\"{\\\"ok\\\":true}\" isReplay=false step=3 recorded=[call_attempt_failed/step=1/attempt=2/svc.op/err=\"TRY_AGAIN: 503 try again\"/nonretry=false/exhausted=false/code=\"\" call/step=2/attempt=0/svc.op/err=\"\"/nonretry=false/exhausted=false/code=\"\"] attempts=2 others=0 keysFromStep=[0 0]",
+	"replay_mid_retry_other_operation":                  "res=0xfd0000000001 wrote=\"replay divergence at step 0: expected call event, got call_attempt_failed.\\n  actual request: {}\\n  expected request: \\nRun 'cleat vet' on your workflow code to check for common non-determinism issues (time.Now(), random values, map iteration, goroutines).\" isReplay=true step=1 recorded=[] attempts=0 others=0 keysFromStep=[]",
+	"replay_other_event_type":                           "res=0xf60000000001 wrote=\"replay divergence at step 0: expected call event, got durable_send.\\n  actual request: {}\\n  expected request: \\nRun 'cleat vet' on your workflow code to check for common non-determinism issues (time.Now(), random values, map iteration, goroutines).\" isReplay=true step=1 recorded=[] attempts=0 others=0 keysFromStep=[]",
+	"replay_quit":                                       "res=0x0 wrote=\"\" isReplay=true step=1 recorded=[] attempts=0 others=0 keysFromStep=[]",
+	"replay_terminal_call":                              "res=0xb0000000000 wrote=\"{\\\"ok\\\":true}\" isReplay=true step=1 recorded=[] attempts=0 others=0 keysFromStep=[]",
+	"replay_terminal_error_record":                      "res=0x200000000201 wrote=\"retries exhausted: 503 try again\" isReplay=true step=1 recorded=[] attempts=0 others=0 keysFromStep=[]",
+	"segment_defer_body":                                "res=0xb0000000000 wrote=\"{\\\"ok\\\":true}\" isReplay=false step=3 recorded=[call_attempt_failed/step=1/attempt=1/svc.op/err=\"TRY_AGAIN: 503 try again\"/nonretry=false/exhausted=false/code=\"\" call/step=2/attempt=0/svc.op/err=\"\"/nonretry=false/exhausted=false/code=\"\"] attempts=2 others=0 keysFromStep=[1 1]",
+	"segment_fresh":                                     "res=0x80000000 wrote=\"\" isReplay=false step=0 recorded=[] attempts=0 others=0 keysFromStep=[]",
+	"segment_frontier":                                  "res=0x80000000 wrote=\"\" isReplay=false step=1 recorded=[] attempts=0 others=0 keysFromStep=[]",
+	"shutdown_fresh":                                    "res=0x80000000 wrote=\"\" isReplay=false step=0 recorded=[] attempts=0 others=0 keysFromStep=[]",
+	"write_failed_between_attempts":                     "res=0x80000000 wrote=\"\" isReplay=false step=1 recorded=[call_attempt_failed/step=0/attempt=1/svc.op/err=\"TRY_AGAIN: 503 try again\"/nonretry=false/exhausted=false/code=\"\"] attempts=1 others=0 keysFromStep=[0]",
+	"write_failed_fresh":                                "res=0x80000000 wrote=\"\" isReplay=false step=0 recorded=[] attempts=0 others=0 keysFromStep=[]",
 }
 
 func TestG3rRetriedCallBehavesAsRecordedBeforeTheDispatcher(t *testing.T) {
@@ -286,8 +298,10 @@ func TestG3rRetriedCallBehavesAsRecordedBeforeTheDispatcher(t *testing.T) {
 			t.Errorf("%s: a situation with no golden row", name)
 		}
 	}
-	if len(g3rGolden) != 23 {
-		t.Errorf("the table has %d rows; this was recorded with 23, so a row was added or removed without saying so", len(g3rGolden))
+	// 23 rows as recorded against the code as it was, plus four ADDED by cleat#4244's refusal of a policy that allows no attempt: zero and negative
+	// maxAttempts fresh, and zero on a resume and on a replayed terminal call. None of the 23 moved for that reason.
+	if len(g3rGolden) != 27 {
+		t.Errorf("the table has %d rows; this was recorded with 27, so a row was added or removed without saying so", len(g3rGolden))
 	}
 }
 
