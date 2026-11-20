@@ -51,6 +51,10 @@ var scenarios = []scenario{
 	// The promise IS resolved, after the run has suspended in the await: resume with the resolution, then a call, then replay again (cleat#4177).
 	// The effect count is the oracle: the recorded history can look right while a replay re-runs the call.
 	{"await_promise_resolved", []op{{Op: "await_promise", Name: "p", Ms: 20000, Hit: "RES", Miss: "TIMEDOUT"}, {Op: "call", Name: "B"}}, resolveWhenSuspended},
+	// The shape seed 4179 drew (cleat#4169): a poll, calls, then a defer. A kill at the poll's BRANCH call (HIT or MISS) lands before the defer is
+	// registered, so a terminated run must not expect its cleanup. The oracle used to match the boundary only on an op's Name, never found the poll
+	// for a branch call, and counted the later defer; this is the fixed case that keeps it from regressing.
+	{"poll_then_defer", []op{{Op: "await0", Name: "go", Hit: "HIT", Miss: "MISS"}, {Op: "call", Name: "C"}, {Op: "side_effect", Name: "S"}, {Op: "defer", Name: "D"}}, nil},
 	{"retry", []op{{Op: "call", Name: "A"}, {Op: "call_retry", Name: "R", Attempts: 5, Fail: 2}, {Op: "call", Name: "B"}}, nil},
 }
 
@@ -302,7 +306,10 @@ func verifyTerminate(sc scenario, g goldenRecord, f *fault, b request, o outcome
 	}
 	// Cleanups registered before the boundary run once each in the defer segment: a defer scripted before the op the boundary belongs to.
 	for _, o2 := range sc.Ops {
-		if o2.Op != "defer" && o2.Name == b.Op {
+		// The boundary's op is the script op NAMED b.Op, or the poll/await whose Hit or Miss branch call b.Op is: that call is made by the
+		// await0/await_promise op itself and has no op of its own, so matching on Name alone never stopped, and every later defer was counted
+		// as registered when the kill had landed before it (cleat#4169; seed 4179, `await0:go call:C3 side_effect:S4 defer:D5` killed at MISS2).
+		if o2.Op != "defer" && (o2.Name == b.Op || (o2.Hit != "" && o2.Hit == b.Op) || (o2.Miss != "" && o2.Miss == b.Op)) {
 			break
 		}
 		if o2.Op == "defer" {
