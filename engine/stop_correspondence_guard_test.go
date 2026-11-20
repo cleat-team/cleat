@@ -436,10 +436,11 @@ var stepCallSpec = regexp.MustCompile(`\bs\.step\(\s*[^,()]+,\s*[^,()]+,\s*&(\w+
 // declaration's own closures (indented with tabs) never contain.
 var specDecl = regexp.MustCompile(`(?s)\nvar (\w+) = stepSpec\{(.*?)\n\}`)
 
-// neverRefusedSpecs names the specs declared `Effect: effectRelease`: steps the dispatcher does NOT refuse (cleat#4211). A host call that goes
+// neverRefusedSpecs names the specs declared `Refuse: neverRefuse`: steps the dispatcher does NOT refuse (cleat#4211). A host call that goes
 // through step is a stop site only if its spec can be refused, so counting every s.step caller one (as this scan did while every non-Pure
 // step was refused) reports ReleaseLock as a call the SDKs must guard, and the Java count one too high. Reading the declaration, not a list kept
-// here, means a new effectRelease spec is understood the day it is written.
+// here, means a new spec that says `Refuse: neverRefuse` is understood the day it is written. A spec with any OTHER Refuse is not in this set
+// and so counts as a site: the scan cannot prove an arbitrary Refuse never refuses, and over-counting fails loudly.
 func neverRefusedSpecs(t *testing.T) map[string]bool {
 	t.Helper()
 	entries, err := os.ReadDir(".")
@@ -456,7 +457,7 @@ func neverRefusedSpecs(t *testing.T) map[string]bool {
 			t.Fatalf("reading %s: %v", e.Name(), err)
 		}
 		for _, m := range specDecl.FindAllStringSubmatch(blankComments(string(b)), -1) {
-			if regexp.MustCompile(`\bEffect:\s*effectRelease\b`).MatchString(m[2]) {
+			if regexp.MustCompile(`\bRefuse:\s*neverRefuse\b`).MatchString(m[2]) {
 				out[m[1]] = true
 			}
 		}
@@ -466,7 +467,7 @@ func neverRefusedSpecs(t *testing.T) map[string]bool {
 
 // goesThroughStep reports whether a host call's text (the method and the spec value that follows it, up to the next method) calls the
 // dispatcher with a spec the dispatcher can refuse. A call that went through step with a Pure spec would be wrongly counted a stop site; the
-// dispatcher's own tests assert no spec declares Pure and records (cleat#4152). A call to a spec in unrefused (effectRelease) is not a site.
+// dispatcher's own tests assert no spec declares Pure and records (cleat#4152). A call to a spec in unrefused (`Refuse: neverRefuse`) is not a site.
 //
 // A step call whose spec this cannot read counts as a site: that over-reports, and an over-count fails loudly (the Java count's equality), where
 // an under-count would pass a call the SDKs do not guard.

@@ -22,7 +22,7 @@ import (
 //	an unwritable event      AcquireLock refused   ReleaseLock released and recorded
 //
 // A cleanup that is draining on a shutting-down worker cannot take a lock but can give one back, and applying the blanket rule would leave the lock
-// held until its lease ran out. So ReleaseLock keeps its behaviour, as an effect class of its own (effectRelease), and whether a segment's body should
+// held until its lease ran out. So ReleaseLock keeps its behaviour by declaring `Refuse: neverRefuse`, and whether a segment's body should
 // release at all is a separate decision. Each row is run twice: the call as the guest makes it fresh, and the same call reached at the replay frontier
 // (a defer segment starts in replay, so its body's first new call arrives that way, cleat#4101).
 

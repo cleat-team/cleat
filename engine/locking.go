@@ -113,13 +113,14 @@ var acquireLockStep = stepSpec{
 	},
 }
 
-// releaseLockStep is ReleaseLock as a step, and the one that is NEVER refused (effectRelease). Measured before the move, a_lock_call_in_each_stop_state_test.go:
+// releaseLockStep is ReleaseLock as a step, and the one that is NEVER refused (Refuse: neverRefuse, which carries the measurement). Measured before the move, a_lock_call_in_each_stop_state_test.go:
 // in a segment's body, after a worker shutdown, in a defer draining on a shutting-down worker and after an event that could not be written, AcquireLock is
 // refused and ReleaseLock releases and records. A cleanup that cannot give a lock back leaves it held for its lease, so the move keeps that and
 // declares it, where it used to be an entry in a list of exemptions. Whether a segment's body should be able to release is a separate decision.
 var releaseLockStep = stepSpec{
 	Name:     "release_lock",
-	Effect:   effectRelease,
+	Effect:   effectEffect,
+	Refuse:   neverRefuse,
 	Records:  recordsOne,
 	Want:     EventTypeReleaseLock,
 	Identity: lockIdentity,

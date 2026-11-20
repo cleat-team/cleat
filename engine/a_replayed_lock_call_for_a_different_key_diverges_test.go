@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"reflect"
 	"testing"
 )
 
@@ -68,10 +69,10 @@ func TestAReplayedLockCallForADifferentKeyDiverges(t *testing.T) {
 	}
 }
 
-// A release is the one non-Pure step the dispatcher does NOT refuse (effectRelease), and the reason is measured in
-// a_lock_call_in_each_stop_state_test.go. This is the dispatcher-level statement of it, with the refused class run in the same states as the control, so
+// A release is the one step the dispatcher does NOT refuse (`Refuse: neverRefuse`), and the reason is measured in
+// a_lock_call_in_each_stop_state_test.go. This is the dispatcher-level statement of it, with a default step run in the same states as the control, so
 // that "was not refused" cannot be read from a state that refuses nothing.
-func TestAnEffectReleaseStepIsNotRefusedWhereAnEffectStepIs(t *testing.T) {
+func TestAStepThatNeverRefusesIsNotRefusedWhereADefaultStepIs(t *testing.T) {
 	ctx := context.Background()
 	closedShutdown := make(chan struct{})
 	close(closedShutdown)
@@ -94,12 +95,15 @@ func TestAnEffectReleaseStepIsNotRefusedWhereAnEffectStepIs(t *testing.T) {
 				return []EventRecord{{Step: 0, EventType: fakeEvent}}
 			}
 			t.Run(r.name+"/"+arrival, func(t *testing.T) {
-				run := func(effect stepEffect) (got int64, ran int32) {
+				run := func(never bool) (got int64, ran int32) {
 					s := stepSession(r.opts, history())
 					if r.mod != nil {
 						r.mod(s)
 					}
-					spec := fakeSpec(effect, recordsOne, &ran, recordOneFake)
+					spec := fakeSpec(effectEffect, recordsOne, &ran, recordOneFake)
+					if never {
+						spec.Refuse = neverRefuse
+					}
 					if len(s.history) > 0 {
 						// Consume the record the replay frontier starts on, so the next call is the first one PAST the history.
 						if first := s.step(ctx, nil, spec, stepArgs{}); first != 7 {
@@ -109,13 +113,13 @@ func TestAnEffectReleaseStepIsNotRefusedWhereAnEffectStepIs(t *testing.T) {
 					}
 					return s.step(ctx, nil, spec, stepArgs{}), ran
 				}
-				if got, ran := run(effectRelease); got != 9 || ran != 1 {
-					t.Errorf("an effectRelease step in %q: returned %d, ran %d times; want it to run once and return its own 9", r.name, got, ran)
+				if got, ran := run(true); got != 9 || ran != 1 {
+					t.Errorf("a step with Refuse: neverRefuse in %q: returned %d, ran %d times; want it to run once and return its own 9", r.name, got, ran)
 				}
-				// The control, same state, same fake: an effectEffect step IS refused where this state refuses, which is every state except the
-				// drain of a segment; in the shutdown drain it is refused too, because shutdown is the third condition of stopBeforeNewWork.
-				if got, ran := run(effectEffect); got != callSuspendSentinel || ran != 0 {
-					t.Errorf("CONTROL: an effectEffect step in %q returned %d, ran %d times; want the stop sentinel and no run, or this state refuses nothing and the row above proves nothing", r.name, got, ran)
+				// The control, same state, same fake: a default step (Refuse nil, so stopBeforeNewWork) IS refused in every state listed, the
+				// shutdown drain included, because shutdown is the third condition of stopBeforeNewWork.
+				if got, ran := run(false); got != callSuspendSentinel || ran != 0 {
+					t.Errorf("CONTROL: a default step in %q returned %d, ran %d times; want the stop sentinel and no run, or this state refuses nothing and the row above proves nothing", r.name, got, ran)
 				}
 			})
 		}
@@ -125,12 +129,14 @@ func TestAnEffectReleaseStepIsNotRefusedWhereAnEffectStepIs(t *testing.T) {
 // The scans that decide what a host stop site is read the SOURCE, and the source says which specs are never refused. This holds that reading to the
 // registry, which has the actual values: two derivations that can disagree. The negative controls are the behaviour before the scan knew the class,
 // which is what reported ReleaseLock as a call the SDKs must guard and put the Java count at 29 when the true number is 28.
-func TestTheStopSiteScanReadsEffectReleaseFromTheSpecDeclaration(t *testing.T) {
+func TestTheStopSiteScanReadsNeverRefuseFromTheSpecDeclaration(t *testing.T) {
 	fromSource := neverRefusedSpecs(t)
 
+	// Function values can be compared only by their code pointer, which is what makes this a reading of the VALUES and not of the same text.
+	neverPtr := reflect.ValueOf(neverRefuse).Pointer()
 	byValue := 0
 	for _, sp := range stepSpecs {
-		if sp.Effect == effectRelease {
+		if sp.Refuse != nil && reflect.ValueOf(sp.Refuse).Pointer() == neverPtr {
 			byValue++
 		}
 	}
@@ -138,15 +144,15 @@ func TestTheStopSiteScanReadsEffectReleaseFromTheSpecDeclaration(t *testing.T) {
 		t.Errorf("the scan found %d never-refused spec declaration(s) in the source %v, the registry holds %d: one of the two readings is wrong", len(fromSource), fromSource, byValue)
 	}
 	if !fromSource["releaseLockStep"] {
-		t.Errorf("the scan did not find releaseLockStep, which is declared Effect: effectRelease: %v", fromSource)
+		t.Errorf("the scan did not find releaseLockStep, which is declared `Refuse: neverRefuse`: %v", fromSource)
 	}
 	for _, refused := range []string{"acquireLockStep", "createPromiseStep", "resolvePromiseStep", "rejectPromiseStep"} {
 		if fromSource[refused] {
 			t.Errorf("the scan reports %s as never refused; it is refused by the dispatcher", refused)
 		}
 	}
-	if releaseLockStep.Effect != effectRelease || acquireLockStep.Effect != effectEffect {
-		t.Errorf("the registry's values disagree with the declarations the scan read: release %v, acquire %v", releaseLockStep.Effect, acquireLockStep.Effect)
+	if releaseLockStep.Refuse == nil || reflect.ValueOf(releaseLockStep.Refuse).Pointer() != neverPtr || acquireLockStep.Refuse != nil {
+		t.Errorf("the registry's values disagree with the declarations the scan read: release Refuse set %v, acquire Refuse set %v", releaseLockStep.Refuse != nil, acquireLockStep.Refuse != nil)
 	}
 
 	call := func(spec string) string {

@@ -253,7 +253,7 @@ func TestTheRequiredJavaGuardsCoverEveryHostStopSite(t *testing.T) {
 	// onto step is the same as before they were. Matched at the start of a code line so a comment quoting the call is not counted; a
 	// call written any other way is missed, which makes the count LOWER and fails this test, the safe direction.
 	//
-	// A call whose spec is effectRelease (ReleaseLock, cleat#4211) is NOT a stop site: step never refuses it, so there is no refusal for
+	// A call whose spec says `Refuse: neverRefuse` (ReleaseLock, cleat#4211) is NOT a stop site: step never refuses it, so there is no refusal for
 	// an SDK to check. Counting every `return s.step(` line gave 29 when the true number was 28, and the constant below was one edit from
 	// recording the wrong one. The spec is read from the call, as stop_correspondence_guard_test.go's neverRefusedSpecs reads the declaration.
 	viaStep := regexp.MustCompile(`(?m)^\s*return s\.step\(\s*[^,()]+,\s*[^,()]+,\s*&(\w+)`)
