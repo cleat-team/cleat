@@ -2165,9 +2165,9 @@ impl HostCalls {
     /// `Ok(Some(v))`: it does, the step is consumed, and the caller must NOT run its function or call [`Self::side_effect`].
     /// `Ok(None)`: nothing is recorded and nothing changed. `Err`: a refused call (the workflow is stopping) or a replay divergence.
     pub fn side_effect_recorded(&self) -> Result<Option<String>, String> {
-        let mut out_buf = vec![0u8; memory::OUT_BUF_SIZE as usize];
+        let mut out_buf = vec![0u8; memory::out_buf_cap() as usize];
         let result = unsafe {
-            imports::cleat_side_effect_recorded(out_buf.as_mut_ptr(), memory::OUT_BUF_SIZE)
+            imports::cleat_side_effect_recorded(out_buf.as_mut_ptr(), memory::out_buf_cap())
         };
         // Bit 31 before any field: a fresh lookup in a stopped workflow is refused so the function never runs.
         if stop_requested(result) {
