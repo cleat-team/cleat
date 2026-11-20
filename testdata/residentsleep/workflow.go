@@ -78,3 +78,12 @@ func SpinSleepSpin(h cleat.HostCalls, input string) (string, error) {
 	b := spin(n)
 	return `{"status":"ok","x":` + strconv.FormatUint(a+b, 10) + `}`, nil
 }
+
+// SpinTwice computes twice in ONE segment with no wait between: the known positive for the fence row. If this is not killed by a fence that one spin fits,
+// the fence is too generous for two spins to be charged to it, and a "completes" from SpinSleepSpin proves nothing about a restart.
+func SpinTwice(h cleat.HostCalls, input string) (string, error) {
+	n := digits(input)
+	a := spin(n)
+	b := spin(n)
+	return `{"status":"ok","x":` + strconv.FormatUint(a+b, 10) + `}`, nil
+}
