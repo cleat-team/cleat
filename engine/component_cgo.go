@@ -1753,6 +1753,14 @@ func (b *wasmtimeBackend) ExecuteComponentCGo(
 	return &ExecResult{Result: resultStr, Suspended: false}, nil
 }
 
+// suspendedForContinueAsNew asks the session (when the backend has one) whether the suspension it is returning is a continue-as-new.
+func suspendedForContinueAsNew(h HostHandler) bool {
+	if s, ok := h.(interface{ suspendedForContinueAsNew() bool }); ok {
+		return s.suspendedForContinueAsNew()
+	}
+	return false
+}
+
 // componentRunGuestDefersAfterSuspend drains a suspended component guest's
 // defer table, on the same instance, through the world's `run-deferred` export.
 //
@@ -1772,14 +1780,6 @@ func (b *wasmtimeBackend) ExecuteComponentCGo(
 // older world has no defer table the host can reach, and a workflow with no
 // defers is the overwhelmingly common case. The defer segment's own test is
 // what catches a guest that should have had one.
-// suspendedForContinueAsNew asks the session (when the backend has one) whether the suspension it is returning is a continue-as-new.
-func suspendedForContinueAsNew(h HostHandler) bool {
-	if s, ok := h.(interface{ suspendedForContinueAsNew() bool }); ok {
-		return s.suspendedForContinueAsNew()
-	}
-	return false
-}
-
 func (b *wasmtimeBackend) componentRunGuestDefersAfterSuspend(
 	store wasmtime.Storelike, instance *C.wasmtime_component_instance_t, entryPoint string,
 ) {
