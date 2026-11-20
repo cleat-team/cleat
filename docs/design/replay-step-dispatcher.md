@@ -376,6 +376,36 @@ What changed, and what did not.
 
 **Facts taken from WS-cleat-2 and re-checked against develop 7d1d0e20 on 2026-11-20:** #4151, #4163 and #4166 are merged; `stopBeforeNewWork` has the third condition; `stopAfterFailedEventWrite` orders the quota path as described. Appendix A (generated at `1157baf3`) is regenerated in this revision or its date says it is not.
 
+## Revision 3 (2026-11-20): replay identity is a dispatcher invariant (cleat#4211), and what the core PR (#4207) built
+
+**The rule.** On replay, after the recorded event's TYPE matches, the dispatcher asks the spec's `Identity` function whether the record names THIS call. A difference is a divergence in the one shared shape (`replayIdentityDivergence`), and it consumes nothing. This closes by construction the class cleat#4211 found for locks and scope (a replay that matched on type alone accepted a record of another lock, consumed it and answered as though it were this call) instead of fixing it one call at a time. **Every spec sets exactly one of `Identity` and `NoIdentity` (a reason string); `validate()` enforces it at start-up and a test with controls checks the check.** "This call has nothing to compare" is therefore a decision a reviewer reads in the spec, never an omission.
+
+**What identifies a call** is what cannot legitimately differ between a run and its replay. Decided by the coordinator on 2026-11-20 for the cases that were open:
+
+| call | identity | why |
+|---|---|---|
+| `DurableCall`, `PluginCall`, `PluginCallStreaming` | service + op (plugin + method); **not the request body** | a body can legitimately differ on replay (a value the workflow computed itself); the body is still printed in the divergence message. Temporal treats activity input the same way |
+| `SideEffect`, `SideEffectRecorded` | `NoIdentity`: "the value is the event" | the recorded value is the non-deterministic output by design |
+| `ChildWorkflow*` | the workflow type, and the child id **when the caller supplies it**; a generated id is not identity | a generated id differs per run |
+| `SignalWorkflow`, `DurableSend` | the target and the signal (or message) name | |
+| `CreatePromise` | the promise **name** (the id is generated, and replay returns the recorded one) | built in #4207 |
+| `ResolvePromise`, `RejectPromise` | the promise id, and the cleat#4079 Service/Op when the record carries it | built in #4207; a record without the marker (before #4079, or `await_promise`'s own) is still accepted for a matching id |
+| `AcquireLock`, `ReleaseLock` | the lock key | cleat#4211 |
+| `SetScope` | the scope key (`vo:<type>:<key>`) | cleat#4211 |
+| crons | the cron name | |
+| `ContinueAsNew*` | `NoIdentity` on the input: "terminal; the input may be computed". Event type only | |
+| `Live` (`PollSignal`, `PollChild`, `PollCancellation`) and `Pure` calls | outside `step`: they record no event to compare | section 4 |
+
+**Generated ids are not identity; the stable name next to them is.** A group owner who finds a call with a field that is neither in this table nor obviously one of these kinds sets `NoIdentity` with the reason, and says so in the PR; the reviewer decides, and the table here is amended.
+
+**A behaviour change, and said so.** The first migrations were specified as "changes where the code lives and nothing else". This is the one exception: replay of the promise calls used to accept a record naming a different promise. It was **measured on the old code first** (all three calls accepted, consumed and answered success) and is pinned by three characterization rows that move from "accepted" to "divergence, not consumed" with no other row moving. It is **upgrade-visible**: a history replayed under code that now asks for a different promise fails loudly instead of being silently answered, so the PR carries a `changelog.d` upgrade fragment. Each group that adds identity to its calls has the same obligation: measure the old behaviour first, in the same PR, and say what changes.
+
+**What #4207 built, as it differs from the sketch in section 3 and Revision 2.** `step` reads ONE record per step; `Fresh` records through `c.Record`; `stepCtx` carries per-call data (`stepArgs`) so specs are package-level values; the refusal is applied to every non-Pure step on both arrival paths, on three conditions (a defer segment's body, a failed event write, graceful shutdown); leaving replay asserts the history was all read, and REPORTS it (`stepViolations`, logged) rather than stopping the run. **Not built and said so:** the park-or-suspend field (it has no consumer until a Wait moves), pre-check fields (`DurableCall`), multi-record steps (`takeRecords`), and so the `OverPending` and `AtNext` outcome shapes: each arrives with the first group that needs it, with its own round-trip row.
+
+**For `Multi` (cleat#4210).** A step that records several events in one call must check `stopBeforeNewWork` between them: `DurableCallWithRetry` recorded each failed attempt's event and made the next attempt without asking, so after the first refused write the loop performed real attempts, returned success and left none of them in `event_history`. This is the decision recorded in Revision 2 ("stop the loop at the first failed write"), found in the code; WS-cleat1's fix for #4210 is the first test row of the `Multi` group.
+
+**Facts, re-derived 2026-11-20:** `step` is called by exactly 3 host calls today (`grep -n 'return s.step(' engine/*.go | grep -v _test.go`); the Java stop-site count is unchanged at 28 with the three calls counted through `step`.
+
 ## Appendix A. Inventory (generated; regenerated 2026-11-20, develop `7d1d0e20`; the 2026-11-19 table was `1157baf3`)
 
 Columns: **replay-aware** the body reads `s.isReplay`; **consumes** reaches `advanceReplayStep`; **exits replay** reaches
