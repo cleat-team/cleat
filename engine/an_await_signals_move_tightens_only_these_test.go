@@ -26,6 +26,11 @@ func TestTheAwaitSignalsMoveTightensTheseAndNothingElse(t *testing.T) {
 		{name: "replay: an await recorded for other names is a divergence that consumes nothing (old: consumed it)",
 			hist: []EventRecord{await(awaitT-1000, 60000, `["x"]`)}, timeoutMs: 60000,
 			want: awaitWant{diverged: true, step: 0, replaying: true}},
+		// The ORDER of the names is part of the call: the store is polled in that order, so it is the priority between signals, and the same set in
+		// another order is a different call. A set comparison would accept this (found by cleat-review3: a set-compare mutant was all green).
+		{name: "replay: an await recorded for the SAME names in another order is a divergence that consumes nothing (old: consumed it)",
+			hist: []EventRecord{await(awaitT-1000, 60000, `["b","a"]`)}, timeoutMs: 60000,
+			want: awaitWant{diverged: true, step: 0, replaying: true}},
 		// cleat#933's misattribution, closed: an await followed by ANOTHER call's delivery (a different name) times out alone and leaves the delivery.
 		{name: "replay: an await followed by a delivery of another name times out ALONE and leaves the delivery (old: paired them)",
 			hist: []EventRecord{await(awaitT-1000, 60000, awaitNames), delivered(1, "z", "pz")}, timeoutMs: 60000,
@@ -46,7 +51,7 @@ func TestTheAwaitSignalsMoveTightensTheseAndNothingElse(t *testing.T) {
 	for _, r := range rows {
 		t.Run(r.name, func(t *testing.T) { runAwaitRow(t, r) })
 	}
-	if len(rows) != 5 {
-		t.Fatalf("the tightening table has %d rows, want 5: every row is a deliberate change and is listed in the PR", len(rows))
+	if len(rows) != 6 {
+		t.Fatalf("the tightening table has %d rows, want 6: every row is a deliberate change and is listed in the PR", len(rows))
 	}
 }

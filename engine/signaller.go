@@ -177,19 +177,32 @@ var awaitSignalsStep = stepSpec{
 }
 
 // awaitSuspendOrPark is the wait: park if this session may and there is a wake source, else suspend (production today: every wait suspends).
-// A wake carries no payload and may be spurious, so it re-polls through the same read the first poll used and parks again with the same
-// deadline; a passed deadline is the timeout. Baseline is 0: the lost-wakeup window is closed by the wake source's own ordering (it registers,
-// then the call re-polls), so no sequence is compared in v1 (WS-cleat-2, #4152).
+//
+// What a park returns is ADVISORY, exactly as for a durable sleep (cleat#4237): a wake and a deadline both carry no payload, a delivery can land
+// with either, and a source can be wrong about the time. So after EVERY return from the source the call polls the store once, through the same read
+// the first poll used; it is a timeout only if the engine's real clock agrees the deadline has passed; and a deadline outcome the clock does not
+// agree with suspends, so the scheduler's own clock decides when the run wakes. Trusting the outcome returned a timeout without looking, which lost
+// a delivery that landed with the deadline (it was then delivered only by suspend and replay) and timed a wait out at once on a source that was early.
+// The clock check also gives an empty wake loop an exit that does not depend on the source. The real clock, not the cached one (s.nowMs), because
+// the scheduler wakes on real time: the same reasoning as AwaitPromise's deadline.
+//
+// Baseline is 0: the lost-wakeup window is closed by the wake source's own ordering (it registers, then the call re-polls), so no sequence is
+// compared in v1 (WS-cleat-2, #4152).
 func awaitSuspendOrPark(c *stepCtx, deliverIfWaiting func() (int64, bool), req parkRequest) int64 {
 	for {
-		switch c.s.parkOrSuspend(c.ctx, req) {
-		case parkRefused:
+		out := c.s.parkOrSuspend(c.ctx, req)
+		if out == parkRefused {
 			return c.s.suspendingAwaitResult()
-		case parkDeadline:
-			return packAwaitSignalsResult(0, 0, true, 0)
 		}
 		if r, ok := deliverIfWaiting(); ok {
 			return r
+		}
+		if c.s.engine.realNowMs() >= req.DeadlineMs {
+			return packAwaitSignalsResult(0, 0, true, 0)
+		}
+		if out == parkDeadline {
+			c.s.suspendFor(req)
+			return c.s.suspendingAwaitResult()
 		}
 	}
 }

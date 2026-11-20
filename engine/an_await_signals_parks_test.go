@@ -37,6 +37,9 @@ func TestAnAwaitWokenWithNothingParksAgainAndThenDelivers(t *testing.T) {
 		if i == 1 { // the second wake brings the delivery
 			w.deliveries["a"] = []SignalDelivery{{ID: 7, Payload: "pa"}}
 		}
+		if i > 5 { // a loop that never re-polls would ask forever: refuse after a few so it FAILS (suspends) instead of hanging the package
+			return parkRefused
+		}
 		return parkWoke
 	}}
 	s := awaitParkSession(w, ws, nil)
@@ -64,26 +67,89 @@ func TestAnAwaitWokenWithNothingParksAgainAndThenDelivers(t *testing.T) {
 	}
 }
 
-// A passed deadline while parked is the timeout, and the await is the only thing recorded. CONTROL: the same call woken once with nothing then a
-// deadline asked the source twice, with the SAME request both times (a deadline that moved would never expire).
-func TestAnAwaitWhoseParkReachesItsDeadlineTimesOutHavingRecordedOnlyTheAwait(t *testing.T) {
-	w := &awaitWorld{deliveries: map[string][]SignalDelivery{}}
-	ws := &scriptedWake{answer: func(i int, _ parkRequest) parkOutcome {
-		if i == 0 {
-			return parkWoke
-		}
-		return parkDeadline
-	}}
-	s := awaitParkSession(w, ws, nil)
-	_, _, timedOut, errCode, raw, _ := callAwaitSignals(s, 60000)
-	if !timedOut || errCode != 0 || raw == callSuspendSentinel {
-		t.Fatalf("returned %#x, want the timeout", raw)
+// A park's outcome is ADVISORY and the clock decides, as it does for a durable sleep (cleat#4237's FINAL NOT OK): a wake and a deadline both carry
+// no payload, a delivery can land with either, and a source can be wrong about the time. So after EVERY return from the source the call polls the
+// store once; it is a timeout only if the engine's real clock agrees the deadline has passed; and a deadline the clock does not agree with
+// suspends, so the scheduler's own clock decides when the run wakes. Without the clock check an empty wake loop also had no exit but the source.
+//
+// The scripted source here moves the clock and lands deliveries from inside Wait, which is what a real one does between "registered" and "woke".
+func TestAnAwaitParkOutcomeIsAdvisoryAndTheClockDecidesTheTimeout(t *testing.T) {
+	const dl = awaitT + 60000
+	type row struct {
+		name     string
+		answers  []parkOutcome // what the source returns on ask 0, 1, ...; a source asked more times than this REFUSES (so a loop that would hang fails loud)
+		clockAt  []int64       // the clock after ask i returns; the last value holds
+		deliverA int           // deliver "a" during ask i (-1: never)
+		want     string        // "timeout", "delivered", "suspended"
+		asks     int
+		polls    []string
 	}
-	if want := []EventType{EventTypeAwaitSignals}; !awaitSameEventTypes(evTypes(s.history, 0), want) || s.suspendErr != nil {
-		t.Errorf("recorded %v with suspension %v, want only the await and no suspension", evTypes(s.history, 0), s.suspendErr)
+	rows := []row{
+		{name: "a deadline outcome with the clock PAST the deadline and nothing delivered is the timeout, after one more poll",
+			answers: []parkOutcome{parkDeadline}, clockAt: []int64{dl + 1}, deliverA: -1, want: "timeout", asks: 1, polls: []string{"a", "b", "a", "b"}},
+		{name: "a deadline outcome with the clock exactly AT the deadline is the timeout",
+			answers: []parkOutcome{parkDeadline}, clockAt: []int64{dl}, deliverA: -1, want: "timeout", asks: 1, polls: []string{"a", "b", "a", "b"}},
+		{name: "a deadline outcome 60s EARLY is not a timeout: it suspends and the scheduler's clock decides (the source can be wrong about the time)",
+			answers: []parkOutcome{parkDeadline}, clockAt: []int64{dl - 60000}, deliverA: -1, want: "suspended", asks: 1, polls: []string{"a", "b", "a", "b"}},
+		{name: "a delivery that lands WITH the deadline is delivered, not timed out (clock past the deadline)",
+			answers: []parkOutcome{parkDeadline}, clockAt: []int64{dl + 1}, deliverA: 0, want: "delivered", asks: 1, polls: []string{"a", "b", "a"}},
+		{name: "a delivery that lands with an early deadline outcome is delivered too",
+			answers: []parkOutcome{parkDeadline}, clockAt: []int64{dl - 60000}, deliverA: 0, want: "delivered", asks: 1, polls: []string{"a", "b", "a"}},
+		{name: "a source that only ever says woken cannot hold the call past the deadline: it times out once the clock does",
+			answers: []parkOutcome{parkWoke, parkWoke, parkWoke, parkWoke, parkWoke, parkWoke}, clockAt: []int64{awaitT + 25_000, awaitT + 50_000, dl + 15_000}, deliverA: -1, want: "timeout", asks: 3,
+			polls: []string{"a", "b", "a", "b", "a", "b", "a", "b"}},
 	}
-	if len(ws.reqs) != 2 || ws.reqs[0] != ws.reqs[1] {
-		t.Errorf("source asked %d times with %+v, want 2 identical requests", len(ws.reqs), ws.reqs)
+	for _, r := range rows {
+		t.Run(r.name, func(t *testing.T) {
+			clock := awaitT
+			w := &awaitWorld{deliveries: map[string][]SignalDelivery{}}
+			ws := &scriptedWake{answer: func(i int, _ parkRequest) parkOutcome {
+				if i >= len(r.answers) {
+					return parkRefused
+				}
+				if i < len(r.clockAt) {
+					clock = r.clockAt[i]
+				} else if len(r.clockAt) > 0 {
+					clock = r.clockAt[len(r.clockAt)-1]
+				}
+				if i == r.deliverA {
+					w.deliveries["a"] = []SignalDelivery{{ID: 7, Payload: "pa"}}
+				}
+				return r.answers[i]
+			}}
+			s := awaitParkSession(w, ws, nil, WithClock(func() int64 { return clock }))
+			nameLen, _, timedOut, errCode, raw, buf := callAwaitSignals(s, 60000)
+			got := "delivered"
+			switch {
+			case raw == callSuspendSentinel:
+				got = "suspended"
+			case timedOut:
+				got = "timeout"
+			}
+			if got != r.want || errCode != 0 {
+				t.Errorf("returned %#x (%s, name %q), want %s", raw, got, buf[:nameLen], r.want)
+			}
+			if len(ws.reqs) != r.asks {
+				t.Errorf("source asked %d times, want %d", len(ws.reqs), r.asks)
+			}
+			if !awaitSameStrings(w.polls, r.polls) {
+				t.Errorf("polled %v, want %v: one poll after EVERY return from the source, and the first poll before the first park", w.polls, r.polls)
+			}
+			wantEvents := []EventType{EventTypeAwaitSignals}
+			if r.want == "delivered" {
+				wantEvents = append(wantEvents, EventTypeSignalReceived)
+			}
+			if !awaitSameEventTypes(evTypes(s.history, 0), wantEvents) {
+				t.Errorf("recorded %v, want %v (the await once, never one per park)", evTypes(s.history, 0), wantEvents)
+			}
+			if r.want == "suspended" {
+				if s.suspendErr == nil || !s.suspendErr.Until.Equal(time.UnixMilli(dl)) {
+					t.Errorf("suspension %+v, want one that wakes at the deadline %d", s.suspendErr, dl)
+				}
+			} else if s.suspendErr != nil {
+				t.Errorf("set a suspension %+v, want none", s.suspendErr)
+			}
+		})
 	}
 }
 
@@ -93,6 +159,9 @@ func TestAnAwaitAtTheReplayFrontierParksFromItsRecordedDeadlineAndDoesNotRecordI
 	w := &awaitWorld{deliveries: map[string][]SignalDelivery{}}
 	ws := &scriptedWake{answer: func(i int, _ parkRequest) parkOutcome {
 		w.deliveries["b"] = []SignalDelivery{{ID: 9, Payload: "pb"}}
+		if i > 5 { // bounded, so a call that never re-polls FAILS instead of hanging the package
+			return parkRefused
+		}
 		return parkWoke
 	}}
 	hist := []EventRecord{{Step: 0, EventType: EventTypeAwaitSignals, SignalNames: awaitNames, TimeoutMs: 60000, TimestampMs: awaitT - 10_000}}
