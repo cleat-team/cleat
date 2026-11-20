@@ -233,6 +233,11 @@ type ResidentRunInfo struct {
 	Language string
 	// EventCount is how many events the run's history held when it was claimed, which is what the replay estimate is made from.
 	EventCount int
+	// ClaimCheck reports whether the store still has this execution assigned to this worker: nil if it does, an error if it does not OR if that could not be
+	// established. It is run every time a held run is about to go back to its guest (parkOrSuspend), because a terminate, a cancel or a reclaim made while the
+	// run was held is otherwise learned only at the next heartbeat, and in the meantime the guest could act: measured on a real worker, a run terminated while
+	// held reached its next outbound call, which a suspended run cannot. REQUIRED: WithResidency installs no wake source for a handle without one.
+	ClaimCheck func(ctx context.Context) error
 }
 
 // ResidentRun is one run's handle on the set: it is the engine's wakeSource for that run, and carries what Wait does not receive.

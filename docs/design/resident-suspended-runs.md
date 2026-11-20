@@ -101,7 +101,7 @@ Recommendation: **(a) now, with a `resident` flag exposed through metrics and th
 |---|---|
 | worker killed or crashed | the reaper reclaims the run after about 47 s and it replays: **the same as today** |
 | database unreachable while parked | the heartbeat fails, fresh calls are refused as presumed lost, the run evicts |
-| the fence is lost (terminate, reaper) | evict without writing; the other owner proceeds from the durable history |
+| the fence is lost (terminate, cancel, reaper) | **the heartbeat reports it within one `--heartbeat` and evicts without writing; and the run checks the store itself every time a wait ends, before it goes back to the guest.** The second part was NOT in this design and was added after a measurement (section 9b): a run whose timer fired before the heartbeat did acted after it had been terminated, which a suspended run cannot. The other owner proceeds from the durable history |
 | a wake arrives as the window expires | the run is evicted and released with `next_wake_at = now()`: a normal claim, nothing lost |
 | the host goroutine/thread leaks | the resident limit and a watchdog (a parked run older than window + margin is force-evicted) |
 
@@ -193,6 +193,23 @@ So the suspicion that a garbage-collected runtime sizes its heap to the limit is
 - **`--memory-soft-limit` (`MemoryController` over `MemoryMonitor`, which stops claiming at a fraction of memory) sees a parked instance's memory only on some hosts.** `MemoryMonitor` reads cgroup v2 `memory.current` when it exists (the worker's own container, which includes wasmtime's linear memory), otherwise the host-wide `/proc/meminfo` (everything on the machine), and otherwise the Go heap (`readGoHeap`), which cannot see wasmtime's memory at all: parked instances are invisible to it there, which includes macOS. So it is an aggregate guard for the worker's own parked memory only on cgroup v2; whether residency should account for parked instances itself, by their measured cost, is a question for the design of the limit.
 - **Raising `--wasm-memory-max-mb` to 256 (the default since cleat#4200) costs Go and Python nothing here and C# about a third more per parked instance after churn.** Together with the point above, that argues for a per-language or per-workflow-type memory limit rather than one number (cleat#4171 is the decision; the per-workflow-type limit is a separate design).
 - **Until cleat#4200 the worker passed the memory limit to the engine only when `--wasm-memory-max-mb` was explicitly set** (`wasmtimeMemoryLimitFromFlags`), so changing the flag's default alone would have left a stock worker on the engine's own 32 MiB. #4200 changed the engine constant and removed that gate, which is why a stock worker now runs at 256 MiB.
+
+## 9b. Terminate and cancel while held (measured 2026-11-20, cleat#4162 PR 2c)
+
+**Question.** Does a terminate or a cancel recorded in the store reach a held run as soon as it reaches a suspended one? The bar: no later than with residency off, on the same worker.
+
+**Method.** A real worker (real wasmtime, real Postgres), a guest that sleeps 8 s (durably) and then makes one outbound call, residency off and on, the run terminated or cancelled in the store while it sleeps. The worker's heartbeat is called by hand, either straight after the settle (the best case) or not before the timer fires (the worst case inside one `--heartbeat` interval, made deterministic). Both settles bump the lease's generation and clear `assigned_to` on a running run, so the heartbeat reports the run lost.
+
+| | residency off (control) | on, heartbeat right after | on, heartbeat not yet run, **before the check** | on, heartbeat not yet run, **after the check** |
+|---|---|---|---|---|
+| terminate | stopped in 38 to 86 ms (five runs), never reached the call | stopped in 39 to 153 ms (two runs), never reached the call | stopped when the timer fired, **6.0 and 7.2 s later; reached the call** | stopped at the timer, 7.3 s; **never reached the call** |
+| cancel | stopped in 40 to 285 ms (five runs), never reached the call | stopped in 43 to 77 ms (two runs), never reached the call | stopped at the timer, 7.1 to 7.2 s later (three runs); **reached the call** | stopped at the timer, 7.3 s; **never reached the call** |
+
+**Reading it.** The existing lost-fence path works: the heartbeat reports the run lost, `reg.cancel()` reaches the hold, and eviction was as fast as the control. The gap was the interval between the settle and the next heartbeat: a held run whose timer fired first went back to its guest, which made an outbound call that a suspended run could not (it cannot be claimed once terminated). The store write that follows is fenced, so the final status was right; the side effect had already happened. The fix is a check of the store at the one place a held run returns to its guest, for every kind of wake. The check runs the worker's heartbeat tick itself, so it costs one tick per wake (one batched query per tenant that has runs in flight, and ticks are serialized), not one query for the one run.
+
+**What was not measured.** A guest with real defers; a reclaim by the reaper (it bumps the same generation, so the predicate is the same, but it was not run as its own row); a store that is slow and not unreachable. With the check in place, "evicted at the wake" means the instance stays in memory until the heartbeat or the timer, whichever is first.
+
+**A caveat that applies to every measurement above and below this one: a cold start is slow.** Compiling the module on a worker that has not seen it took **2.8 s** here (`replay_ms=2789`), and a sleep's deadline is anchored at when the run was **claimed**, not when the guest reached the sleep. A short sleep can therefore be over before the guest gets to it: a 300 ms sleep completed instantly and the run finished without ever sleeping, which is how the first version of this test measured nothing. Any claim about a hold window, a short sleep, or "residency off suspends here" has to say whether the module was warm.
 
 ## 10. Staging if approved
 

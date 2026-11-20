@@ -365,6 +365,9 @@ func TestAPolicyThatCannotMeanWhatItSaysIsRefusedAtBoot(t *testing.T) {
 	}
 }
 
+// claimStillHeld is the claim check of a run the store still has assigned to this worker, for the tests that are about something else.
+func claimStillHeld(context.Context) error { return nil }
+
 func TestResidencyIsOffWhenTheRunLimitIsZeroAndAnOffSetHandsOutNoWakeSource(t *testing.T) {
 	set := newTestResidentSet(t, DefaultResidencyConfig()) // MaxRuns is zero
 	if set.Enabled() {
@@ -392,7 +395,7 @@ func TestResidencyIsOffWhenTheRunLimitIsZeroAndAnOffSetHandsOutNoWakeSource(t *t
 func TestADurableSleepIsHeldByTheResidentSetAndCompletedWhenItsTimerFires(t *testing.T) {
 	clock := newFakeResidentClock(residentT)
 	set := newTestResidentSet(t, residentTestConfig(clock, nil))
-	s := stepSession([]EngineOption{WithClock(func() int64 { return clock.nowMs.Load() }), WithResidency(set.ForRun(ResidentRunInfo{Language: "go"}))}, nil)
+	s := stepSession([]EngineOption{WithClock(func() int64 { return clock.nowMs.Load() }), WithResidency(set.ForRun(ResidentRunInfo{Language: "go", ClaimCheck: claimStillHeld}))}, nil)
 	s.nowMs = residentT
 
 	done := make(chan int64, 1)
@@ -424,7 +427,7 @@ func TestADurableSleepIsHeldByTheResidentSetAndCompletedWhenItsTimerFires(t *tes
 func TestADurableSleepWhoseRunIsSentBackSuspendsAsItAlwaysDid(t *testing.T) {
 	clock := newFakeResidentClock(residentT)
 	set := newTestResidentSet(t, residentTestConfig(clock, nil))
-	s := stepSession([]EngineOption{WithClock(func() int64 { return clock.nowMs.Load() }), WithResidency(set.ForRun(ResidentRunInfo{Language: "go"}))}, nil)
+	s := stepSession([]EngineOption{WithClock(func() int64 { return clock.nowMs.Load() }), WithResidency(set.ForRun(ResidentRunInfo{Language: "go", ClaimCheck: claimStillHeld}))}, nil)
 	s.nowMs = residentT
 
 	done := make(chan int64, 1)
@@ -513,7 +516,7 @@ func TestAHeldSleepEndsWhenItsExecutionIsCancelled(t *testing.T) {
 	clock := newFakeResidentClock(residentT)
 	m := newReplayMetrics(t)
 	set := newTestResidentSet(t, residentTestConfig(clock, func(c *ResidencyConfig) { c.Metrics = m }))
-	s := stepSession([]EngineOption{WithClock(func() int64 { return clock.nowMs.Load() }), WithResidency(set.ForRun(ResidentRunInfo{Language: "go"}))}, nil)
+	s := stepSession([]EngineOption{WithClock(func() int64 { return clock.nowMs.Load() }), WithResidency(set.ForRun(ResidentRunInfo{Language: "go", ClaimCheck: claimStillHeld}))}, nil)
 	s.nowMs = residentT
 	ctx, cancel := context.WithCancel(context.Background())
 	s.execCtx = ctx
@@ -542,7 +545,7 @@ func TestASleepTooCloseToTheExecutionsDeadlineIsNotHeld(t *testing.T) {
 	clock := newFakeResidentClock(residentT)
 	m := newReplayMetrics(t)
 	set := newTestResidentSet(t, residentTestConfig(clock, func(c *ResidencyConfig) { c.Metrics = m }))
-	s := stepSession([]EngineOption{WithClock(func() int64 { return clock.nowMs.Load() }), WithResidency(set.ForRun(ResidentRunInfo{Language: "go"}))}, nil)
+	s := stepSession([]EngineOption{WithClock(func() int64 { return clock.nowMs.Load() }), WithResidency(set.ForRun(ResidentRunInfo{Language: "go", ClaimCheck: claimStillHeld}))}, nil)
 	s.nowMs = residentT
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
 	defer cancel()

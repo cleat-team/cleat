@@ -85,7 +85,7 @@ func runResident(t *testing.T, rt *Runtime, wt *wasmtimeBackend, wasmBytes []byt
 		if err != nil {
 			t.Fatalf("NewResidentSet: %v", err)
 		}
-		opts = append(opts, WithResidency(set.ForRun(ResidentRunInfo{WorkflowID: "wf-resident-limits", Language: "go"})))
+		opts = append(opts, WithResidency(set.ForRun(ResidentRunInfo{WorkflowID: "wf-resident-limits", Language: "go", ClaimCheck: claimStillHeld})))
 	}
 	eng := NewEngine(rt, &phasedWorkCaller{before: r.before, after: r.after}, opts...)
 	eng.Metrics = m

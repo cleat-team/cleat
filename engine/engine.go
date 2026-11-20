@@ -126,7 +126,11 @@ type Engine struct {
 	deferPhase      bool          // this execution is a defer segment; see WithDeferPhase
 	// wakeSource resumes a parked run. nil means no wait parks: each suspends, which is every engine unless the worker has turned residency on and
 	// handed this run a handle (WithResidency, resident.go) and every engine in a test that does not assign one; see parkOrSuspend (park.go).
-	wakeSource           wakeSource
+	wakeSource wakeSource
+	// claimCheck is asked, from parkOrSuspend and nowhere else, every time a held run is about to return to its guest: is this execution still the one the store
+	// has the run assigned to? An error means it is not, OR that the answer could not be had, and the run is suspended instead of resumed. WithResidency sets it
+	// together with wakeSource, and installs neither without it, so a held run cannot exist without a way to revalidate (cleat#4162, PR 2c).
+	claimCheck           func(ctx context.Context) error
 	stopAtLastStoppable  bool         // a defer segment over a killed run; see WithStopAtLastStoppable
 	killedWithDefersOwed atomic.Bool  // a component guest was stopped before its wrapper ran its defers; see KilledWithDefersOwed
 	nowFn                func() int64 // wall clock for sleep-deadline decisions; see WithClock
@@ -448,10 +452,15 @@ func WithShutdownSignal(ch <-chan struct{}) EngineOption {
 
 // WithResidency gives this run the worker's resident set as its wake source, so a wait that is due soon may be held on the worker instead of
 // suspended (cleat#4162). nil, which is what a set that is not enabled hands out, changes nothing: every wait suspends as it always has.
+//
+// A handle whose ResidentRunInfo carries no ClaimCheck installs NOTHING, so nothing is held and every wait suspends. The check is what a held run uses to prove the
+// store still has it assigned to this worker before it goes back to the guest, and a hold without one is a run that can act after it has been terminated, cancelled
+// or reclaimed (measured on a real worker, cleat#4162): failing closed here means the omission cannot be a silent one.
 func WithResidency(r *ResidentRun) EngineOption {
 	return func(e *Engine) {
-		if r != nil {
+		if r != nil && r.info.ClaimCheck != nil {
 			e.wakeSource = r
+			e.claimCheck = r.info.ClaimCheck
 		}
 	}
 }

@@ -754,6 +754,9 @@ type execSession struct {
 	stepViolations []string
 	// parkViolations are the park requests parkOrSuspend found invalid and suspended anyway (park.go). Test-visible, like stepViolations.
 	parkViolations []string
+	// claimCheckFailures are the reasons a held run was suspended at its wake instead of resumed: the store no longer had it assigned to this worker, or could not
+	// be asked (park.go, cleat#4162). Test-visible, like parkViolations.
+	claimCheckFailures []string
 
 	// handlingEventWriteFailure is set while stopAfterFailedEventWrite is acting on a failure, so the continue-as-new it triggers for a
 	// refused quota cannot re-enter it through its own failed write (the quota refuses that event too).

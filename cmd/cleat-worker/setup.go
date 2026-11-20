@@ -2480,6 +2480,11 @@ type Worker struct {
 	// and the entry is dropped when a tick sees none of its runs.
 	groupHeartbeatOK sync.Map // map[tenantID]int64
 
+	// heartbeatTickMu serialises heartbeatAndFenceInFlight. The heartbeat loop was its only caller and never overlapped itself; a held run's claim check (claimStillMine) is
+	// a second, so two ticks can now be asked for at once. They must not run together: a check has to be answered by a tick that STARTED after the check was asked (a tick
+	// that began before the wake cannot have seen a terminate that landed before it), and two ticks storing lastHeartbeatOK out of order would move it backwards.
+	heartbeatTickMu sync.Mutex
+
 	// claimedAfter is, per (workflow id, generation) in flight, an instant at or
 	// BEFORE the claim that produced it: the start of the dispatch iteration that
 	// made the claim call. A group's clock is seeded from the earliest of its
@@ -4255,6 +4260,8 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 			WorkflowID: wf.ID,
 			Language:   wasm.DetectLanguage(wasmBytes),
 			EventCount: len(history),
+			// Without this nothing is held (engine.WithResidency): a held run has to be able to prove it still owns its claim before it goes back to the guest.
+			ClaimCheck: func(ctx context.Context) error { return w.claimStillMine(ctx, wf) },
 		})))
 	}
 	eng := engine.NewEngine(nil, caller, engineOpts...)
@@ -4627,6 +4634,8 @@ func (w *Worker) heartbeatStoreForTenant(tenantID string) (engine.WorkflowStore,
 // that matters for how soon this worker's own reaper (and every other
 // worker's) trusts it again after a stall.
 func (w *Worker) heartbeatAndFenceInFlight() bool {
+	w.heartbeatTickMu.Lock()
+	defer w.heartbeatTickMu.Unlock()
 	tickStart := time.Now()
 	var runs []engine.GenerationKey
 	byTenant := map[string][]engine.GenerationKey{}
@@ -4868,6 +4877,50 @@ func (w *Worker) heartbeatAndFenceInFlight() bool {
 		reg.cancel()
 	}
 	return allAnswered
+}
+
+// errClaimLost is what a held run's claim check returns when the store no longer has the run assigned to this execution.
+var errClaimLost = errors.New("the run is no longer assigned to this execution")
+
+// errClaimUnknown is what it returns when the question could not be answered: the heartbeat did not land for every group, or this worker has no way to ask.
+var errClaimUnknown = errors.New("the store could not confirm that the run is still assigned to this execution")
+
+// claimStillMine is the engine's ClaimCheck for a held run (cleat#4162, PR 2c): asked every time the hold ends and before control goes back to the guest, it answers whether the
+// store still has THIS execution assigned to this worker.
+//
+// IT RUNS THE HEARTBEAT, and does not ask the store itself, for two reasons that are the same reason. "Lost" then means exactly what it means to the heartbeat and does exactly
+// what the heartbeat does (the run is marked fenced, so its next durable call is refused, and its execution is cancelled), because it is the heartbeat. And the heartbeat pool
+// is used from one place only (TestTheHeartbeatPoolIsUsedOnlyThroughHeartbeatBatchStore, cleat#3571): a second caller of its accessors is a second user of a pool whose
+// connections carry another tenant's session context on SQL Server, which that guard exists to refuse.
+//
+// WHY IT IS NOT LEFT TO THE HEARTBEAT'S TICKER. A terminate, a cancel or a reclaim bumps the lease's generation and clears assigned_to, and the ticker reports the run lost at
+// its next tick, up to --heartbeat later. A SUSPENDED run cannot act in that interval: there is no claim for it to win. A held one can, if its timer fires first, and measured on a
+// real worker (a_terminated_held_run_does_not_act_test.go) it did, reaching the outbound call after the terminate had committed.
+//
+// WHAT IT RETURNS. nil: the tick landed for every group and did not fence this run. errClaimLost: the run is fenced (by this tick or an earlier one). errClaimUnknown: the tick did
+// not land for every group, which includes a tenant's store this worker could not open and a different tenant's unreachable pool, so it can over-report unknown and never
+// under-report it. Unknown suspends WITHOUT the run being marked fenced: the heartbeat does not cancel on an error, because one blip would stop every execution, and here the one
+// thing at stake is a run that will be replayed if the suspension stands, so the safe reading and the cheap one agree. A run that was in fact fine costs one replay.
+func (w *Worker) claimStillMine(ctx context.Context, wf *engine.WorkflowInstance) error {
+	fenced := func() bool {
+		v, ok := w.fencedRuns.Load(wf.ID)
+		return ok && v.(int64) == wf.Generation
+	}
+	if fenced() {
+		return errClaimLost // the ticker already learned of it
+	}
+	landed := w.heartbeatAndFenceInFlight()
+	if fenced() {
+		w.logger.WarnContext(ctx, "a held run no longer holds its claim at its wake (terminated, cancelled or reclaimed while held); it is suspended instead of resumed",
+			"worker_id", w.id, "workflow_id", wf.ID, "def_name", wf.DefName, "generation", wf.Generation)
+		return errClaimLost
+	}
+	if !landed {
+		w.logger.WarnContext(ctx, "a held run could not revalidate its claim; it is suspended instead of resumed",
+			"worker_id", w.id, "workflow_id", wf.ID, "def_name", wf.DefName)
+		return errClaimUnknown
+	}
+	return nil
 }
 
 // heartbeatGroupFor names the group a run's heartbeat belongs to: "" for the
