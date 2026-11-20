@@ -1,0 +1,4 @@
+---
+section: fixed
+---
+- **A retried call resumed with every attempt already spent no longer panics (cleat#4244).** `DurableCallWithRetry` records each failed attempt, so a worker lost mid-policy leaves attempt events and no terminal event, and the reclaimed run continues from them. When the recorded attempts already equalled the resumed policy's `maxAttempts` (reachable when a worker restarts with a lower `--max-retries` than the run that recorded them), the loop never ran, the terminal event was built from a nil error and the call dereferenced it. The resume now makes no further service call and records the same retries-exhausted failure a policy that ran out normally records, carrying the error of the last recorded attempt. Its error class is not carried (only the message is read back from the attempt event), so the terminal event's class is empty. What a worker did with the panic was not established.

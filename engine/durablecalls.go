@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"sync/atomic"
@@ -270,25 +271,26 @@ func (s *execSession) freshCall(ctx context.Context, m api.Module, service, oper
 // attempt events at all, a service/op mismatch) returns false and leaves the
 // record for replayCall, which already reports divergence with the better
 // message.
-func (s *execSession) replayRetryAttempts(ctx context.Context, service, operation string) (spent int64, firstStep int, resume bool) {
+func (s *execSession) replayRetryAttempts(ctx context.Context, service, operation string) (spent int64, firstStep int, lastRecordedErr string, resume bool) {
 	firstStep = -1
 	for s.stepCount < len(s.history) {
 		rec := s.history[s.stepCount]
 		if rec.EventType != EventTypeCallAttemptFailed {
-			return spent, firstStep, false
+			return spent, firstStep, lastRecordedErr, false
 		}
 		if rec.Service != service || rec.Op != operation {
-			return spent, firstStep, false
+			return spent, firstStep, lastRecordedErr, false
 		}
 		if firstStep < 0 {
 			firstStep = rec.Step
 		}
 		if !s.advanceReplayStep(ctx, &rec) {
-			return spent, firstStep, false
+			return spent, firstStep, lastRecordedErr, false
 		}
 		spent++
+		lastRecordedErr = rec.Err
 	}
-	return spent, firstStep, spent > 0
+	return spent, firstStep, lastRecordedErr, spent > 0
 }
 
 func (s *execSession) replayCall(ctx context.Context, m api.Module, service, operation, requestJSON string, responsePtr, responseMaxLen uint32) int64 {
@@ -576,7 +578,7 @@ func (s *execSession) DurableCallWithRetry(ctx context.Context, m api.Module,
 		}
 	}
 	if s.isReplay {
-		spent, firstStep, resume := s.replayRetryAttempts(ctx, service, operation)
+		spent, firstStep, lastRecordedErr, resume := s.replayRetryAttempts(ctx, service, operation)
 		if !resume {
 			return s.replayCall(ctx, m, service, operation, requestJSON, responsePtr, responseMaxLen)
 		}
@@ -594,7 +596,7 @@ func (s *execSession) DurableCallWithRetry(ctx context.Context, m api.Module,
 		}
 		return s.freshCallWithRetry(ctx, m, service, operation, requestJSON,
 			maxAttempts, initialIntervalMs, backoffCoefficient100x, maxIntervalMs,
-			nonRetryableErrorsJSON, responsePtr, responseMaxLen, spent, firstStep)
+			nonRetryableErrorsJSON, responsePtr, responseMaxLen, spent, firstStep, lastRecordedErr)
 	}
 	if s.stopBeforeNewWork() {
 		return callSuspendSentinel
@@ -602,7 +604,7 @@ func (s *execSession) DurableCallWithRetry(ctx context.Context, m api.Module,
 
 	return s.freshCallWithRetry(ctx, m, service, operation, requestJSON,
 		maxAttempts, initialIntervalMs, backoffCoefficient100x, maxIntervalMs,
-		nonRetryableErrorsJSON, responsePtr, responseMaxLen, 0, -1)
+		nonRetryableErrorsJSON, responsePtr, responseMaxLen, 0, -1, "")
 }
 
 // refuseRetryPolicy answers a guest's retry entry point with RetryPolicyTooLong and the reason, which is the code both
@@ -617,7 +619,7 @@ func (s *execSession) freshCallWithRetry(ctx context.Context, m api.Module,
 	service, operation, requestJSON string,
 	maxAttempts, initialIntervalMs, backoffCoefficient100x, maxIntervalMs int64,
 	nonRetryableErrorsJSON string,
-	responsePtr, responseMaxLen uint32, attemptsSpent int64, resumeStep int) int64 {
+	responsePtr, responseMaxLen uint32, attemptsSpent int64, resumeStep int, lastRecordedErr string) int64 {
 
 	// Parse non-retryable error patterns.
 	//
@@ -653,6 +655,18 @@ func (s *execSession) freshCallWithRetry(ctx context.Context, m api.Module,
 
 	var lastErr error
 	exhausted := true
+
+	// A resume whose recorded attempts already equal (or exceed) this incarnation's maxAttempts never enters the loop below, and lastErr stayed nil:
+	// the terminal event was then built from a nil error and the call panicked (cleat#4244). It is reachable when the resume's policy is shorter than
+	// the one recorded (a worker restarted with a lower --max-retries). The policy IS spent, so the honest outcome is the one it would have reached:
+	// the retries-exhausted failure, carrying the error of the last attempt that was recorded. The recorded class is not carried (only the message
+	// is read back here), so the terminal event's error class is empty.
+	if attemptsSpent >= maxAttempts && attemptsSpent > 0 {
+		if lastRecordedErr == "" {
+			lastRecordedErr = "the last recorded attempt carried no error text"
+		}
+		lastErr = errors.New(lastRecordedErr)
+	}
 
 	// One step for every attempt, so every attempt carries the same idempotency
 	// key. That is the intent: a retry of a call that may already have been

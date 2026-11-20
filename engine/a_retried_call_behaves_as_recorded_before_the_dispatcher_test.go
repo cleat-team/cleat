@@ -231,10 +231,11 @@ func g3rCases() map[string]g3rCase {
 // g3rGolden is the table recorded against the code as it was (develop 5a4d59db), one string per situation: the reference the migration is checked
 // against. A row that changes is a behaviour change, and the PR that changes it says so.
 //
-// TWO KINDS OF ROW ARE KNOWN-BAD, and are recorded so the migration moves them on purpose and not by accident:
+// ONE KIND OF ROW IS STILL KNOWN-BAD (and one was fixed), and are recorded so the migration moves them on purpose and not by accident:
 //
-//   - replay_mid_retry_all_attempts_spent is a PANIC (cleat#4244): a resume whose recorded attempts already equal the policy's maxAttempts never
-//     enters the loop, and freshCallWithRetry then dereferences a nil lastErr. The row records the panic, not an answer.
+//   - (fixed in cleat#4244, now pinned as correct) replay_mid_retry_all_attempts_spent recorded a PANIC: a resume whose recorded attempts already
+//     equal the policy's maxAttempts never entered the loop, and freshCallWithRetry dereferenced a nil lastErr. It now makes NO service call and
+//     records the retries-exhausted failure carrying the last recorded attempt's error, retryable, as a policy that ran out normally does.
 //   - replay_mid_retry_other_operation and replay_other_event_type end at step 1: a divergence CONSUMED the record before reporting it (the #4152
 //     defect), so the call that owns it loses it. The migration consumes nothing.
 //
@@ -252,7 +253,7 @@ var g3rGolden = map[string]string{
 	"fresh_unparseable_non_retryable":       "res=0x401 wrote=\"\" isReplay=false step=0 recorded=[] attempts=0 others=0 keysFromStep=[]",
 	"frontier_gets_its_whole_policy":        "res=0xb0000000000 wrote=\"{\\\"ok\\\":true}\" isReplay=false step=3 recorded=[call_attempt_failed/step=1/attempt=1/svc.op/err=\"TRY_AGAIN: 503 try again\"/nonretry=false/exhausted=false/code=\"\" call/step=2/attempt=0/svc.op/err=\"\"/nonretry=false/exhausted=false/code=\"\"] attempts=2 others=0 keysFromStep=[1 1]",
 	"replay_a_recorded_refusal":             "res=0xbd0000000601 wrote=\"retry policy rejected: this policy was refused when this call was recorded, as its worst-case backoff exceeds the host-retry budget; run the policy in the guest, suspending between attempts\" isReplay=true step=1 recorded=[] attempts=0 others=0 keysFromStep=[]",
-	"replay_mid_retry_all_attempts_spent":   "PANIC=\"runtime error: invalid memory address or nil pointer dereference\" isReplay=false step=3 recorded=[] attempts=0 others=0 keysFromStep=[]",
+	"replay_mid_retry_all_attempts_spent":   "res=0x200000000201 wrote=\"retries exhausted: 503 try again\" isReplay=false step=4 recorded=[call/step=3/attempt=0/svc.op/err=\"retries exhausted: 503 try again\"/nonretry=false/exhausted=true/code=\"\"] attempts=0 others=0 keysFromStep=[]",
 	"replay_mid_retry_keeps_the_first_step": "res=0xb0000000000 wrote=\"{\\\"ok\\\":true}\" isReplay=false step=4 recorded=[call_attempt_failed/step=2/attempt=2/svc.op/err=\"TRY_AGAIN: 503 try again\"/nonretry=false/exhausted=false/code=\"\" call/step=3/attempt=0/svc.op/err=\"\"/nonretry=false/exhausted=false/code=\"\"] attempts=2 others=0 keysFromStep=[1 1]",
 	"replay_mid_retry_one_attempt_spent":    "res=0xb0000000000 wrote=\"{\\\"ok\\\":true}\" isReplay=false step=3 recorded=[call_attempt_failed/step=1/attempt=2/svc.op/err=\"TRY_AGAIN: 503 try again\"/nonretry=false/exhausted=false/code=\"\" call/step=2/attempt=0/svc.op/err=\"\"/nonretry=false/exhausted=false/code=\"\"] attempts=2 others=0 keysFromStep=[0 0]",
 	"replay_mid_retry_other_operation":      "res=0xfd0000000001 wrote=\"replay divergence at step 0: expected call event, got call_attempt_failed.\\n  actual request: {}\\n  expected request: \\nRun 'cleat vet' on your workflow code to check for common non-determinism issues (time.Now(), random values, map iteration, goroutines).\" isReplay=true step=1 recorded=[] attempts=0 others=0 keysFromStep=[]",
@@ -287,5 +288,29 @@ func TestG3rRetriedCallBehavesAsRecordedBeforeTheDispatcher(t *testing.T) {
 	}
 	if len(g3rGolden) != 23 {
 		t.Errorf("the table has %d rows; this was recorded with 23, so a row was added or removed without saying so", len(g3rGolden))
+	}
+}
+
+// TestAResumeWithEveryAttemptAlreadySpentRecordsTheExhaustionAndMakesNoCall is cleat#4244 stated directly, in both directions: a resume whose recorded
+// attempts equal maxAttempts must not call the service and must not panic, and a resume with one attempt LEFT must still call it (so the guard is not
+// "never call on resume").
+func TestAResumeWithEveryAttemptAlreadySpentRecordsTheExhaustionAndMakesNoCall(t *testing.T) {
+	failed := func(step, attempt int) EventRecord {
+		return EventRecord{Step: step, EventType: EventTypeCallAttemptFailed, Service: "svc", Op: "op", Attempt: attempt, Err: "503 try again"}
+	}
+	pol := func() g3rPolicy { return g3rDefaultPolicy() }
+	spent := g3rCase{replaying: true, history: []EventRecord{failed(0, 1), failed(1, 2), failed(2, 3)}, policy: pol()}
+	got := spent.observe()
+	if strings.HasPrefix(got, "PANIC") {
+		t.Fatalf("a spent resume panicked: %s", got)
+	}
+	for _, want := range []string{"attempts=0", `exhausted=true`, `retries exhausted: 503 try again`, "nonretry=false"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("a spent resume: want %q in %s", want, got)
+		}
+	}
+	oneLeft := g3rCase{replaying: true, history: []EventRecord{failed(0, 1), failed(1, 2)}, failFirst: 0, policy: pol()}
+	if got := oneLeft.observe(); !strings.Contains(got, "attempts=1") {
+		t.Errorf("a resume with one attempt left must make exactly one call, got %s", got)
 	}
 }
