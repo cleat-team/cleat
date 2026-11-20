@@ -30,7 +30,6 @@ var recordedEventSitesWithoutOwnStopCheck = map[string]string{
 	"children.go:AwaitAnyChild":          "OBSERVATION: records which child finished",
 	"children.go:AwaitChild":             "OBSERVATION: records a child's result",
 	"children.go:freshAwaitAllChildren":  "FRESH HALF: an await of children that already ran; entry points AwaitAllChildren and its replay half",
-	"durablecalls.go:freshCallWithRetry": "FRESH HALF: DurableCallWithRetry checks before it",
 	"lifecycle.go:RegisterUpdateHandler": "OBSERVATION: records a registration, performs no external work",
 	"locking.go:freshReleaseLock":        "FRESH HALF: releasing a lock the run holds; ReleaseLock and its replay half",
 	"plugins.go:freshPluginCallInternal": "FRESH HALF: the plugin-call entry points check before it",

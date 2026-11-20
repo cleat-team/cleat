@@ -62,6 +62,11 @@ var sdkStopSiteExemptions = map[string][]sdkCoverageExemption{
 				"import to guard, so this is an absence rather than a gap.",
 		},
 		{
+			hostSite: "freshCallWithRetry",
+			why: "the attempt loop of DurableCallWithRetry (cleat#4210), whose exemption is above: the Rust SDK has no " +
+				"call_with_retry, so its guest never reaches this site through a retry import.",
+		},
+		{
 			hostSite: "ScheduleCron",
 			why: "the Rust SDK declares no cleat_schedule_cron import and has no " +
 				"schedule_cron method: `grep -c schedule_cron crates/cleat-sdk/src/host_calls.rs` " +

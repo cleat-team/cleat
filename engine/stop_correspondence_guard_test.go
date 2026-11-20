@@ -232,6 +232,12 @@ var stopSurfaces = map[string]stopSurface{
 		adapters: []string{"DurableCallWithRetry"},
 		wit:      []string{"durable-call-retry"},
 	},
+	// The attempt loop of the same host call (cleat#4210): it stops between attempts after a refused event write, with the sentinel the call's
+	// entry returns, so the adapter and the WIT function are the ones above.
+	"freshCallWithRetry": {
+		adapters: []string{"DurableCallWithRetry"},
+		wit:      []string{"durable-call-retry"},
+	},
 	"freshCallWithHeartbeat": {
 		adapters: []string{"DurableCallWithHeartbeat"},
 		wit:      []string{"durable-call-heartbeat"},

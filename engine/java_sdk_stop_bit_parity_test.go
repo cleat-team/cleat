@@ -81,6 +81,8 @@ var javaCallsTheHostCanRefuse = []sdkRefusableCall{
 	{"completeUpdate", "DurableCompleteUpdate"},
 	{"cleatCall", "freshCall"},
 	{"cleatCallWithRetry", "DurableCallWithRetry"},
+	// The same host function from inside its attempt loop (cleat#4210): one SDK method, two host sites, one sentinel.
+	{"cleatCallWithRetry", "freshCallWithRetry"},
 	{"cleatCallHeartbeat", "freshCallWithHeartbeat"},
 	{"childWorkflow", "childWorkflowWithVersion"},
 	{"childWorkflowWithOptions", "childWorkflowWithVersion"},
