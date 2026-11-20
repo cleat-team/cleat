@@ -55,6 +55,9 @@ var scenarios = []scenario{
 	// registered, so a terminated run must not expect its cleanup. The oracle used to match the boundary only on an op's Name, never found the poll
 	// for a branch call, and counted the later defer; this is the fixed case that keeps it from regressing.
 	{"poll_then_defer", []op{{Op: "await0", Name: "go", Hit: "HIT", Miss: "MISS"}, {Op: "call", Name: "C"}, {Op: "side_effect", Name: "S"}, {Op: "defer", Name: "D"}}, nil},
+	// The promise calls (cleat#4207): no service request of their own, so the faults land on the calls around them and the oracle reads the
+	// promise rows. A kill after the three have run and before B replays them: a replay that ran any of them fresh would leave a second row.
+	{"promises", []op{{Op: "call", Name: "A"}, {Op: "promise_resolve", Name: "R"}, {Op: "promise_reject", Name: "J"}, {Op: "promise_create", Name: "C"}, {Op: "call", Name: "B"}}, nil},
 	{"retry", []op{{Op: "call", Name: "A"}, {Op: "call_retry", Name: "R", Attempts: 5, Fail: 2}, {Op: "call", Name: "B"}}, nil},
 }
 
@@ -78,7 +81,8 @@ type outcome struct {
 	Events                 int
 	EventsAfterHold        int
 	ReleaseAt, KillAt      time.Time
-	Applied                bool // the fault actually fired: a fault that never did measures nothing
+	Applied                bool                // the fault actually fired: a fault that never did measures nothing
+	Promises               map[string][]string // promise name -> the status of every workflow_promises row under it, read after the run
 	Log                    string
 }
 
@@ -177,6 +181,7 @@ func execute(t *testing.T, env *env, sc scenario, f *fault) outcome {
 		out.Status = "NOT-TERMINAL:" + status
 	}
 	out.Requests = env.svc.requestsOf(run)
+	out.Promises = promiseRows(env.db, run)
 	out.Log = first.output()
 	if second != nil {
 		out.Log += "\n--- second worker ---\n" + second.output()
@@ -241,6 +246,9 @@ func verifyReclaim(sc scenario, g goldenRecord, f *fault, b request, o outcome) 
 	}
 	if o.Status != g.Status {
 		v = append(v, fmt.Sprintf("final status %q, golden %q (error: %s)", o.Status, g.Status, o.ErrMsg))
+	}
+	if o.Status == "done" || o.Status == "completed" {
+		v = append(v, promiseViolations(sc, o)...)
 	}
 	gs := g.successes()
 	successes, attempts, helds, first := tally(o.Requests)
@@ -391,6 +399,9 @@ func goldenOf(t *testing.T, e *env, sc scenario) goldenRecord {
 			seq = seq[:400] + " ..."
 		}
 		t.Fatalf("the FAULT-FREE run of %s performed effects other than once: %s (%d requests in all). No fault was injected.\n  requests: %s", sc.Name, strings.Join(repeated, ", "), len(gold.Requests), seq)
+	}
+	if pv := promiseViolations(sc, gold); len(pv) > 0 {
+		t.Fatalf("the FAULT-FREE run of %s left promise rows other than the script's: %s. No fault was injected, so the op did not do what it claims and nothing below measures it.", sc.Name, strings.Join(pv, "; "))
 	}
 	g := goldenRecord{Reqs: gold.Requests, Status: gold.Status}
 	t.Logf("golden: %d requests status=%s result=%s", len(g.Reqs), g.Status, gold.Result)
@@ -691,4 +702,41 @@ func TestChaosAScopeIsAcquiredOnceAcrossWakes(t *testing.T) {
 	if n != 1 {
 		t.Errorf("the scope key was acquired %d times by the run across its wakes, want 1", n)
 	}
+}
+
+// promiseRows reads every workflow_promises row of the run, by promise name. The recording service cannot see a promise-store write, so this is the
+// only oracle for create_promise, resolve_promise and reject_promise: a name with two rows is a create that ran twice, a status that is not the
+// scripted one is a resolve or reject that did not take.
+func promiseRows(db *sql.DB, run string) map[string][]string {
+	m := map[string][]string{}
+	rows, err := db.Query(`SELECT promise_name, status FROM workflow_promises WHERE workflow_id = $1 ORDER BY created_at, promise_id`, run)
+	if err != nil {
+		return m
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var name, status string
+		if rows.Scan(&name, &status) == nil {
+			m[name] = append(m[name], status)
+		}
+	}
+	return m
+}
+
+// promiseViolations checks the promise ops of a script against the rows a FINISHED run left: each op's promise exists exactly once, in the status
+// the op scripts. UNMEASURED is not reported here: a run that did not finish has performed an unknown prefix of the script, so the caller asks only of a
+// run that ended done, and the golden run asks it unconditionally (a fault-free run that did not produce the rows did not exercise the op).
+func promiseViolations(sc scenario, o outcome) []string {
+	var v []string
+	for _, o2 := range sc.Ops {
+		want := map[string]string{"promise_create": "pending", "promise_resolve": "resolved", "promise_reject": "rejected"}[o2.Op]
+		if want == "" {
+			continue
+		}
+		got := o.Promises["p-"+o2.Name]
+		if len(got) != 1 || got[0] != want {
+			v = append(v, fmt.Sprintf("promise %q after %s: rows %v, want exactly [%s]", "p-"+o2.Name, o2.Op, got, want))
+		}
+	}
+	return v
 }
