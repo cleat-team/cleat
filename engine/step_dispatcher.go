@@ -89,6 +89,15 @@ type stepSpec struct {
 	// as though it were this one. The fields that identify a call are the ones that cannot legitimately vary between a run and its replay;
 	// a payload that can (a timestamp in a request, a generated id) is not identity.
 	Identity func(a stepArgs, rec *EventRecord) string
+	// Refuse says when this step is refused instead of run, on both arrival paths. nil means stopBeforeNewWork, which is every spec that
+	// had no reason to differ. A spec whose old code refused under a narrower condition says so here (DurableDefer refuses only in a defer
+	// segment over a killed run, because an ordinary segment's body has always been allowed to register a defer past its frontier,
+	// cleat#4079): the dispatcher must not newly refuse what the call did not. Not allowed on a Pure step, which is never refused.
+	Refuse func(s *execSession) bool
+	// StaysInReplayAtFrontier is for a lookup that answers a question about the record at the replay frontier without ending replay: it does
+	// not call leaveReplay there, still applies the refusal, and calls Fresh with replay still on, so the step that follows does the leaving
+	// (SideEffectRecorded asks, then SideEffect decides). Only for a step that records nothing and is not Pure.
+	StaysInReplayAtFrontier bool
 	// NoIdentity says why a call has no identifying field, when it has none: exactly one of Identity and NoIdentity is set, so "no identity"
 	// is a decision with a reason that a reviewer can read, not an omission.
 	NoIdentity string
@@ -116,6 +125,10 @@ func (sp *stepSpec) validate() error {
 		return fmt.Errorf("step spec %q is missing its Decode or its Fresh", sp.Name)
 	case (sp.Identity == nil) == (sp.NoIdentity == ""):
 		return fmt.Errorf("step spec %q must set exactly one of Identity and NoIdentity: a call either names what identifies it or says why it has nothing to compare", sp.Name)
+	case sp.Refuse != nil && sp.Effect == effectPure:
+		return fmt.Errorf("step spec %q is Pure and has a Refuse: a Pure step is never refused", sp.Name)
+	case sp.StaysInReplayAtFrontier && (sp.Records != recordsNone || sp.Effect == effectPure):
+		return fmt.Errorf("step spec %q stays in replay at the frontier but records or is Pure: only a non-Pure step that records nothing may answer without leaving replay", sp.Name)
 	case sp.Effect == effectPure && sp.Records != recordsNone:
 		return fmt.Errorf("step spec %q is Pure and declares it records events: a Pure step is not refused in a segment, so it must record nothing", sp.Name)
 	}
@@ -159,10 +172,20 @@ func (s *execSession) step(ctx context.Context, m api.Module, sp *stepSpec, args
 			}
 			return sp.Decode(c, &rec)
 		}
-		s.leaveReplay(sp)
+		if !sp.StaysInReplayAtFrontier {
+			s.leaveReplay(sp)
+		}
 	}
-	if sp.Effect != effectPure && s.stopBeforeNewWork() {
-		return callSuspendSentinel
+	if sp.Effect != effectPure {
+		refused := false
+		if sp.Refuse != nil {
+			refused = sp.Refuse(s)
+		} else {
+			refused = s.stopBeforeNewWork()
+		}
+		if refused {
+			return callSuspendSentinel
+		}
 	}
 	before := s.stepCount
 	res := sp.Fresh(c)
