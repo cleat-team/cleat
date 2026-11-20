@@ -130,8 +130,8 @@ export interface Ctx extends UpdatesCtx, SignalsCtx, ChildrenCtx, DetachedCtx, L
   call<T = unknown>(service: string, operation: string, request?: unknown): Promise<T>;
   sleep(ms: number): Promise<void>;
   /**
-   * Wait for a signal. `timeoutMs` defaults to 24 hours; pass `Infinity` to wait without a limit. A positive fraction rounds up to a
-   * whole millisecond (cleat#4144).
+   * Wait for a signal. `timeoutMs` defaults to 24 hours; pass `Infinity` to wait without a limit. `0` or less does NOT wait: it times
+   * out at once. A positive fraction rounds up to a whole millisecond (cleat#4144).
    */
   waitForSignal(name: string | string[], timeoutMs?: number): Promise<SignalResult>;
   /** Start a child workflow and wait for its result. */
@@ -182,7 +182,7 @@ export interface Ctx extends UpdatesCtx, SignalsCtx, ChildrenCtx, DetachedCtx, L
    */
   createPromise(name: string): Promise<string>;
   /** Wait for a promise. A rejection is a `CleatError`; an expired timeout resolves with `timedOut: true`. */
-  /** `timeoutMs` defaults to 24 hours; pass `Infinity` to wait without a limit. A positive fraction rounds up (cleat#4144). */
+  /** `timeoutMs` defaults to 24 hours; pass `Infinity` to wait without a limit; `0` or less does not wait. A positive fraction rounds up (cleat#4144). */
   awaitPromise<T = unknown>(id: string, timeoutMs?: number): Promise<AwaitedPromise<T>>;
   /** Settle a promise with a value. Rejects if the id is unknown to the host. */
   resolvePromise(id: string, value: unknown): Promise<void>;

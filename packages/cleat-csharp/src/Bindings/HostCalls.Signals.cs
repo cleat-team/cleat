@@ -19,23 +19,32 @@ public readonly record struct SignalResult(string Name, string Payload, bool Tim
 public sealed partial class HostCalls
 {
     /// <summary>
-    /// Waits for one of the named signals, or for <paramref name="timeout"/>. A timeout of zero or less waits
-    /// indefinitely, and the host suspends the workflow until a matching signal arrives. A fresh wait that has to
-    /// wait throws <see cref="CleatSuspendException"/>.
+    /// Waits for one of the named signals, or for <paramref name="timeout"/>. A timeout of zero or less does NOT wait: a
+    /// signal that is already pending is returned, and otherwise the result is a timeout at once. To wait without a limit
+    /// pass <see cref="System.Threading.Timeout.InfiniteTimeSpan"/>; the host then suspends the workflow until a matching signal
+    /// arrives. A fresh wait that has to wait throws <see cref="CleatSuspendException"/>. (Before cleat#4144 a timeout of zero
+    /// or less waited indefinitely.)
     /// </summary>
     public SignalResult AwaitSignals(IReadOnlyList<string> names, TimeSpan timeout)
         => AwaitSignalsMs(names, WaitDuration.Ms(timeout));
 
-    /// <summary><see cref="AwaitSignals(IReadOnlyList{string}, TimeSpan)"/> in milliseconds; zero waits indefinitely.</summary>
+    /// <summary>
+    /// The count that means "wait without a limit" for <see cref="AwaitSignalsMs"/> and <see cref="AwaitPromiseMs"/>
+    /// (cleat#4144). The host clamps it.
+    /// </summary>
+    public const ulong WaitForeverMs = WaitDuration.Forever;
+
+    /// <summary>
+    /// <see cref="AwaitSignals(IReadOnlyList{string}, TimeSpan)"/> in milliseconds. Zero does not wait; pass
+    /// <see cref="WaitForeverMs"/> to wait without a limit.
+    /// </summary>
     public SignalResult AwaitSignalsMs(IReadOnlyList<string> names, ulong timeoutMs)
     {
         DispatchUpdates(); // a dispatch point: python's await_signals_ms serves pending updates before it waits
-        // The host reads i64::MAX as "no timeout" (INFINITE_TIMEOUT_MS in the Python SDK).
-        var effective = timeoutMs == 0 ? (ulong)long.MaxValue : timeoutMs;
         IDurableSignalsImports.SignalOutcome outcome;
         try
         {
-            outcome = IDurableSignalsImports.DurableAwaitSignals(EntryJson.StringArray(names), effective);
+            outcome = IDurableSignalsImports.DurableAwaitSignals(EntryJson.StringArray(names), timeoutMs);
         }
         catch (WitException e) when (e.Value is IOutcomesImports.CallFailure f)
         {

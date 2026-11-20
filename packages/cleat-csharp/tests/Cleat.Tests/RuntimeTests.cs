@@ -835,7 +835,7 @@ public class ChildDocumentTests
 
 public class WaitDurationTests
 {
-    // cleat#4144. A positive wait must never reach the host as 0: AwaitSignalsMs reads 0 as "wait indefinitely".
+    // cleat#4144. A positive wait must never reach the host as 0, which means "do not wait".
     [Theory]
     [InlineData(5L, 1UL)]            // 5 ticks: positive and far under a millisecond
     [InlineData(10_000L, 1UL)]       // exactly 1 ms
@@ -845,10 +845,20 @@ public class WaitDurationTests
         => Assert.Equal(want, WaitDuration.Ms(TimeSpan.FromTicks(ticks)));
 
     [Fact]
-    public void ZeroAndNegativeStayZero()
+    public void ZeroAndNegativeStayZeroWhichTheHostReadsAsDoNotWait()
     {
         Assert.Equal(0UL, WaitDuration.Ms(TimeSpan.Zero));
         Assert.Equal(0UL, WaitDuration.Ms(TimeSpan.FromSeconds(-1)));
-        Assert.Equal(0UL, WaitDuration.Ms(System.Threading.Timeout.InfiniteTimeSpan));
+        Assert.Equal(0UL, WaitDuration.Ms(TimeSpan.FromTicks(-5)));
+    }
+
+    // cleat#4144: waiting without a limit is explicit. The .NET idiom for it is Timeout.InfiniteTimeSpan (-1 ms), which is NEGATIVE
+    // and so must be recognised before the "zero or less" rule, or it would be the one span that means "do not wait".
+    [Fact]
+    public void TheInfiniteTimeSpanIsTheExplicitWaitWithoutALimit()
+    {
+        Assert.Equal(WaitDuration.Forever, WaitDuration.Ms(System.Threading.Timeout.InfiniteTimeSpan));
+        Assert.Equal((ulong)long.MaxValue, WaitDuration.Forever);
+        Assert.NotEqual(WaitDuration.Ms(TimeSpan.FromMilliseconds(-2)), WaitDuration.Ms(System.Threading.Timeout.InfiniteTimeSpan));
     }
 }

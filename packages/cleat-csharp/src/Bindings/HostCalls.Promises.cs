@@ -23,13 +23,15 @@ public sealed partial class HostCalls
         => IDurablePromisesImports.DurableCreatePromise(name, ttlMs);
 
     /// <summary>
-    /// Waits for a promise to settle, or for <paramref name="timeout"/>. A fresh wait that has to wait throws
+    /// Waits for a promise to settle, or for <paramref name="timeout"/>. A timeout of zero or less does NOT wait: an
+    /// already-settled promise is returned, and otherwise the result is a timeout at once (cleat#4144). To wait without a limit
+    /// pass <see cref="System.Threading.Timeout.InfiniteTimeSpan"/>. A fresh wait that has to wait throws
     /// <see cref="CleatSuspendException"/>; on replay the wait has already ended and it returns the outcome.
     /// </summary>
     public PromiseResult AwaitPromise(string id, TimeSpan timeout)
         => AwaitPromiseMs(id, WaitDuration.Ms(timeout));
 
-    /// <summary><see cref="AwaitPromise(string, TimeSpan)"/> in milliseconds.</summary>
+    /// <summary><see cref="AwaitPromise(string, TimeSpan)"/> in milliseconds. Zero does not wait; pass <see cref="WaitForeverMs"/> to wait without a limit.</summary>
     public PromiseResult AwaitPromiseMs(string id, ulong timeoutMs)
     {
         DispatchUpdates(); // a dispatch point: python's await_promise_ms serves pending updates before it waits

@@ -540,14 +540,17 @@ def _error_code_name(code: int) -> str:
 INFINITE_TIMEOUT_MS: int = 9223372036854775807  # i64::MAX / 2^63 - 1
 
 
-def _seconds_to_timeout_ms(seconds: float) -> int:
-    """Seconds to the milliseconds a wait is given, without letting a POSITIVE timeout become the wait-forever 0.
+def _seconds_to_timeout_ms(seconds: float | None) -> int:
+    """Seconds to the milliseconds a wait is given, without letting a POSITIVE timeout become 0.
 
-    ``int(seconds * 1000)`` truncates: ``0.0004`` is 0 ms, and a 0 in :meth:`HostCalls.await_signals_ms` means wait without a limit, so
-    a caller who asked for a tenth of a millisecond waited for ever. A positive value that would truncate to 0 is 1 ms, so that a
-    positive timeout can never become the one value that means something else. A non-positive value is returned as it is (the
-    caller's own, unchanged), and one too large for the host saturates at :data:`INFINITE_TIMEOUT_MS` instead of raising.
+    ``int(seconds * 1000)`` truncates: ``0.0004`` is 0 ms, and a 0 in :meth:`HostCalls.await_signals_ms` means do not wait (cleat#4144),
+    so a caller who asked for a tenth of a millisecond would not wait at all. A positive value that would truncate to 0 is 1 ms, so a
+    positive timeout never becomes the value that means something else. A non-positive value is returned as the caller's own, unchanged
+    (:func:`_host_timeout_ms` turns it into the 0 the host is given), and one too large for the host saturates at
+    :data:`INFINITE_TIMEOUT_MS` instead of raising.
     """
+    if seconds is None:
+        return INFINITE_TIMEOUT_MS
     ms = seconds * 1000
     if ms >= INFINITE_TIMEOUT_MS:
         return INFINITE_TIMEOUT_MS
@@ -555,6 +558,17 @@ def _seconds_to_timeout_ms(seconds: float) -> int:
     if ms == 0 and seconds > 0:
         return 1
     return ms
+
+
+def _host_timeout_ms(timeout_ms: int | None) -> int:
+    """The timeout a wait hands the host: ``None`` waits without a limit, and 0 or less is 0, which means do not wait (cleat#4144).
+
+    The WIT's ``timeout-ms`` is a ``u64``. A negative Python int cannot be lowered into it: componentize-py's ``wit_dylib_pop_u64`` raises
+    ``OverflowError``, which is an uncatchable wasm trap, so the run fails (found in review of cleat#4189, measured on a real guest). So a
+    negative value is clamped to 0 HERE, at the one place the SDK hands a wait's timeout to the host, rather than relied on to be
+    refused by the host as it was before.
+    """
+    return INFINITE_TIMEOUT_MS if timeout_ms is None else max(timeout_ms, 0)
 
 
 # ========================================================================
@@ -2059,7 +2073,7 @@ class HostCalls:
     # 12. await_signals — wait for signals
     # --------------------------------------------------------------------
 
-    def await_signals(self, signal_names: list[str], timeout_seconds: float) -> SignalResult:
+    def await_signals(self, signal_names: list[str], timeout_seconds: float | None) -> SignalResult:
         """Wait for one or more external signals, with a timeout in seconds.
 
         Compatible with Temporal/DBOS timeout conventions.
@@ -2071,11 +2085,15 @@ class HostCalls:
         ----------
         signal_names : list[str]
             List of signal names to wait for.
-        timeout_seconds : float
-            Maximum wait time in seconds.  Pass ``0`` or a negative
-            value to wait indefinitely (no timeout).  When waiting
-            indefinitely the host suspends the workflow until a matching
-            signal arrives.
+        timeout_seconds : float | None
+            Maximum wait time in seconds.  ``0`` or a negative value means
+            DO NOT WAIT: a signal that is already waiting is returned, and
+            otherwise the result is ``timed_out`` at once.  A positive value
+            below a millisecond waits 1 ms.  To wait without a limit pass
+            ``None`` (or :data:`INFINITE_TIMEOUT_MS` to
+            :meth:`await_signals_ms`); the host then suspends the workflow
+            until a matching signal arrives.  Before cleat#4144 a timeout of
+            ``0`` waited for ever.
 
         Returns
         -------
@@ -2092,7 +2110,7 @@ class HostCalls:
         """
         return self.await_signals_ms(signal_names, _seconds_to_timeout_ms(timeout_seconds))
 
-    def await_signals_ms(self, signal_names: list[str], timeout_ms: int) -> SignalResult:
+    def await_signals_ms(self, signal_names: list[str], timeout_ms: int | None) -> SignalResult:
         """Wait for one or more external signals, with a timeout in milliseconds.
 
         Prefer the seconds-based :meth:`await_signals` variant.
@@ -2104,11 +2122,13 @@ class HostCalls:
         ----------
         signal_names : list[str]
             List of signal names to wait for.
-        timeout_ms : int
-            Maximum wait time in milliseconds.  Pass ``0`` or a negative
-            value to wait indefinitely (no timeout).  When waiting
-            indefinitely the host suspends the workflow until a matching
-            signal arrives.
+        timeout_ms : int | None
+            Maximum wait time in milliseconds.  ``0`` or a negative value
+            means DO NOT WAIT: a signal that is already waiting is returned,
+            and otherwise the result is ``timed_out`` at once.  To wait
+            without a limit pass ``None`` or :data:`INFINITE_TIMEOUT_MS`; the
+            host then suspends the workflow until a matching signal arrives.
+            Before cleat#4144 a timeout of ``0`` waited for ever.
 
         Returns
         -------
@@ -2126,10 +2146,9 @@ class HostCalls:
         self.dispatch_updates()  # dispatch point; see dispatch_updates
         names_json = json.dumps(signal_names)
 
-        # Support indefinite wait: timeout_ms <= 0 means "wait forever".
-        effective_timeout = timeout_ms
-        if timeout_ms <= 0:
-            effective_timeout = INFINITE_TIMEOUT_MS
+        # Waiting without a limit is explicit: ``None``. A timeout of 0 or less is 0, which the host reads as "do not wait"
+        # (cleat#4144), the same as for await_promise; see _host_timeout_ms for why a negative one is clamped here.
+        effective_timeout = _host_timeout_ms(timeout_ms)
 
         try:
             outcome = _import_cleat_await_signals(names_json, effective_timeout)
@@ -2501,7 +2520,7 @@ class HostCalls:
     # 24. await_promise — await a cleat promise
     # --------------------------------------------------------------------
 
-    def await_promise(self, promise_id: str, timeout_seconds: float) -> PromiseResult:
+    def await_promise(self, promise_id: str, timeout_seconds: float | None) -> PromiseResult:
         """Wait for a cleat promise to resolve, with a timeout in seconds.
 
         Compatible with Temporal/DBOS timeout conventions.
@@ -2510,8 +2529,10 @@ class HostCalls:
         ----------
         promise_id : str
             The promise ID to wait for.
-        timeout_seconds : float
-            Maximum wait time in seconds.
+        timeout_seconds : float | None
+            Maximum wait time in seconds.  ``0`` or a negative value means
+            do not wait (an already-settled promise is returned; otherwise
+            ``timed_out`` at once).  Pass ``None`` to wait without a limit.
 
         Returns
         -------
@@ -2525,7 +2546,7 @@ class HostCalls:
         """
         return self.await_promise_ms(promise_id, _seconds_to_timeout_ms(timeout_seconds))
 
-    def await_promise_ms(self, promise_id: str, timeout_ms: int) -> PromiseResult:
+    def await_promise_ms(self, promise_id: str, timeout_ms: int | None) -> PromiseResult:
         """Wait for a cleat promise to resolve, with a timeout in milliseconds.
 
         Prefer the seconds-based :meth:`await_promise` variant.
@@ -2536,13 +2557,12 @@ class HostCalls:
             The promise ID to wait for.
         timeout_ms : int
             Maximum wait time in milliseconds. Zero or negative means DO NOT
-            WAIT (cleat#4144): an already-settled promise is returned, and a
-            pending one reports a timeout at once, recording one event. A loop
-            of such polls records one event per iteration, so prefer a positive
-            timeout to a zero-timeout poll loop. To wait without a limit,
-            pass ``INFINITE_TIMEOUT_MS``. (:meth:`await_signals_ms` still
-            maps ``<= 0`` to "wait for ever" itself; whether the two should
-            agree is an open decision.)
+            WAIT (cleat#4144), as for :meth:`await_signals_ms`: an
+            already-settled promise is returned, and a pending one reports a
+            timeout at once, recording one event. A loop of such polls records
+            one event per iteration, so prefer a positive timeout to a
+            zero-timeout poll loop. To wait without a limit pass ``None`` or
+            ``INFINITE_TIMEOUT_MS``.
 
         Returns
         -------
@@ -2556,7 +2576,7 @@ class HostCalls:
         """
         self.dispatch_updates()  # dispatch point; see dispatch_updates
         try:
-            result = _import_cleat_await_promise(promise_id, timeout_ms)
+            result = _import_cleat_await_promise(promise_id, _host_timeout_ms(timeout_ms))
         except _WitErr as err:
             # ``err(call-failure)``: a stop unwinds, a host failure raises.
             # Neither is an outcome of the promise (cleat#3425).

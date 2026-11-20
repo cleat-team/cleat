@@ -238,12 +238,15 @@ if res.TimedOut {
 }
 ```
 
-**The timeout is required, and there is no indefinite wait.** Pass a
-`time.Duration` long enough for the decision you are waiting on. A value that
-rounds to 0 milliseconds — anything under 1ms — is **rejected** rather than
-treated as "wait forever": a 0ms await has no deadline to expire and would
-never return, so the runtime returns an error instead of hanging. For a
-non-blocking check, use `h.PollSignals` instead.
+**The timeout is required, and waiting without a limit is explicit.** Pass a
+`time.Duration` long enough for the decision you are waiting on, or
+`cleat.WaitForever` to wait until the signal arrives. A value that rounds to
+0 milliseconds or less, anything under 1ms, is **rejected** rather than treated
+as "wait forever": a 0ms await has no deadline to expire, and a zero usually
+comes from arithmetic (a deadline minus now) that went wrong, so the runtime
+returns an error instead of hanging. The same rule holds in every SDK: a
+timeout of zero or less does not wait. For a non-blocking check, use
+`h.PollSignals` instead.
 
 **Test `Err` before `TimedOut`.** When the window merely closes, `Err` is nil
 and `TimedOut` is set — but that rejection sets **both**, so `TimedOut` alone

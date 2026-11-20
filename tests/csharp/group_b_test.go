@@ -301,17 +301,26 @@ func TestCSharpGroupBAwaitSignalsFreshWaitStopsTheGuestAtTheWait(t *testing.T) {
 	}
 }
 
-// timeout_ms 0 is documented as "wait indefinitely". The host reads a 0ms await_signals as an immediate timed_out (the cleat#1331
-// guard), so an SDK that passed 0 through would mean "time out now". With no signal pending the run must SUSPEND at the wait, not
-// finish with a timeout.
-func TestCSharpGroupBAwaitSignalsZeroTimeoutWaitsIndefinitely(t *testing.T) {
-	res := runConformanceEntry(t, "b_await_signals", entryRun{Input: `{"names":["approve"],"timeout_ms":0}`,
+// timeout_ms 0 is DO NOT WAIT, as it is for the host's await_signals (cleat#1331) and in every SDK (cleat#4144; before that this SDK
+// mapped 0 to "wait indefinitely", and this test pinned it). With no signal pending the run completes with a timeout at once.
+func TestCSharpGroupBAwaitSignalsZeroTimeoutDoesNotWait(t *testing.T) {
+	got := mustFinish(t, runConformanceEntry(t, "b_await_signals", entryRun{Input: `{"names":["approve"],"timeout_ms":0}`,
+		Options: []engine.EngineOption{engine.WithSignalStore(newFakeSignalStore())}}))
+	if got["timed_out"] != true || got["name"] != "" || got["payload"] != "" {
+		t.Errorf("timeout_ms 0: got %v, want timed_out=true and nothing else (it must not wait)", got)
+	}
+}
+
+// CONTROL for the test above: waiting without a limit is explicit, and the largest count the guest can pass is that wait. With no signal
+// pending the run must SUSPEND at the wait. Without this row, "completes with a timeout" is also what a host that never waits does.
+func TestCSharpGroupBAwaitSignalsTheLargestTimeoutWaitsWithoutALimit(t *testing.T) {
+	res := runConformanceEntry(t, "b_await_signals", entryRun{Input: `{"names":["approve"],"timeout_ms":9223372036854775807}`,
 		Options: []engine.EngineOption{engine.WithSignalStore(newFakeSignalStore())}})
 	if res.Err != nil {
 		t.Fatalf("the run FAILED where it should have suspended: %v", res.Err)
 	}
 	if res.Suspended == nil {
-		t.Fatalf("timeout_ms 0 completed (%s): it was passed through as an immediate timeout instead of meaning wait indefinitely", res.Result)
+		t.Fatalf("the largest timeout completed (%s): it did not wait", res.Result)
 	}
 	if ops := opsOf(res); len(ops) != 0 {
 		t.Errorf("the guest ran on past the wait and made %v", ops)

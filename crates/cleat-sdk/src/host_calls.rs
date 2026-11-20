@@ -750,11 +750,14 @@ impl HostCalls {
     }
 
     /// Await external signals for a duration. Preferred over await_signals_ms.
+    ///
+    /// A zero `Duration` does NOT wait: a signal already pending is returned, and otherwise the result is a timeout at once. A positive
+    /// `Duration` under a millisecond waits 1 ms. To wait without a limit pass `Duration::MAX`, which saturates (cleat#4144).
     pub fn await_signals(&self, signal_names: &[&str], timeout: Duration) -> Result<AwaitedSignal, CallError> {
         self.await_signals_ms(signal_names, wait_ms(timeout))
     }
 
-    /// Await external signals in milliseconds. Mirrors Go's AwaitSignals.
+    /// Await external signals in milliseconds. Mirrors Go's AwaitSignals. Zero or negative does not wait; `i64::MAX` waits without a limit.
     pub fn await_signals_ms(&self, signal_names: &[&str], timeout_ms: i64) -> Result<AwaitedSignal, CallError> {
         self.dispatch_updates(); // dispatch point; see updates::dispatch_updates
         // JSON-marshal the signal names array, matching Go's adapter.go behavior.
@@ -921,11 +924,15 @@ impl HostCalls {
     }
 
     /// Await a durable promise for a duration. Preferred over await_promise_ms.
+    ///
+    /// A zero `Duration` does NOT wait: an already-settled promise is returned, and otherwise the result is a timeout at once. To wait
+    /// without a limit pass `Duration::MAX`, which saturates (cleat#4144).
     pub fn await_promise(&self, promise_id: &str, timeout: Duration) -> (String, bool, Option<String>) {
         self.await_promise_ms(promise_id, wait_ms(timeout))
     }
 
-    /// Await a durable promise in milliseconds. Mirrors Go's AwaitPromise (ABI 2.21).
+    /// Await a durable promise in milliseconds. Mirrors Go's AwaitPromise (ABI 2.21). Zero or negative does not wait; `i64::MAX` waits
+    /// without a limit.
     /// Returns (result, timed_out, error).
     pub fn await_promise_ms(&self, promise_id: &str, timeout_ms: i64) -> (String, bool, Option<String>) {
         self.dispatch_updates(); // dispatch point; see updates::dispatch_updates

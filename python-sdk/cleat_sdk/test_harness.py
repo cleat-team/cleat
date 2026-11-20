@@ -33,6 +33,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from .host_calls import (
+    INFINITE_TIMEOUT_MS,
     ChildResult,
     HostCalls,
     PromiseResult,
@@ -598,16 +599,22 @@ class CleatTestHarness(HostCalls):
                 return (sig.payload, True)
         return ("", False)
 
-    def await_signals_ms(self, signal_names: list[str], timeout_ms: int) -> SignalResult:
+    def await_signals_ms(self, signal_names: list[str], timeout_ms: int | None) -> SignalResult:
+        if timeout_ms is None:
+            timeout_ms = INFINITE_TIMEOUT_MS
         # Check for any immediately available signal
         for i, sig in enumerate(self._pending_signals):
             if sig.name in signal_names and sig.deliver_at_ms <= self.now_ms:
                 self._pending_signals.pop(i)
                 return SignalResult(name=sig.name, payload=sig.payload, timed_out=False)
 
-        # Indefinite wait: timeout_ms <= 0 means "wait forever".
-        # Simulate by raising SuspendSentinel (matching real host behavior).
+        # A timeout of 0 or less is do not wait (cleat#4144): nothing was available, so it timed out at once.
         if timeout_ms <= 0:
+            return SignalResult(name="", payload="", timed_out=True)
+
+        # Waiting without a limit is explicit (``None`` or ``INFINITE_TIMEOUT_MS``). Simulate by raising SuspendSentinel
+        # (matching real host behavior).
+        if timeout_ms >= INFINITE_TIMEOUT_MS:
             raise SuspendSentinel()
 
         # Advance time to simulate blocking
@@ -684,7 +691,9 @@ class CleatTestHarness(HostCalls):
             self._promises[promise_id] = _PromiseState(name=name)
         return promise_id
 
-    def await_promise_ms(self, promise_id: str, timeout_ms: int) -> PromiseResult:
+    def await_promise_ms(self, promise_id: str, timeout_ms: int | None) -> PromiseResult:
+        if timeout_ms is None:
+            timeout_ms = INFINITE_TIMEOUT_MS
         ps = self._promises.get(promise_id)
         if ps is None:
             raise RuntimeError(f"promise {promise_id} not found")
@@ -694,8 +703,9 @@ class CleatTestHarness(HostCalls):
         if ps.status == "rejected":
             return PromiseResult(result=ps.error, timed_out=False, rejected=True)
 
-        # Pending — simulate timeout
-        self.now_ms += timeout_ms
+        # Pending — simulate timeout. A wait without a limit does not advance the clock by the sentinel.
+        if 0 < timeout_ms < INFINITE_TIMEOUT_MS:
+            self.now_ms += timeout_ms
         return PromiseResult(result="", timed_out=True, rejected=False)
 
     def resolve_promise(self, promise_id: str, value: str) -> None:

@@ -184,7 +184,9 @@ type Timer interface {
 // systems in a deterministic, replay-safe manner.
 type Signaler interface {
 	// AwaitSignals blocks until one of the named signals arrives or the
-	// timeout expires. Returns a structured SignalResult.
+	// timeout expires. Returns a structured SignalResult. A timeout that
+	// rounds to 0 ms or less does not wait: it is refused with TimedOut and
+	// an error (cleat#1331). To wait without a limit pass WaitForever.
 	AwaitSignals(signalNames []string, timeout time.Duration) SignalResult
 
 	// DurableAwaitSignals is the low-level signal wait. Prefer AwaitSignals.

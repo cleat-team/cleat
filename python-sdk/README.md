@@ -98,7 +98,7 @@ places.
 - `schedule_invoke(service, operation, request, delay_ms) -> None` -- delayed one-shot invocation
 
 ### Signals & Events
-- `await_signals(signal_names, timeout_seconds) -> SignalResult` -- wait for external signals; `0` waits indefinitely, and `await_signals_ms` is the milliseconds form
+- `await_signals(signal_names, timeout_seconds) -> SignalResult` -- wait for external signals; `0` or less does not wait (a signal already waiting is returned, otherwise `timed_out` at once), `None` waits without a limit, and `await_signals_ms` is the milliseconds form (`None` or `INFINITE_TIMEOUT_MS` for no limit)
 - `poll_signal(name) -> (payload, found)` -- non-blocking signal check
 - `poll_cancellation() -> (cancelled, reason)` -- check for cancellation
 
@@ -416,7 +416,7 @@ def counter_entity(h: HostCalls, instance_key: str) -> str:
     # Process signals in a loop (long-lived entity)
     while True:
         # Wait for the next signal
-        result = h.await_signals(["increment", "reset", "get", "stop"], 0)
+        result = h.await_signals(["increment", "reset", "get", "stop"], None)  # None: wait without a limit
 
         if result.timed_out:
             continue
@@ -473,7 +473,7 @@ h.signal_workflow(target_run_id, "approve_request",
 reply = h.await_signals(["approve_reply"], 30)   # seconds; reply.timed_out if none came
 
 # Receiver workflow:
-request = h.await_signals(["approve_request"], 0)  # 0 waits indefinitely
+request = h.await_signals(["approve_request"], None)  # None waits without a limit; 0 would time out at once
 # ... decode request.payload, read its "reply_to" run id, decide ...
 h.signal_workflow(reply_to_run_id, "approve_reply", '{"approved": true}')
 ```
