@@ -35,6 +35,97 @@ var notYetOnTheParkHelper = map[string]struct {
 	"lifecycle.go:stopAfterFailedEventWrite": {1, "a failed-event-write stop, not a wait: nothing to park"},
 }
 
+// suspendSites counts the assignments to suspendErr in one parsed file, keyed by where they sit: "file:Func" for a function or method (including
+// any literal nested in it), and "file:var Name" for a package-level var, which is where a step spec's Fresh literal lives. A scan of function
+// bodies alone cannot see the second kind: a suspension set inside `var x = stepSpec{Fresh: func(c *stepCtx) int64 {...}}` belongs to no
+// FuncDecl, so it would read as a site that had moved to the helper when it is neither (WS-cleat-2, #4237).
+func suspendSites(fname string, file *ast.File) map[string]int {
+	found := map[string]int{}
+	count := func(key string, root ast.Node) {
+		ast.Inspect(root, func(n ast.Node) bool {
+			as, ok := n.(*ast.AssignStmt)
+			if !ok {
+				return true
+			}
+			for _, lhs := range as.Lhs {
+				if sel, ok := lhs.(*ast.SelectorExpr); ok && sel.Sel.Name == "suspendErr" {
+					found[key]++
+				}
+			}
+			return true
+		})
+	}
+	for _, d := range file.Decls {
+		switch d := d.(type) {
+		case *ast.FuncDecl:
+			if d.Body != nil {
+				count(fname+":"+d.Name.Name, d.Body)
+			}
+		case *ast.GenDecl:
+			if d.Tok != token.VAR {
+				continue
+			}
+			for _, sp := range d.Specs {
+				vs := sp.(*ast.ValueSpec)
+				for _, v := range vs.Values {
+					count(fname+":var "+vs.Names[0].Name, v)
+				}
+			}
+		}
+	}
+	return found
+}
+
+// The scan has to see a suspension wherever it is set. Each case is a source the scan reads and the key it must report; the first is
+// WS-cleat-2's known-positive, which the function-bodies-only scan returned nothing for.
+func TestTheSuspensionScanSeesAnAssignmentWhereverItSits(t *testing.T) {
+	for name, c := range map[string]struct {
+		src  string
+		want map[string]int
+	}{
+		"in a literal in a package-level spec": {
+			"package p\nvar zz = stepSpec{Fresh: func(c *stepCtx) int64 { c.s.suspendErr = nil; return 0 }}\n",
+			map[string]int{"x.go:var zz": 1},
+		},
+		"in a method": {
+			"package p\nfunc (s *execSession) M() { s.suspendErr = nil }\n",
+			map[string]int{"x.go:M": 1},
+		},
+		"in a literal nested in a method (attributed to the method)": {
+			"package p\nfunc (s *execSession) M() { f := func() { s.suspendErr = nil }; f() }\n",
+			map[string]int{"x.go:M": 1},
+		},
+		"two in one var": {
+			"package p\nvar zz = stepSpec{Fresh: func(c *stepCtx) int64 { c.s.suspendErr = nil; c.s.suspendErr = nil; return 0 }}\n",
+			map[string]int{"x.go:var zz": 2},
+		},
+		// CONTROLS: a read, and an assignment to some other field, are not suspensions.
+		"a read is not an assignment": {
+			"package p\nfunc (s *execSession) M() bool { return s.suspendErr != nil }\n",
+			map[string]int{},
+		},
+		"another field is not suspendErr": {
+			"package p\nvar zz = stepSpec{Fresh: func(c *stepCtx) int64 { c.s.eventWriteFailure = nil; return 0 }}\n",
+			map[string]int{},
+		},
+	} {
+		file, err := parser.ParseFile(token.NewFileSet(), "x.go", c.src, 0)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		got := suspendSites("x.go", file)
+		if len(got) != len(c.want) {
+			t.Errorf("%s: scan = %v, want %v", name, got, c.want)
+			continue
+		}
+		for k, n := range c.want {
+			if got[k] != n {
+				t.Errorf("%s: scan = %v, want %v", name, got, c.want)
+			}
+		}
+	}
+}
+
 func TestEverySuspensionIsSetByTheHelperOrIsNamedAsNotYetMoved(t *testing.T) {
 	files, err := filepath.Glob("*.go")
 	if err != nil {
@@ -50,23 +141,8 @@ func TestEverySuspensionIsSetByTheHelperOrIsNamedAsNotYetMoved(t *testing.T) {
 		if err != nil {
 			t.Fatalf("parsing %s: %v", f, err)
 		}
-		for _, d := range file.Decls {
-			fn, ok := d.(*ast.FuncDecl)
-			if !ok || fn.Body == nil {
-				continue
-			}
-			ast.Inspect(fn.Body, func(n ast.Node) bool {
-				as, ok := n.(*ast.AssignStmt)
-				if !ok {
-					return true
-				}
-				for _, lhs := range as.Lhs {
-					if sel, ok := lhs.(*ast.SelectorExpr); ok && sel.Sel.Name == "suspendErr" {
-						found[f+":"+fn.Name.Name]++
-					}
-				}
-				return true
-			})
+		for k, n := range suspendSites(f, file) {
+			found[k] += n
 		}
 	}
 
