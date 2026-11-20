@@ -148,7 +148,7 @@ Decisions the owner is asked for:
 
 Off by default, per worker (`--resident-window 0` is today's behaviour), so a canary worker can run it beside unchanged workers on one database: nothing in the history or the row changes, and a resident run on a worker that dies is recovered by replay on any other. No migration is required by option 4.2a.
 
-## 9. What has to be measured first (items 2 to 4 are measured, section 9a; the rest are not yet)
+## 9. What has to be measured first (items 2 and 4 are measured, section 9a; item 3 is done, cleat#4174; the rest are not yet)
 
 WS-cleat1 will run the fuller latency benchmark; these are the numbers the design depends on, in the order they decide things:
 1. **What the per-claim 0.4 to 0.7 s is made of** (claim, history load, instantiation, replay, finalize) for Go, Python and C#, on all three databases: the `setup_ms`/`replay_ms`/`finalize_ms` debug log is the starting point. This decides whether PARK or WARM RE-ENTRY buys the most, and it fixes the cost model for policy B.
