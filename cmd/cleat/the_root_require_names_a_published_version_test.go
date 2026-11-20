@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
@@ -62,32 +64,43 @@ func TestTheRootRequireNamesAPublishedVersion(t *testing.T) {
 	// from the only place anyone would run it.
 	url := fmt.Sprintf("https://proxy.golang.org/github.com/cleat-team/cleat/@v/%s.info", version)
 	client := &http.Client{Timeout: proxyAttemptTimeout}
-	status, attempts, err := askProxy(client, url, proxyRetryPauses, time.Sleep)
+	status, attempts, err := askProxy(client, url, proxyRetryPauses, proxyMaxRetryAfter, time.Sleep)
 	if verdict := proxyVerdict(version, url, status, attempts, err); verdict != "" {
 		t.Error(verdict)
 	}
 }
 
-// proxyAttemptTimeout is ONE attempt's timeout, and proxyRetryPauses the pauses between attempts, so the call is made at most len+1 = 3 times and the
-// worst case is 3*20s + 2s + 5s = 67s (it used to be one 30s attempt). The shorter per-attempt timeout is deliberate: the failure that motivated the retry
+// proxyAttemptTimeout is ONE attempt's timeout, and proxyRetryPauses the pauses between attempts, so the call is made at most len+1 = 3 times. A pause is the
+// configured one, or the proxy's own Retry-After when that is longer, capped at proxyMaxRetryAfter, so the worst case is 3*20s + 10s + 10s = 80s (it used to be
+// one 30s attempt). The shorter per-attempt timeout is deliberate: the failure that motivated the retry
 // (cleat#4264) was a proxy that stalled awaiting headers for the whole 30s, and three independent tries beat one long wait on a proxy that is stuck.
 const proxyAttemptTimeout = 20 * time.Second
 
 var proxyRetryPauses = []time.Duration{2 * time.Second, 5 * time.Second}
 
-// askProxy returns the proxy's FIRST DEFINITE answer, retrying only what is not one: a transport error (no answer at all) or a 5xx (the proxy saying it
-// could not answer). A 200 and a 404 or 410 ("unknown revision") are definite and final; so is any other status below 500 (a 403, say), which is
-// not retried because it says something about the request and not about the proxy's health. It never turns a transport failure into a pass: when every
+// proxyMaxRetryAfter caps how long a Retry-After can make the test wait. The proxy's word is honoured because it knows how long it needs, and capped because a
+// header the test cannot bound would let a misbehaving proxy hold a Tier 1 shard for as long as it liked.
+const proxyMaxRetryAfter = 10 * time.Second
+
+// askProxy returns the proxy's FIRST DEFINITE answer, retrying only what is not one: a transport error (no answer at all), a 5xx (the proxy saying it could
+// not answer) or a 429 (the proxy saying to come back later, transient by definition). A 200 and a 404 or 410 ("unknown revision") are definite and final; so
+// is any other status below 500 (a 403, say), which is not retried because it says something about the request and not about the proxy's health.
+//
+// When a retried response carries a Retry-After in seconds, the next pause is the longer of the configured one and that, capped at maxRetryAfter. The
+// HTTP-date form is not honoured (the configured pause applies): the module proxy's CDN sends seconds, and parsing a date adds a clock to a test whose
+// whole point is to have none. It never turns a transport failure into a pass: when every
 // attempt is exhausted it returns the error, and the caller fails (cleat#4264: a skip here would reopen the hole cleat#2452 is about).
 //
 // status is 0 when there was no definite answer; attempts is how many calls were made; err carries the FIRST cause and the last one, since a retry
 // that hides the first failure makes the second hard to read.
-func askProxy(client *http.Client, url string, pauses []time.Duration, sleep func(time.Duration)) (status, attempts int, err error) {
+func askProxy(client *http.Client, url string, pauses []time.Duration, maxRetryAfter time.Duration, sleep func(time.Duration)) (status, attempts int, err error) {
 	var first, last error
+	var retryAfter time.Duration // the proxy's own request for how long to wait before the NEXT attempt, from the last response
 	for i := 0; i <= len(pauses); i++ {
 		if i > 0 {
-			sleep(pauses[i-1])
+			sleep(max(pauses[i-1], min(retryAfter, maxRetryAfter)))
 		}
+		retryAfter = 0
 		attempts++
 		resp, getErr := client.Get(url)
 		if getErr != nil {
@@ -95,8 +108,11 @@ func askProxy(client *http.Client, url string, pauses []time.Duration, sleep fun
 		} else {
 			code := resp.StatusCode
 			_ = resp.Body.Close()
-			if code < 500 {
+			if code < 500 && code != http.StatusTooManyRequests {
 				return code, attempts, nil
+			}
+			if secs, convErr := strconv.Atoi(strings.TrimSpace(resp.Header.Get("Retry-After"))); convErr == nil && secs > 0 {
+				retryAfter = time.Duration(secs) * time.Second
 			}
 			last = fmt.Errorf("HTTP %d", code)
 		}

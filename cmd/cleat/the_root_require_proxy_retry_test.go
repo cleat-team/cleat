@@ -6,21 +6,28 @@ package main
 //
 //   - the KNOWN-POSITIVE: a definite "this version does not exist" (404, 410) is FINAL, is not retried, and still fails with the message that stops the
 //     require which cleat#2452 got wrong;
-//   - the KNOWN-NEGATIVE: a timeout, or a 5xx, followed by a 200 passes;
+//   - the KNOWN-NEGATIVE: a timeout, a 5xx or a 429, followed by a 200 passes, and a Retry-After is honoured up to the cap;
 //   - and a proxy that never answers still FAILS once the bounded attempts run out. It is never a skip.
 
 import (
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 )
 
-// stubProxy serves the scripted statuses in order, one per request; a status of 0 stalls past the client's timeout (a proxy that never sends headers).
-// After the script it repeats the last entry. It reports how many requests it saw.
-func stubProxy(t *testing.T, script ...int) (*httptest.Server, *atomic.Int64) {
+// stubRA is a scripted response carrying a Retry-After header (in seconds).
+type stubRA struct {
+	code  int
+	after string
+}
+
+// stubProxy serves the scripted responses in order, one per request. An entry is an int status, or a stubRA for one with a Retry-After; a status of 0 stalls
+// past the client's timeout (a proxy that never sends headers). After the script it repeats the last entry. It reports how many requests it saw.
+func stubProxy(t *testing.T, script ...any) (*httptest.Server, *atomic.Int64) {
 	t.Helper()
 	var n atomic.Int64
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -28,14 +35,22 @@ func stubProxy(t *testing.T, script ...int) (*httptest.Server, *atomic.Int64) {
 		if i >= len(script) {
 			i = len(script) - 1
 		}
-		if script[i] == 0 {
+		code := 0
+		switch e := script[i].(type) {
+		case int:
+			code = e
+		case stubRA:
+			code = e.code
+			w.Header().Set("Retry-After", e.after)
+		}
+		if code == 0 {
 			select {
 			case <-time.After(2 * time.Second):
 			case <-r.Context().Done():
 			}
 			return
 		}
-		w.WriteHeader(script[i])
+		w.WriteHeader(code)
 	}))
 	t.Cleanup(srv.Close)
 	return srv, &n
@@ -45,7 +60,7 @@ func stubProxy(t *testing.T, script ...int) (*httptest.Server, *atomic.Int64) {
 func ask(t *testing.T, srv *httptest.Server, pauses ...time.Duration) (status, attempts int, err error, slept []time.Duration) {
 	t.Helper()
 	client := &http.Client{Timeout: 60 * time.Millisecond}
-	status, attempts, err = askProxy(client, srv.URL+"/x.info", pauses, func(d time.Duration) { slept = append(slept, d) })
+	status, attempts, err = askProxy(client, srv.URL+"/x.info", pauses, proxyMaxRetryAfter, func(d time.Duration) { slept = append(slept, d) })
 	return status, attempts, err, slept
 }
 
@@ -107,10 +122,11 @@ func TestServerErrorsAreRetriedUntilTheProxyAnswers(t *testing.T) {
 
 // A proxy that NEVER answers is bounded and FAILS: never a skip, never a pass. The first and the last cause are both reported when they differ.
 func TestAProxyThatNeverAnswersFailsAfterTheBoundedAttempts(t *testing.T) {
-	for name, script := range map[string][]int{
+	for name, script := range map[string][]any{
 		"always a timeout": {0},
 		"always a 503":     {http.StatusServiceUnavailable},
 		"a 502 then 503":   {http.StatusBadGateway, http.StatusServiceUnavailable},
+		"always a 429":     {http.StatusTooManyRequests},
 	} {
 		srv, seen := stubProxy(t, script...)
 		status, attempts, err, slept := ask(t, srv, twoPauses...)
@@ -136,6 +152,40 @@ func TestAProxyThatNeverAnswersFailsAfterTheBoundedAttempts(t *testing.T) {
 	}
 }
 
+// 429 is the proxy saying to come back later: retried, and a 200 after it passes. A Retry-After is honoured as the pause when it is longer than the
+// configured one, and capped at proxyMaxRetryAfter; without one the configured pause applies.
+func TestATooManyRequestsIsRetriedAndARetryAfterIsHonouredUpToTheCap(t *testing.T) {
+	// 429 then 200, no Retry-After: the configured pause
+	srv, seen := stubProxy(t, http.StatusTooManyRequests, http.StatusOK)
+	status, attempts, err, slept := ask(t, srv, twoPauses...)
+	if err != nil || status != http.StatusOK || attempts != 2 || seen.Load() != 2 || len(slept) != 1 || slept[0] != twoPauses[0] {
+		t.Fatalf("429 then 200: status %d, attempts %d, err %v, slept %v; want 200 on the 2nd attempt after the configured pause %v", status, attempts, err, slept, twoPauses[0])
+	}
+	if msg := proxyVerdict("v9.9.9", "u", status, attempts, err); msg != "" {
+		t.Errorf("a 429 followed by a 200 failed: %q", msg)
+	}
+	// a Retry-After longer than the configured pause and under the cap is honoured exactly
+	srv, _ = stubProxy(t, stubRA{http.StatusTooManyRequests, "3"}, http.StatusOK)
+	status, _, err, slept = ask(t, srv, twoPauses...)
+	if err != nil || status != http.StatusOK || len(slept) != 1 || slept[0] != 3*time.Second {
+		t.Errorf("Retry-After: 3: status %d, err %v, slept %v; want 200 after exactly 3s", status, err, slept)
+	}
+	// one beyond the cap is capped, never trusted whole: a header the test cannot bound would let a proxy hold a shard as long as it liked
+	srv, _ = stubProxy(t, stubRA{http.StatusServiceUnavailable, strconv.Itoa(99999)}, http.StatusOK)
+	status, _, err, slept = ask(t, srv, twoPauses...)
+	if err != nil || status != http.StatusOK || len(slept) != 1 || slept[0] != proxyMaxRetryAfter {
+		t.Errorf("Retry-After: 99999: status %d, err %v, slept %v; want 200 after the cap %v", status, err, slept, proxyMaxRetryAfter)
+	}
+	// a Retry-After shorter than the configured pause does not shorten it, and a value that is not seconds is ignored
+	for _, ra := range []string{"0", "-5", "soon", "Wed, 21 Oct 2015 07:28:00 GMT", ""} {
+		srv, _ = stubProxy(t, stubRA{http.StatusTooManyRequests, ra}, http.StatusOK)
+		_, _, err, slept = ask(t, srv, 5*time.Second)
+		if err != nil || len(slept) != 1 || slept[0] != 5*time.Second {
+			t.Errorf("Retry-After %q: err %v, slept %v; want the configured 5s pause", ra, err, slept)
+		}
+	}
+}
+
 // A 200 on the first attempt asks once and never pauses.
 func TestAnImmediateSuccessAsksOnce(t *testing.T) {
 	srv, seen := stubProxy(t, http.StatusOK)
@@ -148,14 +198,15 @@ func TestAnImmediateSuccessAsksOnce(t *testing.T) {
 	}
 }
 
-// The production bound is the one the comment on proxyAttemptTimeout states: three attempts, 20s each, paused 2s and 5s, so at most 67s.
+// The production bound is the one the comment on proxyAttemptTimeout states: three attempts, 20s each, each pause the configured one or a Retry-After capped at
+// 10s, so at most 3*20s + 10s + 10s = 80s.
 func TestTheProductionRetryBoundIsWhatItsCommentSays(t *testing.T) {
 	var pauses time.Duration
 	for _, p := range proxyRetryPauses {
-		pauses += p
+		pauses += max(p, proxyMaxRetryAfter)
 	}
 	worst := time.Duration(len(proxyRetryPauses)+1)*proxyAttemptTimeout + pauses
-	if len(proxyRetryPauses)+1 != 3 || worst != 67*time.Second {
-		t.Errorf("%d attempts, worst case %v; the comment on proxyAttemptTimeout says 3 attempts and 67s", len(proxyRetryPauses)+1, worst)
+	if len(proxyRetryPauses)+1 != 3 || worst != 80*time.Second {
+		t.Errorf("%d attempts, worst case %v; the comment on proxyAttemptTimeout says 3 attempts and 80s", len(proxyRetryPauses)+1, worst)
 	}
 }
