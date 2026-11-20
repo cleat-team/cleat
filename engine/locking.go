@@ -97,12 +97,14 @@ func (s *execSession) freshAcquireLock(ctx context.Context, m api.Module, key st
 func (s *execSession) replayAcquireLock(ctx context.Context, m api.Module, key string, ttlMs int64) int64 {
 	if s.stepCount < len(s.history) {
 		rec := s.history[s.stepCount]
+		// The type is checked BEFORE the step is consumed, as every other replay does: advancing first swallowed an event that belongs to another
+		// call and carried on in replay one step out of line, with no divergence reported (cleat#4201, measured).
+		if rec.EventType != EventTypeAcquireLock {
+			s.replayDivergence(ctx, m, EventTypeAcquireLock, 0, 0)
+			return packAcquireLockResult(false, 1)
+		}
 		if !s.advanceReplayStep(ctx, &rec) {
 			return 0
-		}
-
-		if rec.EventType != EventTypeAcquireLock {
-			return packAcquireLockResult(false, 1)
 		}
 		if rec.Err != "" {
 			return packAcquireLockResult(false, 1)
@@ -163,12 +165,12 @@ func (s *execSession) freshReleaseLock(ctx context.Context, m api.Module, key st
 func (s *execSession) replayReleaseLock(ctx context.Context, m api.Module, key string) int64 {
 	if s.stepCount < len(s.history) {
 		rec := s.history[s.stepCount]
+		// Type first, then consume: see replayAcquireLock (cleat#4201).
+		if rec.EventType != EventTypeReleaseLock {
+			return s.replayDivergence(ctx, m, EventTypeReleaseLock, 0, 0)
+		}
 		if !s.advanceReplayStep(ctx, &rec) {
 			return 0
-		}
-
-		if rec.EventType != EventTypeReleaseLock {
-			return int64(1)
 		}
 		if rec.Err != "" {
 			return int64(1)
