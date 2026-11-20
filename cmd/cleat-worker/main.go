@@ -489,8 +489,7 @@ func main() {
 	resolveDBURL()
 
 	// Set WASM output buffer size before any Runtime is created.
-	engine.OutBufSize = uint32(*wasmOutputBufferSize)
-	engine.MaxWasmStringLen = uint32(*wasmMaxStringLen)
+	applyEngineGlobalsFromFlags()
 	if *wasmMaxResponseBytes < 1 || *wasmMaxResponseBytes > 1<<24-1 {
 		// A result word carries the response length in 24 bits (packDurableCallResult), so a larger value would wrap and report a short response.
 		log.Fatalf("--wasm-max-response-bytes must be between 1 and %d, got %d", 1<<24-1, *wasmMaxResponseBytes)
@@ -2275,26 +2274,8 @@ func main() {
 	// former wazero fallback was removed rather than kept as a degraded
 	// option -- it could not fence a compute-bound guest, so silently
 	// running on it was a safety-relevant degradation no operator asked for.
-	//
-	// Bound wasmtime execution: epoch interruption (wall-clock, primary
-	// defense against a runaway workflow hanging the worker — see
-	// IMPROVEMENT-PLAN.md 1.5) and StoreLimits (memory/table/instance
-	// ceilings), plus optional fuel-based instruction metering when
-	// --wasm-instruction-limit is set.
-	// 0 => the engine's default (256 MiB). See wasmtimeMemoryLimitBytes.
-	memoryLimitBytes := wasmtimeMemoryLimitBytes(*wasmMemoryMaxMB)
-	wt, wasmtimeErr := engine.NewWasmtimeBackend(ctx,
-		engine.WithWasmtimeExecutionTimeout(*wasmInstanceTimeout),
-		engine.WithWasmtimeInstructionLimit(uint64(*wasmInstructionLimit)),
-		engine.WithWasmtimeMemoryLimits(memoryLimitBytes, 0, 0),
-		engine.WithWasmtimeDeferBudget(*wasmDeferBudget),
-		engine.WithWasmtimeModuleCacheMaxEntries(*wasmModuleCacheMaxEntries),
-		engine.WithWasmtimeModuleCacheMaxBytes(int64(*wasmModuleCacheMaxMB)<<20),
-		// Without this the backend writes to slog.Default(), and this worker's
-		// configured handler never sees the one record that says whether a
-		// KILLED workflow's defers ran. See WithWasmtimeLogger.
-		engine.WithWasmtimeLogger(logger),
-	)
+	// The options it is built with are wasmtimeOptionsFromFlags.
+	wt, wasmtimeErr := engine.NewWasmtimeBackend(ctx, wasmtimeOptionsFromFlags(logger)...)
 	if wasmtimeErr != nil {
 		logger.ErrorContext(context.Background(), "wasmtime backend failed to initialize; wasmtime is the only WASM backend cleat has, there is no fallback", "worker_id", workerID, "error", wasmtimeErr)
 		os.Exit(1)
@@ -2312,7 +2293,7 @@ func main() {
 	}
 
 	var wasmtimeBackend engine.WasmBackend = wt
-	logger.InfoContext(context.Background(), "wasmtime backend registered for Go WASM", "worker_id", workerID, "instance_timeout", *wasmInstanceTimeout, "wall_clock_ceiling", *wasmWallClockCeiling, "instruction_limit", *wasmInstructionLimit, "memory_limit_bytes", memoryLimitBytes, "defer_budget", *wasmDeferBudget)
+	logger.InfoContext(context.Background(), "wasmtime backend registered for Go WASM", "worker_id", workerID, "instance_timeout", *wasmInstanceTimeout, "wall_clock_ceiling", *wasmWallClockCeiling, "instruction_limit", *wasmInstructionLimit, "memory_limit_bytes", wasmtimeMemoryLimitBytes(*wasmMemoryMaxMB), "defer_budget", *wasmDeferBudget)
 
 	// Start PostgreSQL NOTIFY listener for low-latency dispatch wake-up.
 	var notifyCh chan struct{}
@@ -3167,6 +3148,35 @@ func flushRetryWindowAdvice(flushWindow, reclaim, heartbeat time.Duration) strin
 			"and a retry that succeeds after that loses its fence. Raise --reclaim-timeout to at least "+
 			"%v to make the extra retrying reachable, or ignore this if nothing else reaps for this deployment.",
 		flushWindow, window, flushWindow)
+}
+
+// applyEngineGlobalsFromFlags sets the engine's two package-level knobs from their flags: the WASM output buffer and the maximum string length. They have no
+// option path (the engine reads them from package variables), so this is the only place a worker applies them. It is a function, called unconditionally from
+// main, so that a test can run the same code main runs: until cleat#4212 these were two bare assignments in a function no test executes, which is how a
+// 32 KiB override of the engine's 1 MiB survived unnoticed (cleat#4171).
+func applyEngineGlobalsFromFlags() {
+	engine.OutBufSize = uint32(*wasmOutputBufferSize)
+	engine.MaxWasmStringLen = uint32(*wasmMaxStringLen)
+}
+
+// wasmtimeOptionsFromFlags is every option the worker builds its wasmtime backend with, taken from the flags.
+//
+// Bound wasmtime execution: epoch interruption (wall-clock, primary defense against a runaway workflow hanging the worker -- see IMPROVEMENT-PLAN.md 1.5)
+// and StoreLimits (memory/table/instance ceilings), plus optional fuel-based instruction metering when --wasm-instruction-limit is set.
+// The memory limit is the flag's value, or the engine's default (256 MiB) for 0: see wasmtimeMemoryLimitBytes.
+func wasmtimeOptionsFromFlags(logger *slog.Logger) []engine.WasmtimeOption {
+	return []engine.WasmtimeOption{
+		engine.WithWasmtimeExecutionTimeout(*wasmInstanceTimeout),
+		engine.WithWasmtimeInstructionLimit(uint64(*wasmInstructionLimit)),
+		engine.WithWasmtimeMemoryLimits(wasmtimeMemoryLimitBytes(*wasmMemoryMaxMB), 0, 0),
+		engine.WithWasmtimeDeferBudget(*wasmDeferBudget),
+		engine.WithWasmtimeModuleCacheMaxEntries(*wasmModuleCacheMaxEntries),
+		engine.WithWasmtimeModuleCacheMaxBytes(int64(*wasmModuleCacheMaxMB) << 20),
+		// Without this the backend writes to slog.Default(), and this worker's
+		// configured handler never sees the one record that says whether a
+		// KILLED workflow's defers ran. See WithWasmtimeLogger.
+		engine.WithWasmtimeLogger(logger),
+	}
 }
 
 // wasmtimeMemoryLimitBytes is the per-store memory limit to hand the wasmtime backend, in bytes: the flag's value, or the engine's own default
