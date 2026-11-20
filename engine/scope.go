@@ -216,8 +216,28 @@ func (s *execSession) replaySetScope(ctx context.Context, m api.Module, objectTy
 		}
 
 		if rec.Err != "" {
-			// Previous attempt failed.
-			// Do not set scope fields; switch to fresh to retry acquisition.
+			// A recorded attempt FAILED. The retry that followed it is recorded at the NEXT step, not over this row, because
+			// advanceReplayStep has already moved past it (cleat#4177: the same shape as await_promise, which left replay at its
+			// own pending record on every later replay). So history can hold [failed, failed, ..., acquired] and whatever the guest
+			// did after, and leaving replay here instead re-acquired the key and re-ran everything after it on EVERY later replay:
+			// measured against a real event_history, five wakes after the key was free gave five acquisitions and five follow-ups.
+			//
+			// Skip the run of failed attempts of THIS scope. If the acquisition that ended them is recorded, take it as this call's
+			// outcome. If history ends inside the run, the retry has not happened yet: that is the one case that goes fresh.
+			scopeKey := "vo:" + objectType + ":" + instanceKey
+			for s.stepCount < len(s.history) {
+				next := s.history[s.stepCount]
+				if next.EventType != EventTypeScopeAcquired || next.ScopeKey != scopeKey {
+					return packSimpleResult(1, 0) // divergence, as for any other record that is not this call's
+				}
+				if !s.advanceReplayStep(ctx, &next) {
+					return 0
+				}
+				if next.Err == "" {
+					return s.adoptReplayedScope(objectType, instanceKey, prevEC, prevLen)
+				}
+			}
+			// The failed attempts were the end of history.
 			s.exitReplay()
 			return s.freshSetScope(ctx, m, objectType, instanceKey, prevScopePtr, prevScopeMaxLen)
 		}
@@ -232,20 +252,26 @@ func (s *execSession) replaySetScope(ctx context.Context, m api.Module, objectTy
 		// lock once that object has been re-acquired. Found by the
 		// fresh-vs-replay parity property test on its first run;
 		// IMPROVEMENT-PLAN 3.69.
-		if s.scopeSet && s.scopePrefix != "" {
-			s.forgetHeldScope("vo:" + s.scopeObjType + ":" + s.scopeInstKey)
-		}
-		s.scopeSet = true
-		s.scopeObjType = objectType
-		s.scopeInstKey = instanceKey
-		s.scopePrefix = "vo:" + objectType + ":" + instanceKey + ":"
-		s.heldScopes = append(s.heldScopes, "vo:"+objectType+":"+instanceKey)
-		return packSimpleResult(prevEC, prevLen)
+		return s.adoptReplayedScope(objectType, instanceKey, prevEC, prevLen)
 	}
 
 	// Past recorded history -- switch to fresh execution.
 	s.exitReplay()
 	return s.freshSetScope(ctx, m, objectType, instanceKey, prevScopePtr, prevScopeMaxLen)
+}
+
+// adoptReplayedScope applies the bookkeeping of a recorded SUCCESSFUL acquisition: drop the scope it switched away from, and hold the new one.
+// It acquires nothing; the acquisition happened in the segment that recorded it.
+func (s *execSession) adoptReplayedScope(objectType, instanceKey string, prevEC byte, prevLen uint32) int64 {
+	if s.scopeSet && s.scopePrefix != "" {
+		s.forgetHeldScope("vo:" + s.scopeObjType + ":" + s.scopeInstKey)
+	}
+	s.scopeSet = true
+	s.scopeObjType = objectType
+	s.scopeInstKey = instanceKey
+	s.scopePrefix = "vo:" + objectType + ":" + instanceKey + ":"
+	s.heldScopes = append(s.heldScopes, "vo:"+objectType+":"+instanceKey)
+	return packSimpleResult(prevEC, prevLen)
 }
 
 func (s *execSession) releaseHeldScopes(ctx context.Context) {

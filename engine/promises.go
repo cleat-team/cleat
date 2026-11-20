@@ -140,6 +140,59 @@ func (s *execSession) AwaitPromise(ctx context.Context, m api.Module, promiseID 
 				// bottom of this function.
 				awaitAnchorMs = rec.TimestampMs
 				awaitTimeoutMs = rec.TimeoutMs
+
+				// HISTORY CONTINUES PAST THIS RECORD: the await was already answered, so answer it from history and STAY IN
+				// REPLAY (cleat#4177). A pending await can only be left in two ways, and both leave a trace in what follows:
+				//
+				//   - it RESOLVED or was REJECTED: the outcome is recorded at the NEXT step, not over the pending row (the fresh path
+				//     records at s.stepCount, which advanceReplayStep has just moved past this record). So the record right after this
+				//     one is this promise's promise_resolved or promise_rejected.
+				//   - it TIMED OUT: nothing is recorded for a timeout ("the deadline has passed" is monotone, below), so the next record
+				//     is simply the guest's next call. Any other record means the original run took the timeout.
+				//
+				// Leaving replay here instead, as this branch always did, ran every durable call recorded after the await a second time
+				// on every later replay, and answered `resolved` to a replay that ran after the promise had settled where the original
+				// had been told it timed out. Flush's immutability guard kept the duplicates out of the stored history, so the history
+				// read as correct while the effects ran twice.
+				//
+				// WHICH outcome records are the await's own: only one WITHOUT the settlement discriminator. resolve_promise and
+				// reject_promise record the same event types with the same PromiseID, and only Service="promise" with Op="resolve"
+				// or "reject" tells them apart (cleat#4079, ResolvePromise). A workflow that awaits p, times out, and then resolves p
+				// ITSELF with a default records [await_promise, promise_resolved(Op=resolve)] and a call after it: matching on the
+				// event type alone read that settlement as the await's answer, so a later replay returned `resolved` where the
+				// original run was told it timed out, and the call ran again (measured by cleat-review on cleat#4178).
+				//
+				// DIRECTION for histories written before cleat#4079, which have no Op on either: such an outcome is read as the
+				// await's own, which is what this branch did before it looked ahead at all and what an outcome recorded by the
+				// await itself has always looked like. The reading is wrong only for a pre-#4079 workflow that timed out and then
+				// resolved the same promise itself as its very next step, and a record cannot tell the two apart. The await's own
+				// outcome always carries PromiseID, so an empty one is not the await's (nothing writes one).
+				//
+				// KNOWN AMBIGUITY, deliberately resolved toward resolved: [await_promise, promise_resolved(p)] with no Op is also what
+				// a timed-out await followed IMMEDIATELY by a second await of the same already-settled promise records. They are only
+				// both possible when the promise settles in the instant between the timeout and the guest's next call. An await
+				// followed by anything else, which is every shape a retry loop makes, is unambiguous.
+				if s.stepCount < len(s.history) {
+					next := s.history[s.stepCount]
+					sameID := next.PromiseID == promiseID && next.Service == "" && next.Op == ""
+					switch {
+					case next.EventType == EventTypePromiseResolved && sameID:
+						if !s.advanceReplayStep(ctx, &next) {
+							return 0
+						}
+						written, writtenEC := s.writeOut(ctx, m, resultPtr, next.PromiseResult, resultMaxLen)
+						return packAwaitPromiseResult(written, false, uint16(writtenEC))
+					case next.EventType == EventTypePromiseRejected && sameID:
+						if !s.advanceReplayStep(ctx, &next) {
+							return 0
+						}
+						written, _ := s.writeResult(ctx, m, resultPtr, next.PromiseError, resultMaxLen)
+						s.setAwaitRejected(true)
+						return packAwaitPromiseResult(written, false, 1)
+					default:
+						return packAwaitPromiseResult(0, true, 0)
+					}
+				}
 				resumingAwait = true
 				s.exitReplay()
 			}
