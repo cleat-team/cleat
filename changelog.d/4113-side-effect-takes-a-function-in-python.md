@@ -1,0 +1,4 @@
+---
+section: fixed
+---
+- **Python: `HostCalls.side_effect` takes a function and asks the host first, so the function runs exactly once across the first run and every replay** (cleat#4113, part 3 of 6). It took the already computed value, which could not freeze anything (and did not match `LocalHostCalls.side_effect(fn)` or the Go method, nor its own docstring). `side_effect(fn)` now asks `side-effect-recorded` before calling `fn`; the string form still works and now gets the recorded value on replay instead of a failure, but its computation still runs on every replay, and the docstring says so. Verified through a really built component: the function ran 0 times in the replay, 1 in the first run. `python-sdk/cleat_sdk/_wit` was regenerated with componentize-py 0.25.1 and the diff is exactly the new import.
