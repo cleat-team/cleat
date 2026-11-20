@@ -168,7 +168,7 @@ type stepSpec struct {
 // stepSpecs lists every spec in the engine. It exists for the dispatcher's tests (step_dispatcher_test.go), which run each property over every
 // spec on it and check the list against the `var x = stepSpec{` declarations in the source, so a spec nobody registered is on no list and is
 // caught. A host call moved onto step adds its spec here in the same change.
-var stepSpecs = []*stepSpec{&createPromiseStep, &resolvePromiseStep, &rejectPromiseStep, &acquireLockStep, &releaseLockStep, &sideEffectStep, &sideEffectRecordedStep, &deferStep, &scheduleCronStep, &deleteCronStep, &listCronsStep}
+var stepSpecs = []*stepSpec{&createPromiseStep, &resolvePromiseStep, &rejectPromiseStep, &acquireLockStep, &releaseLockStep, &sideEffectStep, &sideEffectRecordedStep, &deferStep, &scheduleCronStep, &deleteCronStep, &listCronsStep, &awaitSignalsStep}
 
 // validate says whether a spec is well-formed: it names a replay event, can decode it and can run fresh, and a step that declares itself Pure
 // (and so is never refused in a segment) records nothing.
@@ -282,7 +282,7 @@ func (s *execSession) step(ctx context.Context, m api.Module, sp *stepSpec, args
 	}
 	before := s.stepCount
 	res := sp.Fresh(c)
-	s.checkRecorded(sp, c.recorded, s.stepCount-before)
+	s.checkRecorded(sp, c.recorded, s.stepCount-before, len(c.Prefix) > 0, res == callSuspendSentinel)
 	return res
 }
 
@@ -298,7 +298,7 @@ func (s *execSession) leaveReplay(sp *stepSpec) {
 }
 
 // checkRecorded compares what a step's Fresh recorded with what its spec declared.
-func (s *execSession) checkRecorded(sp *stepSpec, recorded, stepsTaken int) {
+func (s *execSession) checkRecorded(sp *stepSpec, recorded, stepsTaken int, continuedRun, refused bool) {
 	ok := true
 	switch sp.Records {
 	case recordsOne:
@@ -306,7 +306,10 @@ func (s *execSession) checkRecorded(sp *stepSpec, recorded, stepsTaken int) {
 	case recordsNone:
 		ok = recorded == 0
 	case recordsMany:
-		ok = recorded >= 1
+		// A step that CONTINUED a run its history ended inside (c.Prefix) may record nothing new: an await whose record is already there and
+		// that suspends again, or times out at its recorded deadline, has written nothing this time. A Fresh that REFUSED (it returned the
+		// suspend sentinel) records nothing by design: an await's second-await guard and its event-cap stop are refusals inside Fresh.
+		ok = recorded >= 1 || continuedRun || refused
 	}
 	if !ok {
 		s.specViolation(sp, fmt.Sprintf("declares shape %d but recorded %d event(s)", sp.Records, recorded))

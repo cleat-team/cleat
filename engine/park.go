@@ -66,13 +66,12 @@ type parkRequest struct {
 	Kind wakeKind
 	// Key names what is waited on: the promise id, the child id, the signal-name set. Empty for a timer.
 	Key string
-	// Baseline is what the call's last poll read, so that a wake source can compare after it has registered and catch a change made in between
-	// (the lost-wakeup window). What each Kind puts here, because a batched check has to read it cheaply and compare it for inequality:
-	//   wakeTimer   unused (0)
-	//   wakeSignal  the signal_seq the poll saw
-	//   wakePromise the promise_seq the poll saw
-	//   wakeChild   UNDECIDED until the child waits move (W3); no call uses wakeChild before then
-	//   wakeUpdate  UNDECIDED until the update calls move (W1); no call uses wakeUpdate before then
+	// Baseline is RESERVED and unused in v1: every call passes 0. It was meant to carry what the call's last poll read, so that a wake source
+	// could compare after registering and catch a change made in the lost-wakeup window; no store read exposes signal_seq or promise_seq to a call
+	// (they are bumped on delivery and snapshotted at claim, in SQL only), and adding one on three dialects was not worth it. The window is closed
+	// by ORDERING instead (WS-cleat-2, #4152): the wake source registers on the first Wait and answers parkWoke at once, and the call re-polls
+	// through the same live read a replay uses, so anything delivered before the registration is found there. A kind that needs a compared value
+	// (the child and update waits are still undecided: W3, W1) may use this field again; until then it is the zero it always was.
 	Baseline int64
 	// DeadlineMs is the absolute wake time in unix ms, 0 for none. A timer must have one.
 	DeadlineMs int64

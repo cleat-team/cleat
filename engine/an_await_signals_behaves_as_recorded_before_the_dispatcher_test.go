@@ -76,8 +76,126 @@ func evTypes(h []EventRecord, from int) []EventType {
 	return out
 }
 
+// awaitNames are the names every row asks for unless it says otherwise.
+const awaitNames = `["a","b"]`
+
+// awaitRow is one situation: the history the call replays, the world it polls, the arguments it is given, and what it must do.
+type awaitRow struct {
+	name      string
+	opts      []EngineOption
+	noStore   bool
+	deliver   map[string][]SignalDelivery
+	pollErr   error
+	hist      []EventRecord
+	stepCount int
+	mod       func(s *execSession)
+	timeoutMs int64
+	payMax    uint32
+	nameMax   uint32
+	sigNames  string // the names the guest asks about; default ["a","b"]
+	want      awaitWant
+}
+
+// runAwaitRow runs one row against DurableAwaitSignals and compares everything the call does that anything can observe.
+func runAwaitRow(t *testing.T, r awaitRow) {
+	w := &awaitWorld{deliveries: r.deliver, pollErr: r.pollErr}
+	opts := append([]EngineOption{WithClock(func() int64 { return awaitT }), WithWorkflowID("wf-await")}, r.opts...)
+	if !r.noStore {
+		opts = append(opts, WithSignalStore(w))
+	}
+	s := &execSession{
+		engine: NewEngine(nil, &mockCaller{}, opts...), workflowID: "wf-await", nowMs: awaitT,
+		deferrals: map[string]string{}, queryState: map[string]string{},
+		isReplay: len(r.hist) > 0, history: append([]EventRecord(nil), r.hist...), stepCount: r.stepCount,
+	}
+	if r.mod != nil {
+		r.mod(s)
+	}
+	before := len(s.history)
+	priorSuspend := s.suspendErr
+	buf := make([]byte, 600)
+	payMax := r.payMax
+	if payMax == 0 {
+		payMax = 200
+	}
+	sigNames := r.sigNames
+	if sigNames == "" {
+		sigNames = awaitNames
+	}
+	nameMax := r.nameMax
+	if nameMax == 0 {
+		nameMax = 200
+	}
+	got := s.DurableAwaitSignals(contextWithRawMemBuf(context.Background(), buf), nil, sigNames, r.timeoutMs, 0, nameMax, 256, payMax)
+
+	nameLen, payLen, timedOut, errCode := decodeAwaitSignalsResultGuest(got)
+	w2 := r.want
+	isSentinel := got == callSuspendSentinel
+	if isSentinel != w2.sentinel {
+		t.Errorf("sentinel = %v, want %v (result %#x)", isSentinel, w2.sentinel, got)
+	}
+	if !isSentinel {
+		if w2.diverged {
+			if errCode != 1 {
+				t.Errorf("want a divergence (errCode 1), got %#x", got)
+			}
+		} else {
+			if timedOut != w2.timedOut {
+				t.Errorf("timedOut = %v, want %v (result %#x)", timedOut, w2.timedOut, got)
+			}
+			if (errCode != 0) != w2.errNonZero {
+				t.Errorf("errCode = %d, want non-zero=%v (result %#x)", errCode, w2.errNonZero, got)
+			}
+			if gotName := string(buf[:nameLen]); gotName != w2.name {
+				t.Errorf("name written = %q, want %q", gotName, w2.name)
+			}
+			if !w2.errNonZero {
+				if gotPay := string(buf[256 : 256+payLen]); gotPay != w2.payl {
+					t.Errorf("payload written = %q, want %q", gotPay, w2.payl)
+				}
+			}
+		}
+	}
+	if ev := evTypes(s.history, before); !awaitSameEventTypes(ev, w2.events) {
+		t.Errorf("recorded %v, want %v", ev, w2.events)
+	}
+	if !awaitSameStrings(w.polls, w2.polls) {
+		t.Errorf("polled %v, want %v", w.polls, w2.polls)
+	}
+	if !awaitSameInt64s(w.consumed, w2.consumed) {
+		t.Errorf("consumed %v, want %v", w.consumed, w2.consumed)
+	}
+	switch {
+	case w2.reason == "" && s.suspendErr != nil && s.suspendErr != priorSuspend:
+		t.Errorf("set a suspension %+v, want none", s.suspendErr)
+	case w2.reason != "":
+		if s.suspendErr == nil {
+			t.Fatalf("no suspension, want %q", w2.reason)
+		}
+		if s.suspendErr.Reason != w2.reason {
+			t.Errorf("suspension reason = %q, want %q", s.suspendErr.Reason, w2.reason)
+		}
+		if w2.until == -1 {
+			if !s.suspendErr.Until.After(time.UnixMilli(awaitT)) {
+				t.Errorf("suspension Until = %v, want after the clock", s.suspendErr.Until)
+			}
+		} else if w2.until != 0 && !s.suspendErr.Until.Equal(time.UnixMilli(w2.until)) {
+			t.Errorf("suspension Until = %v, want %v", s.suspendErr.Until, time.UnixMilli(w2.until))
+		}
+	}
+	if s.stepCount != w2.step {
+		t.Errorf("stepCount = %d, want %d", s.stepCount, w2.step)
+	}
+	if len(s.stepViolations) != 0 {
+		t.Errorf("the dispatcher noted spec violations: %v", s.stepViolations)
+	}
+	if s.isReplay != w2.replaying {
+		t.Errorf("isReplay = %v, want %v", s.isReplay, w2.replaying)
+	}
+}
+
 func TestAnAwaitSignalsBehavesAsRecordedBeforeTheDispatcher(t *testing.T) {
-	const names = `["a","b"]`
+	const names = awaitNames
 	longPayload := strings.Repeat("x", 300)
 	longName := strings.Repeat("n", 40)
 	shortName := longName[:10] // what a 10-byte name buffer receives, with the truncation reported alongside it
@@ -95,21 +213,7 @@ func TestAnAwaitSignalsBehavesAsRecordedBeforeTheDispatcher(t *testing.T) {
 		return fmt.Sprintf(`await_signals(["a","b"], %dms) [replayed]`, timeoutMs)
 	}
 
-	rows := []struct {
-		name      string
-		opts      []EngineOption
-		noStore   bool
-		deliver   map[string][]SignalDelivery
-		pollErr   error
-		hist      []EventRecord
-		stepCount int
-		mod       func(s *execSession)
-		timeoutMs int64
-		payMax    uint32
-		nameMax   uint32
-		sigNames  string // the names the guest asks about; default ["a","b"]
-		want      awaitWant
-	}{
+	rows := []awaitRow{
 		// ---- replay ----
 		{name: "replay: a recorded delivery with no await before it (a first-poll hit)", hist: []EventRecord{delivered(0, "a", "pa")}, timeoutMs: 60000,
 			want: awaitWant{name: "a", payl: "pa", step: 1, replaying: true}},
@@ -162,6 +266,17 @@ func TestAnAwaitSignalsBehavesAsRecordedBeforeTheDispatcher(t *testing.T) {
 		{name: "fresh: a worker that is shutting down refuses", opts: []EngineOption{WithShutdownSignal(closed)}, timeoutMs: 60000, want: awaitWant{sentinel: true}},
 		{name: "fresh: a delivery whose payload does not fit reports the truncation", deliver: map[string][]SignalDelivery{"a": {{ID: 1, Payload: longPayload}}}, timeoutMs: 60000, payMax: 200,
 			want: awaitWant{errNonZero: true, name: "a", events: []EventType{EventTypeSignalReceived}, polls: []string{"a"}, consumed: []int64{1}, step: 1}},
+		// ---- added in the W5 move: two histories whose reading the move had to keep (each passes on the OLD code) ----
+		// A polling loop that times out records [await, await, ...] with the SAME names each time. By type and identity alone the first call's run
+		// would swallow the second call's await and the delivery that follows; it times out ALONE (cleat-review3's measurement on #4227).
+		{name: "replay: two awaits with the same names then a delivery: the first times out alone, the second is left",
+			hist: []EventRecord{await(awaitT-5000, 60000), await(awaitT-4000, 60000), delivered(2, "a", "pa")}, timeoutMs: 60000,
+			want: awaitWant{timedOut: true, step: 1, replaying: true}},
+		// cleat#4144: a no-wait poll that found nothing records an await, and the NEXT poll's first-poll hit records a bare delivery. They are two
+		// calls, and the delivery is the second one's.
+		{name: "replay: a recorded no-wait await followed by the next poll's delivery does not pair with it",
+			hist: []EventRecord{await(awaitT-1000, 0), delivered(1, "a", "pa")}, timeoutMs: 0,
+			want: awaitWant{timedOut: true, step: 1, replaying: true}},
 		// ---- added on cleat-review3's condition: rows no earlier mutation reached ----
 		{name: "replay: a store error on the frontier poll is read as nothing found, even when it arrives with a delivery",
 			pollErr: fmt.Errorf("store down"), deliver: map[string][]SignalDelivery{"a": {{ID: 7, Payload: "pa"}}},
@@ -177,13 +292,13 @@ func TestAnAwaitSignalsBehavesAsRecordedBeforeTheDispatcher(t *testing.T) {
 			deliver: map[string][]SignalDelivery{"a": {{ID: 7, Payload: longPayload}}}, hist: []EventRecord{await(awaitT-1000, 60000)}, timeoutMs: 60000, payMax: 200,
 			want: awaitWant{errNonZero: true, name: "a", events: []EventType{EventTypeSignalReceived}, polls: []string{"a"}, consumed: []int64{7}, step: 2}},
 		{name: "replay: a delivery with no await before it: a delivery whose NAME does not fit reports the truncation",
-			hist: []EventRecord{delivered(0, longName, "pa")}, timeoutMs: 60000, nameMax: 10,
+			hist: []EventRecord{delivered(0, longName, "pa")}, sigNames: longNames, timeoutMs: 60000, nameMax: 10,
 			want: awaitWant{errNonZero: true, name: shortName, step: 1, replaying: true}},
 		{name: "replay: an await then a delivery: a delivery whose NAME does not fit reports the truncation",
-			hist: []EventRecord{await(awaitT-1000, 60000), delivered(1, longName, "pb")}, timeoutMs: 60000, nameMax: 10,
+			hist: []EventRecord{{Step: 0, EventType: EventTypeAwaitSignals, SignalNames: longNames, TimeoutMs: 60000, TimestampMs: awaitT - 1000}, delivered(1, longName, "pb")}, sigNames: longNames, timeoutMs: 60000, nameMax: 10,
 			want: awaitWant{errNonZero: true, name: shortName, step: 2, replaying: true}},
 		{name: "replay: the frontier poll: a delivery whose NAME does not fit reports the truncation",
-			deliver: map[string][]SignalDelivery{longName: {{ID: 7, Payload: "pa"}}}, hist: []EventRecord{{Step: 0, EventType: EventTypeAwaitSignals, SignalNames: longNames, TimeoutMs: 60000, TimestampMs: awaitT - 1000}}, timeoutMs: 60000, nameMax: 10,
+			deliver: map[string][]SignalDelivery{longName: {{ID: 7, Payload: "pa"}}}, hist: []EventRecord{{Step: 0, EventType: EventTypeAwaitSignals, SignalNames: longNames, TimeoutMs: 60000, TimestampMs: awaitT - 1000}}, sigNames: longNames, timeoutMs: 60000, nameMax: 10,
 			want: awaitWant{errNonZero: true, name: shortName, events: []EventType{EventTypeSignalReceived}, polls: []string{longName}, consumed: []int64{7}, step: 2}},
 		{name: "fresh: a delivery whose NAME does not fit reports the truncation",
 			deliver: map[string][]SignalDelivery{longName: {{ID: 1, Payload: "pa"}}}, sigNames: longNames, timeoutMs: 60000, nameMax: 10,
@@ -193,99 +308,7 @@ func TestAnAwaitSignalsBehavesAsRecordedBeforeTheDispatcher(t *testing.T) {
 	}
 
 	for _, r := range rows {
-		t.Run(r.name, func(t *testing.T) {
-			w := &awaitWorld{deliveries: r.deliver, pollErr: r.pollErr}
-			opts := append([]EngineOption{WithClock(func() int64 { return awaitT }), WithWorkflowID("wf-await")}, r.opts...)
-			if !r.noStore {
-				opts = append(opts, WithSignalStore(w))
-			}
-			s := &execSession{
-				engine: NewEngine(nil, &mockCaller{}, opts...), workflowID: "wf-await", nowMs: awaitT,
-				deferrals: map[string]string{}, queryState: map[string]string{},
-				isReplay: len(r.hist) > 0, history: append([]EventRecord(nil), r.hist...), stepCount: r.stepCount,
-			}
-			if r.mod != nil {
-				r.mod(s)
-			}
-			before := len(s.history)
-			priorSuspend := s.suspendErr
-			buf := make([]byte, 600)
-			payMax := r.payMax
-			if payMax == 0 {
-				payMax = 200
-			}
-			sigNames := r.sigNames
-			if sigNames == "" {
-				sigNames = names
-			}
-			nameMax := r.nameMax
-			if nameMax == 0 {
-				nameMax = 200
-			}
-			got := s.DurableAwaitSignals(contextWithRawMemBuf(context.Background(), buf), nil, sigNames, r.timeoutMs, 0, nameMax, 256, payMax)
-
-			nameLen, payLen, timedOut, errCode := decodeAwaitSignalsResultGuest(got)
-			w2 := r.want
-			isSentinel := got == callSuspendSentinel
-			if isSentinel != w2.sentinel {
-				t.Errorf("sentinel = %v, want %v (result %#x)", isSentinel, w2.sentinel, got)
-			}
-			if !isSentinel {
-				if w2.diverged {
-					if errCode != 1 {
-						t.Errorf("want a divergence (errCode 1), got %#x", got)
-					}
-				} else {
-					if timedOut != w2.timedOut {
-						t.Errorf("timedOut = %v, want %v (result %#x)", timedOut, w2.timedOut, got)
-					}
-					if (errCode != 0) != w2.errNonZero {
-						t.Errorf("errCode = %d, want non-zero=%v (result %#x)", errCode, w2.errNonZero, got)
-					}
-					if gotName := string(buf[:nameLen]); gotName != w2.name {
-						t.Errorf("name written = %q, want %q", gotName, w2.name)
-					}
-					if !w2.errNonZero {
-						if gotPay := string(buf[256 : 256+payLen]); gotPay != w2.payl {
-							t.Errorf("payload written = %q, want %q", gotPay, w2.payl)
-						}
-					}
-				}
-			}
-			if ev := evTypes(s.history, before); !awaitSameEventTypes(ev, w2.events) {
-				t.Errorf("recorded %v, want %v", ev, w2.events)
-			}
-			if !awaitSameStrings(w.polls, w2.polls) {
-				t.Errorf("polled %v, want %v", w.polls, w2.polls)
-			}
-			if !awaitSameInt64s(w.consumed, w2.consumed) {
-				t.Errorf("consumed %v, want %v", w.consumed, w2.consumed)
-			}
-			switch {
-			case w2.reason == "" && s.suspendErr != nil && s.suspendErr != priorSuspend:
-				t.Errorf("set a suspension %+v, want none", s.suspendErr)
-			case w2.reason != "":
-				if s.suspendErr == nil {
-					t.Fatalf("no suspension, want %q", w2.reason)
-				}
-				if s.suspendErr.Reason != w2.reason {
-					t.Errorf("suspension reason = %q, want %q", s.suspendErr.Reason, w2.reason)
-				}
-				if w2.until == -1 {
-					if !s.suspendErr.Until.After(time.UnixMilli(awaitT)) {
-						t.Errorf("suspension Until = %v, want after the clock", s.suspendErr.Until)
-					}
-				} else if w2.until != 0 && !s.suspendErr.Until.Equal(time.UnixMilli(w2.until)) {
-					t.Errorf("suspension Until = %v, want %v", s.suspendErr.Until, time.UnixMilli(w2.until))
-				}
-			}
-			if s.stepCount != w2.step {
-				t.Errorf("stepCount = %d, want %d", s.stepCount, w2.step)
-			}
-			if s.isReplay != w2.replaying {
-				t.Errorf("isReplay = %v, want %v", s.isReplay, w2.replaying)
-			}
-		})
+		t.Run(r.name, func(t *testing.T) { runAwaitRow(t, r) })
 	}
 }
 
