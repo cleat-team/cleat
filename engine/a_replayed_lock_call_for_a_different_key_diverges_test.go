@@ -160,6 +160,7 @@ func TestTheStopSiteScanReadsNeverRefuseFromTheSpecDeclaration(t *testing.T) {
 		{"KNOWN-POSITIVE: a neverRefuse spec that returns suspendingAwaitResult() is a site, so it is out", map[string]string{"a": "Refuse: neverRefuse,\n Fresh: func(c *stepCtx) int64 { return c.s.suspendingAwaitResult() }"}, map[string]bool{}},
 		{"a neverRefuse spec that returns the sentinel itself is a site, so it is out", map[string]string{"a": "Refuse: neverRefuse,\n Fresh: func(c *stepCtx) int64 { return callSuspendSentinel }"}, map[string]bool{}},
 		{"a spec with any other Refuse is not in the set", map[string]string{"a": "Refuse: someOther,\n Fresh: func(c *stepCtx) int64 { return 0 }"}, map[string]bool{}},
+		{"KNOWN-POSITIVE: a neverRefuse spec that waits through awaitSuspendOrPark is a site by construction, so it is out", map[string]string{"a": "Refuse: neverRefuse,\n Fresh: func(c *stepCtx) int64 { return awaitSuspendOrPark(c, poll, req, word) }"}, map[string]bool{}},
 		{"a spec that merely names the call without calling it is still in the set", map[string]string{"a": "Refuse: neverRefuse,\n Fresh: func(c *stepCtx) int64 { f := c.s.suspendingAwaitResult; _ = f; return 0 }"}, map[string]bool{"a": true}},
 	} {
 		got := neverStopIn(c.decls)

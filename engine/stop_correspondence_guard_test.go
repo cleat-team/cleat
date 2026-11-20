@@ -458,7 +458,8 @@ func neverRefusedSpecs(t *testing.T) map[string]bool {
 // sentinel in any other way. "Never refused" and "never a stop site" are different claims, and conflating them was the defect W4 of cleat#4152
 // found. await_promise is declared `Refuse: neverRefuse` (it never asked stopBeforeNewWork: a defer body records and suspends), and it is STILL a
 // stop site, because a suspending await answers the guest with the sentinel (cleat#3383) and every SDK has to check the stop bit on it. So a spec
-// that can return suspendingAwaitResult() or callSuspendSentinel from its own declaration is not in this set whatever its Refuse says. Without that,
+// that can return suspendingAwaitResult() or callSuspendSentinel from its own declaration, or waits through awaitSuspendOrPark, is not in this set
+// whatever its Refuse says. Without that,
 // moving the call onto the dispatcher dropped it from the host stop sites and the SDK coverage test then told the SDKs to stop guarding it. Only the
 // stop-site scan (hostStopSites) reads this; the refusal counts read neverRefusedSpecs, because await_promise is not a REFUSAL site and the Java
 // parity count is one of refusals.
@@ -508,13 +509,19 @@ func specDeclsIn(sources map[string]string) map[string]string {
 var neverRefuseDecl = regexp.MustCompile(`\bRefuse:\s*neverRefuse\b`)
 var sentinelToken = regexp.MustCompile(`\bcallSuspendSentinel\b`)
 
+// waitCall matches a call to awaitSuspendOrPark, the wait both awaits share. Its contract is the point: a wait that does not settle SUSPENDS the run and
+// hands the guest the stop word (suspendingAwaitResult), so a spec that waits through it is a stop site by construction. Reading only the two places a
+// spec spells the stop itself (an invented-deadline branch, an event-cap refusal) left that status resting on branches a refactor could move behind a
+// helper without changing what the call does (cleat-review, #4270). It has arguments, so callsInCode, which matches `name()`, cannot see it.
+var waitCall = regexp.MustCompile(`\bawaitSuspendOrPark\(`)
+
 // declaresNeverRefuse says whether a spec's declaration reads `Refuse: neverRefuse`.
 func declaresNeverRefuse(body string) bool { return neverRefuseDecl.MatchString(body) }
 
 // canAnswerWithTheStop says whether a spec's declaration can hand the guest the stop sentinel, by calling suspendingAwaitResult() or naming
 // callSuspendSentinel in code. The declaration is read with comments already blanked.
 func canAnswerWithTheStop(body string) bool {
-	return callsInCode(body, "suspendingAwaitResult") || sentinelToken.MatchString(body)
+	return callsInCode(body, "suspendingAwaitResult") || sentinelToken.MatchString(body) || waitCall.MatchString(body)
 }
 
 // neverStopIn is neverStopSpecs over declarations already read, so the rule can be tested on text.
