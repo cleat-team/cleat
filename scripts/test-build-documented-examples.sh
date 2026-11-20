@@ -23,7 +23,19 @@
 #   3. a log past the cap: the output SAYS lines were omitted and how many, and the
 #      cause at line 1 is not printed -- the limit is stated, not hidden;
 #   4. every build succeeds: exit 0 and no FAIL, so the stub is not simply
-#      failing everything.
+#      failing everything;
+#   5. a REAL transient fetch failure (the 429 log) that passes on the second attempt: exit 0, the failure's
+#      cause is printed on the RETRY line, the example is OK and is listed as having needed a retry, and the
+#      build ran exactly twice (cleat#4254);
+#   6. a REAL "Could not find" fetch failure that never clears: exit 1, FAIL, and exactly three attempts (two
+#      retries), so the retry is bounded and a persistent failure still turns the job red;
+#   7. a failure that is NOT a fetch (the compile error of case 1): exactly ONE attempt and no RETRY, so a real
+#      failure is never retried into a pass;
+#   8. BDE_FETCH_RETRIES=0 disables the retry: one attempt on the 429 log.
+#
+# The two fetch fixtures are the java-workflow build's own output from real failed runs of this job on 2026-11-20
+# (run 44674959287: HTTP 429 from repo.maven.apache.org; run 44773417605: `Could not find org.teavm:teavm-core:0.10.2`
+# at plugins.gradle.org), not invented text.
 #
 # BDE_SCRIPT runs a different copy of the script, which is how a falsification is
 # done: run this against the version before the change and it must go red.
@@ -82,14 +94,95 @@ if tail -8 "$WORK/gradle-failure.log" | grep -qE 'What went wrong|error: incompa
   exit 2
 fi
 
+cat >"$WORK/fetch-429.log" <<'EOF'
+Vetting Java project in /home/runner/work/cleat/cleat/examples/java-workflow...
+
+  Summary: 1 files, 0 errors, 0 warnings
+  Compiling Java to WASM via TeaVM...
+Downloading https://services.gradle.org/distributions/gradle-7.6.4-bin.zip
+...........10%............20%............30%...........40%............50%............60%...........70%............80%............90%............100%
+
+FAILURE: Build failed with an exception.
+
+* What went wrong:
+A problem occurred configuring root project 'java-workflow'.
+> Could not resolve all files for configuration ':classpath'.
+   > Could not resolve org.teavm:teavm-core:0.10.2.
+     Required by:
+         project : > org.teavm:org.teavm.gradle.plugin:0.10.2 > org.teavm:teavm-gradle-plugin:0.10.2
+      > Could not resolve org.teavm:teavm-core:0.10.2.
+         > Could not get resource 'https://plugins.gradle.org/m2/org/teavm/teavm-core/0.10.2/teavm-core-0.10.2.pom'.
+            > Could not GET 'https://repo.maven.apache.org/maven2/org/teavm/teavm-core/0.10.2/teavm-core-0.10.2.pom'. Received status code 429 from server: Too Many Requests
+   > Could not resolve org.teavm:teavm-tooling:0.10.2.
+     Required by:
+         project : > org.teavm:org.teavm.gradle.plugin:0.10.2 > org.teavm:teavm-gradle-plugin:0.10.2
+      > Could not resolve org.teavm:teavm-tooling:0.10.2.
+         > Could not get resource 'https://plugins.gradle.org/m2/org/teavm/teavm-tooling/0.10.2/teavm-tooling-0.10.2.pom'.
+            > Could not GET 'https://repo.maven.apache.org/maven2/org/teavm/teavm-tooling/0.10.2/teavm-tooling-0.10.2.pom'. Received status code 429 from server: Too Many Requests
+
+* Try:
+> Run with --stacktrace option to get the stack trace.
+> Run with --info or --debug option to get more log output.
+> Run with --scan to get full insights.
+
+* Get more help at https://help.gradle.org
+
+BUILD FAILED in 27s
+Error: gradle build failed: exit status 1
+Make sure the TeaVM plugin is configured in the Gradle build file.
+EOF
+cat >"$WORK/fetch-notfound.log" <<'EOF'
+Vetting Java project in /home/runner/work/cleat/cleat/examples/java-workflow...
+
+  Summary: 1 files, 0 errors, 0 warnings
+  Compiling Java to WASM via TeaVM...
+Downloading https://services.gradle.org/distributions/gradle-7.6.4-bin.zip
+...........10%............20%............30%...........40%............50%............60%...........70%............80%............90%............100%
+
+FAILURE: Build failed with an exception.
+
+* What went wrong:
+A problem occurred configuring root project 'java-workflow'.
+> Could not resolve all files for configuration ':classpath'.
+   > Could not find org.teavm:teavm-core:0.10.2.
+     Searched in the following locations:
+       - https://plugins.gradle.org/m2/org/teavm/teavm-core/0.10.2/teavm-core-0.10.2.pom
+     If the artifact you are trying to retrieve can be found in the repository but without metadata in 'Maven POM' format, you need to adjust the 'metadataSources { ... }' of the repository declaration.
+     Required by:
+         project : > org.teavm:org.teavm.gradle.plugin:0.10.2 > org.teavm:teavm-gradle-plugin:0.10.2
+   > Could not find org.teavm:teavm-tooling:0.10.2.
+     Searched in the following locations:
+       - https://plugins.gradle.org/m2/org/teavm/teavm-tooling/0.10.2/teavm-tooling-0.10.2.pom
+     If the artifact you are trying to retrieve can be found in the repository but without metadata in 'Maven POM' format, you need to adjust the 'metadataSources { ... }' of the repository declaration.
+     Required by:
+         project : > org.teavm:org.teavm.gradle.plugin:0.10.2 > org.teavm:teavm-gradle-plugin:0.10.2
+
+* Try:
+> Run with --stacktrace option to get the stack trace.
+> Run with --info or --debug option to get more log output.
+> Run with --scan to get full insights.
+
+* Get more help at https://help.gradle.org
+
+BUILD FAILED in 21s
+Error: gradle build failed: exit status 1
+Make sure the TeaVM plugin is configured in the Gradle build file.
+EOF
+
 # A `cleat` that fails java-workflow with $FIXTURE's text and succeeds for every
-# other example, or succeeds for all when FIXTURE is unset.
+# other example, or succeeds for all when FIXTURE is unset. When FAILS_FIRST is
+# set it fails only that many times (counted in $COUNTER) and then succeeds; the
+# count of java-workflow builds is left in $COUNTER either way.
 mkdir -p "$WORK/bin"
 cat >"$WORK/bin/cleat" <<'EOF'
 #!/usr/bin/env bash
 if [[ -n "${FIXTURE:-}" && "$PWD $*" == *java-workflow* ]]; then
-  cat "$FIXTURE"
-  exit 1
+  n=$(( $(cat "$COUNTER" 2>/dev/null || echo 0) + 1 ))
+  echo "$n" >"$COUNTER"
+  if [[ -z "${FAILS_FIRST:-}" || "$n" -le "$FAILS_FIRST" ]]; then
+    cat "$FIXTURE"
+    exit 1
+  fi
 fi
 exit 0
 EOF
@@ -99,7 +192,8 @@ failures=0
 run_script() { # fixture-or-empty [extra env...] -> output in $WORK/out, status in $RC
   local fixture=$1
   shift
-  env FIXTURE="$fixture" CLEAT_BIN="$WORK/bin/cleat" "$@" bash "$SCRIPT" >"$WORK/out" 2>&1
+  rm -f "$WORK/count"
+  env FIXTURE="$fixture" COUNTER="$WORK/count" BDE_RETRY_SLEEP=0 CLEAT_BIN="$WORK/bin/cleat" "$@" bash "$SCRIPT" >"$WORK/out" 2>&1
   RC=$?
 }
 expect() { # name condition-result(0=true) detail
@@ -147,6 +241,37 @@ echo "4. nothing fails"
 run_script ""
 expect "exits 0" "$((RC == 0 ? 0 : 1))" "rc=$RC"
 expect "prints no FAIL" "$(grep -q '^FAIL ' "$WORK/out" && echo 1 || echo 0)"
+
+attempts() { cat "$WORK/count" 2>/dev/null || echo 0; }
+
+echo "5. a real 429 fetch failure that clears on the second attempt"
+run_script "$WORK/fetch-429.log" FAILS_FIRST=1
+expect "exits 0" "$((RC == 0 ? 0 : 1))" "rc=$RC"
+expect "built the example exactly twice" "$((  $(attempts) == 2 ? 0 : 1))" "attempts=$(attempts)"
+expect "prints a RETRY line" "$(has 'RETRY examples/java-workflow'; echo $?)"
+expect "prints the first failure's cause on it" "$(has 'Received status code 429 from server: Too Many Requests'; echo $?)"
+expect "the example is OK and says it was retried" "$(has 'OK    examples/java-workflow (after 1 retry(ies)'; echo $?)"
+expect "the summary lists it as needing a retry" "$(has 'RETRIED and then built'; echo $?)"
+expect "the totals count it" "$(has 'needed a retry: 1'; echo $?)"
+
+echo "6. a real 'Could not find' fetch failure that never clears"
+run_script "$WORK/fetch-notfound.log"
+expect "exits 1" "$((RC == 1 ? 0 : 1))" "rc=$RC"
+expect "tried exactly three times (two retries), then stopped" "$(( $(attempts) == 3 ? 0 : 1))" "attempts=$(attempts)"
+expect "names the failing example" "$(has 'FAIL  examples/java-workflow'; echo $?)"
+expect "says it failed after 3 attempts" "$(has 'failed after 3 attempts'; echo $?)"
+expect "prints the cause" "$(has 'Could not find org.teavm:teavm-core:0.10.2'; echo $?)"
+
+echo "7. a failure that is not a fetch is never retried"
+run_script "$WORK/gradle-failure.log"
+expect "exits 1" "$((RC == 1 ? 0 : 1))" "rc=$RC"
+expect "built exactly once" "$(( $(attempts) == 1 ? 0 : 1))" "attempts=$(attempts)"
+expect "prints no RETRY" "$(has 'RETRY ' && echo 1 || echo 0)"
+
+echo "8. BDE_FETCH_RETRIES=0 disables the retry"
+run_script "$WORK/fetch-429.log" BDE_FETCH_RETRIES=0
+expect "exits 1" "$((RC == 1 ? 0 : 1))" "rc=$RC"
+expect "built exactly once" "$(( $(attempts) == 1 ? 0 : 1))" "attempts=$(attempts)"
 
 if (( failures > 0 )); then
   echo "build-documented-examples self-test: $failures check(s) failed" >&2
