@@ -67,6 +67,11 @@ read:
 			break read
 		}
 	}
+	if len(run) == 0 && foreign == s.stepCount && sp.ForeignFirst != nil {
+		if res, ok := sp.ForeignFirst(args); ok {
+			return res, false
+		}
+	}
 	if len(run) == 0 {
 		return s.replayDivergenceAt(ctx, m, &s.history[s.stepCount], sp.Want, args.outPtr, args.outMaxLen), false
 	}

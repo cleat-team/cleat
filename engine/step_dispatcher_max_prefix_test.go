@@ -90,3 +90,60 @@ func TestMaxPrefixIsValidatedForItsShape(t *testing.T) {
 		}
 	}
 }
+
+// ForeignFirst (cleat#4152, W5): a call whose FIRST record belongs to another call can be answered without consuming it and without leaving
+// replay. Over the fake multi-record spec, each with a control that runs.
+func TestAForeignFirstRecordIsAnsweredWithoutConsumingItWhenTheSpecSaysSo(t *testing.T) {
+	ctx := context.Background()
+	answer := func(a stepArgs) (int64, bool) { return 42, a.i1 <= 0 }
+	hist := []EventRecord{runRec(0, runOtherEvent, "x")}
+	call := func(sp *stepSpec, a stepArgs, h []EventRecord) (int64, *execSession) {
+		s := stepSession(nil, h)
+		buf := make([]byte, 256)
+		a.outPtr, a.outMaxLen = 0, 256
+		return s.step(context.WithValue(ctx, wasmMemBufKey{}, buf), nil, sp, a), s
+	}
+	var ran int32
+	var dec, pre []EventRecord
+
+	// The answer holds: the hook's result, NOTHING consumed, and the session still replaying (the record belongs to the next call).
+	sp := runSpec(&ran, &dec, &pre)
+	sp.ForeignFirst = answer
+	got, s := call(sp, stepArgs{s1: "a", i1: 0}, hist)
+	if got != 42 || s.stepCount != 0 || !s.isReplay {
+		t.Errorf("a foreign first record with a ForeignFirst that answers: result %d, step %d, replaying %v; want 42, 0, true", got, s.stepCount, s.isReplay)
+	}
+	// CONTROL: the same call when the hook declines is the ordinary divergence, so the answer above came from the hook and not from the shape.
+	got, s = call(sp, stepArgs{s1: "a", i1: 5}, hist)
+	if got&0xFF != 1 || s.stepCount != 0 {
+		t.Errorf("a foreign first record with a ForeignFirst that declines returned %#x at step %d, want a divergence consuming nothing", got, s.stepCount)
+	}
+	// CONTROL: and a spec with no hook is the ordinary divergence too.
+	got, s = call(runSpec(&ran, &dec, &pre), stepArgs{s1: "a", i1: 0}, hist)
+	if got&0xFF != 1 || s.stepCount != 0 {
+		t.Errorf("a foreign first record with no ForeignFirst returned %#x at step %d, want a divergence", got, s.stepCount)
+	}
+	// The hook is for a FOREIGN first record only: a record whose Role is none of the three is a bug in the spec and is a divergence ALWAYS.
+	unknown := runSpec(&ran, &dec, &pre)
+	unknown.ForeignFirst = answer
+	unknown.Role = func(a stepArgs, rec *EventRecord) recordRole { return recordRole(99) }
+	got, s = call(unknown, stepArgs{s1: "a", i1: 0}, hist)
+	if got&0xFF != 1 || s.stepCount != 0 {
+		t.Errorf("an unknown Role with a ForeignFirst that would answer returned %#x at step %d, want a divergence (a spec bug is never a legitimate answer)", got, s.stepCount)
+	}
+	// A foreign record AFTER the run has begun is not the first record, and the hook is not consulted: [prefix, other] ends without a final as before.
+	sp.EndsWithoutFinal = true
+	got, s = call(sp, stepArgs{s1: "a", i1: 0}, []EventRecord{runRec(0, runPrefixEvent, "a"), runRec(1, runOtherEvent, "x")})
+	if got != 7 || s.stepCount != 1 {
+		t.Errorf("[prefix, other]: result %d at step %d, want DecodeRun's 7 at step 1 (the hook is for the first record only)", got, s.stepCount)
+	}
+	// Validation: a hook on a single-record step is a mistake.
+	bad := runSpec(&ran, &dec, &pre)
+	bad.Role = nil
+	bad.DecodeRun = nil
+	bad.Decode = func(*stepCtx, *EventRecord) int64 { return 0 }
+	bad.ForeignFirst = answer
+	if err := bad.validate(); err == nil || !strings.Contains(err.Error(), "ForeignFirst") {
+		t.Errorf("validate on a ForeignFirst without a Role returned %v, want an error naming ForeignFirst", err)
+	}
+}

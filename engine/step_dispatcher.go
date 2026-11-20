@@ -72,6 +72,8 @@ type stepArgs struct {
 	i1 int64
 	// outPtr and outMaxLen are where a divergence message is written, and where the call's own output goes; zero when it has none.
 	outPtr, outMaxLen uint32
+	// out2Ptr and out2MaxLen are a second buffer for a call that returns two things (an await's delivery: the signal's name and its payload).
+	out2Ptr, out2MaxLen uint32
 }
 
 // stepCtx is what a spec's Decode and Fresh are handed.
@@ -151,6 +153,13 @@ type stepSpec struct {
 	// one delivery (measured on the old code by a_await_signals_behaves_as_recorded_before_the_dispatcher_test.go: the first call times out and
 	// the second one pairs). 0 means unlimited, which is a retried call's or SetScope's shape. Needs a Role.
 	MaxPrefix int
+	// ForeignFirst, for a multi-record step, answers a call whose FIRST record belongs to another call, WITHOUT consuming it and without leaving
+	// replay, instead of reporting a divergence. ok false means "not answerable", and the divergence follows as usual. It exists for one
+	// case (cleat#4152, W5): a history written before cleat#4151 recorded nothing for a no-wait poll that timed out, so the record at the
+	// poll's step is the NEXT call's, and the poll's answer was always the timeout (had a signal been found it would have been a record). Dropping
+	// that would turn a resumable history into a divergence, which a migration may not do. It is not called for a record whose Role is not
+	// one of the three (a bug in the spec is always a divergence), and it must not touch the world: it is a pure function of the arguments.
+	ForeignFirst func(a stepArgs) (res int64, ok bool)
 	// Fresh does the work and records, through c.Record, where the call records. It is called only once the dispatcher has decided
 	// fresh work is allowed.
 	Fresh func(c *stepCtx) int64
@@ -177,6 +186,8 @@ func (sp *stepSpec) validate() error {
 		return fmt.Errorf("step spec %q is a multi-record step (it has a Role) and needs exactly a DecodeRun, not a Decode", sp.Name)
 	case sp.Role != nil && sp.Records == recordsNone:
 		return fmt.Errorf("step spec %q is a multi-record step that records nothing: a run is made of recorded events", sp.Name)
+	case sp.ForeignFirst != nil && sp.Role == nil:
+		return fmt.Errorf("step spec %q has a ForeignFirst but no Role: it answers a multi-record step whose first record is another call's", sp.Name)
 	case sp.MaxPrefix < 0 || (sp.MaxPrefix > 0 && sp.Role == nil):
 		return fmt.Errorf("step spec %q has MaxPrefix %d: it bounds the prefix records of a run, so it needs a Role and cannot be negative", sp.Name, sp.MaxPrefix)
 	case sp.EndsWithoutFinal && sp.Identity == nil:
