@@ -1738,6 +1738,15 @@ Only the reflog is unforgeable by typing; only the trailer names a person. See `
 **One PR, one thing.** Every PR that bundled a second concern was harder to review than the two
 would have been apart.
 
+**A change that ships adds a `changelog.d/<issue>-<slug>.md` fragment and does not edit
+`CHANGELOG.md`.** Two PRs editing one file conflicted three times in one day (2026-11-19).
+`changelog.d/README.md` is the format; `scripts/check-changelog-fragments.py` (Lint) refuses a
+direct edit and shipped code with no fragment. A change with nothing to tell users puts
+`no-changelog: <reason>` on a line of its own in the PR body; correcting an existing entry puts
+`changelog-edit: <reason>` there. `scripts/fold-changelog.py` folds fragments into `CHANGELOG.md`
+at release prep. Only that PR, a `release/*` or `hotfix/*` branch, or a `changelog-edit:` correction
+edits `CHANGELOG.md` directly.
+
 **Never merge on red, and never re-run a failing job hoping it passes.** Read the log. If it is
 genuinely infrastructure, say so out loud and re-run *that*.
 
