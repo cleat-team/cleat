@@ -1408,6 +1408,13 @@ func goComponentCallback(
 	if entry.backend == nil || entry.backend.handler == nil {
 		return nil
 	}
+	// The guest is not running while the host is, so what the host does on its behalf (a service call, a plugin call, a retry's backoff, a
+	// database write) is not charged to --wasm-instance-timeout. The core-module path brackets every host function this way
+	// (hostBudget, engine/wasmtime_hostbudget.go); the component path did not, so a durable call that took longer than the instance
+	// timeout killed a Python or C# workflow with "execution time limit exceeded" while the flag's help said host time is not charged
+	// (cleat#4174). One bracket here covers every callback, as hostFunc does for core. A nil budget (the fence disabled) is a no-op.
+	entry.backend.budget.enterHost()
+	defer entry.backend.budget.leaveHost()
 	// Before the switch, not in its arm: the stop-correspondence guard reads the
 	// arms as `case cbTypeX: return ...dispatchX(`, and this check needs `ty`.
 	if entry.typ == cbTypeAwaitPromise {
@@ -1629,6 +1636,8 @@ func (b *wasmtimeBackend) ExecuteComponentCGo(
 	if err != nil {
 		return nil, err
 	}
+	// Guest execution time, not wall clock: see the bracket in goComponentCallback (cleat#4174). Armed below, immediately before the guest runs.
+	b.budget = newHostBudget(store, execTimeout)
 	wasiConfig := wasmtime.NewWasiConfig()
 	wasiConfig.InheritStderr()
 	wasiConfig.SetEnv([]string{"PYTHONHOME", "PYTHONPATH"}, []string{"/", "/"})
@@ -1697,6 +1706,7 @@ func (b *wasmtimeBackend) ExecuteComponentCGo(
 		return nil, fmt.Errorf("component %s: %w", componentRunExport, err)
 	}
 
+	b.budget.arm()
 	outcome, resultStr, callErr := componentCallRun(fn, store, string(dispatchInput))
 	if callErr != nil {
 		// Name the limit that stopped it, the same way the core-module and
