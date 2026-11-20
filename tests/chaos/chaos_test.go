@@ -574,11 +574,11 @@ func seqOf(reqs []request) string {
 	return strings.Join(b, " ")
 }
 
-// A run that registered a cleanup and then parks (a sleep) before a body ContinueAsNew. TERMINATING it while it is parked runs its defer
-// segment, which replays the body to the frontier: the body's ContinueAsNew must NOT be taken there, and the cleanup must run once (cleat#4159).
 // parkedSleepMs is the body's sleep; the terminated run is claimed after it.
 const parkedSleepMs = 4000
 
+// A run that registered a cleanup and then parks (a sleep) before a body ContinueAsNew. TERMINATING it while it is parked runs its defer
+// segment, which replays the body to the frontier: the body's ContinueAsNew must NOT be taken there, and the cleanup must run once (cleat#4159).
 var parkedScenario = scenario{"defer_sleep_can", []op{{Op: "defer", Name: "D"}, {Op: "sleep", Ms: parkedSleepMs}, {Op: "continue_as_new", Name: "POST"}}, nil}
 
 func continuations(db *sql.DB, id string) int {
