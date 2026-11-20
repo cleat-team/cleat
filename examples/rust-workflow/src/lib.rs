@@ -235,6 +235,20 @@ fn suspend_probe(_h: &HostCalls, _input: PlaceOrderInput) -> Result<String, Stri
     Ok("{\"unreachable\":true}".to_string())
 }
 
+/// cleat#4113: one frozen value and a count of how often its function ran. The count is a local the closure captures, not a static: every
+/// execution is a fresh WASM instance, so a first run reports 1 and a replay that returns the recorded value without calling the function reports
+/// 0, and `cleat build --target rust` refuses a static atomic (R007, global mutable state) in an entry point. Keep this entry point;
+/// `engine/rust_side_effect_test.go` is its only caller.
+#[cleat_entry]
+fn side_effect_probe(h: &HostCalls, _input: PlaceOrderInput) -> Result<String, String> {
+    let mut ran = 0usize;
+    let value = h.side_effect_with(|| {
+        ran += 1;
+        format!("\"computed-in-run-{}\"", ran)
+    })?;
+    Ok(format!("{{\"value\":{},\"ran\":{}}}", value, ran))
+}
+
 /// The ordinary shape: a real sleep, propagated with `?`.
 #[cleat_entry]
 fn sleep_probe(h: &HostCalls, _input: PlaceOrderInput) -> Result<String, String> {

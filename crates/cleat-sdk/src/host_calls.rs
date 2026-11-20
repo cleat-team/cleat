@@ -394,6 +394,11 @@ mod imports {
             out_ptr: *mut u8, out_max_len: u32,
         ) -> i64;
 
+        // cleat_side_effect_recorded - (ptr,maxLen) -> i64 (ABI 2.43a, cleat#4113)
+        pub fn cleat_side_effect_recorded(
+            out_ptr: *mut u8, out_max_len: u32,
+        ) -> i64;
+
         // plugin_call_streaming - (ptr,len x4, ptr,maxLen) -> i64
         #[link_name = "plugin_call_streaming"]
         pub fn cleat_plugin_call_streaming(
@@ -2120,6 +2125,9 @@ impl HostCalls {
 
     /// Record a non-deterministic computation result in event history on first
     /// execution, returning the cached result on replay. Mirrors Go's SideEffect.
+    ///
+    /// The value was computed BEFORE the host could be asked, so this cannot stop the computation running again on replay (the host now
+    /// returns the recorded value instead of failing the replay). To freeze a value, use [`Self::side_effect_with`] (cleat#4113).
     pub fn side_effect(&self, computed_result: &str) -> Result<String, String> {
         let mut out_buf = vec![0u8; memory::out_buf_cap() as usize];
         let result = unsafe {
@@ -2141,12 +2149,57 @@ impl HostCalls {
     }
 
     /// Typed version of side_effect using serde for serialization/deserialization.
+    ///
+    /// Takes an already computed value, so it cannot freeze anything: the computation ran before the host could be asked. Prefer
+    /// [`Self::side_effect_typed_with`].
     pub fn side_effect_typed<T: serde::Serialize, R: serde::de::DeserializeOwned>(
         &self, computed: &T,
     ) -> Result<R, String> {
         let input_json = serde_json::to_string(computed).map_err(|e| format!("serialize input: {}", e))?;
         let result_json = self.side_effect(&input_json)?;
         serde_json::from_str(&result_json).map_err(|e| format!("deserialize result: {}", e))
+    }
+
+    /// Ask the host whether the history already holds the value of the side effect at this step (cleat#4113, ABI 2.43a).
+    ///
+    /// `Ok(Some(v))`: it does, the step is consumed, and the caller must NOT run its function or call [`Self::side_effect`].
+    /// `Ok(None)`: nothing is recorded and nothing changed. `Err`: a refused call (the workflow is stopping) or a replay divergence.
+    pub fn side_effect_recorded(&self) -> Result<Option<String>, String> {
+        let mut out_buf = vec![0u8; memory::out_buf_cap() as usize];
+        let result = unsafe {
+            imports::cleat_side_effect_recorded(out_buf.as_mut_ptr(), memory::out_buf_cap())
+        };
+        // Bit 31 before any field: a fresh lookup in a stopped workflow is refused so the function never runs.
+        if stop_requested(result) {
+            return Err("cleat: host refused this call -- the workflow is running its defer phase".to_string());
+        }
+        let (out_len, status) = memory::decode_simple_result(result);
+        match status {
+            0 => Ok(Some(memory::read_result(&out_buf, out_len))),
+            2 => Ok(None),
+            code => Err(memory::host_message_or(&out_buf, out_len, format!("side_effect_recorded() failed: host status {}.", code))),
+        }
+    }
+
+    /// Freeze a value: call `f` once, on first execution, and record its result; on every replay return the recorded value WITHOUT calling
+    /// `f` (cleat#4113). `f` must not make host calls: each consumes a step of the history.
+    ///
+    /// This is [`Self::side_effect`] done in the order that works: ask the host first, compute only if nothing is recorded.
+    pub fn side_effect_with<F: FnOnce() -> String>(&self, f: F) -> Result<String, String> {
+        if let Some(recorded) = self.side_effect_recorded()? {
+            return Ok(recorded);
+        }
+        self.side_effect(&f())
+    }
+
+    /// [`Self::side_effect_with`] with serde on both sides.
+    pub fn side_effect_typed_with<R, F>(&self, f: F) -> Result<R, String>
+    where
+        R: serde::Serialize + serde::de::DeserializeOwned,
+        F: FnOnce() -> R,
+    {
+        let json = self.side_effect_with(|| serde_json::to_string(&f()).unwrap_or_else(|e| format!("\"__serialize_error: {}\"", e)))?;
+        serde_json::from_str(&json).map_err(|e| format!("deserialize result: {}", e))
     }
 
     // ── R1.4: plugin_call_streaming ──────────────────────────────────────

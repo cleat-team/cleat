@@ -47,6 +47,7 @@ declare function __cleat_json_stringify(text: string): string;
 declare function __cleat_workflow_id(): string;
 declare function __cleat_set_query_state(key: string, value: string): void;
 declare function __cleat_side_effect(computed: string): string;
+declare function __cleat_side_effect_recorded(): string;
 declare function __cleat_version(): number;
 declare function __cleat_min_version(): number;
 declare function __cleat_run_id(): string;
@@ -227,7 +228,14 @@ const ctx: Ctx = {
     if (out === "") throw new Error("the host refused to canonicalise: " + jsonText.slice(0, 80));
     return out;
   },
-  sideEffect: <T>(compute: () => T) => settle<string>(__cleat_side_effect(encode(compute()))).then((v) => parseJSON(v) as T),
+  // cleat#4113: freeze a value. Ask the host first, SYNCHRONOUSLY (the order of host calls is part of the history), so `compute` does not run on a replay.
+  sideEffect: <T>(compute: () => T) => {
+    const raw = __cleat_side_effect_recorded();
+    const looked = JSON.parse(raw) as Envelope;
+    if (looked.suspended || looked.err !== undefined) return settle<T>(raw);
+    if (looked.ok !== null && looked.ok !== undefined) return Promise.resolve(parseJSON((looked.ok as { recorded: string }).recorded) as T);
+    return settle<string>(__cleat_side_effect(encode(compute()))).then((v) => parseJSON(v) as T);
+  },
   setQueryState: (key, value) => __cleat_set_query_state(key, value),
   version: () => __cleat_version(),
   minVersion: () => __cleat_min_version(),
