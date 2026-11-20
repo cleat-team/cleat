@@ -906,9 +906,15 @@ func (s *execSession) DurableSleep(ctx context.Context, m api.Module, durationMs
 		return packSleepResult(sleepStatusCompleted, 0)
 	}
 
-	s.suspendErr = &SuspendError{
-		Reason: fmt.Sprintf("cleat_sleep(%dms)", durationMs),
-		Until:  time.UnixMilli(s.nowMs),
+	// The park-or-suspend choice is the helper's (cleat#4152, W2b). A refusal sets exactly the suspension this call set inline before. A timer has
+	// nothing to re-poll but the clock, so a wake or a passed deadline both mean the wait is over.
+	if s.parkOrSuspend(ctx, parkRequest{
+		Kind:       wakeTimer,
+		DeadlineMs: s.nowMs,
+		Reason:     fmt.Sprintf("cleat_sleep(%dms)", durationMs),
+		Until:      time.UnixMilli(s.nowMs),
+	}) != parkRefused {
+		return packSleepResult(sleepStatusCompleted, 0)
 	}
 
 	return packSleepResult(sleepStatusSuspend, durationMs)
