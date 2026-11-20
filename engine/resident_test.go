@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"net/http/httptest"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -440,5 +441,152 @@ func TestADurableSleepWhoseRunIsSentBackSuspendsAsItAlwaysDid(t *testing.T) {
 	}
 	if s.suspendErr == nil || s.suspendErr.Reason != "cleat_sleep(5000ms)" {
 		t.Errorf("a sleep sent back set %+v, want the suspension it sets when nothing parks", s.suspendErr)
+	}
+}
+
+// A run's own context carries the wall-clock ceiling and the workflow deadline (executor.go), and a hold that outlives it is worse than the suspension
+// it replaced: the sleep still suspends, but the executor then sees execCtx.Err() == DeadlineExceeded and FAILS the run with a timeout, where the
+// same sleep without residency would have suspended at once. So a wait whose context ends at or before its wake is refused, not held (cleat#4162, PR 2).
+func TestAWaitWhoseContextEndsBeforeItsWakeIsRefusedNotHeld(t *testing.T) {
+	// The wake is on the fake clock's epoch (year 2027), so any real deadline in the next seconds is before it, which is the shape of a run close to
+	// its ceiling. The fake clock never fires, so a wrongly admitted wait ends only when the context does: it fails on the metrics below rather than hanging.
+	clock := newFakeResidentClock(residentT)
+	m := newReplayMetrics(t)
+	set := newTestResidentSet(t, residentTestConfig(clock, func(c *ResidencyConfig) { c.Metrics = m }))
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
+	if got := set.ForRun(ResidentRunInfo{Language: "go"}).Wait(ctx, timerReq(residentT+5000)); got != parkRefused {
+		t.Fatalf("returned %d, want the refusal %d", got, parkRefused)
+	}
+	if n := residentCounter(t, m, "cleat_resident_parks_total"); n != 0 {
+		t.Errorf("a wait whose context ends before its wake was HELD (%d hold(s) counted): at the ceiling it would fail the run with a timeout instead of suspending it", n)
+	}
+	if n := residentCounter(t, m, "cleat_resident_refusals_total", `reason="deadline"`); n != 1 {
+		t.Errorf("the refusal was counted %d time(s) under reason \"deadline\", want 1", n)
+	}
+}
+
+// The boundary: a context that ends at EXACTLY the wake is refused too. Both would happen at the same instant, and the executor treats an expired context
+// as a timeout whichever got there first, so only a deadline strictly after the wake leaves room to complete.
+func TestAWaitWhoseContextEndsAtExactlyItsWakeIsRefusedNotHeld(t *testing.T) {
+	clock := newFakeResidentClock(residentT)
+	m := newReplayMetrics(t)
+	set := newTestResidentSet(t, residentTestConfig(clock, func(c *ResidencyConfig) { c.Metrics = m }))
+	ctx, cancel := context.WithDeadline(context.Background(), time.UnixMilli(residentT+5000))
+	defer cancel()
+	// Bounded: a wrongly admitted hold blocks on a clock nobody fires and a context that ends in 2027, so it must fail here and not hang.
+	out := park(set.ForRun(ResidentRunInfo{Language: "go"}), ctx, timerReq(residentT+5000))
+	select {
+	case got := <-out:
+		if got != parkRefused {
+			t.Fatalf("returned %d, want the refusal %d", got, parkRefused)
+		}
+	case <-time.After(2 * time.Second):
+		clock.fireAll() // release the wrongly held wait so the test can end
+		t.Fatal("a context ending at exactly the wake was HELD, not refused")
+	}
+	if n := residentCounter(t, m, "cleat_resident_refusals_total", `reason="deadline"`); n != 1 {
+		t.Errorf("a context ending at exactly the wake was counted %d time(s) as a deadline refusal, want 1", n)
+	}
+}
+
+// The control for the row above: a context whose deadline is AFTER the wake does not stop the hold, or the refusal could be for any context with a deadline.
+func TestAWaitWhoseContextOutlivesItsWakeIsStillHeld(t *testing.T) {
+	clock := newFakeResidentClock(residentT)
+	set := newTestResidentSet(t, residentTestConfig(clock, nil))
+	ctx, cancel := context.WithDeadline(context.Background(), time.UnixMilli(residentT+60_000))
+	defer cancel()
+	out := park(set.ForRun(ResidentRunInfo{Language: "go"}), ctx, timerReq(residentT+5000))
+	awaitArmed(t, clock)
+	if set.Len() != 1 {
+		t.Fatalf("a wait whose context outlives its wake was not held")
+	}
+	clock.fireAll()
+	mustOutcome(t, out, parkDeadline, "the timer")
+}
+
+// The wasmtime paths call the handler with context.Background() (wasmtime_hostfuncs_core.go, component_callbacks.go), so these tests call it the same way
+// and put the limits only where production puts them: on the session's execution context. A test that handed the limits to the host call itself would pass
+// whether or not the session's context reaches the wait, which is the thing that is wrong if it does not.
+
+func TestAHeldSleepEndsWhenItsExecutionIsCancelled(t *testing.T) {
+	clock := newFakeResidentClock(residentT)
+	m := newReplayMetrics(t)
+	set := newTestResidentSet(t, residentTestConfig(clock, func(c *ResidencyConfig) { c.Metrics = m }))
+	s := stepSession([]EngineOption{WithClock(func() int64 { return clock.nowMs.Load() }), WithResidency(set.ForRun(ResidentRunInfo{Language: "go"}))}, nil)
+	s.nowMs = residentT
+	ctx, cancel := context.WithCancel(context.Background())
+	s.execCtx = ctx
+
+	done := make(chan int64, 1)
+	go func() { done <- s.DurableSleep(context.Background(), nil, 5000) }()
+	awaitArmed(t, clock)
+	if set.Len() != 1 {
+		t.Fatalf("PRECONDITION FAILED: the sleep was not held (%d held)", set.Len())
+	}
+	cancel() // a terminate or a cancel: the execution's context ends while the run is held
+	select {
+	case got := <-done:
+		if got != packSleepResult(sleepStatusSuspend, 5000) {
+			t.Errorf("a held sleep whose execution was cancelled returned %#x, want the suspend result", got)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("a cancelled execution's held sleep never returned: the hold does not see the session's context, so a terminate would wait for the timer")
+	}
+	if set.Len() != 0 {
+		t.Errorf("%d run(s) still held after the execution ended", set.Len())
+	}
+}
+
+func TestASleepTooCloseToTheExecutionsDeadlineIsNotHeld(t *testing.T) {
+	clock := newFakeResidentClock(residentT)
+	m := newReplayMetrics(t)
+	set := newTestResidentSet(t, residentTestConfig(clock, func(c *ResidencyConfig) { c.Metrics = m }))
+	s := stepSession([]EngineOption{WithClock(func() int64 { return clock.nowMs.Load() }), WithResidency(set.ForRun(ResidentRunInfo{Language: "go"}))}, nil)
+	s.nowMs = residentT
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
+	s.execCtx = ctx
+
+	done := make(chan int64, 1)
+	go func() { done <- s.DurableSleep(context.Background(), nil, 5000) }()
+	select {
+	case got := <-done:
+		if got != packSleepResult(sleepStatusSuspend, 5000) {
+			t.Errorf("returned %#x, want the suspend result", got)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the sleep never returned")
+	}
+	if n := residentCounter(t, m, "cleat_resident_parks_total"); n != 0 {
+		t.Errorf("a sleep whose execution deadline was 30ms away was HELD (%d): at the ceiling the executor would fail the run with a timeout", n)
+	}
+	if n := residentCounter(t, m, "cleat_resident_refusals_total", `reason="deadline"`); n != 1 {
+		t.Errorf("the refusal was counted %d time(s) under \"deadline\", want 1", n)
+	}
+}
+
+// Every place the executor builds the execution context hands it to the session, after the ceiling: a path that forgot would hold runs through limits
+// that only the session's context can show them. Counted against the places the ceiling is applied, so a third site is also caught.
+func TestEveryExecutionContextTheExecutorBuildsIsHandedToTheSession(t *testing.T) {
+	raw, err := os.ReadFile("executor.go")
+	if err != nil {
+		t.Fatalf("read executor.go: %v", err)
+	}
+	src := string(raw)
+	ceilings := strings.Count(src, "execCtx, cancel = context.WithTimeout(execCtx, ceiling)")
+	handed := strings.Count(src, "session.execCtx = execCtx")
+	if ceilings < 2 {
+		t.Fatalf("found %d place(s) the ceiling is applied, want at least 2: this test reads the wrong thing", ceilings)
+	}
+	if handed != ceilings {
+		t.Errorf("the ceiling is applied at %d place(s) and the context is handed to the session at %d", ceilings, handed)
+	}
+	// And after, not before: a hand-off before the ceiling carries a context without it.
+	for _, seg := range strings.Split(src, "execCtx, cancel = context.WithTimeout(execCtx, ceiling)")[1:] {
+		next := strings.Index(seg, "session.execCtx = execCtx")
+		if next < 0 || next > 400 {
+			t.Errorf("a ceiling is not followed by the hand-off within the same block")
+		}
 	}
 }

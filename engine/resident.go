@@ -40,6 +40,7 @@ const (
 	residentRefusedMemory   = "memory"    // admitting it would exceed the resident-memory budget
 	residentRefusedPressure = "pressure"  // the worker is at or over its memory soft limit
 	residentRefusedDraining = "draining"  // the worker is shutting down
+	residentRefusedDeadline = "deadline"  // the run's own context (the wall-clock ceiling, the workflow deadline) ends at or before the wake
 	residentEndedDeadline   = "deadline"  // the timer fired: the caller's clock decides whether the wait is over
 	residentEndedCancelled  = "cancelled" // the run's context ended while parked
 	residentEndedEvicted    = "evicted"   // the set sent the run back (see the eviction reasons)
@@ -262,6 +263,12 @@ func (r *ResidentRun) Wait(ctx context.Context, req parkRequest) parkOutcome {
 	}
 	if remaining > s.cfg.window(r.info.EventCount) {
 		return refuse(residentRefusedWindow)
+	}
+	// The run's own context carries the wall-clock ceiling and the workflow deadline. A hold that outlives it is worse than a suspension: the sleep
+	// still suspends, but the executor then sees the expired context and FAILS the run with a timeout (executor.go, the DeadlineExceeded branch),
+	// where the same sleep without residency would have suspended at once. So a run too close to its limit to see its wake is not held.
+	if dl, ok := ctx.Deadline(); ok && !dl.After(time.UnixMilli(req.DeadlineMs)) {
+		return refuse(residentRefusedDeadline)
 	}
 	if s.cfg.Pressure != nil && s.cfg.Pressure() > 0 {
 		return refuse(residentRefusedPressure)

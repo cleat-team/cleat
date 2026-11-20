@@ -428,7 +428,7 @@ A durable sleep that is due soon can be **held on the worker** instead of suspen
 
 A held run keeps its instance and one OS thread (measured: about one thread per held instance, 1053 for 1024 Go instances), so keep this small. The thread cost at larger counts was not measured.
 
-**Experimental.** Held time is not yet excluded from `--wasm-wall-clock-ceiling` (a context timeout around one execution) or from `--max-workflow-duration`: the design says it counts against both, and that has not been verified or fixed yet (the next change). The defaults keep a held run at 10 seconds or less, far inside both; if you raise `--resident-window-floor` or `--resident-window-cap`, keep them well below those limits, and expect a run held to the ceiling to be sent back and suspended rather than completed.
+**The run's own limits win.** A wait that would still be held when the run's context ends (`--wasm-wall-clock-ceiling`, or `--max-workflow-duration`) is **not held**: it suspends exactly as it does with residency off, and is counted as a refusal with reason `deadline`. Without that check a held run failed with `execution timed out` where the same sleep would have suspended (measured on real wasmtime at a 150 ms ceiling and a 300 ms sleep: suspended in 1 to 3 ms with residency off, and held to the ceiling and failed with it on). A cancel or a terminate ends a held run at once. Held time still **counts against** both limits (it is not paused), so a run close to a limit is simply not held.
 
 ---
 

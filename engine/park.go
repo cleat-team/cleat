@@ -131,7 +131,13 @@ func (s *execSession) parkOrSuspend(ctx context.Context, req parkRequest) parkOu
 		return s.suspendFor(req)
 	}
 	if s.canPark() {
-		switch out := s.engine.wakeSource.Wait(ctx, req); out {
+		// The EXECUTION's context when the session has one, not the host call's: the latter is context.Background() on every wasmtime path, so waiting
+		// on it would hold a run through its own ceiling, a cancel and a terminate (execSession.execCtx).
+		waitCtx := ctx
+		if s.execCtx != nil {
+			waitCtx = s.execCtx
+		}
+		switch out := s.engine.wakeSource.Wait(waitCtx, req); out {
 		case parkWoke, parkDeadline:
 			return out
 		}
