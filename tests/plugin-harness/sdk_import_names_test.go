@@ -312,12 +312,8 @@ var sdkUnreachedBaseline = map[string][]string{
 	// buys deferred cleanup after a kill, and no other SDK has asked for it.
 	// When one does, delete its entry rather than re-labelling it -- this list
 	// is shrink-only.
-	//
-	// cleat_side_effect_recorded (cleat#4113) is the question a SideEffect asks the host before it runs its
-	// function. The engine ships it first; each SDK binds it in its own PR, which deletes that SDK's entry
-	// here -- the shrink-only direction this test checks.
 	"rust": {"cleat_interrupt_requested"},
-	"java": {"cleat_interrupt_requested", "cleat_side_effect_recorded"},
+	"java": {"cleat_interrupt_requested"},
 
 	// rust and java: the cron trio is deliberately absent from their entries above, because both
 	// bound it in 3.242 -- which is what this baseline existed to make

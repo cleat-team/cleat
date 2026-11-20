@@ -80,6 +80,8 @@ var javaCallsTheHostCanRefuse = []sdkRefusableCall{
 	{"pollUpdate", "DurablePollUpdate"},
 	{"completeUpdate", "DurableCompleteUpdate"},
 	{"cleatCall", "freshCall"},
+	// sideEffect(Supplier) asks cleat_side_effect_recorded first (cleat#4113); a fresh lookup in a stopped workflow is refused.
+	{"sideEffectOnce", "SideEffectRecorded"},
 	{"cleatCallWithRetry", "DurableCallWithRetry"},
 	// The same host function from inside its attempt loop (cleat#4210): one SDK method, two host sites, one sentinel.
 	{"cleatCallWithRetry", "freshCallWithRetry"},
@@ -365,13 +367,13 @@ func TestTheRequiredJavaGuardsCoverEveryHostStopSite(t *testing.T) {
 	// TypeScript and the Go adapters already decode bit 31 (_check_host_result, withSuspendCheck).
 	//
 	// 24 since cleat#4113 (SideEffectRecorded): a fresh lookup in a stopped workflow is refused so a guest's side-effect function never runs.
-	// Java has no import for it yet, which sdkStopSiteExemptions records and checks by absence; the PR that adds one removes the exemption.
+	// Java covers it with sideEffectOnce (cleat#4113), which asks first and checks the stop bit on the lookup; the exemption the engine PR added
+	// for Java is deleted by the Java PR.
 	//
 	// 25 since cleat#4143 (SideEffectRecorded, a SECOND site): the lookup is refused at the replay frontier of a defer segment too, because
 	// a segment over a run with history starts in replay and an SDK that asks first runs its function between the lookup and the record.
-	// Both sides were checked rather than assumed. Java needs NO new method: this is a second site for the same host call, and Java still
-	// has no import for it (sdkStopSiteExemptions records that and checks it by absence), so there is no decoder to guard; the PR that adds
-	// the import takes on the guard for BOTH sites, since the call is refused at either. A count of sites and a list of methods are
+	// Both sides were checked rather than assumed. Java needs NO new method for the second site: it is the same host call, and sideEffectOnce's
+	// stop check on the lookup covers the refusal at either site, the fresh one and the replay-frontier one. A count of sites and a list of methods are
 	// different things, as at 18.
 	// 26 since cleat#4152 (DurableCallWithRetry, a further site, counted after cleat#4143's second): the replay-frontier block refuses a defer segment inside the block, so that
 	// the refusal sits in the branch that spells the frontier predicate. Same host call as the sites already counted, so Java needs no

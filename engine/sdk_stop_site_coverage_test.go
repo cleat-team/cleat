@@ -89,14 +89,6 @@ var sdkStopSiteExemptions = map[string][]sdkCoverageExemption{
 				"so a Java guest cannot register a cron trigger and there is no decoder " +
 				"to guard. Same absence as the Rust entry above.",
 		},
-		{
-			hostSite: "SideEffectRecorded",
-			why: "cleat#4113 added the host function and the Java SDK has not imported it yet: until its " +
-				"PR lands a Java guest cannot call it, so there is no decoder to guard. The PR that " +
-				"adds the import removes this entry, and absentToken makes that automatic.",
-			absentFrom:  "../crates/cleat-java/src/main/java/cleat/HostCalls.java",
-			absentToken: "cleat_side_effect_recorded",
-		},
 	},
 }
 

@@ -43,6 +43,24 @@ public class HostCallFixture {
     // the way the harness asks for it. Getting this wrong does not fail the
     // build: it produces a module that instantiates and then traps with
     // `export "exercise_host_call" not found`.
+    /** How many times the side-effect function ran in THIS execution (every execution is a fresh instance): a first run reports 1, and a
+     *  replay that returns the recorded value without calling the function reports 0. cleat#4113. */
+    private static int sideEffectRan = 0;
+
+    /** cleat#4113: one frozen value and a count of how often its function ran. Returned as JSON text, the way this SDK returns every
+     *  outcome. Keep this entry point; tests/plugin-harness/sideeffect_java_test.go is its only caller. */
+    @CleatEntry(name = "side_effect_once")
+    public static String sideEffectOnce(HostCalls h, String input) {
+        CleatResult<String> r = h.sideEffectOnce(() -> {
+            sideEffectRan++;
+            return "computed-in-run-" + sideEffectRan;
+        });
+        if (!r.isOk()) {
+            return "{\"error\":\"" + r.getError() + "\"}";
+        }
+        return "{\"value\":\"" + r.getValue() + "\",\"ran\":" + sideEffectRan + "}";
+    }
+
     @CleatEntry(name = "exercise_host_call")
     public static String exerciseHostCall(HostCalls h, String input) {
         String call = extractCall(input);
