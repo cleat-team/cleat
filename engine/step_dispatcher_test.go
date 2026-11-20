@@ -204,6 +204,46 @@ func TestEverySpecIsRegisteredAndNoPureSpecRecords(t *testing.T) {
 			t.Errorf("CONTROL: validate accepted a spec with %s", name)
 		}
 	}
+	// The hooks' rules, each with a fixture that reaches ITS rule and no earlier one, and the error asserted by TEXT. A fixture that leaves Records
+	// unset gets recordsOne (the iota zero), which the older "Pure and records" rule rejects first, so the new rule would decide nothing and its
+	// removal would go unseen (cleat-review3, measured on this test's first version: both mutants stayed green).
+	noop := func(*stepCtx, *EventRecord) int64 { return 0 }
+	nofresh := func(*stepCtx) int64 { return 0 }
+	for name, c := range map[string]struct {
+		spec stepSpec
+		want string
+	}{
+		"Refuse on a Pure step": {
+			stepSpec{NoIdentity: "x", Name: "x", Want: fakeEvent, Effect: effectPure, Records: recordsNone, Refuse: func(*execSession) bool { return true }, Decode: noop, Fresh: nofresh},
+			"is Pure and has a Refuse",
+		},
+		"stays in replay but records one": {
+			stepSpec{NoIdentity: "x", Name: "x", Want: fakeEvent, Effect: effectEffect, Records: recordsOne, StaysInReplayAtFrontier: true, Decode: noop, Fresh: nofresh},
+			"stays in replay at the frontier",
+		},
+		"stays in replay but is Pure": {
+			stepSpec{NoIdentity: "x", Name: "x", Want: fakeEvent, Effect: effectPure, Records: recordsNone, StaysInReplayAtFrontier: true, Decode: noop, Fresh: nofresh},
+			"stays in replay at the frontier",
+		},
+	} {
+		c := c
+		err := c.spec.validate()
+		if err == nil {
+			t.Errorf("CONTROL: validate accepted a spec with %s", name)
+		} else if !strings.Contains(err.Error(), c.want) {
+			t.Errorf("CONTROL: a spec with %s was refused for the wrong reason: %q does not name %q", name, err.Error(), c.want)
+		}
+	}
+	// CONTROL for the controls: the same two valid shapes, with the hook the rule is about removed, validate.
+	for name, good := range map[string]stepSpec{
+		"a Pure step with no Refuse":                     {NoIdentity: "x", Name: "x", Want: fakeEvent, Effect: effectPure, Records: recordsNone, Decode: noop, Fresh: nofresh},
+		"a non-Pure recording-nothing lookup that stays": {NoIdentity: "x", Name: "x", Want: fakeEvent, Effect: effectEffect, Records: recordsNone, StaysInReplayAtFrontier: true, Decode: noop, Fresh: nofresh},
+	} {
+		good := good
+		if err := good.validate(); err != nil {
+			t.Errorf("CONTROL: %s was refused: %v", name, err)
+		}
+	}
 	// The registry is checked against the SOURCE, in the other direction too, or a new spec nobody registered would be on no list.
 	decl := regexp.MustCompile(`(?m)^var \w+ = stepSpec\{`)
 	entries, err := os.ReadDir(".")
@@ -378,5 +418,92 @@ func TestAStepOverARecordOfTheRightTypeThatNamesSomethingElseDiverges(t *testing
 	}
 	if other.stepCount != 0 || !other.isReplay {
 		t.Errorf("a divergence on identity consumed the record or left replay: step=%d isReplay=%v, want 0 / true", other.stepCount, other.isReplay)
+	}
+}
+
+// A spec's own Refuse decides when it is refused, on both arrival paths, in place of stopBeforeNewWork (DurableDefer refuses only in a defer
+// segment over a killed run, and must not be newly refused in an ordinary segment's body, cleat#4079). Each case has a control that runs.
+func TestASpecsOwnRefuseReplacesTheDefaultOnBothArrivals(t *testing.T) {
+	ctx := context.Background()
+	stoppingOpts := []EngineOption{WithDeferPhase()} // a defer segment's body: stopBeforeNewWork is true
+	for _, arrival := range []string{"fresh entry", "replay frontier"} {
+		history := func() []EventRecord {
+			if arrival == "fresh entry" {
+				return nil
+			}
+			return []EventRecord{{Step: 0, EventType: fakeEvent}}
+		}
+		run := func(opts []EngineOption, refuse func(*execSession) bool) (got int64, ran int32) {
+			s := stepSession(opts, history())
+			sp := fakeSpec(effectEffect, recordsOne, &ran, recordOneFake)
+			sp.Refuse = refuse
+			if len(s.history) > 0 {
+				s.step(ctx, nil, fakeSpec(effectEffect, recordsOne, new(int32), recordOneFake), stepArgs{})
+			}
+			return s.step(ctx, nil, sp, stepArgs{}), ran
+		}
+		t.Run(arrival, func(t *testing.T) {
+			// The default: nil Refuse is stopBeforeNewWork, so a stopping session refuses and a quiet one runs.
+			if got, ran := run(stoppingOpts, nil); got != callSuspendSentinel || ran != 0 {
+				t.Errorf("nil Refuse in a stopping session returned %#x after %d runs, want the stop sentinel and 0", got, ran)
+			}
+			if got, ran := run(nil, nil); got != 9 || ran != 1 {
+				t.Errorf("CONTROL: nil Refuse in a quiet session returned %#x after %d runs, want 9 and 1", got, ran)
+			}
+			// A Refuse that says no overrides a stopping session: the step runs where the default would have refused it.
+			if got, ran := run(stoppingOpts, func(*execSession) bool { return false }); got != 9 || ran != 1 {
+				t.Errorf("a Refuse that declines, in a stopping session, returned %#x after %d runs, want 9 and 1 (not newly refused)", got, ran)
+			}
+			// A Refuse that says yes refuses a session the default would have let through.
+			if got, ran := run(nil, func(*execSession) bool { return true }); got != callSuspendSentinel || ran != 0 {
+				t.Errorf("a Refuse that refuses, in a quiet session, returned %#x after %d runs, want the stop sentinel and 0", got, ran)
+			}
+		})
+	}
+}
+
+// A lookup answers at the replay frontier WITHOUT leaving replay (SideEffectRecorded asks, then SideEffect decides). It is still refused when the
+// session is stopping, and it still reads a record that is there.
+func TestALookupAtTheFrontierAnswersWithoutLeavingReplay(t *testing.T) {
+	ctx := context.Background()
+	lookup := func(ran *int32) *stepSpec {
+		sp := fakeSpec(effectEffect, recordsNone, ran, func(*stepCtx) {})
+		sp.StaysInReplayAtFrontier = true
+		return sp
+	}
+	var ran int32
+	s := stepSession(nil, []EventRecord{{Step: 0, EventType: fakeEvent}})
+	if got := s.step(ctx, nil, lookup(&ran), stepArgs{}); got != 7 || s.stepCount != 1 {
+		t.Fatalf("PRECONDITION FAILED: the lookup over a recorded event returned %d at step %d, want the decoded 7 at step 1", got, s.stepCount)
+	}
+	if got := s.step(ctx, nil, lookup(&ran), stepArgs{}); got != 9 || ran != 1 {
+		t.Errorf("the lookup at the frontier returned %#x after %d runs, want 9 and 1", got, ran)
+	}
+	if !s.isReplay {
+		t.Error("the lookup at the frontier left replay; the step that follows is the one that leaves")
+	}
+	if len(s.stepViolations) != 0 {
+		t.Errorf("a lookup that stays in replay reported %v", s.stepViolations)
+	}
+	// The step that follows does the leaving, as SideEffect does after SideEffectRecorded.
+	var ran2 int32
+	next := fakeSpec(effectEffect, recordsOne, &ran2, recordOneFake)
+	if got := s.step(ctx, nil, next, stepArgs{}); got != 9 || s.isReplay {
+		t.Errorf("the step after the lookup returned %#x with isReplay=%v, want 9 and false", got, s.isReplay)
+	}
+	// Refused while stopping, before it answers.
+	var ran3 int32
+	stopping := stepSession([]EngineOption{WithDeferPhase()}, []EventRecord{{Step: 0, EventType: fakeEvent}})
+	stopping.step(ctx, nil, fakeSpec(effectEffect, recordsOne, new(int32), recordOneFake), stepArgs{})
+	if got := stopping.step(ctx, nil, lookup(&ran3), stepArgs{}); got != callSuspendSentinel || ran3 != 0 {
+		t.Errorf("the lookup in a stopping session returned %#x after %d runs, want the stop sentinel and 0", got, ran3)
+	}
+	// The control: an ordinary step at the same frontier DOES leave replay, so the lookup's staying is the flag and not the harness.
+	var ran4 int32
+	plain := stepSession(nil, []EventRecord{{Step: 0, EventType: fakeEvent}})
+	plain.step(ctx, nil, fakeSpec(effectEffect, recordsOne, new(int32), recordOneFake), stepArgs{})
+	plain.step(ctx, nil, fakeSpec(effectEffect, recordsOne, &ran4, recordOneFake), stepArgs{})
+	if plain.isReplay {
+		t.Error("CONTROL: an ordinary step at the frontier did not leave replay")
 	}
 }
