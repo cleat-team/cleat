@@ -66,7 +66,29 @@ write). The boundaries are service requests, and these calls make none. A mutant
 final-status check (a replay divergence), not by the row check; the row check's two branches were each proven by a guest mutant (a resolve that never happens;
 a create made twice).
 
+## Kill while a run is held (cleat#4162)
+
+`TestChaosSigkillWhileAHeldRunSleepsThenReclaim`. The other faults land on a request to the recording service, and a run held in memory through a sleep makes none, so none of
+those boundaries is "while held". This one kills the worker in the middle of a hold: `call A`, `sleep 8s`, `call B`, residency on (`--resident-max-runs 2`), SIGKILL once A has
+happened and the run is asleep in memory, then the lease is aged and a second worker (residency off) reclaims. **Oracle:** the run ends `done` with A and B each exactly once.
+What it pins: holding a run adds no durable state, so crash recovery is the same as for any run in flight (a sleep records no event and its deadline is served by the clock on
+replay). A change that made a held run depend on something only memory had would fail here.
+
+**The precondition is the hard part, and it is checked, not assumed.** A kill that lands after the run was *suspended* would pass for the reason a kill of an idle worker does and
+measure nothing about residency. So the worker is killed only once it says it is holding the run: `cleat_resident_runs` on its `/metrics` (the case starts it with
+`--api-addr` on a free loopback port) reads at least 1 AND the store does not have the run parked (`parkedNow`). The **control** is the same scenario with residency off, and has to
+read the opposite on the same detector: `cleat_resident_runs` 0 and the run parked. A case whose run was never in the state it needs reports `UNMEASURED`, which fails.
+
+**Two facts about the detector.** The counter exports no series at all until its first increment, so a worker that has never held a run has no `cleat_resident_runs` line: "the page
+is real (it carries other `cleat_` series) and the series is absent" is zero, and an unreadable page is unknown, not zero (the first version treated absence as unreadable and could
+not tell its own control from a broken scrape, and waited out the whole budget). And a cold start compiles the module (about 2.8 s measured), so the sleep is 8 s, long enough to be
+asleep when the kill lands.
+
+**Not covered, stated so it is not discovered later:** a kill at the instant the timer fires (the wake and the claim check); a held run with real defers or a long history; a signal
+wait (the signal wake source is a later change); a second worker with residency on; MySQL and SQL Server. About 75 s with the harness's build, so it runs in the nightly full sweep
+(`chaos-full`), not in the pull-request sample.
+
 ## Not yet
 
-Signal and promise polls (#4153), `continue_as_new` (#4159), cancel, kill while resident, the Python guest, a slow-service op (a response longer
+Signal and promise polls (#4153), `continue_as_new` (#4159), cancel, the Python guest, a slow-service op (a response longer
 than the instance timeout), seeds, the CI sample/full split, MySQL and SQL Server.
