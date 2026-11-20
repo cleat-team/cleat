@@ -61,18 +61,65 @@ func TestTheRootRequireNamesAPublishedVersion(t *testing.T) {
 	// and SUCCEEDS whatever the version says. The obvious check cannot fail
 	// from the only place anyone would run it.
 	url := fmt.Sprintf("https://proxy.golang.org/github.com/cleat-team/cleat/@v/%s.info", version)
-	client := &http.Client{Timeout: 30 * time.Second}
-	resp, err := client.Get(url)
-	if err != nil {
-		t.Fatalf("cleat/go.mod requires github.com/cleat-team/cleat %s, and this test could not "+
-			"ask the module proxy whether that version exists: %v\n"+
-			"This is a failure of the check, not necessarily a finding about the tree -- "+
-			"the version may be fine. Re-run where the proxy is reachable.", version, err)
+	client := &http.Client{Timeout: proxyAttemptTimeout}
+	status, attempts, err := askProxy(client, url, proxyRetryPauses, time.Sleep)
+	if verdict := proxyVerdict(version, url, status, attempts, err); verdict != "" {
+		t.Error(verdict)
 	}
-	defer resp.Body.Close()
+}
 
-	if resp.StatusCode != http.StatusOK {
-		t.Errorf("cleat/go.mod requires github.com/cleat-team/cleat %s, and the module proxy "+
+// proxyAttemptTimeout is ONE attempt's timeout, and proxyRetryPauses the pauses between attempts, so the call is made at most len+1 = 3 times and the
+// worst case is 3*20s + 2s + 5s = 67s (it used to be one 30s attempt). The shorter per-attempt timeout is deliberate: the failure that motivated the retry
+// (cleat#4264) was a proxy that stalled awaiting headers for the whole 30s, and three independent tries beat one long wait on a proxy that is stuck.
+const proxyAttemptTimeout = 20 * time.Second
+
+var proxyRetryPauses = []time.Duration{2 * time.Second, 5 * time.Second}
+
+// askProxy returns the proxy's FIRST DEFINITE answer, retrying only what is not one: a transport error (no answer at all) or a 5xx (the proxy saying it
+// could not answer). A 200 and a 404 or 410 ("unknown revision") are definite and final; so is any other status below 500 (a 403, say), which is
+// not retried because it says something about the request and not about the proxy's health. It never turns a transport failure into a pass: when every
+// attempt is exhausted it returns the error, and the caller fails (cleat#4264: a skip here would reopen the hole cleat#2452 is about).
+//
+// status is 0 when there was no definite answer; attempts is how many calls were made; err carries the FIRST cause and the last one, since a retry
+// that hides the first failure makes the second hard to read.
+func askProxy(client *http.Client, url string, pauses []time.Duration, sleep func(time.Duration)) (status, attempts int, err error) {
+	var first, last error
+	for i := 0; i <= len(pauses); i++ {
+		if i > 0 {
+			sleep(pauses[i-1])
+		}
+		attempts++
+		resp, getErr := client.Get(url)
+		if getErr != nil {
+			last = getErr
+		} else {
+			code := resp.StatusCode
+			_ = resp.Body.Close()
+			if code < 500 {
+				return code, attempts, nil
+			}
+			last = fmt.Errorf("HTTP %d", code)
+		}
+		if first == nil {
+			first = last
+		}
+	}
+	if attempts > 1 && first.Error() != last.Error() {
+		return 0, attempts, fmt.Errorf("%v (first attempt: %v)", last, first)
+	}
+	return 0, attempts, last
+}
+
+// proxyVerdict is the test's decision, separated so it can be pinned without a network: "" passes, anything else is the failure message.
+func proxyVerdict(version, url string, status, attempts int, err error) string {
+	if err != nil {
+		return fmt.Sprintf("cleat/go.mod requires github.com/cleat-team/cleat %s, and this test could not "+
+			"ask the module proxy whether that version exists after %d attempts: %v\n"+
+			"This is a failure of the check, not necessarily a finding about the tree -- "+
+			"the version may be fine. Re-run where the proxy is reachable.", version, attempts, err)
+	}
+	if status != http.StatusOK {
+		return fmt.Sprintf("cleat/go.mod requires github.com/cleat-team/cleat %s, and the module proxy "+
 			"does not serve it (HTTP %d).\n\n"+
 			"A require must name a version that is ALREADY PUBLISHED. A package's own version is "+
 			"bumped before the tag -- publish-pypi.yml refuses when the tag and pyproject.toml "+
@@ -80,6 +127,7 @@ func TestTheRootRequireNamesAPublishedVersion(t *testing.T) {
 			"until then there is nothing to resolve. The two rules read as contradictory until "+
 			"you separate them, which is how cleat#2452 got this wrong.\n\n"+
 			"Check with:\n    curl -s -o /dev/null -w '%%{http_code}\\n' %s\n"+
-			"and take a version you know exists as a control.", version, resp.StatusCode, url)
+			"and take a version you know exists as a control.", version, status, url)
 	}
+	return ""
 }
