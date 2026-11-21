@@ -171,7 +171,11 @@ func (e *abiErr) Error() string { return e.s }
 // checkSpecsAgainstABI is the property: every spec resolves to an ABI import, the import's documented return packing classifies, and the class equals
 // the spec's declared Result. Violations and UNMEASURED lines are both failures and are told apart by their prefix.
 func checkSpecsAgainstABI(specs []*stepSpec, abi string) []string {
-	secs := abiSections(abi)
+	return checkSpecsAgainstSections(specs, abiSections(abi))
+}
+
+// checkSpecsAgainstSections is the same property over already-split sections, so a test can hand it a section the parser cannot read.
+func checkSpecsAgainstSections(specs []*stepSpec, secs map[string]string) []string {
 	var out []string
 	for _, sp := range specs {
 		imp, ok := abiImportFor(sp.Name, secs)
@@ -327,5 +331,21 @@ func TestTheABIPropertyCatchesTheListCronsDocumentationDefect(t *testing.T) {
 	got := strings.Join(checkSpecsAgainstABI([]*stepSpec{listCrons}, broken), " | ")
 	if !strings.Contains(got, "spec list_crons declares simple but ABI.md's return packing for cleat_list_crons is durableCall") {
 		t.Errorf("the old list_crons sentence was not caught by name: %q", got)
+	}
+}
+
+// KNOWN POSITIVE for the property's OWN reporting of an unreadable row (cleat-review3 found this branch had no test: every real row classifies, so the
+// UNMEASURED line a spec gets for an unreadable ABI row never ran, and dropping it with a bare continue left every other test green). The parser's own
+// error is checked above; this goes through the property, which is what a spec on a row nobody can read would actually meet.
+func TestTheABIPropertyReportsASpecWhoseRowTheParserCannotReadAsUnmeasured(t *testing.T) {
+	secs := map[string]string{"cleat_x": "#### 2.99 `cleat_x`\n\n(func (import \"env\" \"cleat_x\"))\n\n**Return packing:** whatever the host feels like.\n"}
+	got := checkSpecsAgainstSections([]*stepSpec{{Name: "x", Result: layoutSimple}}, secs)
+	if len(got) != 1 || !strings.HasPrefix(got[0], "UNMEASURED: spec x (cleat_x): cannot classify the return packing of cleat_x") {
+		t.Errorf("a spec whose ABI row cannot be read must be reported UNMEASURED by name through the property, got %q", got)
+	}
+	// CONTROL: the same helper on a readable row reports nothing, so the line above is the unreadable row's doing and not the helper's.
+	ok := map[string]string{"cleat_y": "#### 2.98 `cleat_y`\n\n(func (import \"env\" \"cleat_y\"))\n\n**Return packing:** `errCode` only (0 = success).\n"}
+	if v := checkSpecsAgainstSections([]*stepSpec{{Name: "y", Result: layoutSimple}}, ok); len(v) != 0 {
+		t.Errorf("CONTROL FAILED: a readable simple row reported %v", v)
 	}
 }
