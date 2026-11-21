@@ -176,8 +176,8 @@ func TestAnOldHistoryWithACallAfterAPendingAwaitIsReplayedWithoutRunningItAgain(
 	}
 }
 
-// TestAStaleCallThatCompactionFoldedAwayIsNotADivergence is the other half of the rule, through the REAL executor: compaction does not carry the drain stamps
-// (InDeferPhase, InDeferSegment), so a record expanded from a compaction has an UNKNOWN stamp, and failing a workflow on an unknown would fail a healthy drain whose
+// TestAStaleCallThatCompactionFoldedAwayIsNotADivergence is the other half of the rule, through the REAL executor: a state compacted before cleat#4310 did not carry the drain stamps
+// (InDeferPhase, InDeferSegment), so a record expanded from a compaction may have an UNKNOWN stamp (the rule stays wide for newer states too: see compactedRecords), and failing a workflow on an unknown would fail a healthy drain whose
 // records were compacted. The history here is the same shape as the one above, with the pending await and the call BOTH inside the compacted prefix and one live
 // record after them; the engine must not diverge. (The call does run again here: that is the quiet, reported path this rule leaves for what it cannot tell apart.)
 // A mutant that never sets execSession.compactedRecords in the executor fails this and nothing in the unit rows, which set the field by hand.
@@ -222,6 +222,6 @@ func TestAStaleCallThatCompactionFoldedAwayIsNotADivergence(t *testing.T) {
 	// The text to look for is the generic one: this guest swallows the await's own divergence message and the error that reaches the caller is the NEXT call's, which
 	// is the same "replay divergence" (the first version of this test looked for the await's wording, passed with the executor wiring removed, and so measured nothing).
 	if err != nil && strings.Contains(err.Error(), "replay divergence") {
-		t.Fatalf("a pending await followed by a call that compaction folded into the prefix was a divergence (%v): the stamps are unknown there, so it must not be", err)
+		t.Fatalf("a pending await followed by a call that compaction folded into the prefix was a divergence (%v): the stamps may be unknown there (a state from before cleat#4310), so it must not be", err)
 	}
 }
