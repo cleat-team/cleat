@@ -468,12 +468,17 @@ func TestRegisterStepSpecRejectsAMalformedOrRepeatedSpecAndAcceptsAValidOne(t *t
 func dispatcherCallerFacts(t *testing.T, sources map[string]string) (leaveReplayCallers, leaveAtPendingCallers []string, recordCalls, recordInFresh int) {
 	t.Helper()
 	fset := token.NewFileSet()
+	parsed := map[string]*ast.File{}
 	for name, src := range sources {
 		f, err := parser.ParseFile(fset, name, src, 0)
 		if err != nil {
 			t.Fatalf("parsing %s: %v", name, err)
 		}
-		// The source ranges of every `Fresh: func(...) {...}` inside a stepSpec composite literal.
+		parsed[name] = f
+	}
+	// The source ranges of every `Fresh: func(...) {...}` inside a stepSpec composite literal, per file.
+	freshByFile := map[string][][2]token.Pos{}
+	for name, f := range parsed {
 		var freshRanges [][2]token.Pos
 		ast.Inspect(f, func(n ast.Node) bool {
 			cl, ok := n.(*ast.CompositeLit)
@@ -496,6 +501,43 @@ func dispatcherCallerFacts(t *testing.T, sources map[string]string) (leaveReplay
 			}
 			return true
 		})
+		freshByFile[name] = freshRanges
+	}
+	inFreshAt := func(file string, pos, end token.Pos) bool {
+		for _, r := range freshByFile[file] {
+			if pos >= r[0] && end <= r[1] {
+				return true
+			}
+		}
+		return false
+	}
+	// Every REFERENCE to a name (a method or a function), so a helper that holds a Record call can be asked who uses it. A reference is a call or a use as a
+	// value (`f := s.helper`, `go s.helper`, an argument): counting calls only let a method value taken outside a Fresh and called later pass as "all in
+	// Fresh" (cleat-review3, on #4303). A function's own declaration name is not a reference. A reference to a DIFFERENT function of the same name counts
+	// too, which can only make the answer stricter: a helper is vouched for only if every reference by its name is in a Fresh.
+	type callSite struct {
+		file     string
+		pos, end token.Pos
+	}
+	sitesByName := map[string][]callSite{}
+	for name, f := range parsed {
+		skip := map[*ast.Ident]bool{}
+		ast.Inspect(f, func(n ast.Node) bool {
+			switch x := n.(type) {
+			case *ast.FuncDecl:
+				skip[x.Name] = true
+			case *ast.SelectorExpr:
+				skip[x.Sel] = true // counted once, as the selector, not again as the identifier under it
+				sitesByName[x.Sel.Name] = append(sitesByName[x.Sel.Name], callSite{name, x.Pos(), x.End()})
+			case *ast.Ident:
+				if !skip[x] {
+					sitesByName[x.Name] = append(sitesByName[x.Name], callSite{name, x.Pos(), x.End()})
+				}
+			}
+			return true
+		})
+	}
+	for name, f := range parsed {
 		for _, d := range f.Decls {
 			fd, ok := d.(*ast.FuncDecl)
 			if !ok || fd.Body == nil {
@@ -520,6 +562,40 @@ func dispatcherCallerFacts(t *testing.T, sources map[string]string) (leaveReplay
 			})
 		}
 		// Record calls can sit in a package-level var (the specs are vars), so they are found over the whole file, not only inside functions.
+		//
+		// A Record call is "reached only from Fresh" in one of two ways. It sits lexically inside a Fresh literal; or it sits in a helper that takes the
+		// step's context (a *stepCtx parameter) and EVERY call to that helper is itself inside a Fresh literal, with at least one call (a helper nobody
+		// calls is vacuously "all in Fresh" and is exactly the bypass this guard exists to find). The second is what a Fresh too long to write inline
+		// needs (the heartbeat call's goroutine and ticker, cleat#4152 G3). One level only: a helper reached through another helper is reported, not
+		// followed.
+		takesStepCtx := func(fd *ast.FuncDecl) bool {
+			if fd.Type.Params == nil {
+				return false
+			}
+			for _, p := range fd.Type.Params.List {
+				if star, ok := p.Type.(*ast.StarExpr); ok {
+					if id, ok := star.X.(*ast.Ident); ok && id.Name == "stepCtx" {
+						return true
+					}
+				}
+			}
+			return false
+		}
+		helperInFresh := map[*ast.FuncDecl]bool{}
+		helperVouched := func(fd *ast.FuncDecl) bool {
+			if v, ok := helperInFresh[fd]; ok {
+				return v
+			}
+			sites := sitesByName[fd.Name.Name]
+			ok := takesStepCtx(fd) && len(sites) > 0
+			for _, c := range sites {
+				if !inFreshAt(c.file, c.pos, c.end) {
+					ok = false
+				}
+			}
+			helperInFresh[fd] = ok
+			return ok
+		}
 		ast.Inspect(f, func(n ast.Node) bool {
 			call, ok := n.(*ast.CallExpr)
 			if !ok {
@@ -530,8 +606,12 @@ func dispatcherCallerFacts(t *testing.T, sources map[string]string) (leaveReplay
 				return true
 			}
 			recordCalls++
-			for _, r := range freshRanges {
-				if call.Pos() >= r[0] && call.End() <= r[1] {
+			if inFreshAt(name, call.Pos(), call.End()) {
+				recordInFresh++
+				return true
+			}
+			for _, d := range f.Decls {
+				if fd, ok := d.(*ast.FuncDecl); ok && fd.Body != nil && call.Pos() >= fd.Pos() && call.End() <= fd.End() && helperVouched(fd) {
 					recordInFresh++
 					break
 				}
@@ -582,10 +662,21 @@ func (s *execSession) sneaky() { s.leaveReplay(nil) }
 func (s *execSession) sneakyPending() { s.leaveReplayAtPending(nil) }
 var spec = stepSpec{Fresh: func(c *stepCtx) int64 { c.Record(EventRecord{}); return 0 }}
 func (s *execSession) bypass(c *stepCtx) { c.Record(EventRecord{}) }
+var specHelper = stepSpec{Fresh: func(c *stepCtx) int64 { return c.s.okHelper(c) }}
+func (s *execSession) okHelper(c *stepCtx) int64 { c.Record(EventRecord{}); return 0 }
+var specMixed = stepSpec{Fresh: func(c *stepCtx) int64 { return c.s.mixedHelper(c) }}
+func (s *execSession) mixedHelper(c *stepCtx) int64 { c.Record(EventRecord{}); return 0 }
+func (s *execSession) elsewhere(c *stepCtx) { s.mixedHelper(c) }
+var specValue = stepSpec{Fresh: func(c *stepCtx) int64 { return c.s.valueHelper(c) }}
+func (s *execSession) valueHelper(c *stepCtx) int64 { c.Record(EventRecord{}); return 0 }
+func (s *execSession) grabsItAsAValue() { f := s.valueHelper; _ = f }
 `
 	cc, pc, rr, rf := dispatcherCallerFacts(t, map[string]string{"bad.go": badStep})
-	if len(cc) != 2 || len(pc) != 2 || rr != 2 || rf != 1 {
-		t.Errorf("CONTROL: on a source with a second caller of each exit and a Record outside Fresh the scan reported callers=%v pendingCallers=%v records=%d inFresh=%d, want 2, 2, 2 records, 1 in Fresh", cc, pc, rr, rf)
+	// Five Records: one inline in a Fresh (in), one in a helper nobody calls (out: vacuously "all in Fresh", the bypass), one in a helper called only from a
+	// Fresh (in), one in a helper called from a Fresh AND from elsewhere (out), and one in a helper called from a Fresh whose method value is ALSO taken
+	// outside a Fresh (out: a reference that is not a call).
+	if len(cc) != 2 || len(pc) != 2 || rr != 5 || rf != 2 {
+		t.Errorf("CONTROL: on a source with a second caller of each exit, a Record outside Fresh, a helper called only from Fresh and a helper called from elsewhere too, the scan reported callers=%v pendingCallers=%v records=%d inFresh=%d, want 2, 2, 5 records, 2 in Fresh", cc, pc, rr, rf)
 	}
 }
 

@@ -238,7 +238,8 @@ var stopSurfaces = map[string]stopSurface{
 		adapters: []string{"DurableCallWithRetry"},
 		wit:      []string{"durable-call-retry"},
 	},
-	"freshCallWithHeartbeat": {
+	// Keyed by DurableCallWithHeartbeat, the method that goes through step: the refusal is the dispatcher's (cleat#4152, G3), and the method is also the Go adapter.
+	"DurableCallWithHeartbeat": {
 		adapters: []string{"DurableCallWithHeartbeat"},
 		wit:      []string{"durable-call-heartbeat"},
 	},

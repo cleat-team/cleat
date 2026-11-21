@@ -94,7 +94,8 @@ var rustCallsTheHostCanRefuse = []sdkRefusableCall{
 	// be waiting on. The simple layout reads a stop as error code 0, which is a successful settlement.
 	{"resolve_promise", "ResolvePromise"},
 	{"reject_promise", "RejectPromise"},
-	{"cleat_call_heartbeat", "freshCallWithHeartbeat"},
+	// The heartbeat call goes through step, so its refusal is the dispatcher's and the host method is the site (cleat#4152, G3).
+	{"cleat_call_heartbeat", "DurableCallWithHeartbeat"},
 	{"child_workflow", "childWorkflowWithVersion"},
 	{"child_workflow_with_options", "childWorkflowWithVersion"},
 	{"plugin_call", "freshPluginCall"},

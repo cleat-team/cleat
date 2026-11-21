@@ -85,7 +85,8 @@ var javaCallsTheHostCanRefuse = []sdkRefusableCall{
 	{"cleatCallWithRetry", "DurableCallWithRetry"},
 	// The same host function from inside its attempt loop (cleat#4210): one SDK method, two host sites, one sentinel.
 	{"cleatCallWithRetry", "freshCallWithRetry"},
-	{"cleatCallHeartbeat", "freshCallWithHeartbeat"},
+	// The heartbeat call goes through step, so its refusal is the dispatcher's and the host method is the site (cleat#4152, G3).
+	{"cleatCallHeartbeat", "DurableCallWithHeartbeat"},
 	{"childWorkflow", "childWorkflowWithVersion"},
 	{"childWorkflowWithOptions", "childWorkflowWithVersion"},
 	{"pluginCall", "freshPluginCall"},
