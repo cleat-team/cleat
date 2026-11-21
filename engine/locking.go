@@ -113,6 +113,8 @@ var acquireLockStep = stepSpec{
 	},
 }
 
+func init() { registerStepSpec(&acquireLockStep) }
+
 // releaseLockStep is ReleaseLock as a step, and the one that is NEVER refused (Refuse: neverRefuse, which carries the measurement). Measured before the move, a_lock_call_in_each_stop_state_test.go:
 // in a segment's body, after a worker shutdown, in a defer draining on a shutting-down worker and after an event that could not be written, AcquireLock is
 // refused and ReleaseLock releases and records. A cleanup that cannot give a lock back leaves it held for its lease, so the move keeps that and
@@ -169,5 +171,7 @@ var releaseLockStep = stepSpec{
 		return 0
 	},
 }
+
+func init() { registerStepSpec(&releaseLockStep) }
 
 // ---- SideEffect ----

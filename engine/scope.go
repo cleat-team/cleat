@@ -83,6 +83,8 @@ var setScopeStep = stepSpec{
 	},
 }
 
+func init() { registerStepSpec(&setScopeStep) }
+
 // forgetHeldScope drops scopeKey from the held set WITHOUT releasing it.
 //
 // The two halves of "the workflow no longer holds this scope" are separable on

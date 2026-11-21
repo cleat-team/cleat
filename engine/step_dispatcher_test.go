@@ -10,11 +10,12 @@ package engine
 
 import (
 	"context"
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
 	"os"
-	"regexp"
+	"sort"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -244,25 +245,216 @@ func TestEverySpecIsRegisteredAndNoPureSpecRecords(t *testing.T) {
 			t.Errorf("CONTROL: %s was refused: %v", name, err)
 		}
 	}
-	// The registry is checked against the SOURCE, in the other direction too, or a new spec nobody registered would be on no list.
-	decl := regexp.MustCompile(`(?m)^var \w+ = stepSpec\{`)
-	entries, err := os.ReadDir(".")
+	// The registry is checked against the SOURCE by NAME, in the other direction too, or a new spec nobody registered would be on no list. By name and not
+	// by count: a count cannot say WHICH spec is missing, and a spec added beside one deleted nets to zero. The declarations and the registrations are read
+	// from the syntax tree, so a comment or a string that quotes `registerStepSpec(&x)` registers nothing.
+	problems, declared, registered, err := specRegistrationProblems(engineSources(t))
 	if err != nil {
-		t.Fatalf("reading engine/: %v", err)
+		t.Fatal(err)
 	}
-	declared := 0
-	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".go") || strings.HasSuffix(e.Name(), "_test.go") {
-			continue
+	if len(declared) == 0 {
+		t.Fatal("PRECONDITION FAILED: the syntax-tree scan found no `var x = stepSpec{` declaration, so it is reading the wrong thing and would pass whatever the tree said")
+	}
+	for _, p := range problems {
+		t.Error(p)
+	}
+	// Three readings of one population, which must agree. The syntax tree's registrations against the runtime registry (a registration that did not run, or
+	// ran twice, or a spec registered from somewhere the tree scan does not look); and the regexp scan the stop-site guards use for declarations against the
+	// syntax tree's (so those guards count every dispatcher step the registry holds, which is what a later move must not be able to shrink).
+	if len(registered) != len(stepSpecs) {
+		t.Errorf("%d registrations in the source but %d specs in the registry", len(registered), len(stepSpecs))
+	}
+	if viaRegexp := specDeclsIn(engineSources(t)); !specSetsEqual(declared, viaRegexp) {
+		t.Errorf("the syntax tree finds %d declarations %v, the regexp scan the stop-site guards use finds %d %v: one reading is wrong, and the guards would miss a dispatcher step",
+			len(declared), specNames(declared), len(viaRegexp), specNames(specSetOf(viaRegexp)))
+	}
+}
+
+// specDeclarationsAndRegistrations reads engine sources (file name -> text) and returns the names of the package-level `var x = stepSpec{...}`
+// declarations, and the names registered by a top-level `registerStepSpec(&x)` statement in an init(): a registration in any other function, in a
+// condition, or in a comment or string is not one.
+func specDeclarationsAndRegistrations(sources map[string]string) (declared, registered map[string]bool, err error) {
+	declared, registered = map[string]bool{}, map[string]bool{}
+	fset := token.NewFileSet()
+	for name, src := range sources {
+		f, perr := parser.ParseFile(fset, name, src, 0)
+		if perr != nil {
+			return nil, nil, perr
 		}
-		b, err := os.ReadFile(e.Name())
+		for _, d := range f.Decls {
+			switch d := d.(type) {
+			case *ast.GenDecl:
+				for _, sp := range d.Specs {
+					vs, ok := sp.(*ast.ValueSpec)
+					if !ok {
+						continue
+					}
+					for i, v := range vs.Values {
+						if cl, ok := v.(*ast.CompositeLit); ok && i < len(vs.Names) {
+							if id, ok := cl.Type.(*ast.Ident); ok && id.Name == "stepSpec" {
+								declared[vs.Names[i].Name] = true
+							}
+						}
+					}
+				}
+			case *ast.FuncDecl:
+				if d.Recv != nil || d.Name.Name != "init" || d.Body == nil {
+					continue
+				}
+				for _, st := range d.Body.List {
+					es, ok := st.(*ast.ExprStmt)
+					if !ok {
+						continue
+					}
+					call, ok := es.X.(*ast.CallExpr)
+					if !ok || len(call.Args) != 1 {
+						continue
+					}
+					if fn, ok := call.Fun.(*ast.Ident); !ok || fn.Name != "registerStepSpec" {
+						continue
+					}
+					if u, ok := call.Args[0].(*ast.UnaryExpr); ok && u.Op == token.AND {
+						if id, ok := u.X.(*ast.Ident); ok {
+							registered[id.Name] = true
+						}
+					}
+				}
+			}
+		}
+	}
+	return declared, registered, nil
+}
+
+// specRegistrationProblems is the whole decision, on text, so the real tree and the rows below go through the same code: what is declared and never
+// registered (by name, so a spec added beside one deleted does not net to zero), and what is registered and never declared.
+func specRegistrationProblems(sources map[string]string) (problems []string, declared, registered map[string]bool, err error) {
+	declared, registered, err = specDeclarationsAndRegistrations(sources)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	if missing := specSetDiff(declared, registered); len(missing) > 0 {
+		problems = append(problems, fmt.Sprintf("declared but never registered by an init() calling registerStepSpec(&x): %v. Add `func init() { registerStepSpec(&x) }` beside the declaration, or the properties here do not cover it", missing))
+	}
+	if extra := specSetDiff(registered, declared); len(extra) > 0 {
+		problems = append(problems, fmt.Sprintf("registered by name but declared nowhere as `var x = stepSpec{`: %v", extra))
+	}
+	return problems, declared, registered, nil
+}
+
+func specSetDiff(a, b map[string]bool) []string {
+	var out []string
+	for k := range a {
+		if !b[k] {
+			out = append(out, k)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+func specNames(m map[string]bool) []string { return specSetDiff(m, nil) }
+
+func specSetOf(m map[string]string) map[string]bool {
+	out := map[string]bool{}
+	for k := range m {
+		out[k] = true
+	}
+	return out
+}
+
+func specSetsEqual(a map[string]bool, b map[string]string) bool {
+	return len(specSetDiff(a, specSetOf(b))) == 0 && len(specSetDiff(specSetOf(b), a)) == 0
+}
+
+// The rule for what counts as a registration, on text, with a known-positive: a spec declared and never registered is reported BY NAME; and the shapes
+// that look like a registration and are not (a comment, a string, a function that is not init, a condition) do not count. Without these rows a scan that
+// matched the text `registerStepSpec(&x)` anywhere would pass the tree it exists to reject.
+func TestASpecIsRegisteredOnlyByAnInitThatCallsRegisterStepSpec(t *testing.T) {
+	decl := "package p\n\nvar xStep = stepSpec{}\n\n"
+	for _, c := range []struct {
+		name                  string
+		src                   string
+		wantMissing, wantExtr []string
+	}{
+		{"a declaration with its init registration is clean", decl + "func init() { registerStepSpec(&xStep) }\n", nil, nil},
+		{"KNOWN-POSITIVE: a spec declared and never registered is reported by name", decl, []string{"xStep"}, nil},
+		{"a registration quoted in a comment is not one", decl + "// func init() { registerStepSpec(&xStep) }\n", []string{"xStep"}, nil},
+		{"a registration quoted in a string is not one", decl + "var doc = `registerStepSpec(&xStep)`\nfunc init() {}\n", []string{"xStep"}, nil},
+		{"a registration in a function that is not init is not one", decl + "func later() { registerStepSpec(&xStep) }\n", []string{"xStep"}, nil},
+		{"a registration inside a condition is not one", decl + "func init() { if false { registerStepSpec(&xStep) } }\n", []string{"xStep"}, nil},
+		{"a registration of something never declared is reported as extra", decl + "func init() { registerStepSpec(&xStep); registerStepSpec(&yStep) }\n", nil, []string{"yStep"}},
+		{"NET ZERO: a spec declared and never registered, beside a registration of one that is not declared: BOTH are named, though the counts agree",
+			decl + "var zStep = stepSpec{}\nfunc init() { registerStepSpec(&xStep); registerStepSpec(&yStep) }\n", []string{"zStep"}, []string{"yStep"}},
+		{"two specs, one registered: the other is named", decl + "var zStep = stepSpec{}\nfunc init() { registerStepSpec(&xStep) }\n", []string{"zStep"}, nil},
+	} {
+		problems, declared, registered, err := specRegistrationProblems(map[string]string{"p.go": c.src})
 		if err != nil {
-			t.Fatal(err)
+			t.Fatalf("%s: %v", c.name, err)
 		}
-		declared += len(decl.FindAll(b, -1))
+		missing, extra := specSetDiff(declared, registered), specSetDiff(registered, declared)
+		if strings.Join(missing, ",") != strings.Join(c.wantMissing, ",") || strings.Join(extra, ",") != strings.Join(c.wantExtr, ",") {
+			t.Errorf("%s: missing %v extra %v, want %v and %v", c.name, missing, extra, c.wantMissing, c.wantExtr)
+		}
+		if want := len(c.wantMissing) > 0 || len(c.wantExtr) > 0; (len(problems) > 0) != want {
+			t.Errorf("%s: %d problem(s) reported %v, want problems=%v", c.name, len(problems), problems, want)
+		}
+		// every wanted name is in the REPORT, not only in the sets: the decision is what a person reads, and a count-shaped one drops a name
+		for _, n := range append(append([]string{}, c.wantMissing...), c.wantExtr...) {
+			if !strings.Contains(strings.Join(problems, "\n"), n) {
+				t.Errorf("%s: the report %v does not name %q", c.name, problems, n)
+			}
+		}
 	}
-	if declared != len(stepSpecs) {
-		t.Errorf("%d `var x = stepSpec{` declarations in engine/ but %d specs in stepSpecs: register every spec, or the properties here do not cover it", declared, len(stepSpecs))
+}
+
+// registerStepSpecInto rejects what the old start-up loop and the old count could not tell apart: a malformed spec (with validate's own message, so a
+// spec rejected for the wrong reason is seen), the same spec twice, and two specs that share a name; and accepts a valid one in order.
+func TestRegisterStepSpecRejectsAMalformedOrRepeatedSpecAndAcceptsAValidOne(t *testing.T) {
+	good := func(name string) *stepSpec {
+		return &stepSpec{Name: name, NoIdentity: "x", Want: fakeEvent, Effect: effectEffect, Records: recordsOne, Decode: func(*stepCtx, *EventRecord) int64 { return 0 }, Fresh: func(*stepCtx) int64 { return 0 }}
+	}
+	panics := func(f func()) (msg string) {
+		defer func() {
+			if r := recover(); r != nil {
+				msg = fmt.Sprint(r)
+			}
+		}()
+		f()
+		return ""
+	}
+	var list []*stepSpec
+	a, b := good("a"), good("b")
+	if m := panics(func() { registerStepSpecInto(&list, a) }); m != "" {
+		t.Fatalf("a valid spec was refused: %s", m)
+	}
+	registerStepSpecInto(&list, b)
+	if len(list) != 2 || list[0] != a || list[1] != b {
+		t.Fatalf("registered %v, want [a b] in order", list)
+	}
+	bad := good("c")
+	bad.Fresh = nil
+	for _, c := range []struct {
+		name, want string
+		f          func()
+	}{
+		{"a malformed spec is refused with validate's own message", "is missing its Fresh", func() { registerStepSpecInto(&list, bad) }},
+		{"the same spec twice is refused", "is registered twice", func() { registerStepSpecInto(&list, a) }},
+		{"two specs with one name are refused", "two step specs are named", func() { registerStepSpecInto(&list, good("a")) }},
+	} {
+		if m := panics(c.f); !strings.Contains(m, c.want) {
+			t.Errorf("%s: panicked with %q, want it to contain %q", c.name, m, c.want)
+		}
+	}
+	if len(list) != 2 {
+		t.Errorf("a refused spec was still added: %d entries", len(list))
+	}
+	// and the real registry has no two of one name, which registration enforces; the names are read here so a reviewer sees what is registered
+	seen := map[string]bool{}
+	for _, sp := range stepSpecs {
+		if seen[sp.Name] {
+			t.Errorf("the real registry holds two specs named %q", sp.Name)
+		}
+		seen[sp.Name] = true
 	}
 }
 

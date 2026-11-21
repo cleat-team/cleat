@@ -113,6 +113,8 @@ var createPromiseStep = stepSpec{
 	},
 }
 
+func init() { registerStepSpec(&createPromiseStep) }
+
 // AwaitPromise is await_promise as a step (cleat#4152, W4). The wrapper does two things the step cannot: it clears the rejection flag the component
 // path reads (lastAwaitPromiseRejected), and it answers the one case where an engine with NO promise store meets a history it cannot replay (below).
 //
@@ -312,6 +314,8 @@ var awaitPromiseStep = stepSpec{
 	},
 }
 
+func init() { registerStepSpec(&awaitPromiseStep) }
+
 // awaitPromiseWithoutAStore is the answer to an await on an engine with no promise store: with none there is nothing to await and nothing that
 // could ever resolve it, so falling through to a suspend would wait forever. Say so instead (IMPROVEMENT-PLAN 3.231). It records nothing.
 func (s *execSession) awaitPromiseWithoutAStore(ctx context.Context, m api.Module, resultPtr, resultMaxLen uint32) int64 {
@@ -388,6 +392,8 @@ var resolvePromiseStep = stepSpec{
 	},
 }
 
+func init() { registerStepSpec(&resolvePromiseStep) }
+
 func (s *execSession) RejectPromise(ctx context.Context, m api.Module, promiseID, errMsg string) int64 {
 	return s.step(ctx, m, &rejectPromiseStep, stepArgs{s1: promiseID, s2: errMsg})
 }
@@ -429,6 +435,8 @@ var rejectPromiseStep = stepSpec{
 		return 0
 	},
 }
+
+func init() { registerStepSpec(&rejectPromiseStep) }
 
 // setAwaitRejected records whether the AwaitPromise call in progress ended in a
 // rejection. The packed result word cannot say so -- a rejection and a host

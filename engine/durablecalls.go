@@ -1058,6 +1058,8 @@ var deferStep = stepSpec{
 	},
 }
 
+func init() { registerStepSpec(&deferStep) }
+
 // DurableLog emits a guest log line. It is NOT durable, despite the name and
 // despite three documents saying otherwise. cleat#1308.
 //
@@ -1163,6 +1165,8 @@ var durableSendStep = stepSpec{
 		return 0
 	},
 }
+
+func init() { registerStepSpec(&durableSendStep) }
 
 func (s *execSession) DurableScheduleInvoke(ctx context.Context, m api.Module, service, operation, requestJSON string, delayMs int64) int64 {
 	if s.isReplay {

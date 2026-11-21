@@ -122,6 +122,8 @@ var scheduleCronStep = stepSpec{
 	},
 }
 
+func init() { registerStepSpec(&scheduleCronStep) }
+
 // createCronSchedule does the live half of ScheduleCron: validate, enforce the
 // quota, and create the row idempotently.
 func (s *execSession) createCronSchedule(ctx context.Context, workflowName, cronExpr, timezone, inputJSON string) (string, error) {
@@ -275,6 +277,8 @@ var deleteCronStep = stepSpec{
 	},
 }
 
+func init() { registerStepSpec(&deleteCronStep) }
+
 // ListCrons returns the tenant's schedules as a JSON array.
 //
 // The result is journaled like any other observation of outside state: the
@@ -334,6 +338,8 @@ var listCronsStep = stepSpec{
 		return packSimpleResult(writtenEC, written)
 	},
 }
+
+func init() { registerStepSpec(&listCronsStep) }
 
 func (s *execSession) listCronSchedules(ctx context.Context) (string, error) {
 	store := s.engine.workflowStore
