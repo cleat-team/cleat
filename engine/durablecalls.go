@@ -140,10 +140,10 @@ func (s *execSession) triggerEventCapContinueAsNew(ctx context.Context, m api.Mo
 // refuseAtEventCap is the cap check for a recorded event that does not go through freshCall (the no-wait awaits). At the cap it
 // triggers the continue-as-new once and reports true, and the caller returns the stop the continue-as-new set: every SDK reads
 // suspendingAwaitResult as a stop and unwinds. Below the cap it counts the event it is about to record and reports false.
-func (s *execSession) refuseAtEventCap(ctx context.Context, m api.Module) bool {
+func (s *execSession) refuseAtEventCap(c *stepCtx) bool {
 	if s.atEventCap() {
 		if !s.autoContinueAsNewTriggered {
-			s.triggerEventCapContinueAsNew(ctx, m)
+			c.ContinueAsNewAtEventCap()
 		}
 		return true
 	}

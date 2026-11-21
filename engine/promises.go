@@ -304,7 +304,7 @@ var awaitPromiseStep = stepSpec{
 		// await with the timeout it was given, because a replay must return the same answer without asking the store. A poll is an event like any
 		// other, so it counts toward the event cap and stops at it (cleat#4153).
 		if timeoutMs <= 0 {
-			if s.refuseAtEventCap(ctx, m) {
+			if s.refuseAtEventCap(c) {
 				return s.suspendingAwaitResult()
 			}
 			c.Record(EventRecord{Step: s.stepCount, EventType: EventTypeAwaitPromise, PromiseID: promiseID, TimeoutMs: timeoutMs})
