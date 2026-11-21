@@ -277,6 +277,10 @@ type CompactedEvent struct {
 	// exactly like S4a, just triggered by Now() instead of Retryable().
 	TimestampMs int64 `json:"ts,omitempty"`
 
+	// Attempt mirrors EventRecord.Attempt, the 1-based attempt number of a call_attempt_failed event (cleat#4316). Replay does not branch on it, but the store
+	// persists it and `cleatctl replay` prints it, so a compacted failed attempt would otherwise read as attempt 0.
+	Attempt int `json:"att,omitempty"`
+
 	// NewVersion mirrors EventRecord.NewVersion for a continue_as_new event.
 	// ContinueAsNewWithVersion reads rec.NewVersion straight off the replayed
 	// event to decide which workflow version to restart as (lifecycle.go); a
@@ -576,6 +580,13 @@ func extractCompactionStateFrom(prev *CompactionState, events []EventRecord) (*C
 			ce.ErrCode = ev.ErrCode
 			ce.RetriesExhausted = ev.RetriesExhausted
 			ce.ResolvedBy = ev.ResolvedBy
+		case EventTypeCallAttemptFailed:
+			// cleat#4316: this type had a code and NO arm, so a history holding one (any call that retried) refused to compact at all, and the run grew without bound.
+			// The four fields are exactly what the store persists for it (store_events.go), and replay reads the record by type and Service/Op.
+			ce.Service = ev.Service
+			ce.Op = ev.Op
+			ce.Attempt = ev.Attempt
+			ce.Error = ev.Err
 		case EventTypeCallRetryRefused:
 			// Kept so a compacted history can still say WHICH call was refused; replay matches on the type, and the
 			// two fields are what a divergence report needs to name the call.
@@ -800,6 +811,11 @@ func buildFullHistoryFromCompaction(tail []EventRecord, cs *CompactionState) []E
 			rec.ErrCode = ce.ErrCode
 			rec.RetriesExhausted = ce.RetriesExhausted
 			rec.ResolvedBy = ce.ResolvedBy
+		case EventCodeCallAttemptFailed:
+			rec.Service = ce.Service
+			rec.Op = ce.Op
+			rec.Attempt = ce.Attempt
+			rec.Err = ce.Error
 		case EventCodeCallRetryRefused:
 			rec.Service = ce.Service
 			rec.Op = ce.Op
