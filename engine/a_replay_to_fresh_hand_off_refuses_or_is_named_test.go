@@ -44,12 +44,14 @@ var handOffsThatNeedNoRefusal = map[string]string{
 	"leaveReplay": "the dispatcher's one exit from replay (cleat#4152). Its only caller is step, which applies stopBeforeNewWork to every non-Pure step on the next lines, so the refusal is not skipped by reaching a call this way; that is the property the dispatcher exists to have.",
 	"fastForwardToStop": "the mechanism that makes a stop-at-last-stoppable segment refuse: it leaves replay so that the guest's NEXT call " +
 		"takes the non-replay half, where the refusal is.",
-	"AwaitChild": "a read of an existing child's result, recorded as one await event. It performs nothing outside the workflow. Whether a " +
+	"leaveReplayAtPending": "the dispatcher's second exit from replay (cleat#4152, W3a): for a step that found its OWN pending record and does not consume it " +
+		"(OverPending). Its only caller is step, which applies the refusal on the next lines exactly as after leaveReplay, so reaching a call this way " +
+		"skips nothing.",
+	"AwaitAnyChild": "a read of an existing child's result, recorded as one await event. It performs nothing outside the workflow. Whether a " +
 		"segment's body should be stopped at a child wait is a separate decision (see the PR for cleat#4143); until it is made " +
-		"these three child waits are not stop sites, which stopSiteNotStoppable records.",
-	"AwaitAnyChild":          "see AwaitChild.",
-	"replayAwaitAllChildren": "see AwaitChild.",
-	"RegisterUpdateHandler":  "registers a handler in the session and records the registration. It performs nothing outside the workflow.",
+		"the child waits are not stop sites, which stopSiteNotStoppable records. AwaitChild and AwaitAllChildren left this list when they moved onto " +
+		"the dispatcher (W3a); this one goes with W3b.",
+	"RegisterUpdateHandler": "registers a handler in the session and records the registration. It performs nothing outside the workflow.",
 }
 
 var (

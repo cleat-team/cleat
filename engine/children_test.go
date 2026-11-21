@@ -1071,7 +1071,7 @@ func TestAwaitAllChildren_AllCompleted(t *testing.T) {
 // This test previously asserted the opposite -- errCode 0 with
 // Error: "child not completed" for run-b -- which is the behaviour
 // IMPROVEMENT-PLAN 3.309 identified as a durable wrong answer. The outcomes are
-// marshalled into the recorded EventRecord and replayAwaitAllChildren serves
+// marshalled into the recorded EventRecord and awaitAllChildrenStep's replay serves
 // rec.Response verbatim forever, so "had not finished when I looked" became
 // run-b's permanent result even after run-b completed.
 //
@@ -1179,7 +1179,7 @@ func TestReplayAwaitAllChildren_Match(t *testing.T) {
 		Response:  `[{"run_id":"run-a","result":"a"},{"run_id":"run-b","result":"b"}]`,
 	}}
 
-	result := s.replayAwaitAllChildren(context.Background(), nil, `["run-a","run-b"]`, 0, 0)
+	result := s.AwaitAllChildren(context.Background(), nil, `["run-a","run-b"]`, 0, 0)
 
 	errCode := uint32(result & 0xFFFFFFFF)
 	if errCode != 0 {
@@ -1198,7 +1198,7 @@ func TestReplayAwaitAllChildren_MismatchType(t *testing.T) {
 		EventType: EventTypeCall, // wrong type
 	}}
 
-	result := s.replayAwaitAllChildren(context.Background(), nil, `["run-a"]`, 0, 0)
+	result := s.AwaitAllChildren(context.Background(), nil, `["run-a"]`, 0, 0)
 
 	errCode := uint32(result & 0xFFFFFFFF)
 	if errCode != 1 {
@@ -1217,7 +1217,7 @@ func TestReplayAwaitAllChildren_IDsMismatch(t *testing.T) {
 	}}
 
 	// Pass different run IDs than in history.
-	result := s.replayAwaitAllChildren(context.Background(), nil, `["run-y"]`, 0, 0)
+	result := s.AwaitAllChildren(context.Background(), nil, `["run-y"]`, 0, 0)
 
 	errCode := uint32(result & 0xFFFFFFFF)
 	if errCode != 1 {
@@ -1232,7 +1232,7 @@ func TestReplayAwaitAllChildren_PastEnd(t *testing.T) {
 	s.isReplay = true
 	s.history = nil
 
-	result := s.replayAwaitAllChildren(context.Background(), nil, `["run-a"]`, 0, 0)
+	result := s.AwaitAllChildren(context.Background(), nil, `["run-a"]`, 0, 0)
 
 	if s.isReplay {
 		t.Error("expected isReplay=false after exitReplay")
@@ -1246,7 +1246,7 @@ func TestReplayAwaitAllChildren_PastEnd(t *testing.T) {
 func TestFreshAwaitAllChildren_InvalidJSON(t *testing.T) {
 	s := newTestExecSession()
 
-	result := s.freshAwaitAllChildren(context.Background(), nil, `not-json`, 0, 0)
+	result := s.AwaitAllChildren(context.Background(), nil, `not-json`, 0, 0)
 
 	errCode := uint32(result & 0xFFFFFFFF)
 	if errCode != 1 {
@@ -1268,7 +1268,7 @@ func TestFreshAwaitAllChildren_NoStore(t *testing.T) {
 
 	buf := make([]byte, 512)
 	ctx := contextWithRawMemBuf(context.Background(), buf)
-	result := s.freshAwaitAllChildren(ctx, nil, `["run-a"]`, 0, uint32(len(buf)))
+	result := s.AwaitAllChildren(ctx, nil, `["run-a"]`, 0, uint32(len(buf)))
 
 	if result != packAwaitChildResultSuspend() {
 		t.Errorf("with no child store configured AwaitAllChildren must suspend, as AwaitChild does: "+

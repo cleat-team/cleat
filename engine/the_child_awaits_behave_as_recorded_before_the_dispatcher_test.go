@@ -21,6 +21,11 @@ package engine
 //   - A store error is not "still running": AwaitChild and AwaitAnyChild and AwaitAllChildren all record it as the child's ANSWER, durably, which is
 //     a decision of cleat#1115's, kept by every row below that says so.
 //
+// THE MOVE (W3a, AwaitChild and AwaitAllChildren): five rows the move deliberately CHANGES were removed from here and now live in
+// the_child_await_move_tightens_only_these_test.go, each stating what the old code did and failing on it (an await_child record naming another child;
+// await_all's three consume-before-check divergences; an await_all pending record naming other ids). Every row left passes on the old code AND the moved
+// code, so a row that changes later is a change somebody chose. The AwaitAnyChild rows are untouched until W3b.
+//
 // It uses a fake child store, because the question is what the CALL does with a store, not what a database does. Rows are recorded as the code
 // behaves, whether or not that is right; a row that says KNOWN DEFECT names the defect and is not an endorsement.
 
@@ -163,6 +168,11 @@ func runChildAwaitRow(t *testing.T, r childAwaitRow) {
 	if fmt.Sprint(recs) != fmt.Sprint(want.recs) {
 		t.Errorf("recorded %v, want %v", recs, want.recs)
 	}
+	// A moved call must record through the dispatcher's handle. A record written behind its back is a spec violation the production log would carry as an
+	// ERROR on every call, and nothing else in this table can see it (the old code has no handle, so there it is always empty).
+	if len(s.stepViolations) != 0 {
+		t.Errorf("the step dispatcher reported spec violations: %v", s.stepViolations)
+	}
 	reason := ""
 	if s.suspendErr != nil {
 		reason = s.suspendErr.Reason
@@ -213,6 +223,10 @@ func TestTheChildAwaitsBehaveAsRecordedBeforeTheDispatcher(t *testing.T) {
 	rec := func(typ EventType, resp, errText, req, runID string) childAwaitRec {
 		return childAwaitRec{typ: typ, resp: resp, errText: errText, req: req, runID: runID}
 	}
+	// a debugger that quits at the first consumed record (ReplayQuit): the call returns the zero word, the record IS consumed, and replay is not left
+	quits := func(s *execSession) {
+		s.stepCallback = func(int, *EventRecord, map[string]string) ReplayStepAction { return ReplayQuit }
+	}
 	// a session that is resuming at the END of its history: one foreign record, already consumed
 	atEnd := func(s *execSession) { s.stepCount = 1 }
 
@@ -231,9 +245,6 @@ func TestTheChildAwaitsBehaveAsRecordedBeforeTheDispatcher(t *testing.T) {
 			want: childAwaitWant{errCode: 1, result: "E", step: 1, replaying: true}},
 		{name: "await_child replay: a result that does not fit reports the truncation", call: callOfAwaitChild, ids: []string{"c1"}, resMax: 10, hist: []EventRecord{ac(longR, "")},
 			want: childAwaitWant{errCode: uint32(callErrorOutputTruncated), result: longR[:10], step: 1, replaying: true}},
-		{name: "KNOWN DEFECT (no identity): await_child replay consumes a record that names ANOTHER child as this one's", call: callOfAwaitChild, ids: []string{"c1"},
-			hist: []EventRecord{{EventType: EventTypeAwaitChild, RunID: "c2", Response: "R of c2"}},
-			want: childAwaitWant{result: "R of c2", step: 1, replaying: true}},
 		{name: "await_child replay: a record of another type is a divergence, and it consumes nothing", call: callOfAwaitChild, ids: []string{"c1"}, hist: []EventRecord{foreign},
 			want: childAwaitWant{errCode: 1, resultHas: "replay divergence at step 0: expected await_child, got side_effect", step: 0, replaying: true}},
 		// ---- replay of a pending await: the record is NOT consumed, replay ends, and the answer is recorded at the same step ----
@@ -255,6 +266,11 @@ func TestTheChildAwaitsBehaveAsRecordedBeforeTheDispatcher(t *testing.T) {
 		// ---- a pending record with MORE history after it: the shape the guards exempt "by reading, not by measurement" ----
 		{name: "KNOWN DEFECT (history left unread): await_child replay of an empty record that is FOLLOWED by another record leaves replay with that record unread, so a call recorded after it would run again",
 			call: callOfAwaitChild, ids: []string{"c1"}, hist: []EventRecord{ac("", ""), foreign}, outcomes: map[string]ChildOutcome{"c1": done("R")},
+			want: childAwaitWant{result: "R", recs: []childAwaitRec{rec(EventTypeAwaitChild, "R", "", "", "c1")}, step: 1, gets: 1}},
+		{name: "await_child replay: a debugger's ReplayQuit at an answered record returns the zero word, with the record consumed and replay still on", call: callOfAwaitChild, ids: []string{"c1"},
+			hist: []EventRecord{ac("R", "")}, mod: quits, want: childAwaitWant{step: 1, replaying: true}},
+		{name: "await_child replay: a pending record is never consumed, so a debugger's ReplayQuit is not asked about it", call: callOfAwaitChild, ids: []string{"c1"},
+			hist: []EventRecord{ac("", "")}, mod: quits, outcomes: map[string]ChildOutcome{"c1": done("R")},
 			want: childAwaitWant{result: "R", recs: []childAwaitRec{rec(EventTypeAwaitChild, "R", "", "", "c1")}, step: 1, gets: 1}},
 		// ---- the end of history ----
 		{name: "await_child: the end of history leaves replay and a completed child is recorded", call: callOfAwaitChild, ids: []string{"c1"}, hist: []EventRecord{foreign}, mod: atEnd,
@@ -296,13 +312,6 @@ func TestTheChildAwaitsBehaveAsRecordedBeforeTheDispatcher(t *testing.T) {
 			want: childAwaitWant{result: both, step: 1, replaying: true}},
 		{name: "await_all replay: a recorded answer that does not fit reports the truncation", call: callOfAwaitAllChildren, ids: []string{"c1", "c2"}, resMax: 10, hist: []EventRecord{allRec(two, both)},
 			want: childAwaitWant{errCode: uint32(callErrorOutputTruncated), result: both[:10], step: 1, replaying: true}},
-		{name: "await_all replay: a request for other run ids is a divergence, and it CONSUMES the record (the dispatcher's consume none)", call: callOfAwaitAllChildren, ids: []string{"c1", "c2"},
-			hist: []EventRecord{allRec(`["c9"]`, both)},
-			want: childAwaitWant{errCode: 1, resultHas: "await_all_children run IDs mismatch", step: 1, replaying: true}},
-		{name: "await_all replay: a record of another type is a divergence, and it CONSUMES the record", call: callOfAwaitAllChildren, ids: []string{"c1", "c2"}, hist: []EventRecord{foreign},
-			want: childAwaitWant{errCode: 1, resultHas: "replay divergence at step 0: expected await_all_children, got side_effect", step: 1, replaying: true}},
-		{name: "await_all replay: the same ids in another ORDER are a different request (compared as text)", call: callOfAwaitAllChildren, ids: []string{"c2", "c1"}, hist: []EventRecord{allRec(two, both)},
-			want: childAwaitWant{errCode: 1, resultHas: "run IDs mismatch", step: 1, replaying: true}},
 		// ---- replay of a pending await ----
 		{name: "await_all replay: an empty record and every child complete leave replay and record the answer", call: callOfAwaitAllChildren, ids: []string{"c1", "c2"},
 			hist: []EventRecord{allRec(two, "")}, outcomes: map[string]ChildOutcome{"c1": done("R1"), "c2": done("R2")},
@@ -313,13 +322,12 @@ func TestTheChildAwaitsBehaveAsRecordedBeforeTheDispatcher(t *testing.T) {
 		{name: "await_all replay: an empty record and no child store record another empty record and suspend", call: callOfAwaitAllChildren, ids: []string{"c1", "c2"}, noStore: true,
 			hist: []EventRecord{allRec(two, "")},
 			want: childAwaitWant{sentinel: true, recs: []childAwaitRec{rec(EventTypeAwaitAllChildren, "", "", two, "")}, reason: "await_all_children(c1)", step: 1}},
-		{name: "KNOWN DEFECT (no identity on a pending record): await_all replay re-checks the store for THIS call's ids when the empty record names other ids", call: callOfAwaitAllChildren,
-			ids: []string{"c1", "c2"}, hist: []EventRecord{allRec(`["c9"]`, "")}, outcomes: map[string]ChildOutcome{"c1": done("R1"), "c2": done("R2")},
-			want: childAwaitWant{result: both, recs: []childAwaitRec{rec(EventTypeAwaitAllChildren, both, "", two, "")}, step: 1, gets: 2, getOrder: []string{"c1", "c2"}}},
 		{name: "KNOWN DEFECT (history left unread): await_all replay of an empty record that is FOLLOWED by another record leaves replay with that record unread, so a call recorded after it would run again",
 			call: callOfAwaitAllChildren, ids: []string{"c1", "c2"}, hist: []EventRecord{allRec(two, ""), foreign},
 			outcomes: map[string]ChildOutcome{"c1": done("R1"), "c2": done("R2")},
 			want:     childAwaitWant{result: both, recs: []childAwaitRec{rec(EventTypeAwaitAllChildren, both, "", two, "")}, step: 1, gets: 2, getOrder: []string{"c1", "c2"}}},
+		{name: "await_all replay: a debugger's ReplayQuit at an answered record returns the zero word, with the record consumed and replay still on", call: callOfAwaitAllChildren, ids: []string{"c1", "c2"},
+			hist: []EventRecord{allRec(two, both)}, mod: quits, want: childAwaitWant{step: 1, replaying: true}},
 		{name: "await_all: the end of history leaves replay and records the answer", call: callOfAwaitAllChildren, ids: []string{"c1", "c2"}, hist: []EventRecord{foreign}, mod: atEnd,
 			outcomes: map[string]ChildOutcome{"c1": done("R1"), "c2": done("R2")},
 			want:     childAwaitWant{result: both, recs: []childAwaitRec{rec(EventTypeAwaitAllChildren, both, "", two, "")}, step: 2, gets: 2, getOrder: []string{"c1", "c2"}}},
@@ -388,6 +396,8 @@ func TestTheChildAwaitsBehaveAsRecordedBeforeTheDispatcher(t *testing.T) {
 			want: childAwaitWant{sentinel: true, reason: `await_any_child(["c1","c2"])`, step: 1, gets: 2, getOrder: []string{"c1", "c2"}}},
 		{name: "await_any replay: an empty record and no child store suspend and record nothing more", call: callOfAwaitAnyChild, ids: []string{"c1", "c2"}, noStore: true, hist: []EventRecord{anyRec(two, "")},
 			want: childAwaitWant{sentinel: true, reason: `await_any_child(["c1","c2"])`, step: 1}},
+		{name: "await_any replay: a debugger's ReplayQuit at an answered record returns the zero word, with the record consumed and replay still on", call: callOfAwaitAnyChild, ids: []string{"c1", "c2"},
+			hist: []EventRecord{anyRec(two, `{"run_id":"c1","result":"R1"}`)}, mod: quits, want: childAwaitWant{step: 1, replaying: true}},
 		// ---- the end of history ----
 		{name: "await_any: the end of history leaves replay and a completed child is recorded", call: callOfAwaitAnyChild, ids: []string{"c1", "c2"}, hist: []EventRecord{foreign}, mod: atEnd,
 			outcomes: map[string]ChildOutcome{"c1": done("R1")},

@@ -50,11 +50,40 @@ func allEventTypes(t *testing.T) []EventType {
 // nothing, so a later replay leaves replay at the await and a recorded call after it runs again (2 calls, want 1). The entry stays only because
 // removing it fails the probe for the right reason, and cleat#4177 owns the fix; when it lands, delete the entry and let the guard cover it.
 //
-// The other pending-resume sites this guard's neighbours exempt (AwaitChild, AwaitAnyChild, replayAwaitAllChildren) are
-// NOT MEASURED either: whether a defer segment's drain can append events after the pending record has not been tried. Each is a grant, and an
-// entry added to silence a failure is the next duplicate effect.
+// The pending-resume sites of the child awaits (AwaitChild, AwaitAllChildren, AwaitAnyChild) were exempt the same way and were NOT MEASURED. They are now:
+// pendingResumersThatLeaveHistoryUnread below, and the rows of the_child_awaits_behave_as_recorded_before_the_dispatcher_test.go. A call recorded after
+// a pending child await does run again (cleat#4285). Each is a grant, and an entry added to silence a failure is the next duplicate effect.
 var resumesItsOwnPendingEvent = map[string]EventType{
 	"AwaitPromise": EventTypeAwaitPromise,
+}
+
+// pendingResumersThatLeaveHistoryUnread are the calls that find their OWN pending record, do not consume it, and leave replay with the records after it
+// unread (cleat#4285): the child awaits, which record an EMPTY await while a child runs and answer over it. It is a defect kept on purpose by the move
+// onto the dispatcher (stepSpec.OverPending says so), and each entry here MUST still leave history unread: TestThePendingExemptionsStillDescribeSomething
+// fails the moment one does not, which is when #4285's host-side guard and the Java fix have landed and the replay becomes a divergence, and the entry is
+// then deleted. The record is the call's own type, empty, naming what probeArgs gives it.
+var pendingResumersThatLeaveHistoryUnread = map[string]EventRecord{
+	"AwaitChild":       {EventType: EventTypeAwaitChild, RunID: "x"},
+	"AwaitAllChildren": {EventType: EventTypeAwaitAllChildren, Request: "x"},
+}
+
+func TestThePendingExemptionsStillDescribeSomething(t *testing.T) {
+	for name, pending := range pendingResumersThatLeaveHistoryUnread {
+		s, c := foreignReplay(pending.EventType)
+		s.history[0] = pending
+		m := reflect.ValueOf(s).MethodByName(name)
+		if !m.IsValid() {
+			t.Fatalf("%s is exempt but *execSession has no such method; delete the entry", name)
+		}
+		m.Call(probeArgs(m.Type(), hostCtx()))
+		if !leftReplayEarly(s) {
+			t.Errorf("%s is named in pendingResumersThatLeaveHistoryUnread but no longer leaves replay with history unread (stepCount=%d of %d, isReplay=%v): the "+
+				"behaviour cleat#4285 tracks has changed, so delete the entry", name, s.stepCount, len(s.history), s.isReplay)
+		}
+		if len(c.calls) != 0 {
+			t.Errorf("%s ran a service call: %+v", name, c.calls)
+		}
+	}
 }
 
 // probeArgs builds arguments for a HostHandler method by parameter type: strings are "x", a pointer is 0 followed by a 256-byte limit.

@@ -23,9 +23,9 @@ var notYetOnTheParkHelper = map[string]struct {
 	count int
 	why   string
 }{
-	"children.go:AwaitChild":                 {1, "a wait; moves with the child waits (W3)"},
+	"children.go:var awaitChildStep":         {1, "a wait for a child: the park helper has no child wake kind, so the spec sets suspendErr itself (W3a)"},
+	"children.go:var awaitAllChildrenStep":   {1, "a wait for every child in a list: as await_child, no child wake kind on the park helper (W3a)"},
 	"children.go:AwaitAnyChild":              {1, "a wait; moves with the child waits (W3)"},
-	"children.go:freshAwaitAllChildren":      {1, "a wait; moves with the child waits (W3)"},
 	"scope.go:freshSetScope":                 {2, "a wait for a lock scope; moves with SetScope (WS-cleat-2)"},
 	"lifecycle.go:ContinueAsNew":             {2, "a terminal call, not a wait; moves with the terminal group (W1)"},
 	"lifecycle.go:ContinueAsNewWithVersion":  {2, "a terminal call, not a wait; moves with the terminal group (W1)"},

@@ -173,6 +173,22 @@ type stepSpec struct {
 	// that would turn a resumable history into a divergence, which a migration may not do. It is not called for a record whose Role is not
 	// one of the three (a bug in the spec is always a divergence), and it must not touch the world: it is a pure function of the arguments.
 	ForeignFirst func(a stepArgs) (res int64, ok bool)
+	// OverPending, for a SINGLE-record step, names a record of this call that is a PENDING MARKER: the call was recorded and not yet answered, and its
+	// answer is recorded OVER that record, at the same step, by the next wake (cleat#4152, W3: await_child and await_all_children record an empty
+	// await, and the store's conflict clause reopens it). Such a record is not consumed: step leaves replay AT it, calls Fresh with stepCount still on it,
+	// and Fresh records the answer at that step, so the step count moves by one for a record that was already there once. It is checked after the type
+	// and Identity, so a pending record naming ANOTHER call is a divergence, not this call's to answer over.
+	//
+	// THE EXEMPTION THIS CARRIES, AND IT IS A DEFECT KEPT ON PURPOSE (cleat#4285). The pending record is the history's last event when a run is
+	// resumed. When it is NOT, because a guest that ignored the suspend word went on to make a call, that call's record follows it, and leaving
+	// replay here leaves it unread, so the call runs again. The old code did exactly that and this keeps it, so a move changes nothing; it is
+	// reported (a warning with the count) and named in a_host_call_never_leaves_replay_with_history_unread_test.go, whose entry fails the moment the
+	// behaviour changes. It becomes a divergence when #4285's host-side guard and the Java fix have landed, and not before.
+	//
+	// WHAT A PENDING MARKER RESTS ON, a store invariant and not a rule of this field: the two child awaits tell "pending" from "answered" by an EMPTY
+	// answer, so a finished child's answer must never be empty. coerceResultJSON stores an empty result as {} and nonEmptyChildError keeps a failure's
+	// message non-empty; without either, a finished child would read as still pending and be answered over (noted by the reviewer of #4290).
+	OverPending func(a stepArgs, rec *EventRecord) bool
 	// Fresh does the work and records, through c.Record, where the call records. It is called only once the dispatcher has decided
 	// fresh work is allowed.
 	Fresh func(c *stepCtx) int64
@@ -221,6 +237,8 @@ func (sp *stepSpec) validate() error {
 		return fmt.Errorf("step spec %q is a multi-record step (it has a Role) and needs exactly a DecodeRun, not a Decode", sp.Name)
 	case sp.Role != nil && sp.Records == recordsNone:
 		return fmt.Errorf("step spec %q is a multi-record step that records nothing: a run is made of recorded events", sp.Name)
+	case sp.OverPending != nil && (sp.Role != nil || sp.Records == recordsNone):
+		return fmt.Errorf("step spec %q has an OverPending but is a multi-record step or records nothing: OverPending is a single-record step whose answer is recorded over its own pending record", sp.Name)
 	case sp.ForeignFirst != nil && sp.Role == nil:
 		return fmt.Errorf("step spec %q has a ForeignFirst but no Role: it answers a multi-record step whose first record is another call's", sp.Name)
 	case sp.MaxPrefix < 0 || (sp.MaxPrefix > 0 && sp.Role == nil):
@@ -267,6 +285,7 @@ func neverRefuse(*execSession) bool { return false }
 // The refusal lives here and not in each caller, so it cannot be skipped by reaching a call by the second path (the #4143 shape).
 func (s *execSession) step(ctx context.Context, m api.Module, sp *stepSpec, args stepArgs) int64 {
 	c := &stepCtx{ctx: ctx, m: m, s: s, args: args}
+	overPending := false
 	if s.isReplay {
 		if s.stepCount < len(s.history) && sp.Role != nil {
 			// A multi-record step reads its whole run. It returns unless the history ENDED INSIDE the run, in which case the prefix is consumed
@@ -285,12 +304,19 @@ func (s *execSession) step(ctx context.Context, m api.Module, sp *stepSpec, args
 					return s.replayIdentityDivergence(ctx, m, sp.Name, why, args.outPtr, args.outMaxLen)
 				}
 			}
-			if !s.advanceReplayStep(ctx, &rec) {
-				return 0
+			if sp.OverPending != nil && sp.OverPending(args, &rec) {
+				// Its own pending record: not consumed. The answer is recorded over it, so the step leaves replay with stepCount ON it.
+				overPending = true
+			} else {
+				if !s.advanceReplayStep(ctx, &rec) {
+					return 0
+				}
+				return sp.Decode(c, &rec)
 			}
-			return sp.Decode(c, &rec)
 		}
-		if !sp.StaysInReplayAtFrontier {
+		if overPending {
+			s.leaveReplayAtPending(sp)
+		} else if !sp.StaysInReplayAtFrontier {
 			s.leaveReplay(sp)
 		}
 	}
@@ -318,6 +344,18 @@ func (s *execSession) step(ctx context.Context, m api.Module, sp *stepSpec, args
 func (s *execSession) leaveReplay(sp *stepSpec) {
 	if s.stepCount != len(s.history) {
 		s.specViolation(sp, fmt.Sprintf("left replay at step %d with %d records in history", s.stepCount, len(s.history)))
+	}
+	s.exitReplay()
+}
+
+// leaveReplayAtPending is leaveReplay for a step that found its OWN pending record and does not consume it (OverPending): stepCount is ON that record,
+// so the history is read to its last record when the pending one is last, which is the ordinary resume. Records after it are left unread, which is the
+// kept defect of cleat#4285 (see OverPending): it is reported and not enforced, like every disagreement of this kind, because stopping a production run
+// for it would trade a silent re-run for a loud outage.
+func (s *execSession) leaveReplayAtPending(sp *stepSpec) {
+	if unread := len(s.history) - s.stepCount - 1; unread > 0 && s.engine != nil {
+		s.engine.log().WarnContext(context.Background(), "step left replay at its own pending record with later records unread: a call recorded after it will run again (cleat#4285)",
+			"workflow_id", s.workflowID, "step", sp.Name, "at", s.stepCount, "unread", unread)
 	}
 	s.exitReplay()
 }

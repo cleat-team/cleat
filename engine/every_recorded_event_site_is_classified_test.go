@@ -28,8 +28,6 @@ import (
 var recordedEventSitesWithoutOwnStopCheck = map[string]string{
 	"step_dispatcher.go:Record":          "DISPATCHER: reached only from a spec's Fresh, which step runs after it has applied stopBeforeNewWork to every effectEffect step; the one spec that is never refused, ReleaseLock (`Refuse: neverRefuse`), says why where neverRefuse is declared",
 	"children.go:AwaitAnyChild":          "OBSERVATION: records which child finished",
-	"children.go:AwaitChild":             "OBSERVATION: records a child's result",
-	"children.go:freshAwaitAllChildren":  "FRESH HALF: an await of children that already ran; entry points AwaitAllChildren and its replay half",
 	"lifecycle.go:RegisterUpdateHandler": "OBSERVATION: records a registration, performs no external work",
 	"plugins.go:freshPluginCallInternal": "FRESH HALF: the plugin-call entry points check before it",
 	"plugins.go:recordStreamError":       "TERMINAL: records the failure that ends a streaming call",
