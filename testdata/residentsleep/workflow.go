@@ -87,3 +87,14 @@ func SpinTwice(h cleat.HostCalls, input string) (string, error) {
 	b := spin(n)
 	return `{"status":"ok","x":` + strconv.FormatUint(a+b, 10) + `}`, nil
 }
+
+// SleepLongThenCall sleeps for 8 seconds (durably) and then makes one call. It exists for the test that settles a run WHILE it sleeps (cleat#4162, PR 2c): a cold
+// start compiles the module, which took 2.8 s when measured, and a sleep's deadline is anchored to when the run was claimed, so a 300 ms sleep had already "happened"
+// by the time the guest reached it and the run finished without ever sleeping. 8 s is inside the 10 s floor of the hold window.
+func SleepLongThenCall(h cleat.HostCalls, input string) (string, error) {
+	h.DurableSleepMs(8000)
+	if _, err := h.DurableCall("work", "after_sleep", `{}`); err != nil {
+		return "", err
+	}
+	return `{"status":"ok"}`, nil
+}
