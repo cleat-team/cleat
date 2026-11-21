@@ -102,7 +102,7 @@ func (w *ignoredSuspendWorld) ran(histLen, step, dispatched int, susp *SuspendEr
 func TestAGuestThatIgnoresASuspensionStartsNoFreshWork(t *testing.T) {
 	for _, r := range ignoredSuspendRows() {
 		t.Run(r.name, func(t *testing.T) {
-			want := int64(callSuspendSentinel)
+			want := callSuspendSentinel
 			if r.word != nil {
 				want = r.word()
 			}
