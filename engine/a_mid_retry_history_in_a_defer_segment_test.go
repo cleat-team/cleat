@@ -1,7 +1,8 @@
 package engine
 
 // cleat#4152, the row its tests left out. A run lost INSIDE a retry policy leaves call_attempt_failed events and no terminal call event, and
-// DurableCallWithRetry resumes the policy from them (cleat#1145). That branch leaves replay and then asks stopBeforeNewWork, so what a segment
+// DurableCallWithRetry resumes the policy from them (cleat#1145). That resume leaves replay and then meets the dispatcher's refusal (it was the call's own
+// stopBeforeNewWork before cleat#4152 G3), so what a segment
 // over such a history does is a separate fact from what it does at the frontier of a history that ends cleanly, which
 // a_retry_policy_applies_at_the_replay_frontier_test.go covers. Nothing there puts a defer segment over a history that ends on an attempt.
 //

@@ -92,6 +92,9 @@ type stepArgs struct {
 	// i1 is an integer argument: a lock's time to live in milliseconds, or SetScope's previous-scope result, packed (the write into the guest's
 	// buffer happens before the step).
 	i1 int64
+	// i2, i3 and i4 are the rest of a retry policy's integers (cleat#4152, G3): i1 is its maximum attempts, i2 the initial interval in milliseconds, i3 the
+	// backoff coefficient times 100 and i4 the maximum interval in milliseconds. A call with fewer integers leaves them zero.
+	i2, i3, i4 int64
 	// outPtr and outMaxLen are where a divergence message is written, and where the call's own output goes; zero when it has none.
 	outPtr, outMaxLen uint32
 	// out2Ptr and out2MaxLen are a second buffer for a call that returns two things (an await's delivery: the signal's name and its payload).
