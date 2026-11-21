@@ -63,6 +63,15 @@ var scenarios = []scenario{
 	// is what sees it: no fault is needed, which is why this is the golden-run precondition's own test.
 	{"defer_sleep", []op{{Op: "defer", Name: "D"}, {Op: "call", Name: "A"}, {Op: "sleep", Ms: 300}, {Op: "call", Name: "B"}}, nil},
 	{"retry", []op{{Op: "call", Name: "A"}, {Op: "call_retry", Name: "R", Attempts: 5, Fail: 2}, {Op: "call", Name: "B"}}, nil},
+	// Effects the recording service cannot see (cleat#4241). The faults land on the calls around the ops, and the oracle reads the tables.
+	// signal_workflow: one signal per send, across a kill and a reclaim. Two rows under a name is a send that ran twice.
+	{"signals", []op{{Op: "call", Name: "A"}, {Op: "signal", Name: "S"}, {Op: "call", Name: "B"}, {Op: "signal", Name: "T"}, {Op: "call", Name: "C"}}, nil},
+	// schedule_cron and delete_cron, with the table changed between the run and its replay (see outside_effects_test.go): C is taken away after the
+	// run created it and D is put back after the run deleted it; E is left alone. The two delayed calls give the harness time to act before the run ends.
+	{"crons", []op{{Op: "cron_create", Name: "C"}, {Op: "cron_create", Name: "D"}, {Op: "cron_create", Name: "E"}, {Op: "call", Name: "X", Delay: 300},
+		{Op: "cron_delete", Name: "D"}, {Op: "call", Name: "Y", Delay: 1500}}, editCronsBetweenRunAndReplay},
+	// list_crons: a read the engine records. A schedule is added after the run listed, so a replay that listed afresh would report another count.
+	{"cron_list", []op{{Op: "cron_create", Name: "C"}, {Op: "cron_list", Name: "L"}, {Op: "call", Name: "B", Delay: 300}}, addACronAfterTheRunListed},
 }
 
 // fault is one injected failure at one step boundary: the nth request of an operation, held at "before" or "after" its effect, the worker
@@ -87,6 +96,8 @@ type outcome struct {
 	ReleaseAt, KillAt      time.Time
 	Applied                bool                // the fault actually fired: a fault that never did measures nothing
 	Promises               map[string][]string // promise name -> the status of every workflow_promises row under it, read after the run
+	Signals                map[string]int      // signal name -> the workflow_signals rows the run received under it, read after the run (cleat#4241)
+	Schedules              map[string]int      // cron op name -> the workflow_schedules rows of the run's cron workflow, read after the run (cleat#4241)
 	Log                    string
 }
 
@@ -139,6 +150,7 @@ func execute(t *testing.T, env *env, sc scenario, f *fault) outcome {
 	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
 	queue, run := "chaos-q-"+suffix, "chaos-run-"+suffix
 	deploy(t, env.db, env.wasm, queue)
+	defer forgetSchedules(env.db, run)
 
 	first := startWorker(t, env.bin, queue, env.svc.srv.URL, flagsOf(f)...)
 	startRun(t, env.db, run, scriptInput(run, sc), queue)
@@ -192,6 +204,8 @@ func execute(t *testing.T, env *env, sc scenario, f *fault) outcome {
 	}
 	out.Requests = env.svc.requestsOf(run)
 	out.Promises = promiseRows(env.db, run)
+	out.Signals = signalRows(env.db, run)
+	out.Schedules = scheduleRows(env.db, run)
 	out.Log = first.output()
 	if second != nil {
 		out.Log += "\n--- second worker ---\n" + second.output()
@@ -259,10 +273,20 @@ func verifyReclaim(sc scenario, g goldenRecord, f *fault, b request, o outcome) 
 	}
 	if o.Status == "done" || o.Status == "completed" {
 		v = append(v, promiseViolations(sc, o)...)
+		v = append(v, outsideViolations(sc, o)...)
 	}
 	gs := g.successes()
 	successes, attempts, helds, first := tally(o.Requests)
+	amo := atMostOnceOps(sc)
 	for op, want := range gs {
+		if amo[op] {
+			// A fire-and-forget send is recorded BEFORE it is dispatched and a replay never dispatches it, so a kill in between loses it: it may
+			// have happened once or not at all, and what it may never do is happen twice. There is no at-least-once window to allow for.
+			if successes[op] > want {
+				v = append(v, fmt.Sprintf("fire-and-forget effect %q succeeded %d time(s), at most %d (a replay must not dispatch a recorded send again)", op, successes[op], want))
+			}
+			continue
+		}
 		w := want
 		if f.Op == op && f.Mode == "after" && !b.Failed {
 			w = want + 1 // the documented at-least-once window: performed, never recorded, so replayed once
@@ -285,7 +309,7 @@ func verifyReclaim(sc scenario, g goldenRecord, f *fault, b request, o outcome) 
 	{
 		_, _, _, gfirst = tally(g.Reqs)
 	}
-	if strings.Join(first, ",") != strings.Join(gfirst, ",") {
+	if strings.Join(withoutOps(first, amo), ",") != strings.Join(withoutOps(gfirst, amo), ",") {
 		v = append(v, fmt.Sprintf("effects first happened in order %v, golden %v", first, gfirst))
 	}
 	for op, hs := range helds {
@@ -336,7 +360,15 @@ func verifyTerminate(sc scenario, g goldenRecord, f *fault, b request, o outcome
 	}
 	// The loop above counts every defer up to the boundary's op, and stops there. A defer scripted after it is not registered by the kill.
 	successes, _, _, _ := tally(o.Requests)
+	amo := atMostOnceOps(sc)
 	for op, w := range want {
+		if amo[op] {
+			// At most the sends the body had made, and none the body had not: a terminated run's defer segment dispatches nothing new.
+			if successes[op] > w {
+				v = append(v, fmt.Sprintf("fire-and-forget effect %q succeeded %d time(s), at most %d (terminated body: nothing new)", op, successes[op], w))
+			}
+			continue
+		}
 		if successes[op] != w {
 			v = append(v, fmt.Sprintf("effect %q succeeded %d time(s), want %d (terminated body: nothing new, each cleanup once)", op, successes[op], w))
 		}
@@ -413,6 +445,14 @@ func goldenOf(t *testing.T, e *env, sc scenario) goldenRecord {
 	if pv := promiseViolations(sc, gold); len(pv) > 0 {
 		t.Fatalf("the FAULT-FREE run of %s left promise rows other than the script's: %s. No fault was injected, so the op did not do what it claims and nothing below measures it.", sc.Name, strings.Join(pv, "; "))
 	}
+	for op := range atMostOnceOps(sc) {
+		if n := tallyOnce(gold.Requests, op); n != 1 {
+			t.Fatalf("the FAULT-FREE run of %s dispatched the fire-and-forget send %q %d time(s), want exactly 1. No fault was injected, so the op did not do what it claims and nothing below measures it.", sc.Name, op, n)
+		}
+	}
+	if ov := outsideViolations(sc, gold); len(ov) > 0 {
+		t.Fatalf("the FAULT-FREE run of %s left the signal or schedule tables other than the script's: %s. No fault was injected, so the op did not do what it claims and nothing below measures it.", sc.Name, strings.Join(ov, "; "))
+	}
 	g := goldenRecord{Reqs: gold.Requests, Status: gold.Status}
 	t.Logf("golden: %d requests status=%s result=%s", len(g.Reqs), g.Status, gold.Result)
 	if seq := seqOf(g.Reqs); len(seq) > 300 {
@@ -424,19 +464,35 @@ func goldenOf(t *testing.T, e *env, sc scenario) goldenRecord {
 }
 
 func runBoundaries(t *testing.T, then string, verify func(scenario, goldenRecord, *fault, request, outcome) []string, flags ...string) {
+	runBoundariesOver(t, scenarios, then, verify, flags...)
+}
+
+// runBoundariesOver is runBoundaries over a given list of scenarios. The fire-and-forget scenarios have their own list, because their effect is AT MOST
+// once and the generic sweeps (terminate, event-write refusal, signal) demand exactly once; see fireAndForgetScenarios.
+func runBoundariesOver(t *testing.T, list []scenario, then string, verify func(scenario, goldenRecord, *fault, request, outcome) []string, flags ...string) {
 	only := os.Getenv("CLEAT_CHAOS_SCENARIO")
 	if only != "" {
-		found := false
-		for _, sc := range scenarios {
-			found = found || sc.Name == only
+		inThisList, inAny := false, false
+		for _, l := range [][]scenario{scenarios, fireAndForgetScenarios} {
+			for _, sc := range l {
+				inAny = inAny || sc.Name == only
+			}
 		}
-		if !found {
+		for _, sc := range list {
+			inThisList = inThisList || sc.Name == only
+		}
+		if !inAny {
 			// A misspelt name must not select nothing and pass: `go test` is silent about a selection that matched nothing.
 			t.Fatalf("CLEAT_CHAOS_SCENARIO=%q names no scenario", only)
 		}
+		if !inThisList {
+			// The name is real but belongs to the other list: this test has nothing to run for it, and says so.
+			t.Logf("CLEAT_CHAOS_SCENARIO=%q is not one of this test's scenarios", only)
+			return
+		}
 	}
 	e := newEnv(t)
-	for _, sc := range scenarios {
+	for _, sc := range list {
 		if only != "" && only != sc.Name {
 			continue
 		}
@@ -496,6 +552,12 @@ func applies(then, mode string, b request, sc scenario, g goldenRecord) bool {
 		return false
 	case then == "dbwrite" && mode == "after":
 		return false // the fault releases the held call itself
+	case then == "terminate" && atMostOnceOps(sc)[b.Op]:
+		// A fire-and-forget send's request is made by a goroutine, CONCURRENTLY with the body, which has already moved on: with the send held at
+		// this boundary the body made the next calls within milliseconds, before the kill (measured: B, send_T and C at -14, -9 and -8 ms). So what
+		// the body had done at the kill cannot be read off the golden order, which is what verifyTerminate assumes of every boundary. The sends
+		// before and after this one are still swept, and so is every call around them.
+		return false
 	}
 	return true
 }

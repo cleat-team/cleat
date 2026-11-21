@@ -15,6 +15,11 @@
 //	{"op":"continue_as_new","name":"POST"}   continues as a new run whose only operation is a call named POST
 //	{"op":"await_promise","name":"p","ms":1500,"hit":"RES","miss":"TIMEDOUT"}   await an unresolved promise, then a call named for the outcome
 //	{"op":"set_scope","name":"k"}   enter the virtual object ("chaos","k"): the host takes its key, or suspends while another run holds it
+//	{"op":"send","name":"S"}        a fire-and-forget request to the service, named "send_S": recorded first, dispatched after, so at most once
+//	{"op":"signal","name":"S"}      signal THIS run with the signal "sig-S": the effect lands in the signal table, which the recording service cannot see
+//	{"op":"cron_create","name":"C"} schedule a yearly cron for the workflow "chaos-cron-<run>", input {"n":"C"}: the effect lands in workflow_schedules
+//	{"op":"cron_delete","name":"C"} delete the schedule the earlier cron_create C made
+//	{"op":"cron_list","name":"L"}   list the schedules, then make two calls, L and L2, that report how many belong to this run (the value the guest HELD)
 //	{"op":"sleep","ms":300}                a durable sleep
 //	{"op":"defer","name":"D"}              registers a cleanup that makes a durable call named "defer_D" when the run ends
 //
@@ -69,6 +74,9 @@ func Script(h cleat.HostCalls, input string) (string, error) {
 		return "", fmt.Errorf("chaosscript: input is not a script: %w", err)
 	}
 	seen := map[string]string{}
+	// The schedule ids the run's own cron_create ops got, by name, so a later cron_delete can delete the one it means.
+	cronIDs := map[string]string{}
+	cronWorkflow := "chaos-cron-" + s.Run
 	for _, o := range s.Ops {
 		switch o.Op {
 		case "call":
@@ -155,6 +163,59 @@ func Script(h cleat.HostCalls, input string) (string, error) {
 			if err != nil {
 				return "", err
 			}
+		case "send":
+			// Fire-and-forget: the event is recorded first and the request dispatched on a goroutine after, so the service sees it as an effect
+			// named "send_<name>" that happens AT MOST once (a kill between the record and the dispatch loses it, and a replay never sends it).
+			if err := h.DurableSend("chaos", "send_"+o.Name, request(s.Run, "send_"+o.Name, "")); err != nil {
+				return "", err
+			}
+		case "signal":
+			// A signal to THIS run, which nothing waits for: the only place its effect lands is the signal table, so the harness reads
+			// workflow_signals after the run (cleat#4241). A replay that sent it again leaves a second row under the name.
+			if err := h.SignalWorkflow(s.Run, "sig-"+o.Name, `{"n":"`+o.Name+`"}`); err != nil {
+				return "", err
+			}
+		case "cron_create":
+			// A yearly schedule, so nothing fires during a run. The effect lands in workflow_schedules (cleat#4241).
+			id, err := h.ScheduleCron(cronWorkflow, "0 0 1 1 *", "UTC", `{"n":"`+o.Name+`"}`)
+			if err != nil {
+				return "", err
+			}
+			cronIDs[o.Name] = id
+			seen[o.Name] = id
+		case "cron_delete":
+			if err := h.DeleteCron(cronIDs[o.Name]); err != nil {
+				return "", err
+			}
+		case "cron_list":
+			// The list is a READ the engine records, so a replay must answer the RECORDED list and not the table as it is now. The count of
+			// this run's schedules is what the guest held, reported to the service: a replay that listed afresh reports a different one.
+			raw, err := h.ListCrons()
+			if err != nil {
+				return "", err
+			}
+			var list []struct {
+				WorkflowName string `json:"workflow_name"`
+			}
+			if err := json.Unmarshal([]byte(raw), &list); err != nil {
+				return "", fmt.Errorf("chaosscript: ListCrons did not return a JSON list: %w", err)
+			}
+			n := 0
+			for _, c := range list {
+				if c.WorkflowName == cronWorkflow {
+					n++
+				}
+			}
+			held := fmt.Sprintf("n=%d", n)
+			// TWO calls carry the held count: a replayed list is observable only through a request made AFTER it, and the first call is
+			// replayed from its record at a boundary past it. A kill between the two leaves the second to be requested fresh, with the
+			// value the replay's list answered.
+			for _, name := range []string{o.Name, o.Name + "2"} {
+				if _, err := h.DurableCall("chaos", name, request(s.Run, name, held)); err != nil {
+					return "", err
+				}
+			}
+			seen[o.Name] = held
 		case "set_scope":
 			// Enter the virtual object ("chaos", o.Name): the host takes its concurrency key, or suspends the run while another run holds it.
 			h.SetScope("chaos", o.Name)
