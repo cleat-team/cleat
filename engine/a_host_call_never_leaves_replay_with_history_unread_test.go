@@ -60,8 +60,8 @@ var resumesItsOwnPendingEvent = map[string]EventType{
 // pendingResumersThatLeaveHistoryUnread are the calls that find their OWN pending record, do not consume it, and leave replay with the records after it
 // unread (cleat#4285): the child awaits, which record an EMPTY await while a child runs and answer over it (await_any_child answers at the NEXT step, and leaves the record after its empties unread). It is a defect kept on purpose by the move
 // onto the dispatcher (stepSpec.OverPending says so), and each entry here MUST still leave history unread: TestThePendingExemptionsStillDescribeSomething
-// fails the moment one does not, which is when #4285's host-side guard and the Java fix have landed and the replay becomes a divergence, and the entry is
-// then deleted. The record is the call's own type, empty, naming what probeArgs gives it.
+// fails the moment one does not. What is left unread is now only the exemptions of staleCallAfterPending (a drain's records, a record expanded from a
+// compaction), because a call the guest's body recorded after the pending await is a divergence (cleat#4285 step 3): the probe measures both halves. The record is the call's own type, empty, naming what probeArgs gives it.
 var pendingResumersThatLeaveHistoryUnread = map[string]EventRecord{
 	"AwaitChild":       {EventType: EventTypeAwaitChild, RunID: "x"},
 	"AwaitAllChildren": {EventType: EventTypeAwaitAllChildren, Request: "x"},
@@ -72,19 +72,37 @@ var pendingResumersThatLeaveHistoryUnread = map[string]EventRecord{
 
 func TestThePendingExemptionsStillDescribeSomething(t *testing.T) {
 	for name, pending := range pendingResumersThatLeaveHistoryUnread {
-		s, c := foreignReplay(pending.EventType)
-		s.history[0] = pending
-		m := reflect.ValueOf(s).MethodByName(name)
-		if !m.IsValid() {
-			t.Fatalf("%s is exempt but *execSession has no such method; delete the entry", name)
+		probe := func(mut func(s *execSession)) (*execSession, *mockCaller) {
+			s, c := foreignReplay(pending.EventType)
+			s.history[0] = pending
+			mut(s)
+			m := reflect.ValueOf(s).MethodByName(name)
+			if !m.IsValid() {
+				t.Fatalf("%s is exempt but *execSession has no such method; delete the entry", name)
+			}
+			m.Call(probeArgs(m.Type(), hostCtx()))
+			if len(c.calls) != 0 {
+				t.Errorf("%s ran a service call: %+v", name, c.calls)
+			}
+			return s, c
 		}
-		m.Call(probeArgs(m.Type(), hostCtx()))
-		if !leftReplayEarly(s) {
-			t.Errorf("%s is named in pendingResumersThatLeaveHistoryUnread but no longer leaves replay with history unread (stepCount=%d of %d, isReplay=%v): the "+
-				"behaviour cleat#4285 tracks has changed, so delete the entry", name, s.stepCount, len(s.history), s.isReplay)
+		// What is STILL left unread, on purpose: a record a defer drain stamped after the pending await (cleat#3429: the drain's own defers follow its pending await by
+		// design), and a record expanded from a compaction, whose stamp compaction does not carry and so is UNKNOWN (cleat#4285 step 3). Each must still be left
+		// unread: that is what this entry describes, and what staleCallAfterPending exempts.
+		for label, mut := range map[string]func(s *execSession){
+			"a drain-stamped later call":            func(s *execSession) { s.history[1].InDeferPhase = true },
+			"a segment-stamped later call":          func(s *execSession) { s.history[1].InDeferSegment = true },
+			"a later call expanded from compaction": func(s *execSession) { s.compactedRecords = 2 },
+		} {
+			if s, _ := probe(mut); !leftReplayEarly(s) {
+				t.Errorf("%s with %s: no longer leaves replay with history unread (stepCount=%d of %d, isReplay=%v): the exemption in staleCallAfterPending or this entry is wrong", name, label, s.stepCount, len(s.history), s.isReplay)
+			}
 		}
-		if len(c.calls) != 0 {
-			t.Errorf("%s ran a service call: %+v", name, c.calls)
+		// What is NOT left unread any more: a call the guest's BODY made after the pending await. The step refuses it, consuming nothing and staying in replay, so the
+		// call it recorded cannot run a second time (cleat#4285 step 3).
+		s, _ := probe(func(*execSession) {})
+		if s.stepCount != 0 || !s.isReplay || len(s.history) != 2 {
+			t.Errorf("%s: a call recorded after a pending await by the body was not a divergence that consumes nothing (stepCount=%d of %d, isReplay=%v)", name, s.stepCount, len(s.history), s.isReplay)
 		}
 	}
 }

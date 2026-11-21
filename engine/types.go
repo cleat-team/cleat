@@ -691,6 +691,10 @@ type execSession struct {
 	// deferPhaseBeganSuspended is whether the execution had ALREADY suspended when the guest's current drain began (SetDeferPhase(true)). A drain that began before
 	// the suspension is a cleanup that is still in progress (cleat#3429); one that began after it is a wrapper that ran its defers because the guest swallowed
 	// the suspension (cleat#4285). Meaningful only while inDeferPhase.
+	// compactedRecords is how many records at the front of history were EXPANDED from a compaction state and not read from the event rows. The drain stamps
+	// (InDeferPhase, InDeferSegment) are not carried through compaction, so a record below this index has no stamp to read: unknown, not absent (cleat#4285 step 3).
+	compactedRecords int
+
 	deferPhaseBeganSuspended bool
 	awaitRejected            bool // the last AwaitPromise ended in a rejection (cleat#3425)
 	// unflushed is every event this execution recorded that the engine did NOT write because per-step flush is off, in the order

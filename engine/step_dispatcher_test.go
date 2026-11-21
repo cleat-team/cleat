@@ -719,12 +719,23 @@ func TestAStepFindingItsOwnPendingRecordLeavesReplayAtItWithoutConsumingIt(t *te
 		t.Errorf("an answered record: result %d, ran %d, isReplay=%v stepCount=%d, want 7, 0, still replaying at 1", got, ran, s.isReplay, s.stepCount)
 	}
 
-	// 3. a pending record FOLLOWED by another record: the kept defect (cleat#4152 OverPending doc, cleat#4285). Replay is left with that record unread.
+	// 3. a pending record FOLLOWED by another record (cleat#4285). A call the guest's BODY recorded there (a side_effect is the effect of a call) is a divergence that
+	// consumes nothing: Fresh does not run, and replay is not left, so the recorded call cannot run a second time. That is the half the first version of this
+	// case pinned the other way, as the kept defect.
 	ran = 0
 	s = stepSession(nil, []EventRecord{pending, other})
+	if got := s.step(ctx, nil, pendingSpec(&ran), stepArgs{}); got&0xFF != 1 || ran != 0 || !s.isReplay || s.stepCount != 0 || len(s.history) != 2 {
+		t.Errorf("a pending record with a body call after it: result %#x ran %d isReplay=%v stepCount=%d history=%d, want a divergence, 0 runs, still replaying at 0, history unchanged",
+			got, ran, s.isReplay, s.stepCount, len(s.history))
+	}
+	//    ...and the other half, which IS still left unread, on purpose: the same record stamped by a defer drain (its own defers follow its pending await by design).
+	drained := other
+	drained.InDeferPhase = true
+	ran = 0
+	s = stepSession(nil, []EventRecord{pending, drained})
 	s.step(ctx, nil, pendingSpec(&ran), stepArgs{})
 	if ran != 1 || s.isReplay || s.stepCount >= len(s.history) {
-		t.Errorf("a pending record with a record after it: ran %d, isReplay=%v stepCount=%d of %d, want Fresh run, replay left and the later record still unread",
+		t.Errorf("a pending record with a drain's record after it: ran %d, isReplay=%v stepCount=%d of %d, want Fresh run, replay left and the later record still unread",
 			ran, s.isReplay, s.stepCount, len(s.history))
 	}
 

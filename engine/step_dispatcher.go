@@ -198,9 +198,9 @@ type stepSpec struct {
 	// (cleat#4152, W3b: await_any_child, which records an empty await per wake and answers at a later step, and re-checks its children when it finds only the empties).
 	// Where EndsWithoutFinal says such a run is COMPLETE and DecodeRun answers it, this says the call is not finished: it goes on, fresh.
 	//
-	// THE EXEMPTION THIS CARRIES, AND IT IS THE SAME DEFECT KEPT ON PURPOSE AS OverPending's (cleat#4285). The foreign record is history the call leaves UNREAD, so a call
-	// recorded after the empties runs again. The old code did exactly that and a move changes nothing; it is reported (a warning with the count) and named in
-	// a_host_call_never_leaves_replay_with_history_unread_test.go. It becomes a divergence in #4285 step 3, not before.
+	// WHAT IS LEFT UNREAD, AS FOR OverPending (cleat#4285). The foreign record is history the call leaves UNREAD. When it is a call the guest's BODY recorded after
+	// the empties, replayRun refuses it as a divergence before anything is consumed (staleCallAfterPending); what is still left unread, reported with a count, is a
+	// defer drain's record, a record expanded from a compaction and a record that is no call's effect.
 	ResumesFreshAtForeign bool
 	// ForeignFirst, for a multi-record step, answers a call whose FIRST record belongs to another call, WITHOUT consuming it and without leaving
 	// replay, instead of reporting a divergence. ok false means "not answerable", and the divergence follows as usual. It exists for one
@@ -215,11 +215,12 @@ type stepSpec struct {
 	// and Fresh records the answer at that step, so the step count moves by one for a record that was already there once. It is checked after the type
 	// and Identity, so a pending record naming ANOTHER call is a divergence, not this call's to answer over.
 	//
-	// THE EXEMPTION THIS CARRIES, AND IT IS A DEFECT KEPT ON PURPOSE (cleat#4285). The pending record is the history's last event when a run is
-	// resumed. When it is NOT, because a guest that ignored the suspend word went on to make a call, that call's record follows it, and leaving
-	// replay here leaves it unread, so the call runs again. The old code did exactly that and this keeps it, so a move changes nothing; it is
-	// reported (a warning with the count) and named in a_host_call_never_leaves_replay_with_history_unread_test.go, whose entry fails the moment the
-	// behaviour changes. It becomes a divergence when #4285's host-side guard and the Java fix have landed, and not before.
+	// WHAT IS LEFT UNREAD, AND WHAT IS NOT (cleat#4285). The pending record is the history's last event when a run is resumed. When it is NOT, the
+	// records after it are left unread when replay leaves here. A call the guest's BODY recorded there is the case that ran twice (a guest that ignored the
+	// suspend word went on to make it): step refuses that as a divergence that consumes nothing (staleCallAfterPending; the message says what to do). What is
+	// still left unread, on purpose, is what is not that: a defer drain's own records (cleat#3429), a record expanded from a compaction (whose stamps are
+	// unknown), and a record that is no call's effect. Those are reported (a warning with the count) and named in
+	// a_host_call_never_leaves_replay_with_history_unread_test.go, whose entry probes both halves.
 	//
 	// WHAT A PENDING MARKER RESTS ON, a store invariant and not a rule of this field: the two child awaits tell "pending" from "answered" by an EMPTY
 	// answer, so a finished child's answer must never be empty. coerceResultJSON stores an empty result as {} and nonEmptyChildError keeps a failure's
@@ -381,6 +382,9 @@ func (s *execSession) step(ctx context.Context, m api.Module, sp *stepSpec, args
 			}
 		}
 		if overPending {
+			if later := s.staleCallAfterPending(s.stepCount + 1); later >= 0 {
+				return s.staleCallDivergence(ctx, m, sp, s.stepCount, later, args.outPtr, args.outMaxLen)
+			}
 			s.leaveReplayAtPending(sp, len(s.history)-s.stepCount-1)
 		} else if c.unreadAtForeign > 0 {
 			s.leaveReplayAtPending(sp, c.unreadAtForeign)
@@ -426,15 +430,48 @@ func (s *execSession) leaveReplay(sp *stepSpec) {
 }
 
 // leaveReplayAtPending is leaveReplay for a step that found its OWN pending record and does not consume it (OverPending): stepCount is ON that record,
-// so the history is read to its last record when the pending one is last, which is the ordinary resume. Records after it are left unread, which is the
-// kept defect of cleat#4285 (see OverPending): it is reported and not enforced, like every disagreement of this kind, because stopping a production run
-// for it would trade a silent re-run for a loud outage.
+// so the history is read to its last record when the pending one is last, which is the ordinary resume. Records after it are left unread. When one of them
+// records a call's EFFECT (staleCallAfterPending) the step refuses before it gets here: that call would run twice (cleat#4285). What reaches here is the
+// rest: a drain's records, a record whose stamp compaction dropped, and a record that is no effect, which are reported and not enforced because stopping a
+// production run for them would trade a quiet, harmless re-read for a loud outage.
 func (s *execSession) leaveReplayAtPending(sp *stepSpec, unread int) {
 	if unread > 0 && s.engine != nil {
 		s.engine.log().WarnContext(context.Background(), "step left replay with later records unread, after its own pending record or at the end of its run: a call recorded after them will run again (cleat#4285)",
 			"workflow_id", s.workflowID, "step", sp.Name, "at", s.stepCount, "unread", unread)
 	}
 	s.exitReplay()
+}
+
+// staleCallAfterPending returns the index of the first record at or after `from` that a call made by the guest's BODY left, after a pending await the guest had
+// been told to stop at, or -1. Such a record means the guest ignored a suspension (cleat#4285): replaying PAST it would leave it unread and run the call again.
+//
+// A record is one only if ALL of these hold, and each exemption is a way a healthy history reaches this shape:
+//   - it is the effect of a call (isStoppableEvent, the engine's own list): an admin audit row or an update delivery can sit after a pending await in a
+//     healthy history, and re-reading them runs nothing twice;
+//   - it carries neither drain stamp (InDeferPhase, InDeferSegment): a defer body that awaits a child during the guest's own drain records its later
+//     defers after the pending await by design (cleat#3429), the same exemption the host applies when it refuses (guestDrainIsExempt);
+//   - it was read from an event row and not expanded from a compaction: compaction does not carry the stamps (compactedRecords), so a record below that index
+//     has an UNKNOWN stamp, and treating unknown as absent would fail a healthy workflow.
+func (s *execSession) staleCallAfterPending(from int) int {
+	for i := max(from, s.compactedRecords); i < len(s.history); i++ {
+		rec := s.history[i]
+		if rec.InDeferPhase || rec.InDeferSegment || !isStoppableEvent(rec) {
+			continue
+		}
+		return i
+	}
+	return -1
+}
+
+// staleCallDivergence is the divergence for a pending await followed by a call it did not stop the guest from making (cleat#4285). It consumes nothing, and its
+// text names the cause and the way out, because the operator who reads it did nothing wrong and needs to know what to do.
+func (s *execSession) staleCallDivergence(ctx context.Context, m api.Module, sp *stepSpec, pending, later int, outPtr, outMaxLen uint32) int64 {
+	p, l := &s.history[pending], &s.history[later]
+	return sp.divergenceAnswer(s.reportReplayDivergence(ctx, m, fmt.Sprintf(
+		"replay divergence at step %d: %s found its own pending %s record followed by a %s recorded at step %d. "+
+			"This history was written by a guest that ignored a child-await suspension before 0.6.0 (cleat#4285); replaying it would run that call a second time. "+
+			"Terminate or reset the workflow.",
+		p.Step, sp.Name, p.EventType, l.EventType, l.Step), outPtr, outMaxLen))
 }
 
 // checkRecorded compares what a step's Fresh recorded with what its spec declared.

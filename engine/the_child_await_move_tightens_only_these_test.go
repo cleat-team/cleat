@@ -84,9 +84,48 @@ func TestTheChildAwaitMoveTightensOnlyThese(t *testing.T) {
 			outcomes: map[string]ChildOutcome{"c1": done("R1"), "c2": done("R2")},
 			want:     childAwaitWant{errCode: 1, resultHas: `run IDs ["c1","c2"], recorded ["c9"]`, step: 0, replaying: true}},
 	}
+	// cleat#4285 step 3: a pending child await followed by a call the guest's BODY recorded after it is a divergence that consumes nothing. Each of the three child
+	// awaits has the same pair: the OLD row (the old code left that record unread, re-checked the child and went on, so the recorded call would run again; fails on
+	// it) and the exemptions, which hold on BOTH codes because they are the records that are legitimately left unread.
+	for _, c := range []struct {
+		label   string
+		call    childAwaitCall
+		ids     []string
+		pending EventRecord
+		out     map[string]ChildOutcome
+		then    childAwaitWant // the answer when the later record is left unread
+	}{
+		{"await_child", callOfAwaitChild, []string{"c1"}, EventRecord{EventType: EventTypeAwaitChild, RunID: "c1"}, map[string]ChildOutcome{"c1": done("R")},
+			childAwaitWant{result: "R", recs: []childAwaitRec{{typ: EventTypeAwaitChild, resp: "R", runID: "c1"}}, step: 1, gets: 1}},
+		{"await_all", callOfAwaitAllChildren, []string{"c1", "c2"}, allRecForTightening(two, ""), map[string]ChildOutcome{"c1": done("R1"), "c2": done("R2")},
+			childAwaitWant{result: `[{"run_id":"c1","result":"R1"},{"run_id":"c2","result":"R2"}]`, recs: []childAwaitRec{{typ: EventTypeAwaitAllChildren, resp: `[{"run_id":"c1","result":"R1"},{"run_id":"c2","result":"R2"}]`, req: two}}, step: 1, gets: 2, getOrder: []string{"c1", "c2"}}},
+		{"await_any", callOfAwaitAnyChild, []string{"c1", "c2"}, anyRecForTightening(two, ""), map[string]ChildOutcome{"c1": done("R1")},
+			childAwaitWant{result: `{"run_id":"c1","result":"R1"}`, recs: []childAwaitRec{{typ: EventTypeAwaitAnyChild, resp: `{"run_id":"c1","result":"R1"}`, req: two}}, step: 2, gets: 1, getOrder: []string{"c1"}}},
+	} {
+		later := foreign // a recorded side_effect: the effect of a call the guest's body made
+		rows = append(rows,
+			childAwaitRow{name: "OLD left the record unread, re-checked the child and went on, so the recorded call would run again: " + c.label + " replay of its pending record FOLLOWED by a call the body recorded is a divergence that consumes NOTHING (cleat#4285)",
+				call: c.call, ids: c.ids, hist: []EventRecord{c.pending, later}, outcomes: c.out,
+				want: childAwaitWant{errCode: 1, resultHas: "ignored a child-await suspension before 0.6.0 (cleat#4285)", step: 0, replaying: true}},
+			childAwaitRow{name: "UNCHANGED (holds on both): " + c.label + " replay of its pending record followed by a call a defer DRAIN recorded (InDeferPhase) leaves that record unread: the drain's own defers follow its pending await by design (cleat#3429)",
+				call: c.call, ids: c.ids, hist: []EventRecord{c.pending, stamped(later, true, false)}, outcomes: c.out, want: c.then},
+			childAwaitRow{name: "UNCHANGED (holds on both): " + c.label + " replay of its pending record followed by a call a defer SEGMENT recorded (InDeferSegment) leaves that record unread",
+				call: c.call, ids: c.ids, hist: []EventRecord{c.pending, stamped(later, false, true)}, outcomes: c.out, want: c.then},
+			childAwaitRow{name: "UNCHANGED (holds on both): " + c.label + " replay of a pending record followed by a call that was EXPANDED FROM A COMPACTION leaves that record unread: compaction does not carry the stamps, so an unstamped record there is unknown and not stale",
+				call: c.call, ids: c.ids, hist: []EventRecord{c.pending, later}, outcomes: c.out, mod: func(s *execSession) { s.compactedRecords = 2 }, want: c.then},
+			childAwaitRow{name: "UNCHANGED (holds on both): " + c.label + " replay of its pending record followed by a record that is NOT a call's effect (an admin audit row, a delivery) leaves that record unread: re-reading it runs nothing twice",
+				call: c.call, ids: c.ids, hist: []EventRecord{c.pending, {EventType: EventTypeSignalReceived, Service: SignalEventService, Op: "deliver"}}, outcomes: c.out, want: c.then},
+		)
+	}
 	for _, r := range rows {
 		t.Run(r.name, func(t *testing.T) { runChildAwaitRow(t, r) })
 	}
+}
+
+// stamped returns rec marked as a defer drain's (inPhase) or a defer segment's (inSegment) record.
+func stamped(rec EventRecord, inPhase, inSegment bool) EventRecord {
+	rec.InDeferPhase, rec.InDeferSegment = inPhase, inSegment
+	return rec
 }
 
 func allRecForTightening(req, resp string) EventRecord {

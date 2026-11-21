@@ -88,6 +88,13 @@ read:
 	if !final && foreign >= 0 && !sp.EndsWithoutFinal && !sp.ResumesFreshAtForeign {
 		return sp.divergenceAnswer(s.replayDivergenceAt(ctx, m, &s.history[foreign], sp.Want, args.outPtr, args.outMaxLen)), false
 	}
+	if !final && foreign >= 0 && sp.ResumesFreshAtForeign {
+		// The empties are followed by another call's record, which the step would leave UNREAD: if that record is a call the guest's body made after being told
+		// to stop, replaying past it runs it again (cleat#4285). Nothing is consumed, so the divergence leaves the history as it found it.
+		if later := s.staleCallAfterPending(foreign); later >= 0 {
+			return s.staleCallDivergence(ctx, m, sp, s.stepCount, later, args.outPtr, args.outMaxLen), false
+		}
+	}
 	for k := range run {
 		rec := run[k]
 		if !s.advanceReplayStep(ctx, &rec) {
