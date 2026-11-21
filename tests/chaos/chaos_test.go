@@ -100,6 +100,8 @@ type outcome struct {
 	Promises               map[string][]string // promise name -> the status of every workflow_promises row under it, read after the run
 	Signals                map[string]int      // signal name -> the workflow_signals rows the run received under it, read after the run (cleat#4241)
 	Schedules              map[string]int      // cron op name -> the workflow_schedules rows of the run's cron workflow, read after the run (cleat#4241)
+	ConnAtExit             string              // pg_stat_activity as it was when the worker exited early (see connSnapshot); "" when no worker did
+	WorkerExit             string              // why the FIRST worker was gone before the fault's boundary was reached; "" when it was not (cleat#4291)
 	DriveNote              string              // why the scenario's Drive hook did not do what it was for; "" when it did, or was not asked (a run that did not finish)
 	Log                    string
 }
@@ -154,6 +156,9 @@ func execute(t *testing.T, env *env, sc scenario, f *fault) outcome {
 	queue, run := "chaos-q-"+suffix, "chaos-run-"+suffix
 	deploy(t, env.db, env.wasm, queue)
 	defer forgetSchedules(env.db, run)
+	// What the database holds BEFORE this case starts a worker: a count that grows from case to case is a leak, and one that does not is not.
+	_, before, _ := connSnapshot(env.db)
+	t.Logf("%s (before the case)", before)
 
 	first := startWorker(t, env.bin, queue, env.svc.srv.URL, flagsOf(f)...)
 	startRun(t, env.db, run, scriptInput(run, sc), queue)
@@ -173,6 +178,8 @@ func execute(t *testing.T, env *env, sc scenario, f *fault) outcome {
 		select {
 		case <-g.arrived:
 			out.Applied = true
+			_, atBoundary, _ := connSnapshot(env.db)
+			t.Logf("%s (at the boundary, the first worker alive)", atBoundary)
 			out.Events = eventCount(env.db, run)
 			if f.Then == "dbwrite" {
 				// The event write is refused while the call proceeds: the worker performs the effect, cannot record it, and (if it does not stop)
@@ -198,6 +205,16 @@ func execute(t *testing.T, env *env, sc scenario, f *fault) outcome {
 				wantTerminal = func(s string) bool { return s == "terminated" || s == "failed" || s == "done" || s == "completed" }
 			}
 			second = startWorker(t, env.bin, queue, env.svc.srv.URL, flagsOf(f)...)
+		case <-first.exited:
+			// The worker is gone and the harness did not kill it: workers run until they are killed, so it refused to start or died, and the
+			// boundary can never be reached. Say so now. Waiting out runBudget twice (240 s a case, 16 minutes for four in a row) for a worker
+			// that exited in a fraction of a second is what hid this behind "the run did not reach the boundary" (cleat#4291).
+			out.WorkerExit = first.exitReason()
+			_, out.ConnAtExit, _ = connSnapshot(env.db)
+			out.Status = "WORKER-EXITED"
+			out.Requests = env.svc.requestsOf(run)
+			out.Log = first.output()
+			return out
 		case <-time.After(runBudget):
 			first.kill() // the run finished or stalled without ever reaching the boundary
 		}
@@ -432,6 +449,11 @@ func newEnv(t *testing.T) *env {
 func runFault(t *testing.T, e *env, sc scenario, g goldenRecord, f *fault, b request, verify func(scenario, goldenRecord, *fault, request, outcome) []string, repro string) {
 	t.Helper()
 	o := execute(t, e, sc, f)
+	if !o.Applied && o.WorkerExit != "" {
+		t.Errorf("scenario=%s fault=%s\n  UNMEASURED: the worker exited before the boundary was reached (%s). This is a failure of the check, not a finding about the engine, and not a boundary the script cannot reach: no run began.\n  %s\n  reproduce: %s\n  --- worker log (tail) ---\n%s",
+			sc.Name, f, o.WorkerExit, o.ConnAtExit, repro, tail(o.Log, 2500))
+		return
+	}
 	viol := verify(sc, g, f, b, o)
 	t.Logf("applied=%v events-at-kill=%d events-after-hold=%d status=%s requests=%s err=%.160s", o.Applied, o.Events, o.EventsAfterHold, o.Status, seqOf(o.Requests), o.ErrMsg)
 	if len(viol) == 0 {
@@ -666,6 +688,46 @@ func TestChaosSigkillThenSignalThenReclaimAtEveryBoundary(t *testing.T) {
 
 func TestChaosSigkillThenTerminateAtEveryBoundary(t *testing.T) {
 	runBoundaries(t, "terminate", verifyTerminate)
+}
+
+// connSnapshot says what is holding PostgreSQL's connection slots right now, in one line: the total against max_connections, then the biggest groups by
+// database, application_name and state. It exists because a worker that refuses to start for want of a slot (53300) tells you nothing about WHO holds
+// them (cleat#4291, after the 2026-11-21 nightly seeded step). It excludes its own connection, so a quiet database reads 0 and a database with a live
+// worker reads the worker's pools (about 25), which is what the tests below rely on to know it is measuring. It returns the total as a number too, and an
+// error, in which case the line says UNMEASURED and carries the error: a query that failed is not a count of zero.
+func connSnapshot(db *sql.DB) (int, string, error) {
+	// ONE place says "I could not look": every failure below goes through it, so a probe that reads 0 on error cannot hide in one branch while a test
+	// exercises another (the first version had four copies, and a mutant in the second survived a test that failed at the first).
+	unmeasured := func(err error) (int, string, error) {
+		return 0, "UNMEASURED: pg connections: " + err.Error(), err
+	}
+	var max int
+	if err := db.QueryRow(`SHOW max_connections`).Scan(&max); err != nil {
+		return unmeasured(err)
+	}
+	rows, err := db.Query(`SELECT coalesce(datname, ''), coalesce(application_name, ''), coalesce(state, ''), count(*) FROM pg_stat_activity
+		WHERE pid <> pg_backend_pid() AND backend_type = 'client backend' GROUP BY 1, 2, 3 ORDER BY 4 DESC, 1, 2, 3`)
+	if err != nil {
+		return unmeasured(err)
+	}
+	defer rows.Close()
+	total := 0
+	var groups []string
+	for rows.Next() {
+		var d, a, st string
+		var n int
+		if err := rows.Scan(&d, &a, &st, &n); err != nil {
+			return unmeasured(err)
+		}
+		total += n
+		if len(groups) < 6 {
+			groups = append(groups, fmt.Sprintf("%s/%q/%s=%d", d, a, st, n))
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return unmeasured(err)
+	}
+	return total, fmt.Sprintf("pg connections: %d of max_connections %d (this session excluded); biggest groups database/application_name/state: %s", total, max, strings.Join(groups, ", ")), nil
 }
 
 func tail(s string, n int) string {

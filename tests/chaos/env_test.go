@@ -24,6 +24,7 @@ package chaos
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -248,6 +249,10 @@ type worker struct {
 	cmd *exec.Cmd
 	log *strings.Builder
 	mu  sync.Mutex
+	// exited is closed when the process has exited, by anyone: the harness's kill or the worker's own refusal to start. exitErr is what Wait said,
+	// valid once exited is closed. A worker the harness did not kill that has exited has failed (cleat#4291): workers run until they are killed.
+	exited  chan struct{}
+	exitErr error
 }
 
 type syncWriter struct {
@@ -287,6 +292,11 @@ func startWorker(t *testing.T, bin, taskQueue, svcURL string, extra ...string) *
 		t.Fatalf("starting the worker: %v", err)
 	}
 	w.cmd = cmd
+	w.exited = make(chan struct{})
+	go func() {
+		w.exitErr = cmd.Wait()
+		close(w.exited)
+	}()
 	t.Cleanup(func() { w.kill() })
 	return w
 }
@@ -296,7 +306,45 @@ func (w *worker) kill() {
 		return
 	}
 	_ = syscall.Kill(-w.cmd.Process.Pid, syscall.SIGKILL)
-	_, _ = w.cmd.Process.Wait()
+	// startWorker's goroutine is the one Wait; waiting here too would be a second Wait on the same process. A group kill that leaves a descendant
+	// holding the output pipe can keep Wait from returning, so this is bounded and does not hang a test on it.
+	select {
+	case <-w.exited:
+	case <-time.After(10 * time.Second):
+	}
+}
+
+// exitReason says why the worker is gone, in the words a reader needs: the exit status and the last ERROR line the worker logged, which for a worker
+// that refused to start is the whole story ("refusing to start: ... pq: remaining connection slots are reserved ... (53300)"). Call it only once exited
+// is closed.
+func (w *worker) exitReason() string {
+	status := "exit status 0"
+	if w.exitErr != nil {
+		status = w.exitErr.Error()
+	}
+	last := ""
+	for _, line := range strings.Split(w.output(), "\n") {
+		if strings.Contains(line, `"level":"ERROR"`) {
+			last = line
+		}
+	}
+	if last == "" {
+		return status + "; it logged no ERROR line"
+	}
+	var rec struct {
+		Msg   string `json:"msg"`
+		Error string `json:"error"`
+	}
+	if json.Unmarshal([]byte(last), &rec) == nil && rec.Msg != "" {
+		last = rec.Msg
+		if rec.Error != "" {
+			last += ": " + rec.Error
+		}
+	}
+	if len(last) > 600 {
+		last = last[:600] + "..."
+	}
+	return status + "; last ERROR: " + last
 }
 
 func (w *worker) output() string {
