@@ -63,6 +63,27 @@ const (
 	roleFinal
 )
 
+// resultLayout says how a step's guest decodes the int64 the host returns, which a divergence has to be packed into (cleat#4152). The layouts are
+// ABI.md's, and a spec that does not say which is refused at registration: the dispatcher's one divergence answer is the same words in every layout and
+// the SAME BITS in none, so a spec that forgot would be answered in whichever layout the reporter happens to write, which a guest on another layout
+// reads as a garbage call-error code and a one-byte message (found building the heartbeat call's move, which is the first durable-call-layout spec).
+type resultLayout int
+
+const (
+	// layoutUnset is the zero value, and is refused by validate(): there is no default a spec may fall into.
+	layoutUnset resultLayout = iota
+	// layoutSimple: the error code in the low bits and ONE length or value in bits 32-63. Every call whose ABI row reads "upper field 32-63", a call
+	// that returns only an error code, and a call that has no output buffer (its divergence is the bare 1).
+	layoutSimple
+	// layoutDurableCall: responseLen in bits 40-63, callErrorCode in bits 8-39, errCode in bits 0-7 (cleat_call, cleat_call_retry,
+	// cleat_call_heartbeat, plugin_call, plugin_call_streaming, cleat_wait_for_event). A divergence carries callErrorUnknown.
+	layoutDurableCall
+	// layoutAwaitSignals: sigNameLen 48-63, payloadLen 32-47, timedOut 16-31, errCode 0-15 (cleat_await_signals). Its payloadLen is 16 bits and the
+	// reporter's length is not: a divergence message goes to the payload buffer and its length is CLAMPED to 65535, so a long message can never spill
+	// into the name field. Today's messages are a few hundred bytes, so the clamp is a bound on a layout and not a thing the call does.
+	layoutAwaitSignals
+)
+
 // stepArgs is the per-call data a spec needs. A spec is a package-level value and holds no closure over the call, so a step costs no
 // allocation beyond this struct (section 9, risk 5, of the design); two strings cover the promise calls, and G1b adds the third and fourth that
 // signal_workflow and durable_send (three) and fetch (four) need.
@@ -129,6 +150,9 @@ type stepSpec struct {
 	// segment over a killed run, because an ordinary segment's body has always been allowed to register a defer past its frontier,
 	// cleat#4079): the dispatcher must not newly refuse what the call did not. Not allowed on a Pure step, which is never refused.
 	Refuse func(s *execSession) bool
+	// Result is the layout the call's guest decodes (see resultLayout). REQUIRED: validate() refuses layoutUnset, the way it refuses a spec with
+	// neither Identity nor NoIdentity, so a call added later cannot forget to say.
+	Result resultLayout
 	// StaysInReplayAtFrontier is for a lookup that answers a question about the record at the replay frontier without ending replay: it does
 	// not call leaveReplay there, still applies the refusal, and calls Fresh with replay still on, so the step that follows does the leaving
 	// (SideEffectRecorded asks, then SideEffect decides). Only for a step that records nothing and is not Pure.
@@ -227,6 +251,10 @@ func (sp *stepSpec) validate() error {
 	switch {
 	case sp.Name == "":
 		return fmt.Errorf("a step spec has no name")
+	case sp.Result == layoutUnset:
+		return fmt.Errorf("step spec %q declares no result layout (Result is required): a divergence has to be packed in the layout its guest decodes, and there is no default", sp.Name)
+	case sp.Result < layoutSimple || sp.Result > layoutAwaitSignals:
+		return fmt.Errorf("step spec %q declares a result layout that does not exist (Result is %d): a divergence has to be packed in the layout its guest decodes", sp.Name, sp.Result)
 	case sp.Want == "":
 		return fmt.Errorf("step spec %q has no Want: it names no event to consume on replay", sp.Name)
 	case sp.Fresh == nil:
@@ -255,6 +283,22 @@ func (sp *stepSpec) validate() error {
 		return fmt.Errorf("step spec %q is Pure and declares it records events: a Pure step is not refused in a segment, so it must record nothing", sp.Name)
 	}
 	return nil
+}
+
+// divergenceAnswer puts the reporter's answer into the layout the spec's guest decodes. The reporter's is the simple layout: error code 1 in the low
+// bits and the message length in bits 32-63. A simple spec takes it as it is; the others re-pack the same two numbers.
+func (sp *stepSpec) divergenceAnswer(res int64) int64 {
+	written := uint64(res) >> 32
+	switch sp.Result {
+	case layoutDurableCall:
+		return packDurableCallResult(int(written), callErrorUnknown, byte(res))
+	case layoutAwaitSignals:
+		if written > 0xFFFF {
+			written = 0xFFFF // payloadLen is 16 bits; a longer length would spill into sigNameLen
+		}
+		return int64(uint64(byte(res)) | written<<32)
+	}
+	return res
 }
 
 // neverRefuse is a Refuse for a step that is NEVER refused: not in a segment's body, not after a worker shutdown and not after an event that could
@@ -297,11 +341,11 @@ func (s *execSession) step(ctx context.Context, m api.Module, sp *stepSpec, args
 			rec := s.history[s.stepCount]
 			if rec.EventType != sp.Want {
 				// Not consumed: replayDivergence leaves the record for the call it belongs to (cleat#4157).
-				return s.replayDivergence(ctx, m, sp.Want, args.outPtr, args.outMaxLen)
+				return sp.divergenceAnswer(s.replayDivergence(ctx, m, sp.Want, args.outPtr, args.outMaxLen))
 			}
 			if sp.Identity != nil {
 				if why := sp.Identity(args, &rec); why != "" {
-					return s.replayIdentityDivergence(ctx, m, sp.Name, why, args.outPtr, args.outMaxLen)
+					return sp.divergenceAnswer(s.replayIdentityDivergence(ctx, m, sp.Name, why, args.outPtr, args.outMaxLen))
 				}
 			}
 			if sp.OverPending != nil && sp.OverPending(args, &rec) {

@@ -63,7 +63,7 @@ func identityDivergenceMessage(got *EventRecord, step string, why string) string
 // reportReplayDivergence is the one place a divergence is counted and written to the guest: the failure metric, then error code 1 in a simple
 // result with the message in the call's own output buffer when it has one.
 func (s *execSession) reportReplayDivergence(ctx context.Context, m api.Module, msg string, outPtr, outMaxLen uint32) int64 {
-	if s.engine.Metrics != nil {
+	if s.engine != nil && s.engine.Metrics != nil {
 		s.engine.Metrics.RecordReplayFailure(ctx)
 	}
 	var written uint32

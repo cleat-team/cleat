@@ -27,7 +27,7 @@ const fakeEvent EventType = "fake_step_event"
 // fakeSpec builds a one-event spec whose Fresh counts how often it ran.
 func fakeSpec(effect stepEffect, shape recordShape, ran *int32, record func(c *stepCtx)) *stepSpec {
 	return &stepSpec{
-		Name: "fake", Effect: effect, Records: shape, Want: fakeEvent, NoIdentity: "a fake with nothing to compare",
+		Name: "fake", Result: layoutSimple, Effect: effect, Records: shape, Want: fakeEvent, NoIdentity: "a fake with nothing to compare",
 		Decode: func(*stepCtx, *EventRecord) int64 { return 7 },
 		Fresh: func(c *stepCtx) int64 {
 			atomic.AddInt32(ran, 1)
@@ -193,12 +193,12 @@ func TestEverySpecIsRegisteredAndNoPureSpecRecords(t *testing.T) {
 	}
 	// The control: validate refuses what it says it refuses, so the loop above is not vacuous.
 	for name, bad := range map[string]stepSpec{
-		"no name":                         {NoIdentity: "x", Want: fakeEvent, Decode: func(*stepCtx, *EventRecord) int64 { return 0 }, Fresh: func(*stepCtx) int64 { return 0 }},
-		"no Want":                         {NoIdentity: "x", Name: "x", Decode: func(*stepCtx, *EventRecord) int64 { return 0 }, Fresh: func(*stepCtx) int64 { return 0 }},
-		"no Decode":                       {NoIdentity: "x", Name: "x", Want: fakeEvent, Fresh: func(*stepCtx) int64 { return 0 }},
-		"both Identity and NoIdentity":    {Name: "x", Want: fakeEvent, Identity: func(stepArgs, *EventRecord) string { return "" }, NoIdentity: "x", Decode: func(*stepCtx, *EventRecord) int64 { return 0 }, Fresh: func(*stepCtx) int64 { return 0 }},
-		"neither Identity nor NoIdentity": {Name: "x", Want: fakeEvent, Decode: func(*stepCtx, *EventRecord) int64 { return 0 }, Fresh: func(*stepCtx) int64 { return 0 }},
-		"Pure but records one":            {NoIdentity: "x", Name: "x", Want: fakeEvent, Effect: effectPure, Records: recordsOne, Decode: func(*stepCtx, *EventRecord) int64 { return 0 }, Fresh: func(*stepCtx) int64 { return 0 }},
+		"no name":                         {Result: layoutSimple, NoIdentity: "x", Want: fakeEvent, Decode: func(*stepCtx, *EventRecord) int64 { return 0 }, Fresh: func(*stepCtx) int64 { return 0 }},
+		"no Want":                         {Result: layoutSimple, NoIdentity: "x", Name: "x", Decode: func(*stepCtx, *EventRecord) int64 { return 0 }, Fresh: func(*stepCtx) int64 { return 0 }},
+		"no Decode":                       {Result: layoutSimple, NoIdentity: "x", Name: "x", Want: fakeEvent, Fresh: func(*stepCtx) int64 { return 0 }},
+		"both Identity and NoIdentity":    {Result: layoutSimple, Name: "x", Want: fakeEvent, Identity: func(stepArgs, *EventRecord) string { return "" }, NoIdentity: "x", Decode: func(*stepCtx, *EventRecord) int64 { return 0 }, Fresh: func(*stepCtx) int64 { return 0 }},
+		"neither Identity nor NoIdentity": {Result: layoutSimple, Name: "x", Want: fakeEvent, Decode: func(*stepCtx, *EventRecord) int64 { return 0 }, Fresh: func(*stepCtx) int64 { return 0 }},
+		"Pure but records one":            {Result: layoutSimple, NoIdentity: "x", Name: "x", Want: fakeEvent, Effect: effectPure, Records: recordsOne, Decode: func(*stepCtx, *EventRecord) int64 { return 0 }, Fresh: func(*stepCtx) int64 { return 0 }},
 	} {
 		bad := bad
 		if bad.validate() == nil {
@@ -215,15 +215,15 @@ func TestEverySpecIsRegisteredAndNoPureSpecRecords(t *testing.T) {
 		want string
 	}{
 		"Refuse on a Pure step": {
-			stepSpec{NoIdentity: "x", Name: "x", Want: fakeEvent, Effect: effectPure, Records: recordsNone, Refuse: func(*execSession) bool { return true }, Decode: noop, Fresh: nofresh},
+			stepSpec{Result: layoutSimple, NoIdentity: "x", Name: "x", Want: fakeEvent, Effect: effectPure, Records: recordsNone, Refuse: func(*execSession) bool { return true }, Decode: noop, Fresh: nofresh},
 			"is Pure and has a Refuse",
 		},
 		"stays in replay but records one": {
-			stepSpec{NoIdentity: "x", Name: "x", Want: fakeEvent, Effect: effectEffect, Records: recordsOne, StaysInReplayAtFrontier: true, Decode: noop, Fresh: nofresh},
+			stepSpec{Result: layoutSimple, NoIdentity: "x", Name: "x", Want: fakeEvent, Effect: effectEffect, Records: recordsOne, StaysInReplayAtFrontier: true, Decode: noop, Fresh: nofresh},
 			"stays in replay at the frontier",
 		},
 		"stays in replay but is Pure": {
-			stepSpec{NoIdentity: "x", Name: "x", Want: fakeEvent, Effect: effectPure, Records: recordsNone, StaysInReplayAtFrontier: true, Decode: noop, Fresh: nofresh},
+			stepSpec{Result: layoutSimple, NoIdentity: "x", Name: "x", Want: fakeEvent, Effect: effectPure, Records: recordsNone, StaysInReplayAtFrontier: true, Decode: noop, Fresh: nofresh},
 			"stays in replay at the frontier",
 		},
 	} {
@@ -237,8 +237,8 @@ func TestEverySpecIsRegisteredAndNoPureSpecRecords(t *testing.T) {
 	}
 	// CONTROL for the controls: the same two valid shapes, with the hook the rule is about removed, validate.
 	for name, good := range map[string]stepSpec{
-		"a Pure step with no Refuse":                     {NoIdentity: "x", Name: "x", Want: fakeEvent, Effect: effectPure, Records: recordsNone, Decode: noop, Fresh: nofresh},
-		"a non-Pure recording-nothing lookup that stays": {NoIdentity: "x", Name: "x", Want: fakeEvent, Effect: effectEffect, Records: recordsNone, StaysInReplayAtFrontier: true, Decode: noop, Fresh: nofresh},
+		"a Pure step with no Refuse":                     {Result: layoutSimple, NoIdentity: "x", Name: "x", Want: fakeEvent, Effect: effectPure, Records: recordsNone, Decode: noop, Fresh: nofresh},
+		"a non-Pure recording-nothing lookup that stays": {Result: layoutSimple, NoIdentity: "x", Name: "x", Want: fakeEvent, Effect: effectEffect, Records: recordsNone, StaysInReplayAtFrontier: true, Decode: noop, Fresh: nofresh},
 	} {
 		good := good
 		if err := good.validate(); err != nil {
@@ -411,7 +411,7 @@ func TestASpecIsRegisteredOnlyByAnInitThatCallsRegisterStepSpec(t *testing.T) {
 // spec rejected for the wrong reason is seen), the same spec twice, and two specs that share a name; and accepts a valid one in order.
 func TestRegisterStepSpecRejectsAMalformedOrRepeatedSpecAndAcceptsAValidOne(t *testing.T) {
 	good := func(name string) *stepSpec {
-		return &stepSpec{Name: name, NoIdentity: "x", Want: fakeEvent, Effect: effectEffect, Records: recordsOne, Decode: func(*stepCtx, *EventRecord) int64 { return 0 }, Fresh: func(*stepCtx) int64 { return 0 }}
+		return &stepSpec{Name: name, Result: layoutSimple, NoIdentity: "x", Want: fakeEvent, Effect: effectEffect, Records: recordsOne, Decode: func(*stepCtx, *EventRecord) int64 { return 0 }, Fresh: func(*stepCtx) int64 { return 0 }}
 	}
 	panics := func(f func()) (msg string) {
 		defer func() {

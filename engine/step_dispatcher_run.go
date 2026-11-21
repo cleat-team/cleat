@@ -73,20 +73,20 @@ read:
 		}
 	}
 	if len(run) == 0 {
-		return s.replayDivergenceAt(ctx, m, &s.history[s.stepCount], sp.Want, args.outPtr, args.outMaxLen), false
+		return sp.divergenceAnswer(s.replayDivergenceAt(ctx, m, &s.history[s.stepCount], sp.Want, args.outPtr, args.outMaxLen)), false
 	}
 	if sp.Identity != nil {
 		for k := range run {
 			if why := sp.Identity(args, &run[k]); why != "" {
-				return s.replayIdentityDivergenceAt(ctx, m, &run[k], sp.Name, why, args.outPtr, args.outMaxLen), false
+				return sp.divergenceAnswer(s.replayIdentityDivergenceAt(ctx, m, &run[k], sp.Name, why, args.outPtr, args.outMaxLen)), false
 			}
 		}
 	}
 	if unknown >= 0 {
-		return s.replayDivergenceAt(ctx, m, &s.history[unknown], sp.Want, args.outPtr, args.outMaxLen), false
+		return sp.divergenceAnswer(s.replayDivergenceAt(ctx, m, &s.history[unknown], sp.Want, args.outPtr, args.outMaxLen)), false
 	}
 	if !final && foreign >= 0 && !sp.EndsWithoutFinal {
-		return s.replayDivergenceAt(ctx, m, &s.history[foreign], sp.Want, args.outPtr, args.outMaxLen), false
+		return sp.divergenceAnswer(s.replayDivergenceAt(ctx, m, &s.history[foreign], sp.Want, args.outPtr, args.outMaxLen)), false
 	}
 	for k := range run {
 		rec := run[k]

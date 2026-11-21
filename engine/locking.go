@@ -38,6 +38,7 @@ func lockIdentity(a stepArgs, rec *EventRecord) string {
 // segment body took the lock when the refusal lived only in the non-replay branch).
 var acquireLockStep = stepSpec{
 	Name:     "acquire_lock",
+	Result:   layoutSimple,
 	Effect:   effectEffect,
 	Records:  recordsOne,
 	Want:     EventTypeAcquireLock,
@@ -121,6 +122,7 @@ func init() { registerStepSpec(&acquireLockStep) }
 // declares it, where it used to be an entry in a list of exemptions. Whether a segment's body should be able to release is a separate decision.
 var releaseLockStep = stepSpec{
 	Name:     "release_lock",
+	Result:   layoutSimple,
 	Effect:   effectEffect,
 	Refuse:   neverRefuse,
 	Records:  recordsOne,
