@@ -41,12 +41,13 @@ const continueAsNewNoIdentity = "the run continues with the RECORDED input on a 
 // the end of this execution, not a wait, so its registered defers run (suspendedForContinueAsNew). It refuses like every call that starts new work (stopBeforeNewWork: a
 // defer segment must not record a continue_as_new for a workflow being terminated, cleat#4159) and answers the stop word after a suspension, as the old guard did.
 var continueAsNewStep = stepSpec{
-	Name:       "continue_as_new",
-	Result:     layoutSimple,
-	Effect:     effectEffect,
-	Records:    recordsOne,
-	Want:       EventTypeContinueAsNew,
-	NoIdentity: continueAsNewNoIdentity,
+	Name:               "continue_as_new",
+	Result:             layoutSimple,
+	Effect:             effectEffect,
+	Records:            recordsOne,
+	Want:               EventTypeContinueAsNew,
+	NoIdentity:         continueAsNewNoIdentity,
+	NoDivergenceDetail: "its old message was the shared one: the step and both event types; " + divergenceSweepNote,
 	Decode: func(c *stepCtx, rec *EventRecord) int64 {
 		c.s.suspendErr = &SuspendError{Reason: "continue_as_new", NewInput: rec.NewInput}
 		return 0
@@ -61,12 +62,13 @@ var continueAsNewStep = stepSpec{
 
 // continueAsNewVersionedStep is the same call carrying a version (0 keeps the current one). The version is recorded and read back with the input.
 var continueAsNewVersionedStep = stepSpec{
-	Name:       "continue_as_new_versioned",
-	Result:     layoutSimple,
-	Effect:     effectEffect,
-	Records:    recordsOne,
-	Want:       EventTypeContinueAsNew,
-	NoIdentity: continueAsNewNoIdentity,
+	Name:               "continue_as_new_versioned",
+	Result:             layoutSimple,
+	Effect:             effectEffect,
+	Records:            recordsOne,
+	Want:               EventTypeContinueAsNew,
+	NoIdentity:         continueAsNewNoIdentity,
+	NoDivergenceDetail: "its old message was the shared one: the step and both event types; " + divergenceSweepNote,
 	Decode: func(c *stepCtx, rec *EventRecord) int64 {
 		c.s.suspendErr = &SuspendError{Reason: "continue_as_new", NewInput: rec.NewInput, NewVersion: rec.NewVersion}
 		return 0
@@ -125,15 +127,16 @@ func (s *execSession) RegisterUpdateHandler(ctx context.Context, m api.Module, n
 // could always register a handler, and a move does not newly refuse what the call did not. After a suspension it answers the ordinary error code and registers nothing
 // (cleat#4285; it is not a stop site, so its decoders do not know the stop word). It has no identity for the reason below, which is a decision.
 var registerUpdateHandlerStep = stepSpec{
-	Name:         "register_update_handler",
-	Result:       layoutSimple,
-	Effect:       effectEffect,
-	Refuse:       neverRefuse,
-	Records:      recordsOne,
-	Want:         EventTypeUpdateHandler,
-	NoIdentity:   "the old code consumed any update_handler record at the step without comparing the name; comparing it would fail a workflow in flight across a deploy that renamed a handler, which is a resumable history turned into a divergence, and is a separate ruling (cleat#4152 W1)",
-	AfterSuspend: func(*stepCtx) int64 { return 1 },
-	Decode:       func(*stepCtx, *EventRecord) int64 { return 0 },
+	Name:               "register_update_handler",
+	Result:             layoutSimple,
+	Effect:             effectEffect,
+	Refuse:             neverRefuse,
+	Records:            recordsOne,
+	Want:               EventTypeUpdateHandler,
+	NoIdentity:         "the old code consumed any update_handler record at the step without comparing the name; comparing it would fail a workflow in flight across a deploy that renamed a handler, which is a resumable history turned into a divergence, and is a separate ruling (cleat#4152 W1)",
+	NoDivergenceDetail: "its old message was the shared one: the step and both event types; " + divergenceSweepNote,
+	AfterSuspend:       func(*stepCtx) int64 { return 1 },
+	Decode:             func(*stepCtx, *EventRecord) int64 { return 0 },
 	Fresh: func(c *stepCtx) int64 {
 		c.Record(EventRecord{Step: c.s.stepCount, EventType: EventTypeUpdateHandler, UpdateHandlerName: c.args.s1})
 		return 0
