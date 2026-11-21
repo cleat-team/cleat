@@ -224,7 +224,8 @@ var stopSurfaces = map[string]stopSurface{
 		adapters: []string{"SetScope"},
 		witWhy:   reasonWitReturnsAPlainString,
 	},
-	"freshCall": {
+	// Keyed by DurableCall, the method that goes through step: the refusal is the dispatcher's (cleat#4152, G3), and the method is also the Go adapter.
+	"DurableCall": {
 		adapters: []string{"DurableCall"},
 		wit:      []string{"durable-call"},
 	},
@@ -745,7 +746,7 @@ func TestTheThreeStopSurfacesAgree(t *testing.T) {
 		// being too narrow is not the only one.
 		alsoIf string
 	}{
-		{"host stop sites", sites, 6, "freshCall", ""},
+		{"host stop sites", sites, 6, "DurableCall", ""},
 		// A member only the suspendingAwaitResult arm of the scan can find
 		// (cleat#3383). Without it, narrowing the scan back to
 		// stopBeforeNewWork passes this vacuity check and fails only the

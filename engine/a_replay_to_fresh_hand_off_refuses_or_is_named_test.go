@@ -225,10 +225,10 @@ func engineMethodBodies(t *testing.T) map[string]string {
 	return out
 }
 
-// handOffCanaries are functions that must be seen calling exitReplay(): replay halves of the same kind as replayCall that still leave replay themselves.
+// handOffCanaries are functions that must be seen calling exitReplay(): replay halves of the same kind as the ones that moved, that still leave replay themselves.
 // replaySetScope was a canary until SetScope moved onto the dispatcher (cleat#4211), which now owns that hand-off, replaySideEffect before it (cleat#4152,
-// G1a), and replayCallWithHeartbeat after it (G3). When one of these moves, replace it with another that does, and the failure names which one went.
-var handOffCanaries = []string{"replayCall", "replayPluginCall"}
+// G1a), replayCallWithHeartbeat and replayCall after it (G3). When one of these moves, replace it with another that does, and the failure names which one went.
+var handOffCanaries = []string{"replayPluginCall", "replayPluginCallStreaming"}
 
 // handOffScanProblem says why the hand-off scan cannot be trusted on this tree, or "" when it saw what it is meant to see. It is a function of the scan's
 // OUTPUT so a known positive can hand it a scan that saw nothing (TestTheHandOffScanVacuityCheckRefusesAScanThatSawNothing).

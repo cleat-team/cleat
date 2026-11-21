@@ -171,8 +171,8 @@ func TestADivergenceDetailOrAReasonForNoneIsRequired(t *testing.T) {
 // THE PIN: these specs have a detail function (they are the seven calls that lost one), and every other registered spec says why it has none, citing the
 // sweep. A spec moved from one list to the other changes this test in the same diff, where a reviewer reads the reason against the old message.
 func TestExactlyTheSpecsThatPrintedDetailBeforeStillHaveIt(t *testing.T) {
-	// call is added by the move that puts the plain call on the dispatcher (its detail is requestDivergenceDetail, and TestEngineReplayDivergence pins the labels).
-	want := map[string]bool{"call_with_retry": true, "call_with_heartbeat": true, "await_child": true, "await_all_children": true, "fetch": true, "schedule_cron": true}
+	// call is here since the plain call moved onto the dispatcher (its detail is requestDivergenceDetail, and TestEngineReplayDivergence pins the labels).
+	want := map[string]bool{"call": true, "call_with_retry": true, "call_with_heartbeat": true, "await_child": true, "await_all_children": true, "fetch": true, "schedule_cron": true}
 	got := map[string]bool{}
 	for _, sp := range stepSpecs {
 		if sp.DivergenceDetail != nil {
@@ -251,10 +251,14 @@ func TestTheTroubleshootingDivergenceExampleIsStillWhatTheCallsPrint(t *testing.
 		t.Fatalf("UNMEASURED: cannot read docs/troubleshooting.md: %v", err)
 	}
 	var labels []string
+	firstLine := ""
 	inSection := false
 	for _, line := range strings.Split(string(doc), "\n") {
 		if strings.HasPrefix(line, "## ") {
 			inSection = strings.Contains(line, "Replay Divergence")
+		}
+		if inSection && firstLine == "" && strings.HasPrefix(line, "replay divergence at step ") {
+			firstLine = line
 		}
 		if t := strings.TrimSpace(line); inSection && strings.HasSuffix(t, "request: { truncated }") {
 			labels = append(labels, strings.TrimSuffix(t, "{ truncated }"))
@@ -262,6 +266,16 @@ func TestTheTroubleshootingDivergenceExampleIsStillWhatTheCallsPrint(t *testing.
 	}
 	if len(labels) != 2 {
 		t.Fatalf("UNMEASURED: the Replay Divergence section of docs/troubleshooting.md shows %d `request:` lines, want the two this test reads (`actual request:` and `expected request:`); the section was reworded, and this test must be told what it shows now: %q", len(labels), labels)
+	}
+	if firstLine == "" {
+		t.Fatalf("UNMEASURED: the Replay Divergence section of docs/troubleshooting.md has no line starting `replay divergence at step `")
+	}
+	// The page's own example is the plain call meeting a sleep: its FIRST line must be what the call prints, word for word.
+	plain := g3fMessage(func(ctx context.Context, s *execSession) int64 {
+		return s.DurableCall(ctx, nil, "svc", "op", `{}`, 0, 16384)
+	}, []EventRecord{{Step: 0, EventType: EventTypeSleep, Request: "r"}})
+	if got := strings.SplitN(plain, "\n", 2)[0]; got != firstLine {
+		t.Errorf("docs/troubleshooting.md shows %q and the plain call prints %q", firstLine, got)
 	}
 	for _, c := range []struct {
 		name string
