@@ -118,10 +118,16 @@ type stepCtx struct {
 	declined bool
 	// declinedWhy is the reason RecordsNothing was given, so a recordsOne spec can be checked against the paths it listed (RecordsNothingOn).
 	declinedWhy string
+	// reinvoking is set when Reinvoke said the recorded answer is discarded and the call runs again: Fresh reads it through Reinvoking().
+	reinvoking bool
 	// unreadAtForeign is how many history records a run left UNREAD when it ended at a foreign record and the spec resumes fresh there (ResumesFreshAtForeign). step reads it
 	// to leave replay through the named exit, leaveReplayAtPending, and not through leaveReplay, which treats unread history as a violation.
 	unreadAtForeign int
 }
+
+// Reinvoking says that this Fresh is a replayed call running AGAIN, live, because its spec's Reinvoke said so: the record is already in history and already
+// consumed, so Fresh must not record it a second time. It says so through RecordsNothing, with a reason the spec lists.
+func (c *stepCtx) Reinvoking() bool { return c.reinvoking }
 
 // Record records an event where the call records it today. It is the only way a spec's Fresh writes history, which is what lets the
 // dispatcher check afterwards that it wrote what the spec declared. Calls differ on WHEN they record (a promise create records first and
@@ -195,6 +201,13 @@ type stepSpec struct {
 	// Decode turns the consumed record into the call's result. It must not touch the world. A single-record step sets Decode; a multi-record
 	// step (Role set) sets DecodeRun instead.
 	Decode func(c *stepCtx, rec *EventRecord) int64
+	// Reinvoke is for a single-record step whose recorded answer may be DISCARDED on replay (plugin_call's re-invocation, cleat#1318): from the consumed record and
+	// nothing else it says whether the call runs AGAIN, live. It must not touch the world, and it cannot: running the call is Fresh's work, because Fresh is where the
+	// dispatcher's refusals apply. When it returns true the step goes on to the stop refusal, the suspension refusal and then Fresh exactly as a fresh call does, with
+	// Reinvoking() true, the session STILL REPLAYING and the record already consumed (the step count is past it). Fresh runs the call and records nothing, saying so
+	// through RecordsNothing with a reason the spec lists. This is what makes a re-invoked call refuse in a stopping or suspended session like every other call; it was
+	// the one path that did not while it lived in Decode, which runs no refusal (the hole cleat-review3 found in cleat#4330's first table).
+	Reinvoke func(c *stepCtx, rec *EventRecord) bool
 	// Role makes this a MULTI-RECORD step: one call whose history is a run of consecutive records, any number of rolePrefix records ending in a
 	// roleFinal one (a retried call's failed attempts then its outcome; SetScope's failed acquisitions then the acquisition; an await's
 	// pending record then its resolution). nil means a single-record step. Role classifies a record by its type and shape; WHAT it
@@ -350,6 +363,8 @@ func (sp *stepSpec) validate() error {
 		return fmt.Errorf("step spec %q is Pure and has a Refuse: a Pure step is never refused", sp.Name)
 	case sp.StaysInReplayAtFrontier && (sp.Records != recordsNone || sp.Effect == effectPure):
 		return fmt.Errorf("step spec %q stays in replay at the frontier but records or is Pure: only a non-Pure step that records nothing may answer without leaving replay", sp.Name)
+	case sp.Reinvoke != nil && (sp.Role != nil || sp.Records != recordsOne || sp.Effect == effectPure || len(sp.RecordsNothingOn) == 0):
+		return fmt.Errorf("step spec %q has Reinvoke, which needs a single-record recordsOne step that is not Pure and lists RecordsNothingOn: a re-invoked call records nothing, and says so with a listed reason", sp.Name)
 	case len(sp.RecordsNothingOn) > 0 && sp.Records != recordsOne:
 		return fmt.Errorf("step spec %q lists RecordsNothingOn but does not declare recordsOne: only a spec that must record exactly one event needs to name the paths on which it records none", sp.Name)
 	case sp.Effect == effectPure && sp.Records != recordsNone:
@@ -453,7 +468,11 @@ func (s *execSession) step(ctx context.Context, m api.Module, sp *stepSpec, args
 				if !s.advanceReplayStep(ctx, &rec) {
 					return 0
 				}
-				return sp.Decode(c, &rec)
+				if sp.Reinvoke == nil || !sp.Reinvoke(c, &rec) {
+					return sp.Decode(c, &rec)
+				}
+				// The recorded answer is discarded and the call runs again: on to the refusals and Fresh, still replaying (below).
+				c.reinvoking = true
 			}
 		}
 		if overPending {
@@ -463,7 +482,7 @@ func (s *execSession) step(ctx context.Context, m api.Module, sp *stepSpec, args
 			s.leaveReplayAtPending(sp, len(s.history)-s.stepCount-1)
 		} else if c.unreadAtForeign > 0 {
 			s.leaveReplayAtPending(sp, c.unreadAtForeign)
-		} else if !sp.StaysInReplayAtFrontier {
+		} else if !c.reinvoking && !sp.StaysInReplayAtFrontier {
 			s.leaveReplay(sp)
 		}
 	}

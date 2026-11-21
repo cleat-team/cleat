@@ -252,7 +252,8 @@ var stopSurfaces = map[string]stopSurface{
 		adapters: []string{"ChildWorkflow", "ChildWorkflowWithOptions"},
 		wit:      []string{"durable-child-workflow", "durable-child-workflow-with-options"},
 	},
-	"freshPluginCall": {
+	// Keyed by PluginCall, the method that goes through step: the refusal is the dispatcher's (cleat#4152, G3).
+	"PluginCall": {
 		adapters: []string{"PluginCall"},
 		wit:      []string{"plugin-call"},
 	},
