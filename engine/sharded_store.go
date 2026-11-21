@@ -871,15 +871,17 @@ func (s *ShardedStore) GetChildResult(ctx context.Context, runID string) (ChildO
 	// local walk sees no successor and answers with run 1's empty result: the
 	// original defect, reappearing on exactly the deployment the per-store fix
 	// looks like it covers.
-	terminal, err := terminalRunID(ctx, runID, s.successorAcrossShards)
-	if err != nil {
-		return ChildOutcome{}, err
-	}
-	shard := s.getShard(terminal)
-	if shard == nil {
-		return ChildOutcome{}, fmt.Errorf("get_child_result: no shard available -- check shard configuration in CLEAT_SHARD_CONFIG")
-	}
-	return shard.Store.GetChildResult(ctx, terminal)
+	//
+	// And ask again AFTER the read (cleat#4069), across shards for the same reason: the shard's own
+	// GetChildResult follows its own successors, but a successor on ANOTHER shard is invisible to it,
+	// so the chain can move to a different shard between this walk and that shard's read.
+	return readChildOutcomeFollowingTheChain(ctx, runID, s.successorAcrossShards, func(ctx context.Context, terminal string) (ChildOutcome, error) {
+		shard := s.getShard(terminal)
+		if shard == nil {
+			return ChildOutcome{}, fmt.Errorf("get_child_result: no shard available -- check shard configuration in CLEAT_SHARD_CONFIG")
+		}
+		return shard.Store.GetChildResult(ctx, terminal)
+	})
 }
 
 // ReapStaleInstances runs on every shard and returns the total reclaimed count.
