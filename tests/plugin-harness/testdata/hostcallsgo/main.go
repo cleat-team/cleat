@@ -68,6 +68,11 @@ func emit(o outcome) (string, error) {
 // and Execute returns it. A DurableLog is not an option (it is not recorded and not returned: measured).
 const unwoundKey = "guest-recovered-the-suspend"
 
+// refusedKey records what reached the guest when, from its recover(), it made one call the host must refuse because the execution has suspended (cleat#4285):
+// "panicked" when the stop word reached the SDK and it raised the suspension again, "error" when the SDK handed back an error, "returned" when the call was
+// NOT refused. Only the last is wrong.
+const refusedKey = "refusal-reached-the-guest"
+
 // recordUnwind is deferred around the await calls, as
 //
 //	defer func() { recordUnwind(h, recover()) }()
@@ -87,7 +92,23 @@ func recordUnwind(h cleat.HostCalls, rv any) {
 		return
 	}
 	h.SetQueryState(unwoundKey, "1")
+	observeRefusal(h)
 	panic(rv)
+}
+
+// observeRefusal makes one call that records an event, from inside the guest's recover path, and says in query state what came back. The execution has already
+// suspended, so the host refuses it: nothing is run or recorded, and the answer is the stop word, which the SDK turns back into a panic of its own.
+func observeRefusal(h cleat.HostCalls) {
+	defer func() {
+		if r := recover(); r != nil {
+			h.SetQueryState(refusedKey, "panicked")
+		}
+	}()
+	if _, err := h.SideEffect(func() (string, error) { return "must-not-be-recorded", nil }); err != nil {
+		h.SetQueryState(refusedKey, "error")
+		return
+	}
+	h.SetQueryState(refusedKey, "returned")
 }
 
 // ExerciseHostCall runs the one call named in the input.

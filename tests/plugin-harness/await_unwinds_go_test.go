@@ -76,6 +76,17 @@ func TestGoAwaitCallsUnwindThroughTheSuspendSentinel(t *testing.T) {
 				t.Errorf("history = %v, want %v. Anything after the await is a call the guest made after it was told to "+
 					"stop, which the host refuses (cleat#4285); a guest that ran on is not an unwound one", types, want)
 			}
+			// The refusal reached the guest's recover path (the coordinator's ruling on #4295): from inside recover() the guest made one call that records an
+			// event, the host refused it because the run had suspended, and what came back is in query state. "returned" would mean it was NOT refused; absent
+			// means the guest never got that far. The history assertion above is the other half: that call recorded nothing.
+			switch got := queryState["refusal-reached-the-guest"]; {
+			case got == "":
+				t.Errorf("the guest's recover path never reported what its call after the suspension returned: query state = %v", queryState)
+			case got == "returned":
+				t.Errorf("a call made from the guest's recover() after the suspension RETURNED instead of being refused: the host did not refuse fresh work after a suspension (cleat#4285)")
+			default:
+				t.Logf("%s: the refusal reached the guest as %q", c.call, got)
+			}
 			if queryState["guest-recovered-the-suspend"] != "1" {
 				t.Errorf("query state = %v, want the guest's recover() marker set. The marker is the guest's own recover() "+
 					"recording that the adapter panicked with cleat.ErrSuspend; its absence means the guest did not "+
