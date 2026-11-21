@@ -90,6 +90,16 @@ for good. The generic oracle demands exactly once and would call that a failure;
 scenario as it was. The terminate sweep skips the send's OWN boundaries, for a measured reason: the send's request is made by a goroutine concurrently with the body, which has already moved on,
 so with the send held the body made `B`, `send_T` and `C` within 14 ms, before the kill, and "what the body had done at the kill" cannot be read off the golden order there.
 
+**The reclaim sweep does not skip those boundaries, but it allows for the same fact (cleat-review3, measured on a loaded machine).** With the send held, the body may already have PERFORMED the next call
+(`B`) before the kill, and its event is not yet durable, so the reclaim repeats it: the ordinary at-least-once window, for the call the kill actually interrupted. `verifyReclaim` therefore allows ONE extra
+success in total across the plain `call` ops scripted after the send, because the body moves past a call only once its record is durable and so at most one call is in that state. Everything else stays
+exact: a call before the send, two calls, a call three times, or the send itself repeated are still violations. **A retried call after a send gets no allowance** (it can show more than one success in that
+window), so a scenario that puts one there fails loudly until the allowance is extended on purpose. The window is milliseconds wide, so `a_send_boundary_reclaim_oracle_test.go` drives the verifier with the
+measured request sequences instead of waiting for the machine to be loaded enough.
+
+**A hook that drives a scenario (`Scenario.Drive`) returns the reason it did not act**, and a reclaim run that finished with a Drive that did not act is reported UNMEASURED (a failure of the check, not a
+finding about the engine), as is the golden run. The two cron hooks report; `resolveWhenSuspended` still returns `""` always, which is unchanged behaviour on purpose.
+
 **Known positives, each made by mutating the engine and reading the failure (all restored by content afterwards):**
 
 | mutant | caught by | boundaries that fail | that pass |

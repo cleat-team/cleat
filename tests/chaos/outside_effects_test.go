@@ -168,36 +168,42 @@ func cronRowCount(db *sql.DB, run, n string) int {
 
 // editCronsBetweenRunAndReplay is the Drive of the "crons" scenario: it changes the schedule table AFTER the run's own ops, so a replay that acts
 // on the table instead of answering from its record leaves a mark. See the header. It must only read and write through the database.
-func editCronsBetweenRunAndReplay(db *sql.DB, run string) {
+func editCronsBetweenRunAndReplay(db *sql.DB, run string) string {
 	// C: once the run has created it, take it away. A replay that scheduled it again would bring it back.
 	if !waitFor(func() bool { return cronRowCount(db, run, "C") == 1 }) {
-		return
+		return "cron C's row never appeared, so it was not taken away"
 	}
 	_, _ = db.Exec(`DELETE FROM workflow_schedules WHERE def_name = $1 AND input->>'n' = 'C'`, cronWorkflowOf(run))
 	// D: remember the row the run created, wait for the run to delete it, then put it back. A replay that deleted it again would take it away.
 	var d cronRow
 	if !waitFor(func() bool { var ok bool; d, ok = readCronRow(db, run, "D"); return ok }) {
-		return
+		return "cron D's row never appeared, so there was nothing to put back"
 	}
 	if !waitFor(func() bool { return cronRowCount(db, run, "D") == 0 }) {
-		return
+		return "cron D's row was never deleted by the run, so it was not put back"
 	}
-	_, _ = db.Exec(`INSERT INTO workflow_schedules (name, def_name, cron_expression, input, timezone, tenant_id, next_run_at)
-		VALUES ($1, $2, $3, $4::jsonb, $5, $6::uuid, '2099-01-01T00:00:00Z')`, d.name, d.def, d.expr, d.input, d.tz, d.tenant)
+	if _, err := db.Exec(`INSERT INTO workflow_schedules (name, def_name, cron_expression, input, timezone, tenant_id, next_run_at)
+		VALUES ($1, $2, $3, $4::jsonb, $5, $6::uuid, '2099-01-01T00:00:00Z')`, d.name, d.def, d.expr, d.input, d.tz, d.tenant); err != nil {
+		return "putting cron D's row back failed: " + err.Error()
+	}
+	return ""
 }
 
 // addACronAfterTheRunListed is the Drive of the "cron_list" scenario: once the run's list_crons event is DURABLE, add a schedule the list cannot
 // have contained. Any later answer to the same list that includes it was read from the table and not from the record.
-func addACronAfterTheRunListed(db *sql.DB, run string) {
+func addACronAfterTheRunListed(db *sql.DB, run string) string {
 	if !waitFor(func() bool {
 		var n int
 		_ = db.QueryRow(`SELECT count(*) FROM event_history WHERE workflow_id = $1 AND event_type = 'list_crons'`, run).Scan(&n)
 		return n > 0
 	}) {
-		return
+		return "the run's list_crons event never became durable, so no schedule was added after it"
 	}
-	_, _ = db.Exec(`INSERT INTO workflow_schedules (name, def_name, cron_expression, input, timezone, tenant_id, next_run_at)
-		VALUES ($1, $2, '0 0 1 1 *', '{"n":"late"}'::jsonb, 'UTC', $3::uuid, '2099-01-01T00:00:00Z')`, "late-"+run, cronWorkflowOf(run), defaultTenant)
+	if _, err := db.Exec(`INSERT INTO workflow_schedules (name, def_name, cron_expression, input, timezone, tenant_id, next_run_at)
+		VALUES ($1, $2, '0 0 1 1 *', '{"n":"late"}'::jsonb, 'UTC', $3::uuid, '2099-01-01T00:00:00Z')`, "late-"+run, cronWorkflowOf(run), defaultTenant); err != nil {
+		return "adding the late schedule failed: " + err.Error()
+	}
+	return ""
 }
 
 // ---- durable_send (cleat#4241) ----
@@ -220,6 +226,30 @@ func atMostOnceOps(sc scenario) map[string]bool {
 	for _, o := range sc.Ops {
 		if o.Op == "send" {
 			m["send_"+o.Name] = true
+		}
+	}
+	return m
+}
+
+// callsAfterSend names the requests of the plain synchronous calls the script makes AFTER the fire-and-forget send whose request is sendOp
+// ("send_S"). The send is dispatched on a goroutine, so the body is already running those calls while the send is held at a boundary: one of them
+// may have been performed, and not yet recorded, when the kill landed (the body moves past a call only once its record is durable, so at most ONE
+// call is in that state). Empty when sendOp is not a send.
+//
+// SCOPE, and it is deliberately narrow: only op "call". A retried call (call_retry) can show more than one success inside that single window, so
+// the allowance verifyReclaim builds on this ("one extra success, in total") does not describe it, and an op this does not know is outside the
+// allowance, so a defect there is still reported. No send scenario has a retried call after a send today. If one is added, extend this on purpose,
+// counting per call, rather than relying on it to false-red (cleat-review3, #4280).
+func callsAfterSend(sc scenario, sendOp string) map[string]bool {
+	m := map[string]bool{}
+	after := false
+	for _, o := range sc.Ops {
+		if o.Op == "send" && "send_"+o.Name == sendOp {
+			after = true
+			continue
+		}
+		if after && o.Op == "call" {
+			m[o.Name] = true
 		}
 	}
 	return m

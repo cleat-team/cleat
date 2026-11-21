@@ -28,8 +28,10 @@ type scenario struct {
 	Name string
 	Ops  []op
 	// Drive, when set, runs beside the run in every execution of the scenario (the golden one included), so an outside event the script waits for
-	// happens the same way each time. It must only read and write through the database and must not call t.
-	Drive func(db *sql.DB, run string)
+	// happens the same way each time. It must only read and write through the database and must not call t. It returns "" when it did what it
+	// was there to do and otherwise the reason it did not (a wait that timed out): a run whose Drive did not act measured nothing about the
+	// state the Drive was to create, and a reclaim run that finished reports UNMEASURED for it, not a defect in the engine.
+	Drive func(db *sql.DB, run string) string
 }
 
 // The table: every op the script guest knows, in the combinations whose boundaries differ. cleat#4169 adds scripts generated from a seed.
@@ -98,6 +100,7 @@ type outcome struct {
 	Promises               map[string][]string // promise name -> the status of every workflow_promises row under it, read after the run
 	Signals                map[string]int      // signal name -> the workflow_signals rows the run received under it, read after the run (cleat#4241)
 	Schedules              map[string]int      // cron op name -> the workflow_schedules rows of the run's cron workflow, read after the run (cleat#4241)
+	DriveNote              string              // why the scenario's Drive hook did not do what it was for; "" when it did, or was not asked (a run that did not finish)
 	Log                    string
 }
 
@@ -154,8 +157,10 @@ func execute(t *testing.T, env *env, sc scenario, f *fault) outcome {
 
 	first := startWorker(t, env.bin, queue, env.svc.srv.URL, flagsOf(f)...)
 	startRun(t, env.db, run, scriptInput(run, sc), queue)
+	var driven chan string
 	if sc.Drive != nil {
-		go sc.Drive(env.db, run)
+		driven = make(chan string, 1)
+		go func() { driven <- sc.Drive(env.db, run) }()
 	}
 
 	var out outcome
@@ -201,6 +206,15 @@ func execute(t *testing.T, env *env, sc scenario, f *fault) outcome {
 	out.Status, out.ErrMsg, out.Result = status, msg, result
 	if !ok {
 		out.Status = "NOT-TERMINAL:" + status
+	}
+	// Only a run that finished is asked whether its Drive did: those are the runs whose tables are read (verifyReclaim, goldenOf). A terminated or
+	// stalled run may never reach what its Drive waits for, and nothing reads its tables, so waiting here would only cost time.
+	if driven != nil && (status == "done" || status == "completed") {
+		select {
+		case out.DriveNote = <-driven:
+		case <-time.After(5 * time.Second):
+			out.DriveNote = "the Drive hook was still waiting when the run had finished"
+		}
 	}
 	out.Requests = env.svc.requestsOf(run)
 	out.Promises = promiseRows(env.db, run)
@@ -273,11 +287,18 @@ func verifyReclaim(sc scenario, g goldenRecord, f *fault, b request, o outcome) 
 	}
 	if o.Status == "done" || o.Status == "completed" {
 		v = append(v, promiseViolations(sc, o)...)
-		v = append(v, outsideViolations(sc, o)...)
+		if o.DriveNote != "" {
+			// The tables below were never put in the state the scenario expects, so a mismatch there is not about the engine.
+			v = append(v, "UNMEASURED: the scenario's Drive hook did not act ("+o.DriveNote+"), so the schedule and signal tables were not put in the state this run is judged against. This is a failure of the check, not a finding about the engine.")
+		} else {
+			v = append(v, outsideViolations(sc, o)...)
+		}
 	}
 	gs := g.successes()
 	successes, attempts, helds, first := tally(o.Requests)
 	amo := atMostOnceOps(sc)
+	inFlight := callsAfterSend(sc, f.Op)
+	repeatedInFlight := []string{}
 	for op, want := range gs {
 		if amo[op] {
 			// A fire-and-forget send is recorded BEFORE it is dispatched and a replay never dispatches it, so a kill in between loses it: it may
@@ -291,6 +312,14 @@ func verifyReclaim(sc scenario, g goldenRecord, f *fault, b request, o outcome) 
 		if f.Op == op && f.Mode == "after" && !b.Failed {
 			w = want + 1 // the documented at-least-once window: performed, never recorded, so replayed once
 		}
+		if inFlight[op] && successes[op] == want+1 && !b.Failed {
+			// The faulted request is a fire-and-forget send, made by a goroutine while the body went on. The body may have PERFORMED the next call
+			// before the kill landed, and its event was not yet durable, so the reclaim repeats it: the same documented window, for the call the
+			// kill actually interrupted rather than for the send (measured by cleat-review3 under load: sigkill@after:send_S left B twice).
+			// How many calls can be in that state is bounded below, not here.
+			w = want + 1
+			repeatedInFlight = append(repeatedInFlight, op)
+		}
 		if successes[op] != w {
 			v = append(v, fmt.Sprintf("effect %q succeeded %d time(s), want %d", op, successes[op], w))
 		}
@@ -299,6 +328,10 @@ func verifyReclaim(sc scenario, g goldenRecord, f *fault, b request, o outcome) 
 		if _, ok := gs[op]; !ok {
 			v = append(v, fmt.Sprintf("effect %q happened but the golden run never did it", op))
 		}
+	}
+	if len(repeatedInFlight) > 1 {
+		sort.Strings(repeatedInFlight)
+		v = append(v, fmt.Sprintf("calls %v were each performed twice after a kill at the send %q: the body is sequential, so at most ONE call can have been performed and not yet recorded when the kill landed", repeatedInFlight, f.Op))
 	}
 	for _, o2 := range sc.Ops {
 		if o2.Op == "call_retry" && attempts[o2.Name] > o2.Attempts+1 {
@@ -449,6 +482,9 @@ func goldenOf(t *testing.T, e *env, sc scenario) goldenRecord {
 		if n := tallyOnce(gold.Requests, op); n != 1 {
 			t.Fatalf("the FAULT-FREE run of %s dispatched the fire-and-forget send %q %d time(s), want exactly 1. No fault was injected, so the op did not do what it claims and nothing below measures it.", sc.Name, op, n)
 		}
+	}
+	if gold.DriveNote != "" {
+		t.Fatalf("UNMEASURED: the FAULT-FREE run of %s finished but its Drive hook did not act: %s. This is a failure of the check, not a finding about the engine: the table the scenario reads was never put in the state it expects.", sc.Name, gold.DriveNote)
 	}
 	if ov := outsideViolations(sc, gold); len(ov) > 0 {
 		t.Fatalf("the FAULT-FREE run of %s left the signal or schedule tables other than the script's: %s. No fault was injected, so the op did not do what it claims and nothing below measures it.", sc.Name, strings.Join(ov, "; "))
@@ -788,9 +824,10 @@ func TestChaosAScopeIsAcquiredOnceAcrossWakes(t *testing.T) {
 		VALUES (digest('%s','sha256'), '%s', '%s', now() + interval '1 day', '%s')`, key, key, holder, defaultTenant))
 
 	sc := scenario{Name: "scope_wakes", Ops: []op{{Op: "set_scope", Name: "k" + suffix}, {Op: "sleep", Ms: 300}, {Op: "sleep", Ms: 300}, {Op: "sleep", Ms: 300}, {Op: "sleep", Ms: 300}, {Op: "call", Name: "X"}},
-		Drive: func(db *sql.DB, run string) {
+		Drive: func(db *sql.DB, run string) string {
 			time.Sleep(3 * time.Second) // let the run meet the held key and suspend on it
 			_, _ = db.Exec(`DELETE FROM concurrency_keys WHERE workflow_id = $1`, holder)
+			return ""
 		}}
 	o := execute(t, e, sc, nil)
 	var n int
