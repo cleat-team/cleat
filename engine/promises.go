@@ -168,6 +168,13 @@ func awaitPromiseIdentity(a stepArgs, rec *EventRecord) string {
 //     on, and recorded at a step that already held an event (the cleat#4157 class; the await_signals analogue was cleat#947). It is a divergence, except for the engine with no
 //     promise store (AwaitPromise, above).
 //
+// A KNOWN AMBIGUITY, deliberately resolved toward resolved, and carried over from the old code (the paragraph above its look-ahead; the move dropped it
+// and this puts it back, cleat#4277): [await_promise p, promise_resolved p], neither carrying the Service/Op discriminator, is also what a TIMED-OUT
+// await followed IMMEDIATELY by a second await of the same already-settled promise records. The two shapes are only both possible when the promise
+// settles in the instant between the timeout and the guest's next call, and an await followed by anything else, which is every shape a retry loop makes,
+// is unambiguous. A replay of the ambiguous pair hands the first await the resolution where the original run was told it timed out; it converges unless
+// the timeout branch kept guest-local state. Telling the two apart needs a history-format change and is not decided here (cleat#4277).
+//
 // NEVER REFUSED: Refuse is neverRefuse. The old code had no stopBeforeNewWork check, so a defer body, a worker that is shutting down and a session
 // that has already suspended all recorded the await and suspended as usual (four rows of the characterization table), and that is kept.
 // Whether any of them should be refused is a separate decision.
