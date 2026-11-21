@@ -18,17 +18,47 @@ import (
 // ends on its context, and why a language with no measured cost is not admitted at all.
 //
 // WHAT IS AND IS NOT MEASURED, because the defaults below are only as good as these:
-//   - the memory of a parked instance is measured (design section 9a) for MINIMAL guests of Go, Python and C#, not for real workflows. Only Go is admitted,
-//     and its cost here is the larger of the two measured figures (a guest that had made garbage, 19.6 MiB) rounded UP, not the 2.5 MiB of a minimal one.
+//   - the memory of a held instance is measured for MINIMAL guests, not for real workflows: Go in design section 9a, Python and C# in WS-cleat1's component-held-
+//     instances measurement (2026-11-20, cleat-internal/measurements/component-held-instances-2026-11-20/README.md, arm64 only). Go, Python and C# are admitted. Each
+//     figure below is the measured one ROUNDED UP to a whole MiB, and the more expensive of the measured guests where there were two. What a guest ALLOCATES before it
+//     blocks is not in any figure and adds on top roughly one for one (measured: a guest that touched 64 MiB cost 64 MiB more, in both Python and C#), so a table
+//     entry is a floor for a guest that does real work, never a ceiling.
 //   - the replay cost model (a fixed start-up of 0.44 to 0.67 s per claim) is measured; the cost PER EVENT is not, so it defaults to zero and the
 //     multiplier has no effect until it is. With the defaults the window is the floor.
 //   - the 10x multiplier, the 10 s floor and the 5 min cap are the owner's starting point, not measurements. Tuning them on real workflows is cleat#4187.
 
-// defaultResidentInstanceBytes is what admitting one parked instance of a language is charged against the resident-memory budget. A language absent
-// from this table is REFUSED: there is no figure for it, and "unknown, so probably small" is the wrong way to fail.
+// defaultResidentInstanceBytes is what admitting one held instance of a language is charged against the resident-memory budget. A language absent
+// from this table is REFUSED: there is no figure for it, and "unknown, so probably small" is the wrong way to fail. Java, Rust and JavaScript have no figure.
 var defaultResidentInstanceBytes = map[string]uint64{
 	// design section 9a: 2.5 MiB for a minimal Go guest and 19.6 MiB after the guest had allocated and dropped about 256 MiB. Rounded up from the second.
 	"go": 24 << 20,
+	// The rule for every language is the one Go's line already follows: the LARGER of the measured figures, rounded up, because a too-high charge can only make
+	// residency park less.
+	//
+	// Python: WS-cleat1, per held instance, anonymous (private) memory, which is what the cgroup charges: 12.0 to 12.2 MiB for call_all_plugins (no sharing), 1.3 to 1.6
+	// MiB for python-hello, whose RSS (8.3 MiB) is mostly copy-on-write pages shared with the pre-initialised snapshot (the two guests differ eightfold on one runtime,
+	// cause not established). Design section 9a: 16.2 MiB after a guest had allocated and dropped about 256 MiB, at a 32 MiB and at a 256 MiB cap alike. 16.2 rounded up.
+	"python": 17 << 20,
+	// C#: WS-cleat1, 48.8 MiB anonymous and 49.2 to 49.3 MiB RSS per held instance, the same at every N from 1 to 60. Design section 9a: 65.7 MiB after a guest had
+	// allocated and dropped about 256 MiB at a 256 MiB cap (49.5 at a 64 MiB cap), and 256 MiB is the default since cleat#4200, because a .NET heap sizes itself to the
+	// limit. 65.7 rounded up. The coordinator asked for 49.2; the larger measured figure is the more conservative reading of the same instruction.
+	"csharp": 66 << 20,
+}
+
+// defaultResidentFixedBytes is what a component costs the PROCESS once, as soon as any instance of it is held, and it does not grow with the number of instances. It
+// is charged to the budget once per (language, component) while at least one run of that pair is held, and given back with the last. A language absent here has no
+// fixed charge (Go: none was measured).
+//
+// WHAT THE FIGURE IS: WS-cleat1 measured the WHOLE worker process's private memory after one warm-up execution had finished, before any instance was held: the
+// compiled component in the module cache PLUS the Go runtime and wasmtime baseline, which were not separated. The two Python figures (493 and 510 MiB) are two
+// different components. So it is an upper bound for one component's cache entry, and it double counts the process baseline once per distinct component; both are on
+// the safe side. A worker that has run a Python workflow at all has the component cached whether or not anything is held, so this also double counts against that
+// worker's own memory monitor; the coordinator asked for it in the admission budget regardless.
+var defaultResidentFixedBytes = map[string]uint64{
+	// WS-cleat1, after the component is compiled and cached, added to process start: +493 MiB python-hello, +510 MiB call_all_plugins. The larger, rounded up to 512.
+	"python": 512 << 20,
+	// +81 MiB for the C# quick start, rounded up.
+	"csharp": 82 << 20,
 }
 
 // Why a wait was not parked, and why a parked run was sent back. They are metric label values and are read by tests, so they are constants.
@@ -57,8 +87,11 @@ type ResidencyConfig struct {
 	// MaxRuns is the most runs held at once. Zero turns residency off. It is deliberately small when it is on, because a parked instance holds an OS
 	// thread (design 4.6: about one per instance) and the thread cost at larger counts was not measured.
 	MaxRuns int
-	// MemoryBudgetBytes bounds the sum of the per-language costs of the runs held. Zero means MaxRuns times the dearest admitted language, which is
-	// the bound MaxRuns already implies.
+	// MemoryBudgetBytes bounds the sum of the per-language costs of the runs held, the fixed cost of each held component included. Zero means MaxRuns times the dearest
+	// admitted language PLUS one fixed cost per admitted language. That is the bound the TABLE's figures imply when MaxRuns guests of the dearest language are held, and
+	// nothing more: the table is the cost of the RUNTIME, not of what a guest allocates before it blocks (measured: that adds on top roughly one for one), and a worker
+	// holding several distinct components pays one fixed cost each. So the default can still be exceeded by the real memory of real guests, which is what
+	// --memory-soft-limit is for; it is NOT a promise that nothing is refused on memory, and it must not be read as one.
 	MemoryBudgetBytes uint64
 	// WindowFloor and WindowCap bound how far ahead a wait may be due and still be parked: window = clamp(ReplayMultiplier x estimated replay, floor, cap).
 	WindowFloor, WindowCap time.Duration
@@ -74,8 +107,10 @@ type ResidencyConfig struct {
 	// 0.3 ms, p90 about 1 ms and at most 9 ms (6.8 ms under -race) on a loaded machine, so 100 ms is about ten times the worst sample. It is not measured for a guest
 	// with real defers or a large history.
 	DeadlineMargin time.Duration
-	// InstanceBytes is the per-language charge; nil means defaultResidentInstanceBytes.
+	// InstanceBytes is the per-language charge for each held instance; nil means defaultResidentInstanceBytes.
 	InstanceBytes map[string]uint64
+	// FixedBytes is the per-language charge made ONCE while any instance of the language is held; nil means defaultResidentFixedBytes. A language not in it has none.
+	FixedBytes map[string]uint64
 	// Pressure reports the worker's memory pressure from 0 (under the soft limit) up to 1 (at the hard limit). A park is refused while it is above
 	// zero. nil means no second guard, which only tests use.
 	Pressure func() float64
@@ -155,7 +190,9 @@ type ResidentSet struct {
 	mu     sync.Mutex
 	parked map[*residentSlot]struct{}
 	bytes  uint64
-	closed bool
+	// compHeld is how many runs of each (language, component) are held, so that its fixed cost is charged by the first and given back by the last.
+	compHeld map[string]int
+	closed   bool
 }
 
 type residentSlot struct {
@@ -173,6 +210,9 @@ func NewResidentSet(cfg ResidencyConfig) (*ResidentSet, error) {
 	if cfg.InstanceBytes == nil {
 		cfg.InstanceBytes = defaultResidentInstanceBytes
 	}
+	if cfg.FixedBytes == nil {
+		cfg.FixedBytes = defaultResidentFixedBytes
+	}
 	if cfg.clock == nil {
 		cfg.clock = realResidentClock{}
 	}
@@ -184,8 +224,13 @@ func NewResidentSet(cfg ResidencyConfig) (*ResidentSet, error) {
 			}
 		}
 		cfg.MemoryBudgetBytes = dearest * uint64(cfg.MaxRuns)
+		for lang, b := range cfg.FixedBytes {
+			if _, admitted := cfg.InstanceBytes[lang]; admitted {
+				cfg.MemoryBudgetBytes += b
+			}
+		}
 	}
-	return &ResidentSet{cfg: cfg, parked: map[*residentSlot]struct{}{}}, nil
+	return &ResidentSet{cfg: cfg, parked: map[*residentSlot]struct{}{}, compHeld: map[string]int{}}, nil
 }
 
 // Enabled says whether the set will ever park anything.
@@ -231,6 +276,11 @@ type ResidentRunInfo struct {
 	WorkflowID string
 	// Language is the guest's language as its metadata declares it; only a language with a measured cost is admitted.
 	Language string
+	// Component names the compiled component the run executes, so a language's fixed cost is charged once per DISTINCT component and not once per language: the
+	// module cache is keyed by the component's bytes, so two different Python workflows held together each cost their own cache entry (WS-cleat1's reading of the
+	// mechanism; two distinct components held together were NOT measured). The worker passes the definition name and version, a proxy for "the same bytes".
+	// Empty means the language alone, which undercharges when several distinct components are held.
+	Component string
 	// EventCount is how many events the run's history held when it was claimed, which is what the replay estimate is made from.
 	EventCount int
 	// ClaimCheck reports whether the store still has this execution assigned to this worker: nil if it does, an error if it does not OR if that could not be
@@ -298,8 +348,15 @@ func (r *ResidentRun) Wait(ctx context.Context, req parkRequest) parkOutcome {
 		return refuse(residentRefusedDeadline)
 	}
 
+	lang := r.info.Language
+	comp := lang + "\x00" + r.info.Component
 	slot := &residentSlot{bytes: cost, evict: make(chan struct{})}
 	s.mu.Lock()
+	// A component's fixed cost is charged by the FIRST run of it that is held, and given back by the last (see defaultResidentFixedBytes).
+	var fixed uint64
+	if s.compHeld[comp] == 0 {
+		fixed = s.cfg.FixedBytes[lang]
+	}
 	switch {
 	case s.closed:
 		s.mu.Unlock()
@@ -309,13 +366,14 @@ func (r *ResidentRun) Wait(ctx context.Context, req parkRequest) parkOutcome {
 		s.mu.Unlock()
 		resume(false)
 		return refuse(residentRefusedCount)
-	case s.bytes+cost > s.cfg.MemoryBudgetBytes:
+	case s.bytes+cost+fixed > s.cfg.MemoryBudgetBytes:
 		s.mu.Unlock()
 		resume(false)
 		return refuse(residentRefusedMemory)
 	}
 	s.parked[slot] = struct{}{}
-	s.bytes += cost
+	s.bytes += cost + fixed
+	s.compHeld[comp]++
 	s.mu.Unlock()
 	if m := s.cfg.Metrics; m != nil {
 		m.AddResidentRuns(ctx, 1)
@@ -335,6 +393,10 @@ func (r *ResidentRun) Wait(ctx context.Context, req parkRequest) parkOutcome {
 	s.mu.Lock()
 	delete(s.parked, slot)
 	s.bytes -= cost
+	if s.compHeld[comp]--; s.compHeld[comp] == 0 {
+		delete(s.compHeld, comp)
+		s.bytes -= s.cfg.FixedBytes[lang]
+	}
 	reason := slot.reason
 	s.mu.Unlock()
 	// However the hold ended, the segment it was in is over: restart the limits (and the fence), so that the work after the wake, or the unwind of a run that

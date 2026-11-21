@@ -4259,6 +4259,7 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 		engineOpts = append(engineOpts, engine.WithResidency(w.resident.ForRun(engine.ResidentRunInfo{
 			WorkflowID: wf.ID,
 			Language:   wasm.DetectLanguage(wasmBytes),
+			Component:  fmt.Sprintf("%s@%d", wf.DefName, wf.DefVersion),
 			EventCount: len(history),
 			// Without this nothing is held (engine.WithResidency): a held run has to be able to prove it still owns its claim before it goes back to the guest.
 			ClaimCheck: func(ctx context.Context) error { return w.claimStillMine(ctx, wf) },

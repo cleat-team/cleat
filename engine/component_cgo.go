@@ -1670,8 +1670,11 @@ func (b *wasmtimeBackend) ExecuteComponentCGo(
 	}
 	// Guest execution time, not wall clock: see the bracket in goComponentCallback (cleat#4174). Armed below, immediately before the guest runs.
 	b.budget = newHostBudget(store, execTimeout)
-	// A run held through a wait gets fresh limits when it wakes, and this fence is one of them (the core path registers the same, backend_wasmtime.go). Latent today
-	// because only Go is admitted to be held, and that is exactly why it is registered now: the admission table changes in one place and this one would not.
+	// A run held through a wait gets fresh limits when it wakes, and this fence is one of them (the core path registers the same, backend_wasmtime.go). It was
+	// registered before any component could be held, so that admitting one would not leave this builder behind; Python and C# are admitted now. WHAT IS AND IS NOT
+	// SHOWN: that a real component is held through a sleep and completes in place is run (a_real_component_is_held_through_a_sleep_and_charged_its_language_test.go);
+	// that this fence is RESTARTED at the wake is not measured on a component (the core path's row needs a guest that computes around the hold, and a component
+	// version of it was not built; a fence of 5 ms did not stop the C# fixture, so a fence-versus-hold row could not be made to mean anything with it).
 	onLimitsRestart(ctx, func() { b.restartFence(ctx) })
 	wasiConfig := wasmtime.NewWasiConfig()
 	wasiConfig.InheritStderr()

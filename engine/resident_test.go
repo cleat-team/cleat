@@ -167,7 +167,7 @@ func TestAWaitThatIsNotHeldSaysWhyAndSuspendsAsItAlwaysDid(t *testing.T) {
 		reason string
 	}{
 		{"only a timer has a caller on the park helper", nil, ResidentRunInfo{Language: "go"}, parkRequest{Kind: wakeSignal, Key: "s", DeadlineMs: residentT + 5000}, "kind"},
-		{"a language with no measured cost", nil, ResidentRunInfo{Language: "python"}, timerReq(residentT + 5000), "language"},
+		{"a language with no measured cost", nil, ResidentRunInfo{Language: "java"}, timerReq(residentT + 5000), "language"},
 		{"a language the metadata spells another way", nil, ResidentRunInfo{Language: "tinygo"}, timerReq(residentT + 5000), "language"},
 		{"no language at all", nil, ResidentRunInfo{}, timerReq(residentT + 5000), "language"},
 		{"due later than the window", nil, ResidentRunInfo{Language: "go"}, timerReq(residentT + 10_001), "window"},

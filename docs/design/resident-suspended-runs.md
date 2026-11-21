@@ -213,6 +213,31 @@ So the suspicion that a garbage-collected runtime sizes its heap to the limit is
 
 **A caveat that applies to every measurement above and below this one: a cold start is slow.** Compiling the module on a worker that has not seen it took **2.8 s** here (`replay_ms=2789`), and a sleep's deadline is anchored at the last recorded event's timestamp (`DurableSleep` takes `max(s.nowMs, s.Now(ctx))`), which is when the run was **claimed** only when no step precedes the sleep, and not when the guest reached the sleep. A short sleep can therefore be over before the guest gets to it: a 300 ms sleep completed instantly and the run finished without ever sleeping, which is how the first version of this test measured nothing. Any claim about a hold window, a short sleep, or "residency off suspends here" has to say whether the module was warm.
 
+## 9c. Python and C# are admitted (cleat#4162 part A)
+
+**What changed.** Python and C# guests are held through a durable sleep like Go ones. A run is charged a figure per held instance and, for these two languages, a **fixed** figure once per distinct component while any run of it is held (`defaultResidentInstanceBytes`, `defaultResidentFixedBytes` in `engine/resident.go`). Java, Rust and JavaScript are still refused: nothing was measured for them.
+
+**Where the numbers come from, and what each one is.** WS-cleat1's measurement of components held inside a host callback (2026-11-20, `cleat-internal/measurements/component-held-instances-2026-11-20/README.md`; native arm64 Linux, **x86-64 not measured**) and section 9a above.
+
+| | per held instance | charged | fixed, once per component | charged |
+|---|---|---|---|---|
+| Go | 2.5 MiB; 19.6 MiB after a guest made garbage | **24 MiB** | none measured | none |
+| Python | 1.3 to 1.6 MiB (python-hello, private); 12.0 to 12.2 MiB (call_all_plugins, unshared); 16.2 MiB after garbage (9a) | **17 MiB** | +493 MiB (python-hello), +510 MiB (call_all_plugins) | **512 MiB** |
+| C# | 48.8 MiB private, 49.2 to 49.3 MiB RSS, the same at every N from 1 to 60; 65.7 MiB after garbage at a 256 MiB cap (9a) | **66 MiB** | +81 MiB | **82 MiB** |
+
+**The rule for the per-instance figure is the one Go already used: the larger measured figure, rounded up.** The coordinator asked for the 12.2 and 49.2 figures; the 16.2 and 65.7 are this document's own measurements of a guest that had allocated and dropped about 256 MiB, and 256 MiB is the default memory cap since cleat#4200, so they are the more conservative reading and are what is charged. A too-high charge can only make residency park less.
+
+**What the figures are NOT.**
+- **They are the cost of the runtime, not of the guest.** WS-cleat1 measured what a guest adds by what it holds before it blocks: about one for one (16 MiB touched cost +16.0 in Python and +16.2 in C#; 64 MiB cost +63.9 and +64.9; 200,000 small records cost +66.5 and +32.4). So a charge is a floor for a guest that does real work. **The default budget (`MaxRuns` times the dearest instance plus one fixed cost per language) is what the table implies and no more**: it is not a promise that nothing is refused on memory, and real guests can exceed it. `--memory-soft-limit` is the second guard.
+- **The fixed figure is the whole process after one warm-up run**, so it also counts the Go runtime and wasmtime baseline, which was not separated. It is charged per distinct component (the worker passes the definition name and version) because the module cache is keyed by the component's bytes; **two distinct components held together were not measured**. It double counts against a worker's own memory monitor, because a worker that has run a Python workflow at all has the component cached whether or not anything is held. Both are the safe direction.
+- **A component the build did not stamp is detected as Python** (`DetectLanguage`'s fallback) and so would be charged as Python, 17 MiB where C# needs 66. `cleat build --target csharp` stamps and reads the stamp back (`cmd/cleat/build_csharp.go`, exit 2 on a mismatch); the checked-in C# test fixture is NOT stamped, so tests stamp it first.
+- **Threads and mappings are not in the charge.** WS-cleat1 measured about one OS thread and about nine memory mappings per held instance (no limit reached at 400 Python instances; C# stopped at 60 for memory); on a stock kernel `vm.max_map_count` (65,530) would bind at about 7,000 instances. `--resident-max-runs` is the guard, and its default is small.
+- **Standard-library Python only; no third-party import was measured.**
+
+**What was run on a real component.** A real C# component and a real Python guest are each held through a durable sleep on the worker's real wasmtime backend and complete in place with both calls in one execution, where the same run with residency off suspends after the first; what is charged while held is that language's instance plus fixed figure and nothing is left charged afterwards. The Python guest's sleep length is an input and the test shows the hold follows it (a 400 ms and a 1500 ms request, measured as the gap between the guest's two calls, which excludes the component compile that dominates an execution's wall time). A guest that ignores its input was run as the known-positive and turns that row red, both with a short and with a long default.
+
+**What was NOT shown.** That the execution fence is **restarted** at the wake on the component path (the core path has a timing row for it; a component version needs a guest that computes around the hold, and was not built). A fence-shorter-than-the-hold row was attempted with the C# fixture and abandoned: a 5 ms fence did not stop that guest, so the row's control failed and the row would have measured nothing; the reason was not established. The restart is registered by the component builder and its arithmetic is tested, but not exercised on a held component.
+
 ## 10. Staging if approved
 
 | stage | what | depends on |
