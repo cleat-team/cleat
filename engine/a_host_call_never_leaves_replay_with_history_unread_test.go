@@ -185,7 +185,7 @@ func TestNoHostCallLeavesReplayWithHistoryUnread(t *testing.T) {
 			probed[name]++
 			if leftReplayEarly(s) {
 				t.Errorf("%s replayed against a %q event with a recorded call still unread LEFT REPLAY (stepCount=%d of %d): the rest of the history "+
-					"would run fresh and the recorded call would execute again. Report a replay divergence (replayDivergence) when the call always "+
+					"would run fresh and the recorded call would execute again. Report a replay divergence (replayDivergenceAt) when the call always "+
 					"records, or name the call in resumesItsOwnPendingEvent with the reason.", name, et, s.stepCount, len(s.history))
 			}
 			if len(s.history) != 2 {

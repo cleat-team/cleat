@@ -7,7 +7,8 @@ import (
 	"github.com/tetratelabs/wazero/api"
 )
 
-// replayDivergence reports that the event at the next step is not the one this call recorded, while history still continues.
+// replayDivergenceAt reports that a record at this step is not the one this call recorded, while history still continues. It is given the record, so a multi-record step
+// can name one part-way through its run and not the first of the run.
 //
 // cleat#4157. A host call that ALWAYS records an event, when it finds some other event at its step with history still unread, has not met
 // the frontier: the original run reached a LATER event without recording this call, so the workflow's code is not the code that produced
@@ -22,25 +23,15 @@ import (
 // It does NOT consume the event. replayCall does, and for a call that records nothing on some path that is wrong, because the event
 // belongs to the call that follows; leaving it means that call still reads its own record. A true divergence keeps diverging on each
 // later call, which is the honest answer.
-func (s *execSession) replayDivergence(ctx context.Context, m api.Module, expected EventType, outPtr, outMaxLen uint32) int64 {
-	return s.reportReplayDivergence(ctx, m, divergenceMessage(&s.history[s.stepCount], expected), outPtr, outMaxLen)
-}
-
-// replayDivergenceAt is replayDivergence for a record that is not the next one: a multi-record step finds its foreign record part-way through
-// its run, and the message must name THAT record, not the first of the run. Nothing is consumed.
 //
-// It calls reportReplayDivergence directly, as replayDivergence does, and does not delegate to it: the parity test that finds where a handler
-// writes its result length follows callees to a fixed depth, and one more hop between a host call and the packer puts the packer out of reach.
+// It calls reportReplayDivergence directly and does not delegate: the parity test that finds where a handler writes its result length follows callees to a fixed
+// depth, and one more hop between a host call and the packer puts the packer out of reach. (Its next-record form, replayDivergence, was deleted when the last four
+// calls that used it moved onto the dispatcher, cleat#4152, W1.)
 func (s *execSession) replayDivergenceAt(ctx context.Context, m api.Module, got *EventRecord, expected EventType, detail string, outPtr, outMaxLen uint32) int64 {
 	return s.reportReplayDivergence(ctx, m, divergenceMessageWith(got, expected, detail), outPtr, outMaxLen)
 }
 
-// divergenceMessage is the one text of a type divergence: the step and both event types.
-func divergenceMessage(got *EventRecord, expected EventType) string {
-	return divergenceMessageWith(got, expected, "")
-}
-
-// divergenceMessageWith is divergenceMessage with a spec's detail between the step line and the advice: what the call asked and what was recorded, in the
+// divergenceMessageWith is the one text of a type divergence, the step and both event types, with a spec's detail between the step line and the advice: what the call asked and what was recorded, in the
 // lines `docs/troubleshooting.md` shows (`  actual request: ...`). detail is "" or starts with a newline and indents each line by two spaces, so a spec that
 // has none reads exactly as it always has (cleat#4152, G3).
 func divergenceMessageWith(got *EventRecord, expected EventType, detail string) string {

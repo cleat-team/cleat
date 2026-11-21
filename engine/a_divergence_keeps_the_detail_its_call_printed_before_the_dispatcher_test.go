@@ -130,7 +130,7 @@ func TestTheDispatcherPlacesASpecsDetailAndLeavesASpecWithoutOneAlone(t *testing
 		t.Errorf("identity divergence with detail:\n  got:  %q\n  want: %q", got, want)
 	}
 	// A spec with no detail: the message is the shared builder's, byte for byte.
-	if got, want := run(build(false, false), wrong), divergenceMessage(&wrong, fakeEvent); got != want {
+	if got, want := run(build(false, false), wrong), divergenceMessageWith(&wrong, fakeEvent, ""); got != want {
 		t.Errorf("type divergence without detail changed:\n  got:  %q\n  want: %q", got, want)
 	}
 	if got, want := run(build(false, true), right), "replay divergence at step 0: fake asked for something other than the "+string(fakeEvent)+" recorded there: different thing."+g3fAdvice; got != want {

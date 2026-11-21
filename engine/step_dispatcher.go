@@ -438,7 +438,7 @@ func (s *execSession) step(ctx context.Context, m api.Module, sp *stepSpec, args
 						return res
 					}
 				}
-				// Not consumed: replayDivergence leaves the record for the call it belongs to (cleat#4157).
+				// Not consumed: replayDivergenceAt leaves the record for the call it belongs to (cleat#4157).
 				return sp.divergenceAnswer(s.replayDivergenceAt(ctx, m, &rec, sp.Want, sp.divergenceDetailFor(args, &rec), args.outPtr, args.outMaxLen))
 			}
 			if sp.Identity != nil {
