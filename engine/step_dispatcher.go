@@ -151,6 +151,19 @@ func (c *stepCtx) RecordPersisted(rec EventRecord, checksum string) {
 	c.s.recordEventPersisted(rec, checksum)
 }
 
+// ContinueAsNewAtEventCap starts the continue-as-new that --max-quota-events asks for, from inside a spec's Fresh, and counts the event it records
+// (cleat#4152, G3). The cap is the one place a Fresh records an event on its own behalf through a CALL: triggerEventCapContinueAsNew runs ContinueAsNew,
+// which records a continue_as_new event at the step this call was on and sets the suspension. That event went through recordEvent and not through Record,
+// so the shape check read the step count moving by one and the handle's count by none, and reported it. Measured on develop 615c81c4: await_promise and
+// await_signals each logged `recorded 0 event(s) through the handle but the step count moved by 1` every time the cap fired, at error level, and no test
+// read it. Counting it here is a named method and not a wrapper that takes any function, because a wrapper would be a way to record behind the handle and
+// have the count agree: this one counts what the continue-as-new did, and only it.
+func (c *stepCtx) ContinueAsNewAtEventCap() {
+	before := c.s.stepCount
+	c.s.triggerEventCapContinueAsNew(c.ctx, c.m)
+	c.recorded += c.s.stepCount - before
+}
+
 // stepSpec is a description of one host call's step.
 type stepSpec struct {
 	Name    string

@@ -10,6 +10,7 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"go/ast"
 	"go/parser"
@@ -602,7 +603,7 @@ func dispatcherCallerFacts(t *testing.T, sources map[string]string) (leaveReplay
 				return true
 			}
 			sel, ok := call.Fun.(*ast.SelectorExpr)
-			if !ok || (sel.Sel.Name != "Record" && sel.Sel.Name != "RecordPersisted") {
+			if !ok || (sel.Sel.Name != "Record" && sel.Sel.Name != "RecordPersisted" && sel.Sel.Name != "ContinueAsNewAtEventCap") {
 				return true
 			}
 			recordCalls++
@@ -1034,5 +1035,93 @@ func (s *execSession) bypassP(c *stepCtx) { c.RecordPersisted(EventRecord{}, "")
 	_, _, records, inFresh := dispatcherCallerFacts(t, map[string]string{"persisted.go": src})
 	if records != 2 || inFresh != 1 {
 		t.Errorf("the scan found %d RecordPersisted calls of which %d inside a Fresh, want 2 and 1: one inline in a Fresh, one in a function outside any", records, inFresh)
+	}
+}
+
+// ContinueAsNewAtEventCap (cleat#4152, G3): the continue-as-new an event cap asks for records an event at the step the call was on, and a Fresh that
+// starts it through the handle is counted for it, so the shape check agrees with the step count. The second row is the control, and it is the BEHAVIOUR
+// BEFORE: the same continue-as-new started directly records the same event behind the handle and is reported.
+func TestContinueAsNewAtEventCapIsCountedAndStartingItBehindTheHandleIsReported(t *testing.T) {
+	atCap := func(c *stepCtx) { c.ContinueAsNewAtEventCap() }
+	behind := func(c *stepCtx) { c.s.triggerEventCapContinueAsNew(c.ctx, c.m) }
+	for _, tc := range []struct {
+		name   string
+		record func(c *stepCtx)
+		want   string
+	}{
+		{"through the handle", atCap, ""},
+		{"behind the handle", behind, "recorded 0 event(s) through the handle but the step count moved by 1"},
+		// The count is what the continue-as-new DID, not a constant: a continue-as-new that is refused (the stop was set after step() applied its own
+		// refusal, which a write failing inside the Fresh does) records nothing, and a spec that counted it as one would hide a Fresh that recorded none.
+		{"refused: nothing recorded, and counted as nothing", func(c *stepCtx) {
+			c.s.eventWriteFailure = errors.New("event write refused")
+			c.ContinueAsNewAtEventCap()
+		}, "but recorded 0"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var ran int32
+			s := stepSession([]EngineOption{WithMaxQuotaEvents(1)}, nil)
+			s.eventCount, s.originalInput = 1, `{}`
+			sp := fakeSpec(effectEffect, recordsOne, &ran, tc.record)
+			s.step(context.Background(), nil, sp, stepArgs{})
+			if strings.HasPrefix(tc.name, "refused") {
+				if len(s.history) != 0 {
+					t.Errorf("PRECONDITION FAILED: the continue-as-new was not refused (history=%v), so this row measures nothing", s.history)
+				}
+			} else if len(s.history) != 1 || s.history[0].EventType != EventTypeContinueAsNew || !s.autoContinueAsNewTriggered || s.suspendErr == nil {
+				t.Errorf("the continue-as-new did not happen: history=%v triggered=%v suspendErr=%v", s.history, s.autoContinueAsNewTriggered, s.suspendErr)
+			}
+			joined := strings.Join(s.stepViolations, "; ")
+			if tc.want == "" && joined != "" {
+				t.Errorf("reported %q for a continue-as-new started through the handle", joined)
+			}
+			if tc.want != "" && !strings.Contains(joined, tc.want) {
+				t.Errorf("reported %q, want it to contain %q", joined, tc.want)
+			}
+		})
+	}
+}
+
+// A spec that was reporting a violation at the cap (the two no-wait awaits, measured on develop 615c81c4) reports none, and every one of the polls
+// below the cap is still clean. The existing test for the cap (a_no_wait_poll_counts_toward_the_event_cap_test.go) never read the violations, which is
+// how this stayed in the log at error level.
+func TestTheNoWaitAwaitsReportNoSpecViolationAtTheEventCap(t *testing.T) {
+	const cap = 3
+	for _, name := range []string{"await_promise", "await_signals"} {
+		t.Run(name, func(t *testing.T) {
+			s, _ := originalRun(t, WithMaxQuotaEvents(cap), WithPromiseStore(&mockPromiseStore{status: ""}), WithSignalStore(&awaitProbeStore{deliveries: map[string]SignalDelivery{}}))
+			s.originalInput = `{}`
+			poll := func() int64 {
+				if name == "await_promise" {
+					return s.AwaitPromise(hostCtx(), nil, "prom-cap", 0, 0, 256)
+				}
+				return s.DurableAwaitSignals(hostCtx(), nil, "go", 0, 0, 64, 64, 256)
+			}
+			for i := 0; i < cap; i++ {
+				poll()
+			}
+			if len(s.stepViolations) != 0 {
+				t.Fatalf("the polls below the cap reported %q", s.stepViolations)
+			}
+			if got := poll(); got != callSuspendSentinel || !s.autoContinueAsNewTriggered {
+				t.Fatalf("PRECONDITION FAILED: the poll at the cap returned %#x (triggered=%v); the cap did not fire, so this proves nothing", got, s.autoContinueAsNewTriggered)
+			}
+			if len(s.stepViolations) != 0 {
+				t.Errorf("the poll at the cap reported %q; the continue-as-new it starts records an event and must be counted", s.stepViolations)
+			}
+		})
+	}
+}
+
+// The scan that requires every Record to sit inside a spec's Fresh sees ContinueAsNewAtEventCap too: it records an event on the Fresh's behalf, so a
+// second way to start it from outside a Fresh would skip the refusal the exemption rests on. Known positive.
+func TestTheExemptionsScanSeesContinueAsNewAtEventCapToo(t *testing.T) {
+	src := `package engine
+var specC = stepSpec{Fresh: func(c *stepCtx) int64 { c.ContinueAsNewAtEventCap(); return 0 }}
+func (s *execSession) bypassC(c *stepCtx) { c.ContinueAsNewAtEventCap() }
+`
+	_, _, records, inFresh := dispatcherCallerFacts(t, map[string]string{"cap.go": src})
+	if records != 2 || inFresh != 1 {
+		t.Errorf("the scan found %d ContinueAsNewAtEventCap calls of which %d inside a Fresh, want 2 and 1", records, inFresh)
 	}
 }

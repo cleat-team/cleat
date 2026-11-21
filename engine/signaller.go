@@ -94,7 +94,7 @@ var awaitSignalsStep = stepSpec{
 		return 0, false
 	},
 	Fresh: func(c *stepCtx) int64 {
-		s, ctx, m := c.s, c.ctx, c.m
+		s, ctx := c.s, c.ctx
 		names, timeoutMs := c.args.s1, c.args.i1
 
 		// deliverIfWaiting is the ONE read of the signal store an await makes, on the first poll, at the replay frontier and after a wake: it polls
@@ -171,7 +171,7 @@ var awaitSignalsStep = stepSpec{
 		// outcome of a look at the store, and a replay that reached this call after a signal arrived would otherwise return the signal where the
 		// original returned a timeout. A poll loop therefore records one event per iteration, each counting toward the event cap.
 		if timeoutMs <= 0 {
-			if s.refuseAtEventCap(ctx, m) {
+			if s.refuseAtEventCap(c) {
 				return s.suspendingAwaitResult()
 			}
 			c.Record(EventRecord{Step: s.stepCount, EventType: EventTypeAwaitSignals, SignalNames: names, TimeoutMs: timeoutMs})
