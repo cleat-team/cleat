@@ -4,8 +4,8 @@ package engine
 //
 // A session over a run with history starts in replay and stays there until something leaves it. A retried call that follows the last
 // replayed event directly (a run lost, reclaimed or shut down after a recorded step, with no wait between) arrives still replaying, with
-// nothing left to replay: the replay frontier. replayRetryAttempts finds no attempts to resume there, and the call used to go to replayCall,
-// which makes ONE plain call. Measured on a real worker (cmd/cleat-worker/a_retry_policy_survives_a_resume_on_a_real_worker_test.go): the
+// nothing left to replay: the replay frontier. The old replay found no attempts to resume there (replayRetryAttempts, removed when the call moved onto the
+// dispatcher, which leaves replay at the frontier itself), and the call used to go to replayCall, which makes ONE plain call. Measured on a real worker (cmd/cleat-worker/a_retry_policy_survives_a_resume_on_a_real_worker_test.go): the
 // service saw one attempt of five and the run failed on its first failure, where the same call after a wait, or in the run's first segment,
 // retried to success.
 //

@@ -385,7 +385,13 @@ func TestTheRequiredJavaGuardsCoverEveryHostStopSite(t *testing.T) {
 	// Memory.decodeSimpleErrCode, where a stop reads as errCode 0, a SUCCESS, so both list entries above and Memory.throwIfStopped guards
 	// in HostCalls.java were added. Rust got the matching stop_requested guards, Go's adapters withSuspendCheck. Python decodes bit 31
 	// (_check_host_result) and C# tests the sentinel first (Packed.CheckHostResult); neither needed code.
-	const stopSitesOn20260904 = 28
+	// 26 since cleat#4152 G3 (DurableCallWithRetry moved onto the dispatcher): the call had THREE `if s.stopBeforeNewWork() {` sites of its own (the replay frontier,
+	// the resume of a policy a crash interrupted, and the fresh path: the 18 and the 26 above) and now has ONE, step's, counted through `return s.step(`: 28 - 3 + 1.
+	// Both sides were checked rather than assumed. It is the same host call, cleat_call_retry, which the Java SDK already declares and already guards
+	// (javaCallsTheHostCanRefuse covers the CALL, not the site), so a site REMOVED from the engine drops no Java method and needs no code: the number of
+	// methods stays 30. A count of sites and a list of methods are different things, as at 18. (The retry loop's own check between attempts is not an
+	// `if s.stopBeforeNewWork() {` line, and is not counted here or before.)
+	const stopSitesOn20260904 = 26
 	if stopSites != stopSitesOn20260904 {
 		t.Errorf("the engine has %d `if s.stopBeforeNewWork() {` sites; this test was written "+
 			"against %d.\n\nIf a site was ADDED, the Java SDK has a call the host can now "+

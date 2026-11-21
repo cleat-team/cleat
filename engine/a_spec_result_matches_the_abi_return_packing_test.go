@@ -43,6 +43,7 @@ type abiField struct {
 var abiImportExceptions = map[string]string{
 	"durable_send":        "cleat_send",           // ABI.md section 2.46: the spec is named for the event it records, the import for the call it answers
 	"call_with_heartbeat": "cleat_call_heartbeat", // ABI.md section 2.3: the spec is the call's behaviour (a run of heartbeats, then the outcome), the import its name
+	"call_with_retry":     "cleat_call_retry",     // ABI.md section 2.2: the spec is the call's behaviour (a run of failed attempts, then the outcome), the import its name
 }
 
 // abiImportFor maps a spec's Name to its host call's ABI import. The exceptions are explicit and visible: a name that is not here must be the import
@@ -367,6 +368,7 @@ func TestTheABIImportExceptionsArePinnedToTheirDocumentedSections(t *testing.T) 
 	}{
 		{"durable_send", "cleat_send", layoutSimple},
 		{"call_with_heartbeat", "cleat_call_heartbeat", layoutDurableCall},
+		{"call_with_retry", "cleat_call_retry", layoutDurableCall},
 	}
 	if len(pinned) != len(abiImportExceptions) {
 		t.Errorf("abiImportExceptions has %d entries and this pin lists %d: every exception needs its own pin, stated as a literal here", len(abiImportExceptions), len(pinned))

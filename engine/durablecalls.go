@@ -312,36 +312,6 @@ func (s *execSession) freshCall(ctx context.Context, m api.Module, service, oper
 	return packDurableCallResult(int(written), writeErrorClass(writtenEC), writtenEC)
 }
 
-// replayRetryAttempts consumes the call_attempt_failed events at the head of
-// the remaining history and reports how many attempts they account for.
-//
-// resume is true ONLY when the history ends on them -- attempts recorded with
-// no terminal call event after. Anything else (a terminal event follows, no
-// attempt events at all, a service/op mismatch) returns false and leaves the
-// record for replayCall, which already reports divergence with the better
-// message.
-func (s *execSession) replayRetryAttempts(ctx context.Context, service, operation string) (spent int64, firstStep int, lastRecordedErr string, resume bool) {
-	firstStep = -1
-	for s.stepCount < len(s.history) {
-		rec := s.history[s.stepCount]
-		if rec.EventType != EventTypeCallAttemptFailed {
-			return spent, firstStep, lastRecordedErr, false
-		}
-		if rec.Service != service || rec.Op != operation {
-			return spent, firstStep, lastRecordedErr, false
-		}
-		if firstStep < 0 {
-			firstStep = rec.Step
-		}
-		if !s.advanceReplayStep(ctx, &rec) {
-			return spent, firstStep, lastRecordedErr, false
-		}
-		spent++
-		lastRecordedErr = rec.Err
-	}
-	return spent, firstStep, lastRecordedErr, spent > 0
-}
-
 func (s *execSession) replayCall(ctx context.Context, m api.Module, service, operation, requestJSON string, responsePtr, responseMaxLen uint32) int64 {
 
 	if s.engine.Metrics != nil {
@@ -521,16 +491,101 @@ func retryPolicyFitsBudget(maxAttempts, initialIntervalMs, backoffCoefficient100
 	return true
 }
 
+// retryStep is the retried call (cleat_call_retry) as a dispatcher step (cleat#4152, G3). It is a MULTI-RECORD step, like the heartbeat call: a run of
+// call_attempt_failed events, one per failed attempt that another attempt followed, then the call's outcome, which is a call event or, for a policy
+// refused for its length (cleat#4032), a call_retry_refused event. A history that ENDS inside the run of attempts is a worker lost while the policy was
+// running, and the policy is finished from the attempts already spent (cleat#1145) and not restarted. The service and operation identify the call, on
+// EVERY record of the run: the old replay loop compared them on the attempts only by stopping at the first mismatch, and left the record unread.
+var retryStep = stepSpec{
+	Name:    "call_with_retry",
+	Effect:  effectEffect,
+	Records: recordsMany,
+	Want:    EventTypeCall,
+	// The guest decodes result<string, call-failure>: a divergence is answered in the durable-call layout (ABI.md, "Return packing" of cleat_call_retry).
+	// AfterSuspend is left nil on purpose, as for every durable-call-family spec: the refusal after a suspension is the dispatcher's own, and answers the stop word.
+	Result: layoutDurableCall,
+	Identity: func(a stepArgs, rec *EventRecord) string {
+		if rec.Service != a.s1 || rec.Op != a.s2 {
+			return fmt.Sprintf("call %s.%s, recorded %s.%s", a.s1, a.s2, rec.Service, rec.Op)
+		}
+		return ""
+	},
+	Role: func(_ stepArgs, rec *EventRecord) recordRole {
+		switch rec.EventType {
+		case EventTypeCallAttemptFailed:
+			return rolePrefix
+		case EventTypeCall, EventTypeCallRetryRefused:
+			return roleFinal
+		}
+		return roleForeign
+	},
+	DecodeRun: func(c *stepCtx, run []EventRecord) int64 { return c.s.decodeRetryOutcome(c, run[len(run)-1]) },
+	Fresh:     func(c *stepCtx) int64 { return c.s.freshCallWithRetry(c) },
+}
+
+func init() { registerStepSpec(&retryStep) }
+
+// DurableCallWithRetry is cleat_call_retry. The ONE check that stays here, before the dispatcher, is a policy that allows no attempt, and it must: the
+// refusal records nothing, so on a replay the record at this step is the guest's NEXT call, and a step that read the history first would report that
+// call's record as a divergence (and a recorded terminal call or a resume would be replayed and not refused: two rows of the behaviour table pin both).
+// Everything else a retried call decides is the dispatcher's or the spec's.
 func (s *execSession) DurableCallWithRetry(ctx context.Context, m api.Module,
 	service, operation, requestJSON string,
 	maxAttempts, initialIntervalMs, backoffCoefficient100x, maxIntervalMs int64,
 	nonRetryableErrorsJSON string,
 	responsePtr, responseMaxLen uint32) int64 {
+	// A POLICY THAT ALLOWS NO ATTEMPT IS REFUSED, fresh and replay alike (cleat#4244). maxAttempts arrives across the ABI from every SDK and several
+	// pass it unvalidated: the Go SDK sends int64(policy.MaxAttempts), so a cleat.RetryPolicy with no MaxAttempts sent 0. The loop in
+	// freshCallWithRetry then never ran, lastErr stayed nil, and the terminal event dereferenced it: a host panic a guest could trigger with
+	// ordinary code. The engine is the one place that covers every SDK.
+	//
+	// FIRST STATEMENT OF THIS BLOCK, which only runs when nothing is stopping the call: bit 31 wins over any field (ABI.md) and a refusal is a field,
+	// so a defer segment, a shutdown or a refused event write with a zero policy answers the suspend sentinel below, as for any call. It sits BEFORE
+	// the replay branch on purpose, so a call whose terminal event is already recorded, and a resume, are refused too and not replayed. (A call with
+	// maxAttempts < 1 panicked before it could record a terminal event, so no such history exists to be broken by that.)
+	if !s.stopBeforeNewWork() && maxAttempts < 1 {
+		s.engine.log().WarnContext(ctx, "retry policy allows no attempt (maxAttempts < 1); refusing the call",
+			"service", service, "operation", operation, "max_attempts", maxAttempts)
+		return badParamDurableCall
+	}
+	return s.step(ctx, m, &retryStep, stepArgs{s1: service, s2: operation, s3: requestJSON, s4: nonRetryableErrorsJSON,
+		i1: maxAttempts, i2: initialIntervalMs, i3: backoffCoefficient100x, i4: maxIntervalMs, outPtr: responsePtr, outMaxLen: responseMaxLen})
+}
 
-	// Worker-enforced ceiling on retry attempts to prevent runaway retries
-	// from misconfigured WASM modules.  Use the engine-configured limit if
-	// set (it comes from --max-retries on the command line), otherwise the
-	// package-level constant.
+// decodeRetryOutcome answers a replayed retried call from its outcome record, the last of the run the dispatcher read. A recorded refusal is refused again;
+// anything else is the recorded call, answered as the plain call answers it (answerRecordedCall).
+func (s *execSession) decodeRetryOutcome(c *stepCtx, rec EventRecord) int64 {
+	if rec.EventType == EventTypeCallRetryRefused {
+		return s.refuseRetryPolicy(c.ctx, c.m, c.args.outPtr, c.args.outMaxLen,
+			"retry policy rejected: this policy was refused when this call was recorded, as its worst-case "+
+				"backoff exceeds the host-retry budget; run the policy in the guest, suspending between attempts")
+	}
+	return s.answerRecordedCall(c.ctx, c.m, rec, c.args.outPtr, c.args.outMaxLen)
+}
+
+// refuseRetryPolicy answers a guest's retry entry point with RetryPolicyTooLong and the reason, which is the code both
+// SDKs branch on to run the policy themselves. No event is recorded and no attempt is consumed: the guest's own loop
+// records the attempts, and that is what a replay of them replays.
+func (s *execSession) refuseRetryPolicy(ctx context.Context, m api.Module, responsePtr, responseMaxLen uint32, reason string) int64 {
+	written, _ := s.writeResult(ctx, m, responsePtr, reason, responseMaxLen)
+	return packDurableCallResult(int(written), callErrorRetryPolicyTooLong, 1)
+}
+
+// freshCallWithRetry runs the policy: the spec's Fresh. c.Prefix is the attempts a lost worker's FIRST incarnation recorded when the history ended inside
+// the policy, so the attempts already spent, the step its idempotency key was derived from and the error of the last one all come from it. The refusal for
+// a defer segment, a shutdown, a refused event write and a session that has already suspended is the dispatcher's, applied before this runs and on both
+// arrival paths.
+func (s *execSession) freshCallWithRetry(c *stepCtx) int64 {
+	ctx, m := c.ctx, c.m
+	service, operation, requestJSON := c.args.s1, c.args.s2, c.args.s3
+	nonRetryableErrorsJSON := c.args.s4
+	maxAttempts, initialIntervalMs, backoffCoefficient100x, maxIntervalMs := c.args.i1, c.args.i2, c.args.i3, c.args.i4
+	responsePtr, responseMaxLen := c.args.outPtr, c.args.outMaxLen
+	attemptsSpent, resumeStep, lastRecordedErr := int64(len(c.Prefix)), -1, ""
+	if len(c.Prefix) > 0 {
+		resumeStep, lastRecordedErr = c.Prefix[0].Step, c.Prefix[len(c.Prefix)-1].Err
+	}
+
 	// The policy the GUEST asked for, before the attempt ceiling below trims
 	// it. The budget check uses this rather than the clamped value so that the
 	// host reaches the same verdict the guest SDKs used to reach on their own
@@ -550,33 +605,10 @@ func (s *execSession) DurableCallWithRetry(ctx context.Context, m api.Module,
 	if maxAttempts > int64(ceiling) {
 		maxAttempts = int64(ceiling)
 	}
-	// A CALL AT THE REPLAY FRONTIER IS A FRESH CALL AND GETS ITS WHOLE POLICY. cleat#4152.
-	//
-	// A session over a run with history starts in replay (executor.go: isReplay = len(history) > 0), and it stays there until something leaves
-	// it. Nothing leaves it between the last replayed event and a retried call that follows it directly -- a run lost, reclaimed or shut down
-	// after a recorded step, with no wait between that step and the call. (A wait does leave it: the update poll the SDK makes before a sleep
-	// or an await does, at updater.go. Measured: a run that called, slept and then made a retried call got its policy; one lost right after
-	// the call did not.)
-	//
-	// So the retried call arrived here on a replaying session with nothing left to replay. The replay branch below asks
-	// replayRetryAttempts for attempts to resume, finds none, and sends the call to replayCall, whose frontier is exitReplay and then ONE
-	// plain freshCall. The policy was dropped: the service saw a single attempt and the run failed on its first failure, where the same
-	// call in the run's first segment, or after a wait, retried to success. It did not stop at the retry: the budget check below sits on
-	// the fresh branch only, so a policy too long for the budget was never judged either.
-	//
-	// Leaving replay here, before either, is what makes the frontier an ordinary fresh call. It is the same hand-off the mid-retry resume
-	// below makes after replayRetryAttempts, and replayCall makes for a plain call. A recorded event at this step is left to the replay
-	// branch, which still reads it: a terminal call, a refusal, or attempts to resume.
-	if s.isReplay && s.stepCount >= len(s.history) {
-		s.exitReplay()
-		// A defer segment is refused here, at the frontier it arrives on, before the budget check below can answer with a refusal of its
-		// own: bit 31 wins over any field (ABI.md). The check further down also refuses a segment, so this is not a second behaviour. It is
-		// here because a hand-off to fresh work that spells the frontier predicate has to refuse INSIDE it, which is what
-		// TestEveryFrontierAnswerReachesARefusalOrIsNamed requires and what keeps the refusal from sitting in a different branch.
-		if s.stopBeforeNewWork() {
-			return callSuspendSentinel
-		}
-	}
+	// A CALL AT THE REPLAY FRONTIER IS A FRESH CALL AND GETS ITS WHOLE POLICY (cleat#4152). The dispatcher leaves replay at the frontier before it gets here,
+	// so a retried call that follows the last replayed event directly arrives with replay off and is judged and run as a fresh one: the table's
+	// frontier_gets_its_whole_policy row. The history of this bug, kept because the next reader will wonder why the frontier is mentioned at all, is in
+	// IMPROVEMENT-PLAN and in that row's header: the old entry did this hand-off itself, and a retried call that skipped it ran ONE attempt.
 
 	// REFUSE A POLICY TOO LONG TO RUN IN ONE SEGMENT, AND RECORD THE REFUSAL. cleat#4032.
 	//
@@ -585,8 +617,9 @@ func (s *execSession) DurableCallWithRetry(ctx context.Context, m api.Module,
 	// that is refused does not stop. Both SDKs fall back to their own loop of ordinary DurableCalls, which DO
 	// record events, and on the next segment the guest asks this same question again. Answering from history gave
 	// `replayCall` the guest's first FAILED attempt -- the error its own loop was in the middle of retrying --
-	// because replayRetryAttempts only resumes on call_attempt_failed records and an ordinary call event stops the
-	// walk. The workflow died on the very error the policy existed to retry.
+	// because the replay of a retried call only resumed on call_attempt_failed records and an ordinary call event stopped the
+	// walk (replayRetryAttempts, removed when the call moved onto the dispatcher, cleat#4152 G3: the run is now read by retryStep's Role).
+	// The workflow died on the very error the policy existed to retry.
 	//
 	// THE REFUSAL IS NOW AN EVENT, and that is what makes the replay answerable. The two obvious alternatives both
 	// fail:
@@ -608,37 +641,15 @@ func (s *execSession) DurableCallWithRetry(ctx context.Context, m api.Module,
 	//
 	// Skipped when the segment is being stopped, because ABI.md requires bit 31 to win over any field and a refusal
 	// IS a field: the stop paths below return the sentinel unchanged.
-	if !s.stopBeforeNewWork() {
-		// A POLICY THAT ALLOWS NO ATTEMPT IS REFUSED, fresh and replay alike (cleat#4244). maxAttempts arrives across the ABI from every SDK and several
-		// pass it unvalidated: the Go SDK sends int64(policy.MaxAttempts), so a cleat.RetryPolicy with no MaxAttempts sent 0. The loop in
-		// freshCallWithRetry then never ran, lastErr stayed nil, and the terminal event dereferenced it: a host panic a guest could trigger with
-		// ordinary code. The engine is the one place that covers every SDK.
-		//
-		// FIRST STATEMENT OF THIS BLOCK, which only runs when nothing is stopping the call: bit 31 wins over any field (ABI.md) and a refusal is a field,
-		// so a defer segment, a shutdown or a refused event write with a zero policy answers the suspend sentinel below, as for any call. It sits BEFORE
-		// the replay branch on purpose, so a call whose terminal event is already recorded, and a resume, are refused too and not replayed. (A call with
-		// maxAttempts < 1 panicked before it could record a terminal event, so no such history exists to be broken by that.)
-		if maxAttempts < 1 {
-			s.engine.log().WarnContext(ctx, "retry policy allows no attempt (maxAttempts < 1); refusing the call",
-				"service", service, "operation", operation, "max_attempts", maxAttempts)
-			return badParamDurableCall
-		}
-		if s.isReplay {
-			if s.stepCount < len(s.history) && s.history[s.stepCount].EventType == EventTypeCallRetryRefused {
-				rec := s.history[s.stepCount]
-				if !s.advanceReplayStep(ctx, &rec) {
-					return 0
-				}
-				return s.refuseRetryPolicy(ctx, m, responsePtr, responseMaxLen,
-					"retry policy rejected: this policy was refused when this call was recorded, as its worst-case "+
-						"backoff exceeds the host-retry budget; run the policy in the guest, suspending between attempts")
-			}
-		} else if budget := s.engine.hostRetryBudget(ctx); !retryPolicyFitsBudget(
+	// A resume is not judged again: the budget was settled before the attempts it is resuming were recorded, and a policy that fitted then fits with fewer
+	// attempts left (the old code skipped the check on any session still replaying, which is exactly a resume).
+	if len(c.Prefix) == 0 {
+		if budget := s.engine.hostRetryBudget(ctx); !retryPolicyFitsBudget(
 			requestedAttempts, initialIntervalMs, backoffCoefficient100x, maxIntervalMs, budget) {
 			// The REQUEST is deliberately not recorded: nothing reads it back, and a request body is exactly the
 			// kind of value the sealed-payload machinery exists for. Service and Op are enough for a divergence
 			// report to name the call.
-			s.recordEvent(EventRecord{
+			c.Record(EventRecord{
 				Step:      s.stepCount,
 				EventType: EventTypeCallRetryRefused,
 				Service:   service,
@@ -648,52 +659,6 @@ func (s *execSession) DurableCallWithRetry(ctx context.Context, m api.Module,
 				fmt.Sprintf("retry policy rejected: worst-case backoff exceeds the %s host-retry budget; "+
 					"run the policy in the guest, suspending between attempts", budget))
 		}
-	}
-	if s.isReplay {
-		spent, firstStep, lastRecordedErr, resume := s.replayRetryAttempts(ctx, service, operation)
-		if !resume {
-			return s.replayCall(ctx, m, service, operation, requestJSON, responsePtr, responseMaxLen)
-		}
-		// History ended INSIDE the policy: attempts were recorded and no
-		// terminal call event follows, which happens exactly when the worker
-		// was lost while the policy was still running. Finish it from where it
-		// stopped rather than restarting it, which is what re-spent the
-		// caller's MaxAttempts (cleat#1145).
-		//
-		// The budget was already settled above, before this branch: a policy
-		// that fitted on the first incarnation fits with fewer attempts left.
-		s.exitReplay()
-		if s.stopBeforeNewWork() {
-			return callSuspendSentinel
-		}
-		return s.freshCallWithRetry(ctx, m, service, operation, requestJSON,
-			maxAttempts, initialIntervalMs, backoffCoefficient100x, maxIntervalMs,
-			nonRetryableErrorsJSON, responsePtr, responseMaxLen, spent, firstStep, lastRecordedErr)
-	}
-	if s.stopBeforeNewWork() {
-		return callSuspendSentinel
-	}
-
-	return s.freshCallWithRetry(ctx, m, service, operation, requestJSON,
-		maxAttempts, initialIntervalMs, backoffCoefficient100x, maxIntervalMs,
-		nonRetryableErrorsJSON, responsePtr, responseMaxLen, 0, -1, "")
-}
-
-// refuseRetryPolicy answers a guest's retry entry point with RetryPolicyTooLong and the reason, which is the code both
-// SDKs branch on to run the policy themselves. No event is recorded and no attempt is consumed: the guest's own loop
-// records the attempts, and that is what a replay of them replays.
-func (s *execSession) refuseRetryPolicy(ctx context.Context, m api.Module, responsePtr, responseMaxLen uint32, reason string) int64 {
-	written, _ := s.writeResult(ctx, m, responsePtr, reason, responseMaxLen)
-	return packDurableCallResult(int(written), callErrorRetryPolicyTooLong, 1)
-}
-
-func (s *execSession) freshCallWithRetry(ctx context.Context, m api.Module,
-	service, operation, requestJSON string,
-	maxAttempts, initialIntervalMs, backoffCoefficient100x, maxIntervalMs int64,
-	nonRetryableErrorsJSON string,
-	responsePtr, responseMaxLen uint32, attemptsSpent int64, resumeStep int, lastRecordedErr string) int64 {
-	if res, ok := s.refuseIfSuspended("DurableCallWithRetry", callSuspendSentinel); ok {
-		return res
 	}
 
 	// Parse non-retryable error patterns.
@@ -724,6 +689,7 @@ func (s *execSession) freshCallWithRetry(ctx context.Context, m api.Module,
 		if err := json.Unmarshal([]byte(nonRetryableErrorsJSON), &nonRetryableErrors); err != nil {
 			s.engine.log().WarnContext(ctx, "unparseable non-retryable error list; refusing the call",
 				"service", service, "operation", operation, "error", err)
+			c.RecordsNothing("a non-retryable list that cannot be read is refused before any attempt: failing closed, and nothing is recorded")
 			return badParamDurableCall
 		}
 	}
@@ -783,7 +749,7 @@ func (s *execSession) freshCallWithRetry(ctx context.Context, m api.Module,
 				Request:   requestJSON,
 				Response:  resp,
 			}
-			s.recordEvent(rec)
+			c.Record(rec)
 
 			written, writtenEC := s.writeOut(ctx, m, responsePtr, resp, responseMaxLen)
 			return packDurableCallResult(int(written), writeErrorClass(writtenEC), writtenEC)
@@ -818,7 +784,7 @@ func (s *execSession) freshCallWithRetry(ctx context.Context, m api.Module,
 			// by the terminal call event below, so a history never ends with an
 			// attempt event unless the run was interrupted -- which is the
 			// signal the replay path reads (cleat#1145).
-			s.recordEvent(EventRecord{
+			c.Record(EventRecord{
 				Step:      s.stepCount,
 				EventType: EventTypeCallAttemptFailed,
 				Service:   service,
@@ -942,7 +908,7 @@ func (s *execSession) freshCallWithRetry(ctx context.Context, m api.Module,
 		// That is what made the decision a substring match. cleat#902.
 		RetriesExhausted: exhausted,
 	}
-	s.recordEvent(rec)
+	c.Record(rec)
 
 	// Retries exhausted stays callFailureCode: the error was retryable, the
 	// attempts simply ran out, and calling again later may well work.
