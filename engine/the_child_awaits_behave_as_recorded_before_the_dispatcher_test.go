@@ -252,6 +252,10 @@ func TestTheChildAwaitsBehaveAsRecordedBeforeTheDispatcher(t *testing.T) {
 		{name: "await_child replay: an empty record and a store error record the error as the ANSWER", call: callOfAwaitChild, ids: []string{"c1"},
 			hist: []EventRecord{ac("", "")}, storeErr: map[string]error{"c1": errors.New("boom")},
 			want: childAwaitWant{errCode: 1, result: "boom", recs: []childAwaitRec{rec(EventTypeAwaitChild, "", "boom", "", "c1")}, step: 1, gets: 1}},
+		// ---- a pending record with MORE history after it: the shape the guards exempt "by reading, not by measurement" ----
+		{name: "KNOWN DEFECT (history left unread): await_child replay of an empty record that is FOLLOWED by another record leaves replay with that record unread, so a call recorded after it would run again",
+			call: callOfAwaitChild, ids: []string{"c1"}, hist: []EventRecord{ac("", ""), foreign}, outcomes: map[string]ChildOutcome{"c1": done("R")},
+			want: childAwaitWant{result: "R", recs: []childAwaitRec{rec(EventTypeAwaitChild, "R", "", "", "c1")}, step: 1, gets: 1}},
 		// ---- the end of history ----
 		{name: "await_child: the end of history leaves replay and a completed child is recorded", call: callOfAwaitChild, ids: []string{"c1"}, hist: []EventRecord{foreign}, mod: atEnd,
 			outcomes: map[string]ChildOutcome{"c1": done("R")},
@@ -312,6 +316,10 @@ func TestTheChildAwaitsBehaveAsRecordedBeforeTheDispatcher(t *testing.T) {
 		{name: "KNOWN DEFECT (no identity on a pending record): await_all replay re-checks the store for THIS call's ids when the empty record names other ids", call: callOfAwaitAllChildren,
 			ids: []string{"c1", "c2"}, hist: []EventRecord{allRec(`["c9"]`, "")}, outcomes: map[string]ChildOutcome{"c1": done("R1"), "c2": done("R2")},
 			want: childAwaitWant{result: both, recs: []childAwaitRec{rec(EventTypeAwaitAllChildren, both, "", two, "")}, step: 1, gets: 2, getOrder: []string{"c1", "c2"}}},
+		{name: "KNOWN DEFECT (history left unread): await_all replay of an empty record that is FOLLOWED by another record leaves replay with that record unread, so a call recorded after it would run again",
+			call: callOfAwaitAllChildren, ids: []string{"c1", "c2"}, hist: []EventRecord{allRec(two, ""), foreign},
+			outcomes: map[string]ChildOutcome{"c1": done("R1"), "c2": done("R2")},
+			want:     childAwaitWant{result: both, recs: []childAwaitRec{rec(EventTypeAwaitAllChildren, both, "", two, "")}, step: 1, gets: 2, getOrder: []string{"c1", "c2"}}},
 		{name: "await_all: the end of history leaves replay and records the answer", call: callOfAwaitAllChildren, ids: []string{"c1", "c2"}, hist: []EventRecord{foreign}, mod: atEnd,
 			outcomes: map[string]ChildOutcome{"c1": done("R1"), "c2": done("R2")},
 			want:     childAwaitWant{result: both, recs: []childAwaitRec{rec(EventTypeAwaitAllChildren, both, "", two, "")}, step: 2, gets: 2, getOrder: []string{"c1", "c2"}}},
