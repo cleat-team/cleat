@@ -511,24 +511,28 @@ func dispatcherCallerFacts(t *testing.T, sources map[string]string) (leaveReplay
 		}
 		return false
 	}
-	// Every call site by callee name (a method or a function), so a helper that holds a Record call can be asked who calls it. A call to a DIFFERENT
-	// function of the same name counts too, which can only make the answer stricter: a helper is vouched for only if every call by its name is in a Fresh.
+	// Every REFERENCE to a name (a method or a function), so a helper that holds a Record call can be asked who uses it. A reference is a call or a use as a
+	// value (`f := s.helper`, `go s.helper`, an argument): counting calls only let a method value taken outside a Fresh and called later pass as "all in
+	// Fresh" (cleat-review3, on #4303). A function's own declaration name is not a reference. A reference to a DIFFERENT function of the same name counts
+	// too, which can only make the answer stricter: a helper is vouched for only if every reference by its name is in a Fresh.
 	type callSite struct {
 		file     string
 		pos, end token.Pos
 	}
 	sitesByName := map[string][]callSite{}
 	for name, f := range parsed {
+		skip := map[*ast.Ident]bool{}
 		ast.Inspect(f, func(n ast.Node) bool {
-			call, ok := n.(*ast.CallExpr)
-			if !ok {
-				return true
-			}
-			switch fun := call.Fun.(type) {
+			switch x := n.(type) {
+			case *ast.FuncDecl:
+				skip[x.Name] = true
 			case *ast.SelectorExpr:
-				sitesByName[fun.Sel.Name] = append(sitesByName[fun.Sel.Name], callSite{name, call.Pos(), call.End()})
+				skip[x.Sel] = true // counted once, as the selector, not again as the identifier under it
+				sitesByName[x.Sel.Name] = append(sitesByName[x.Sel.Name], callSite{name, x.Pos(), x.End()})
 			case *ast.Ident:
-				sitesByName[fun.Name] = append(sitesByName[fun.Name], callSite{name, call.Pos(), call.End()})
+				if !skip[x] {
+					sitesByName[x.Name] = append(sitesByName[x.Name], callSite{name, x.Pos(), x.End()})
+				}
 			}
 			return true
 		})
@@ -663,12 +667,16 @@ func (s *execSession) okHelper(c *stepCtx) int64 { c.Record(EventRecord{}); retu
 var specMixed = stepSpec{Fresh: func(c *stepCtx) int64 { return c.s.mixedHelper(c) }}
 func (s *execSession) mixedHelper(c *stepCtx) int64 { c.Record(EventRecord{}); return 0 }
 func (s *execSession) elsewhere(c *stepCtx) { s.mixedHelper(c) }
+var specValue = stepSpec{Fresh: func(c *stepCtx) int64 { return c.s.valueHelper(c) }}
+func (s *execSession) valueHelper(c *stepCtx) int64 { c.Record(EventRecord{}); return 0 }
+func (s *execSession) grabsItAsAValue() { f := s.valueHelper; _ = f }
 `
 	cc, pc, rr, rf := dispatcherCallerFacts(t, map[string]string{"bad.go": badStep})
-	// Four Records: one inline in a Fresh (in), one in a helper nobody calls (out: vacuously "all in Fresh", the bypass), one in a helper called only from a
-	// Fresh (in), and one in a helper called from a Fresh AND from elsewhere (out).
-	if len(cc) != 2 || len(pc) != 2 || rr != 4 || rf != 2 {
-		t.Errorf("CONTROL: on a source with a second caller of each exit, a Record outside Fresh, a helper called only from Fresh and a helper called from elsewhere too, the scan reported callers=%v pendingCallers=%v records=%d inFresh=%d, want 2, 2, 4 records, 2 in Fresh", cc, pc, rr, rf)
+	// Five Records: one inline in a Fresh (in), one in a helper nobody calls (out: vacuously "all in Fresh", the bypass), one in a helper called only from a
+	// Fresh (in), one in a helper called from a Fresh AND from elsewhere (out), and one in a helper called from a Fresh whose method value is ALSO taken
+	// outside a Fresh (out: a reference that is not a call).
+	if len(cc) != 2 || len(pc) != 2 || rr != 5 || rf != 2 {
+		t.Errorf("CONTROL: on a source with a second caller of each exit, a Record outside Fresh, a helper called only from Fresh and a helper called from elsewhere too, the scan reported callers=%v pendingCallers=%v records=%d inFresh=%d, want 2, 2, 5 records, 2 in Fresh", cc, pc, rr, rf)
 	}
 }
 
