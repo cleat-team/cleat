@@ -645,6 +645,9 @@ func extractCompactionStateFrom(prev *CompactionState, events []EventRecord) (*C
 			ce.Op = ev.Op
 		case EventTypeAwaitAllChildren:
 			ce.Response = ev.Response
+			// The request, which is the call's IDENTITY: awaitAllChildrenStep compares it on replay, and a compacted record that had lost it replayed as a divergence
+			// (cleat#4325, measured: result 0x1 and the step not consumed where the uncompacted record replays 0x0).
+			ce.Request = ev.Request
 			// All children resolved.
 			openChildren = make(map[string]bool)
 		case EventTypePluginCall:
@@ -864,6 +867,7 @@ func buildFullHistoryFromCompaction(tail []EventRecord, cs *CompactionState) []E
 			rec.Op = ce.Op
 		case EventCodeAwaitAllChildren:
 			rec.Response = ce.Response
+			rec.Request = ce.Request
 		case EventCodePluginCall:
 			rec.PluginName = ce.PluginName
 			rec.PluginFunc = ce.PluginFunc
