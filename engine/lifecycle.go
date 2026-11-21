@@ -45,6 +45,9 @@ func (s *execSession) ContinueAsNew(ctx context.Context, m api.Module, newInputJ
 	if s.stopBeforeNewWork() {
 		return callSuspendSentinel
 	}
+	if res, ok := s.refuseIfSuspended("ContinueAsNew", callSuspendSentinel); ok {
+		return res
+	}
 
 	rec := EventRecord{
 		Step:      s.stepCount,
@@ -87,6 +90,9 @@ func (s *execSession) ContinueAsNewWithVersion(ctx context.Context, m api.Module
 	// and the whole defer table consumed.
 	if s.stopBeforeNewWork() {
 		return callSuspendSentinel
+	}
+	if res, ok := s.refuseIfSuspended("ContinueAsNewWithVersion", callSuspendSentinel); ok {
+		return res
 	}
 
 	rec := EventRecord{
@@ -142,6 +148,11 @@ func (s *execSession) RegisterUpdateHandler(ctx context.Context, m api.Module, n
 			return s.replayDivergence(ctx, m, EventTypeUpdateHandler, 0, 0)
 		}
 		s.exitReplay()
+	}
+
+	// A guest that ignored a suspension registers nothing: it is not a stop site, so it answers the ordinary error code (cleat#4285).
+	if res, ok := s.refuseIfSuspended("RegisterUpdateHandler", 1); ok {
+		return res
 	}
 
 	// Fresh execution: record the handler registration event.

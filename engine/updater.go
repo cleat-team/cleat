@@ -106,6 +106,9 @@ func (s *execSession) DurablePollUpdate(ctx context.Context, m api.Module, outPt
 	if s.stopBeforeNewWork() {
 		return callSuspendSentinel
 	}
+	if res, ok := s.refuseIfSuspended("DurablePollUpdate", callSuspendSentinel); ok {
+		return res
+	}
 
 	pending, err := s.engine.updateStore.GetPendingUpdateRequests(ctx, s.engine.workflowID)
 	if err != nil {
@@ -165,6 +168,9 @@ func (s *execSession) DurableCompleteUpdate(ctx context.Context, m api.Module, r
 
 	if s.stopBeforeNewWork() {
 		return callSuspendSentinel
+	}
+	if res, ok := s.refuseIfSuspended("DurableCompleteUpdate", callSuspendSentinel); ok {
+		return res
 	}
 
 	name, rowID, promiseID := splitUpdateRequestKey(requestID)

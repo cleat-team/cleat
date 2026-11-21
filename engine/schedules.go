@@ -303,12 +303,18 @@ func (s *execSession) ListCrons(ctx context.Context, m api.Module, outPtr, outMa
 // The dispatcher has no Read effect class yet (see stepEffect), so it is declared effectEffect, which only matters for the refusal this
 // overrides.
 var listCronsStep = stepSpec{
-	Name:       "list_crons",
-	Result:     layoutSimple,
-	Effect:     effectEffect,
-	Refuse:     neverRefuse,
-	Records:    recordsOne,
-	Want:       EventTypeListCrons,
+	Name:    "list_crons",
+	Result:  layoutSimple,
+	Effect:  effectEffect,
+	Refuse:  neverRefuse,
+	Records: recordsOne,
+	Want:    EventTypeListCrons,
+	// Not a stop site, so after a suspension it answers an ordinary error and not the stop word its decoders do not know (cleat#4285); that keeps it
+	// a non-site, and nothing runs or records.
+	AfterSuspend: func(c *stepCtx) int64 {
+		written, _ := c.s.writeResult(c.ctx, c.m, c.args.outPtr, callRefusedAfterSuspend, c.args.outMaxLen)
+		return packSimpleResult(1, written)
+	},
 	NoIdentity: "the result is the event: a list of the tenant's schedules at that moment, which differs between a run and its replay by construction, and the call has no argument that could identify it",
 	Decode: func(c *stepCtx, rec *EventRecord) int64 {
 		if rec.Err != "" {

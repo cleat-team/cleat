@@ -24,9 +24,13 @@ import (
 // That row was green through the whole defect.
 //
 // What can see it is the guest. The fixture defers recover() around each
-// await (recordUnwind) and records a side_effect when it caught the panic. A
-// guest that unwound leaves that event AFTER the await record; a guest that
-// trapped cannot run recover() and leaves nothing. AwaitChild and
+// await (recordUnwind) and sets a query-state key when it caught the panic. A
+// guest that unwound sets it; a guest that trapped cannot run recover() and
+// leaves nothing. (This marker was a recorded side_effect after the await until
+// cleat#4285, when the host began refusing every call made after a suspension:
+// the side_effect was refused, so the test wanted a history that can no longer
+// be written. The history must now hold ONLY the await, and the key is what
+// proves the unwind.) AwaitChild and
 // AwaitAnyChild have always honoured the sentinel, so they are this test's own
 // positive controls: if they stop leaving the marker, the probe is broken, not
 // the adapter.
@@ -54,7 +58,7 @@ func TestGoAwaitCallsUnwindThroughTheSuspendSentinel(t *testing.T) {
 			if err != nil {
 				t.Fatalf("marshalling fixture input: %v", err)
 			}
-			_, _, suspended, _, _, err := wenv.H().Execute(ctx, wasmBytes, "exercise_host_call", input)
+			_, _, suspended, _, queryState, err := wenv.H().Execute(ctx, wasmBytes, "exercise_host_call", input)
 			if err != nil {
 				t.Fatalf("engine error: %v", err)
 			}
@@ -67,12 +71,27 @@ func TestGoAwaitCallsUnwindThroughTheSuspendSentinel(t *testing.T) {
 			for _, e := range suspended.History {
 				types = append(types, e.EventType)
 			}
-			want := []engine.EventType{c.awaitType, engine.EventTypeSideEffect}
-			if len(types) != len(want) || types[0] != want[0] || types[1] != want[1] {
-				t.Errorf("history = %v, want %v. The side_effect after the await is the guest's own recover() "+
+			want := []engine.EventType{c.awaitType}
+			if len(types) != len(want) || types[0] != want[0] {
+				t.Errorf("history = %v, want %v. Anything after the await is a call the guest made after it was told to "+
+					"stop, which the host refuses (cleat#4285); a guest that ran on is not an unwound one", types, want)
+			}
+			// The refusal reached the guest's recover path (the coordinator's ruling on #4295): from inside recover() the guest made one call that records an
+			// event, the host refused it because the run had suspended, and what came back is in query state. "returned" would mean it was NOT refused; absent
+			// means the guest never got that far. The history assertion above is the other half: that call recorded nothing.
+			switch got := queryState["refusal-reached-the-guest"]; {
+			case got == "":
+				t.Errorf("the guest's recover path never reported what its call after the suspension returned: query state = %v", queryState)
+			case got == "returned":
+				t.Errorf("a call made from the guest's recover() after the suspension RETURNED instead of being refused: the host did not refuse fresh work after a suspension (cleat#4285)")
+			default:
+				t.Logf("%s: the refusal reached the guest as %q", c.call, got)
+			}
+			if queryState["guest-recovered-the-suspend"] != "1" {
+				t.Errorf("query state = %v, want the guest's recover() marker set. The marker is the guest's own recover() "+
 					"recording that the adapter panicked with cleat.ErrSuspend; its absence means the guest did not "+
 					"unwind (it trapped, or ran on). The engine still reports 'suspended' in that case, which is why "+
-					"the table row cannot catch this (cleat#3385)", types, want)
+					"the table row cannot catch this (cleat#3385)", queryState)
 			}
 		})
 	}

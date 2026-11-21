@@ -128,6 +128,9 @@ var releaseLockStep = stepSpec{
 	Records:  recordsOne,
 	Want:     EventTypeReleaseLock,
 	Identity: lockIdentity,
+	// Not a stop site: after a suspension it answers the ordinary error code its decoders know (cleat#4285). Nothing is released, so the lock stays held until
+	// its lease runs out, which is the cost of a guest that ignored the suspension.
+	AfterSuspend: func(*stepCtx) int64 { return int64(1) },
 	Decode: func(c *stepCtx, rec *EventRecord) int64 {
 		if rec.Err != "" {
 			return int64(1)

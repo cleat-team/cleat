@@ -51,7 +51,7 @@ Three rules the example follows, and one the build enforces:
 - **To wait, call `HostCalls.Sleep`.** `Task.Delay`, `Task.Run`, a thread, and a blocking wait on an incomplete task throw
   `PlatformNotSupportedException` (`Task.Yield` returns). `async`/`await` over host calls works only because every awaited task is already complete.
 - **A suspension is an exception, and it can be caught.** A `catch (Exception)` that swallows `CleatSuspendException` does not change the
-  run's outcome, but the workflow keeps running past it and the host calls it then makes are real. Do not swallow it; the vet warns (`CV101`).
+  run's outcome, but the workflow keeps running past it; since cleat#4285 the host refuses the host calls it then makes, but the code around them still runs. Do not swallow it; the vet warns (`CV101`).
 - **The determinism vet** runs as part of the build (`cleat vet --lang csharp <project>` runs it alone). It is a text scan with no type
   information, so an alias declared in another file, reflection, or an extension method wrapping a refused API are invisible to it. It
   refuses what was measured to differ or fail on the real engine: `Environment.TickCount`, `Stopwatch`, `Thread.Sleep`, `Task.Run`,

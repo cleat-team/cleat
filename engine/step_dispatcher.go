@@ -213,6 +213,12 @@ type stepSpec struct {
 	// answer, so a finished child's answer must never be empty. coerceResultJSON stores an empty result as {} and nonEmptyChildError keeps a failure's
 	// message non-empty; without either, a finished child would read as still pending and be answered over (noted by the reviewer of #4290).
 	OverPending func(a stepArgs, rec *EventRecord) bool
+	// AfterSuspend is what the step answers, WITHOUT running or recording anything, when this execution has already suspended (cleat#4285): step
+	// applies that refusal to every non-Pure step after its other refusals, and this says which word. nil answers callSuspendSentinel, the stop word every
+	// stop site's SDK decoders test first. A spec whose call is not a stop site, so that its decoders do not know that word, answers what they do: the
+	// child awaits their own suspension word (1<<62), and list_crons and release_lock an ordinary error (callRefusedAfterSuspend), which keeps them
+	// non-sites. Not allowed on a Pure step, which is never refused.
+	AfterSuspend func(c *stepCtx) int64
 	// Fresh does the work and records, through c.Record, where the call records. It is called only once the dispatcher has decided
 	// fresh work is allowed.
 	Fresh func(c *stepCtx) int64
@@ -265,6 +271,8 @@ func (sp *stepSpec) validate() error {
 		return fmt.Errorf("step spec %q is a multi-record step (it has a Role) and needs exactly a DecodeRun, not a Decode", sp.Name)
 	case sp.Role != nil && sp.Records == recordsNone:
 		return fmt.Errorf("step spec %q is a multi-record step that records nothing: a run is made of recorded events", sp.Name)
+	case sp.AfterSuspend != nil && sp.Effect == effectPure:
+		return fmt.Errorf("step spec %q is Pure and has an AfterSuspend: a Pure step is never refused", sp.Name)
 	case sp.OverPending != nil && (sp.Role != nil || sp.Records == recordsNone):
 		return fmt.Errorf("step spec %q has an OverPending but is a multi-record step or records nothing: OverPending is a single-record step whose answer is recorded over its own pending record", sp.Name)
 	case sp.ForeignFirst != nil && sp.Role == nil:
@@ -373,6 +381,15 @@ func (s *execSession) step(ctx context.Context, m api.Module, sp *stepSpec, args
 		}
 		if refused {
 			return callSuspendSentinel
+		}
+		// A session that has already suspended starts no fresh work, whatever else would have allowed it (cleat#4285).
+		if res, ok := s.refuseIfSuspendedWith(sp.Name, func() int64 {
+			if sp.AfterSuspend != nil {
+				return sp.AfterSuspend(c)
+			}
+			return callSuspendSentinel
+		}); ok {
+			return res
 		}
 	}
 	before := s.stepCount

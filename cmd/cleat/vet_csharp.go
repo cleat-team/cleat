@@ -674,7 +674,7 @@ func findSwallowingCatches(code []byte) []csFinding {
 			line := strings.Count(src[:m[0]], "\n") + 1
 			col := m[0] - (strings.LastIndex(src[:m[0]], "\n") + 1) + 1
 			out = append(out, csFinding{line: line, col: col, code: "CV101", warning: true,
-				message:    "this catch can swallow CleatSuspendException: a host call made after it still reaches the service and is recorded, past the point the host told the workflow to stop (measured)",
+				message:    "this catch can swallow CleatSuspendException: the workflow keeps running past the point the host told it to stop. The host refuses the host calls it then makes (cleat#4285: none reaches the service), but the code between them still runs",
 				suggestion: "Rethrow it: catch (Exception e) when (e is not CleatSuspendException), or catch (CleatSuspendException) { throw; } before this catch"})
 		}
 		// The handler ends the method or rethrows: the suspension does not fall through to the code after the try.

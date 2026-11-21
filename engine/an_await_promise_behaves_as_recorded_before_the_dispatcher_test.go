@@ -319,10 +319,10 @@ func TestAnAwaitPromiseBehavesAsRecordedBeforeTheDispatcher(t *testing.T) {
 			want: promiseWant{result: "v", events: []EventType{EventTypePromiseResolved}, recordedAs: "v", gets: 1, step: 1}},
 		{name: "fresh: a worker that is shutting down is NOT refused", opts: []EngineOption{WithShutdownSignal(closed)}, status: "pending", timeoutMs: 60000,
 			want: promiseWant{sentinel: true, events: []EventType{EventTypeAwaitPromise}, awaitTO: 60000, awaitTOSet: true, reason: reason, untilMs: promiseT + 60000, gets: 1, step: 1}},
-		{name: "KNOWN DEFECT (cleat#933 shape): a second await in a session that has already suspended is NOT refused, it records a second await and replaces the suspension",
+		{name: "CHANGED BY cleat#4285 (was a KNOWN DEFECT, cleat#933 shape: a second await recorded a second await and replaced the suspension): a call in a session that has already suspended is refused, runs nothing, records nothing and keeps the FIRST suspension",
 			mod:    func(s *execSession) { s.suspendErr = &SuspendError{Reason: "earlier"} },
 			status: "pending", timeoutMs: 60000,
-			want: promiseWant{sentinel: true, events: []EventType{EventTypeAwaitPromise}, awaitTO: 60000, awaitTOSet: true, reason: reason, untilMs: promiseT + 60000, gets: 1, step: 1}},
+			want: promiseWant{sentinel: true, reason: "earlier", gets: 0, step: 0}},
 	}
 	for _, r := range rows {
 		t.Run(r.name, func(t *testing.T) { runPromiseRow(t, r) })

@@ -54,6 +54,18 @@ If the workflow needs to suspend (e.g., for a timer or signal), the export retur
 
 The host must check for this value before decoding the normal result. Suspension is not an error — the host will resume the workflow later by calling the export again with the same input and full event history.
 
+**After a suspension the host refuses fresh work (cleat#4285).** A suspended execution is meant to stop, and a guest is told to. A guest that does not (its SDK returned the suspension as an ordinary value, or the guest caught the exception or discarded the error) goes on making calls, and every such call is recorded after the pending await and runs again when the workflow resumes. So once an execution has suspended, any host call that would start fresh work is **refused**: it runs nothing, records nothing, leaves the first suspension in place, and returns the word that call's own decoder already recognises. The word is the call's own:
+
+| call | answers once the execution has suspended |
+|---|---|
+| `cleat_await_child`, `cleat_await_all_children`, `cleat_await_any_child` | `0x4000000000000000` (`1 << 62`), the word they return while a child runs |
+| `cleat_sleep` | its own suspend status |
+| `cleat_list_crons` | an ordinary error result: `the workflow has suspended; this call was not run` |
+| `cleat_release_lock`, `cleat_register_update_handler` | the ordinary error code `1` |
+| every other call that records or runs something (service calls, plugin calls, child workflows, `cleat_side_effect`, locks, signals, updates, `cleat_continue_as_new`, and the rest) | the stop word `1 << 31`, which those calls' decoders already test first |
+
+Reads that start nothing (`cleat_now`, `cleat_random`, `cleat_uuid`, the polls, the JSON helpers, version and id reads, query state) are not refused. A **defer drain is exempt** when the host runs it, and when the guest runs its own and reports it with `cleat_defer_phase` **only if that drain began before the suspension** (a cleanup in progress whose body awaited a child) **or the suspension is a `cleat_continue_as_new`** (the end of the run, whose defers must run). A drain that begins **after** a wait suspension is not exempt: it is an SDK wrapper running the defers because the guest swallowed the suspension, and its calls are refused like any other. A suspended workflow has not exited, so its cleanup is still pending and runs when the workflow ends. Nothing in this changes what a well-behaved guest sees, because it has already returned.
+
 ### Input/Output format
 
 All arguments are JSON-serialized into a single object. The export function deserializes them, calls the workflow logic, and writes the result as JSON into the output buffer.

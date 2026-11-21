@@ -201,14 +201,19 @@ var probeWant = map[string]map[string]string{
 }
 
 // probeSwallowWant is the swallowing-catch half of the table: how many host calls the SERVICE received from each entry, which sleeps a minute
-// inside the catch under test and then calls the host once AFTER it, and whether the engine saw the suspension. The first two let that call
+// inside the catch under test and then calls the host once AFTER it, and whether the engine saw the suspension. Before cleat#4285 the first two let that call
 // reach the service (1); the filtered and rethrown forms did not (0). CV101 rests on this.
+//
+// THIS CHANGED WITH cleat#4285. The host now refuses every call an execution makes after it has suspended, so the call after the swallowing catch no longer
+// reaches the service: all four entries read 0. The engine still sees the suspension (true) in all four. What the four no longer separate here is the
+// reason CV101 was written (a swallowed suspension used to let a call run twice); the warning still marks a guest that keeps running past the point it was told
+// to stop, which this probe does not measure. The two 1s were updated to 0 from the CI report of this probe and were NOT re-run locally (no dotnet).
 var probeSwallowWant = map[string]struct {
 	calls int
 	susp  bool
 }{
-	"probe_swallow_bare":      {1, true},
-	"probe_swallow_exception": {1, true},
+	"probe_swallow_bare":      {0, true},
+	"probe_swallow_exception": {0, true},
 	"probe_swallow_filtered":  {0, true},
 	"probe_swallow_rethrown":  {0, true},
 }

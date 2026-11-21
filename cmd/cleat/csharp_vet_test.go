@@ -348,8 +348,8 @@ func TestCSharpVetCorpus(t *testing.T) {
 }
 
 // CV101, the warning: a catch that can swallow CleatSuspendException. The four cases are the probe's four swallow entries
-// (packages/cleat-csharp/probe, measured in tests/csharp/determinism_probe_test.go): the first two let a host call after the catch reach the
-// service, and the filtered and rethrown forms did not.
+// (packages/cleat-csharp/probe, measured in tests/csharp/determinism_probe_test.go): the first two keep the guest running past the suspension, and the
+// filtered and rethrown forms do not. (Before cleat#4285 the first two also let a host call after the catch reach the service; the host now refuses it.)
 func TestTheSwallowingCatchWarningMatchesTheProbe(t *testing.T) {
 	warn := func(src string) int { return len(findSwallowingCatches(csharpCodeOnly([]byte(src)))) }
 	cases := []struct {
