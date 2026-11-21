@@ -22,93 +22,77 @@ func (s *execSession) suspendedForContinueAsNew() bool {
 }
 
 func (s *execSession) ContinueAsNew(ctx context.Context, m api.Module, newInputJSON string) int64 {
-	if s.isReplay {
-		if s.stepCount < len(s.history) {
-			rec := s.history[s.stepCount]
-			if rec.EventType == EventTypeContinueAsNew {
-				if !s.advanceReplayStep(ctx, &rec) {
-					return 0
-				}
-				s.suspendErr = &SuspendError{
-					Reason:   "continue_as_new",
-					NewInput: rec.NewInput,
-				}
-				return 0
-			}
-			return s.replayDivergence(ctx, m, EventTypeContinueAsNew, 0, 0)
-		}
-		s.exitReplay()
-	}
-	// New work, so a defer segment refuses it (cleat#4159). It used to record a continue_as_new event in the history of a workflow
-	// being terminated, and a guest that ignored the stop went on into its own defer drain, where the cleanup's call was refused
-	// and the whole defer table consumed.
-	if s.stopBeforeNewWork() {
-		return callSuspendSentinel
-	}
-	if res, ok := s.refuseIfSuspended("ContinueAsNew", callSuspendSentinel); ok {
-		return res
-	}
-
-	rec := EventRecord{
-		Step:      s.stepCount,
-		EventType: EventTypeContinueAsNew,
-		NewInput:  newInputJSON,
-	}
-	s.recordEvent(rec)
-
-	s.suspendErr = &SuspendError{
-		Reason:   "continue_as_new",
-		NewInput: newInputJSON,
-	}
-	return 0
+	return s.step(ctx, m, &continueAsNewStep, stepArgs{s1: newInputJSON})
 }
 
 // ContinueAsNewWithVersion restarts the workflow with new input and optionally
 // a new version. If newVersion is 0, uses the current version (same as ContinueAsNew).
-
 func (s *execSession) ContinueAsNewWithVersion(ctx context.Context, m api.Module, newInputJSON string, newVersion int) int64 {
-	if s.isReplay {
-		if s.stepCount < len(s.history) {
-			rec := s.history[s.stepCount]
-			if rec.EventType == EventTypeContinueAsNew {
-				if !s.advanceReplayStep(ctx, &rec) {
-					return 0
-				}
-				s.suspendErr = &SuspendError{
-					Reason:     "continue_as_new",
-					NewInput:   rec.NewInput,
-					NewVersion: rec.NewVersion,
-				}
-				return 0
-			}
-			return s.replayDivergence(ctx, m, EventTypeContinueAsNew, 0, 0)
-		}
-		s.exitReplay()
-	}
-	// New work, so a defer segment refuses it (cleat#4159). It used to record a continue_as_new event in the history of a workflow
-	// being terminated, and a guest that ignored the stop went on into its own defer drain, where the cleanup's call was refused
-	// and the whole defer table consumed.
-	if s.stopBeforeNewWork() {
-		return callSuspendSentinel
-	}
-	if res, ok := s.refuseIfSuspended("ContinueAsNewWithVersion", callSuspendSentinel); ok {
-		return res
-	}
+	return s.step(ctx, m, &continueAsNewVersionedStep, stepArgs{s1: newInputJSON, i1: int64(newVersion)})
+}
 
-	rec := EventRecord{
-		Step:       s.stepCount,
-		EventType:  EventTypeContinueAsNew,
-		NewInput:   newInputJSON,
-		NewVersion: newVersion,
-	}
-	s.recordEvent(rec)
+// continueAsNewNoIdentity is why neither continue_as_new spec compares anything, and it is a decision and not an omission (cleat#4152, W1). The old code consumed ANY
+// continue_as_new record at the step and continued with the RECORDED input, never the guest's: the guest's input is not what the run continues with on a replay. Comparing it
+// would be a tightening, and one that fails a workflow in flight across a deploy that builds its next input differently, which is a resumable history turned into a
+// divergence. Whether to tighten is a separate ruling; this move keeps what the old code did, and the table pins it.
+const continueAsNewNoIdentity = "the run continues with the RECORDED input on a replay, never the guest's, and the old code compared nothing; comparing it would fail a workflow in flight across a deploy that builds its next input differently (cleat#4152 W1)"
 
-	s.suspendErr = &SuspendError{
-		Reason:     "continue_as_new",
-		NewInput:   newInputJSON,
-		NewVersion: newVersion,
-	}
-	return 0
+// continueAsNewStep is ContinueAsNew as a step. Its replay and fresh halves both END THE RUN: they set the suspension (Reason "continue_as_new") that the executor reads as
+// the end of this execution, not a wait, so its registered defers run (suspendedForContinueAsNew). It refuses like every call that starts new work (stopBeforeNewWork: a
+// defer segment must not record a continue_as_new for a workflow being terminated, cleat#4159) and answers the stop word after a suspension, as the old guard did.
+var continueAsNewStep = stepSpec{
+	Name:               "continue_as_new",
+	Result:             layoutSimple,
+	Effect:             effectEffect,
+	Records:            recordsOne,
+	Want:               EventTypeContinueAsNew,
+	NoIdentity:         continueAsNewNoIdentity,
+	NoDivergenceDetail: "its old message was the shared one: the step and both event types; " + divergenceSweepNote,
+	Decode: func(c *stepCtx, rec *EventRecord) int64 {
+		c.s.suspendErr = &SuspendError{Reason: "continue_as_new", NewInput: rec.NewInput}
+		return 0
+	},
+	Fresh: func(c *stepCtx) int64 {
+		s, input := c.s, c.args.s1
+		c.Record(EventRecord{Step: s.stepCount, EventType: EventTypeContinueAsNew, NewInput: input})
+		s.suspendErr = &SuspendError{Reason: "continue_as_new", NewInput: input}
+		return 0
+	},
+}
+
+// continueAsNewVersionedStep is the same call carrying a version (0 keeps the current one). The version is recorded and read back with the input.
+var continueAsNewVersionedStep = stepSpec{
+	Name:               "continue_as_new_versioned",
+	Result:             layoutSimple,
+	Effect:             effectEffect,
+	Records:            recordsOne,
+	Want:               EventTypeContinueAsNew,
+	NoIdentity:         continueAsNewNoIdentity,
+	NoDivergenceDetail: "its old message was the shared one: the step and both event types; " + divergenceSweepNote,
+	Decode: func(c *stepCtx, rec *EventRecord) int64 {
+		c.s.suspendErr = &SuspendError{Reason: "continue_as_new", NewInput: rec.NewInput, NewVersion: rec.NewVersion}
+		return 0
+	},
+	Fresh: func(c *stepCtx) int64 {
+		s, input, version := c.s, c.args.s1, int(c.args.i1)
+		c.Record(EventRecord{Step: s.stepCount, EventType: EventTypeContinueAsNew, NewInput: input, NewVersion: version})
+		s.suspendErr = &SuspendError{Reason: "continue_as_new", NewInput: input, NewVersion: version}
+		return 0
+	},
+}
+
+// eventCapContinuation is how a refused event write reaches the continue-as-new that is its remedy (triggerEventCapContinueAsNew), and it is a VARIABLE assigned in
+// init() for a reason Go enforces: the continuation records through continueAsNewStep, whose Fresh records through c.Record, which writes the event that failed, which
+// reaches here. As a direct call that is an initialization cycle (continueAsNewStep -> Record -> recordEvent -> stopAfterFailedEventWrite -> triggerEventCapContinueAsNew ->
+// ContinueAsNew -> continueAsNewStep), and the spec has to stay a package-level `var x = stepSpec{...}` because the guards that read the engine's source find specs by that
+// form (assigning it in init() would hide it from them, and a scan that finds nothing reads as clean). The recursion is real and bounded: handlingEventWriteFailure and
+// autoContinueAsNewTriggered latch it, so the continuation's own write failing on the same quota does not come back here.
+var eventCapContinuation func(s *execSession, ctx context.Context, m api.Module)
+
+func init() {
+	eventCapContinuation = (*execSession).triggerEventCapContinueAsNew
+	registerStepSpec(&continueAsNewStep)
+	registerStepSpec(&continueAsNewVersionedStep)
 }
 
 func (s *execSession) Version(ctx context.Context) int64 {
@@ -136,34 +120,30 @@ func (s *execSession) SetQueryState(ctx context.Context, m api.Module, key, valu
 }
 
 func (s *execSession) RegisterUpdateHandler(ctx context.Context, m api.Module, name string) int64 {
-	if s.isReplay {
-		if s.stepCount < len(s.history) {
-			rec := s.history[s.stepCount]
-			if rec.EventType == EventTypeUpdateHandler {
-				if !s.advanceReplayStep(ctx, &rec) {
-					return 0
-				}
-				return 0
-			}
-			return s.replayDivergence(ctx, m, EventTypeUpdateHandler, 0, 0)
-		}
-		s.exitReplay()
-	}
-
-	// A guest that ignored a suspension registers nothing: it is not a stop site, so it answers the ordinary error code (cleat#4285).
-	if res, ok := s.refuseIfSuspended("RegisterUpdateHandler", 1); ok {
-		return res
-	}
-
-	// Fresh execution: record the handler registration event.
-	rec := EventRecord{
-		Step:              s.stepCount,
-		EventType:         EventTypeUpdateHandler,
-		UpdateHandlerName: name,
-	}
-	s.recordEvent(rec)
-	return 0
+	return s.step(ctx, m, &registerUpdateHandlerStep, stepArgs{s1: name})
 }
+
+// registerUpdateHandlerStep is RegisterUpdateHandler as a step. It is NEVER refused (neverRefuse): the old code had no stopBeforeNewWork, so a segment's body and a drain
+// could always register a handler, and a move does not newly refuse what the call did not. After a suspension it answers the ordinary error code and registers nothing
+// (cleat#4285; it is not a stop site, so its decoders do not know the stop word). It has no identity for the reason below, which is a decision.
+var registerUpdateHandlerStep = stepSpec{
+	Name:               "register_update_handler",
+	Result:             layoutSimple,
+	Effect:             effectEffect,
+	Refuse:             neverRefuse,
+	Records:            recordsOne,
+	Want:               EventTypeUpdateHandler,
+	NoIdentity:         "the old code consumed any update_handler record at the step without comparing the name; comparing it would fail a workflow in flight across a deploy that renamed a handler, which is a resumable history turned into a divergence, and is a separate ruling (cleat#4152 W1)",
+	NoDivergenceDetail: "its old message was the shared one: the step and both event types; " + divergenceSweepNote,
+	AfterSuspend:       func(*stepCtx) int64 { return 1 },
+	Decode:             func(*stepCtx, *EventRecord) int64 { return 0 },
+	Fresh: func(c *stepCtx) int64 {
+		c.Record(EventRecord{Step: c.s.stepCount, EventType: EventTypeUpdateHandler, UpdateHandlerName: c.args.s1})
+		return 0
+	},
+}
+
+func init() { registerStepSpec(&registerUpdateHandlerStep) }
 
 // exitReplay transitions from replay to forward execution.
 //
@@ -237,7 +217,7 @@ func (s *execSession) stopAfterFailedEventWrite(rec EventRecord, err error) {
 		// first it refused itself, set no suspension, and left the run going on top of the hole (found in review of the first version, on a
 		// merge with #4161). Its own event write fails on the quota too; the latch above stops that re-entering here.
 		if !s.autoContinueAsNewTriggered {
-			s.triggerEventCapContinueAsNew(context.Background(), nil)
+			eventCapContinuation(s, context.Background(), nil)
 		}
 		s.eventWriteFailure = err
 		return

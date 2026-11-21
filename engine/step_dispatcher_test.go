@@ -946,10 +946,10 @@ func TestARecordsOneSpecMayRecordNothingOnlyOnAPathItListed(t *testing.T) {
 		t.Errorf("a recordsOne spec that returned the suspend sentinel and recorded nothing was reported %q, want the shape violation: the sentinel must not excuse it", joined)
 	}
 
-	// THE PIN: exactly this spec lists paths, and each path is written out here LITERALLY and not through the constants the spec uses, so a reason that is
-	// reworded or a fifth path that is added changes this map in the same diff and the reviewer reads it against the call it is for. A spec added to the
+	// THE PIN: exactly these specs list paths, and each path is written out here LITERALLY and not through the constants the spec uses, so a reason that is
+	// reworded or a path that is added changes this map in the same diff and the reviewer reads it against the call it is for. A spec added to the
 	// registry that lists a path and is not in this map fails here, which is what makes the opt-in visible and not merely available. (Before DurableCall moved
-	// (cleat#4152, G3) this recorded that NO spec listed one.)
+	// (cleat#4152, G3) this recorded that NO spec listed one; poll_update, cleat#4152 W1, is the second.)
 	want := map[string][]string{
 		"call": {
 			"the workflow was cancelled: the call is not made and the guest is told so",
@@ -957,6 +957,8 @@ func TestARecordsOneSpecMayRecordNothingOnlyOnAPathItListed(t *testing.T) {
 			"the worker hard-stopped mid-call: its outcome is unknown, so none is recorded and the next worker replays from before it",
 			"a write-ahead intent that could not be written, completed or honoured: nothing is recorded and the guest is told why",
 		},
+		// poll_update records an update_received only when it finds a pending update.
+		"poll_update": {"no update store: nothing to poll", "the pending requests could not be read: the guest is told nothing was found", "no update is pending"},
 	}
 	listing := map[string][]string{}
 	for _, sp := range stepSpecs {

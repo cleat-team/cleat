@@ -27,7 +27,6 @@ import (
 // check INSIDE freshCall, freshCallWithHeartbeat, freshSideEffect (since moved onto step, cleat#4152) and freshPluginCallStreaming, and this list failed until their entries were removed.)
 var recordedEventSitesWithoutOwnStopCheck = map[string]string{
 	"step_dispatcher.go:Record":          "DISPATCHER: reached only from a spec's Fresh, which step runs after it has applied stopBeforeNewWork to every effectEffect step; the one spec that is never refused, ReleaseLock (`Refuse: neverRefuse`), says why where neverRefuse is declared",
-	"lifecycle.go:RegisterUpdateHandler": "OBSERVATION: records a registration, performs no external work",
 	"plugins.go:freshPluginCallInternal": "FRESH HALF: the plugin-call entry points check before it",
 	"plugins.go:recordStreamError":       "TERMINAL: records the failure that ends a streaming call",
 }
@@ -82,8 +81,10 @@ func TestEveryRecordedEventSiteIsClassified(t *testing.T) {
 	// check"), and a floor on this population is wrong by construction: every call that moves onto the step dispatcher (cleat#4152) stops being a
 	// function that calls recordEvent, because its spec's Fresh records through stepCtx.Record, so the count falls with each migration and the floor
 	// failed the first PR that crossed it (G1b, at 29). What does not drift is that the scan sees BOTH kinds of recording function: one that checks
-	// the stop and one that does not. A scan reading the wrong thing finds neither or only one. The small number below is a sanity bound, not a census.
-	if recording < 10 || withCheck == 0 || len(withoutCheck) == 0 {
+	// the stop and one that does not. A scan reading the wrong thing finds neither or only one. There WAS a small number here as a sanity bound (10, after the 30),
+	// and W1 crossed it too (8 recording functions left, 5 checking the stop and 3 not): a number on a population that shrinks with every migration fails the next
+	// PR that crosses it, so it is gone and the predicate stays, which still fails on a scan that sees nothing (0 and 0) or only one kind.
+	if recording == 0 || withCheck == 0 || len(withoutCheck) == 0 {
 		t.Fatalf("the scan found %d functions that record an event, %d that check the stop and %d that do not; it must see both kinds, so it is not seeing the engine",
 			recording, withCheck, len(withoutCheck))
 	}
