@@ -1674,8 +1674,12 @@ func (b *wasmtimeBackend) ExecuteComponentCGo(
 	// registered before any component could be held, so that admitting one would not leave this builder behind; Python and C# are admitted now. WHAT IS AND IS NOT
 	// SHOWN (a_real_component_is_held_through_a_sleep_and_charged_its_language_test.go): a real component held through a sleep completes in place; a C# run held longer
 	// than the fence is not charged for the hold; a runaway loop after a hold is stopped about one fence after the wake. NOT shown: that the fence is RESTARTED and not
-	// merely re-armed. Removing this registration leaves those rows green, because their guests use almost no guest time before the hold; a row that tells them apart needs
+	// merely re-armed. Neutering restartFence leaves those rows green, because their guests use almost no guest time before the hold; a row that tells them apart needs
 	// a guest that computes before the hold, sized to the machine, and has no component twin yet.
+	//
+	// THIS REGISTRATION IS REDUNDANT with Execute's (backend_wasmtime.go), which registers the same restart BEFORE it dispatches here, and whose closure reads b.budget when
+	// it runs, by which time it is this builder's budget. Removing only this line therefore changes nothing (an equivalent mutant); it is kept so that this builder does
+	// not depend on the order of Execute's body. To test the restart, neuter restartFence or remove both.
 	onLimitsRestart(ctx, func() { b.restartFence(ctx) })
 	wasiConfig := wasmtime.NewWasiConfig()
 	wasiConfig.InheritStderr()

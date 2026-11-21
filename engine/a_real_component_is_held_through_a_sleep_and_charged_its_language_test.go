@@ -210,12 +210,16 @@ func TestPythonComponentIsHeldThroughADurableSleepAndChargedAsPython(t *testing.
 // stopped late, so a lower bound cannot flake under load): the guest must have been given about a whole fence after the wake and not stopped at once, which is what
 // a fence that kept charging during the 400 ms hold would do.
 //
-// WHAT THIS DOES NOT SHOW, AND IT WAS TESTED: that the fence is RESTARTED at the wake, as opposed to re-armed. Removing the component path's restart registration
-// (component_cgo.go, onLimitsRestart) leaves this row GREEN: 1.996 s after the wake against a fence of 2 s, the same as with it (1.959 s). A restart only differs from a
-// re-arm for a guest that had ALREADY used part of its fence when the hold began, and this one has not: componentize-py pre-initialises the interpreter at build time,
-// so there is almost no guest time before the first host call (a hypothesis about this guest, not a measurement). Showing a restart on a component needs a guest that
-// computes, sized to the machine, before the hold, as the core path's timing row does (a_held_wait_restarts_the_fence_on_real_wasmtime_timing_test.go). That row has no
-// component twin yet. What does cover the restart without a clock is the arithmetic test and the structural test that every builder of the fence budget registers it.
+// WHAT THIS DOES NOT SHOW, AND IT WAS TESTED: that the fence is RESTARTED at the wake, as opposed to re-armed. Neutering the restart itself (restartFence's
+// budget.restart) leaves this row GREEN: 1.936 s after the wake against a fence of 2 s, as with it (1.959 s). A restart differs from a re-arm only for a guest that had
+// ALREADY used part of its fence when the hold began, and this one has not (componentize-py pre-initialises the interpreter at build time, so there is almost no guest
+// time before the first host call; a hypothesis about this guest, not a measurement). The twin that does tell them apart is a_held_component_restarts_the_fence_on_real_
+// wasmtime_timing_test.go.
+//
+// A WARNING ABOUT THE OBVIOUS MUTANT, which this comment used to describe wrongly: removing only the component builder's onLimitsRestart registration (component_cgo.go) is
+// an EQUIVALENT mutant. Execute registers the same restart (backend_wasmtime.go) BEFORE it dispatches to the component path, and the closure reads b.budget when it runs,
+// by which time it is the component's budget, so the component's own registration is redundant and removing it changes nothing. Mutate restartFence, or remove both.
+
 func TestPythonRunawayLoopAfterAHoldIsStoppedByTheFenceAWholeFenceAfterTheWake(t *testing.T) {
 	h := newPythonWasmTestHelper(t)
 	if !h.toolsAvailable() {
