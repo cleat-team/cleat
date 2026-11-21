@@ -300,7 +300,8 @@ func (s *execSession) AwaitChild(ctx context.Context, m api.Module, runID string
 //   - never refused (neverRefuse), as before: no stopBeforeNewWork check here, in a segment's body, after a shutdown or after a failed write;
 //   - a store error is recorded as the child's ANSWER (cleat#1115), a failed child as an error, a child still running as an EMPTY record and the
 //     child-await suspend word (packAwaitChildResultSuspend, 1<<62, NOT callSuspendSentinel: ABI.md 2.22);
-//   - a pending record is answered OVER, with later history left unread when there is any (cleat#4285: OverPending says so).
+//   - a pending record is answered OVER. Later history after it is a divergence when it holds a call the body recorded, and is left unread when it holds only a
+//     drain's records, compacted records or no call's effect (cleat#4285: OverPending says so).
 var awaitChildStep = stepSpec{
 	Name: "await_child",
 	// The simple layout: errCode in the low bits and the result length from bit 32 (packAwaitChildResult); the suspend word is 1<<62 and is the
@@ -544,7 +545,7 @@ func (s *execSession) AwaitAnyChild(ctx context.Context, m api.Module, runIDsJSO
 // It keeps the rest, pinned by the old table: never refused, the set compared as a SET (any order), the child-await suspend word (1<<62), a store error recorded as the
 // answer, and the two ways a run ends without an answer. The history ending after the empties resumes fresh with c.Prefix, and a call that resumes records no second
 // empty row (cleat#3391). A FOREIGN record after the empties does the same thing (ResumesFreshAtForeign): the call re-checks its children with that record left
-// UNREAD, so a call recorded after the empties runs again; that is the defect kept on purpose (cleat#4285), warned about and named in the history-unread guard.
+// UNREAD. A call the body recorded there is a divergence (cleat#4285 step 3: staleCallAfterPending); a drain's record, a compacted one or one that is no call's effect is left unread, warned about and named in the history-unread guard.
 //
 // WHAT THE EMPTY MARKER RESTS ON is a store invariant and not a rule of this spec: an answer is told from a pending await by its Response being EMPTY, so a finished
 // child's answer must never be (the answer is JSON with a run_id, so it never is).
@@ -560,7 +561,10 @@ var awaitAnyChildStep = stepSpec{
 	// After a suspension this call answers its own suspension word, as the other two child awaits (cleat#4285).
 	AfterSuspend: func(*stepCtx) int64 { return packAwaitChildResultSuspend() },
 	Identity: func(a stepArgs, rec *EventRecord) string {
-		// A record that names NO set cannot name another, so it is still this call's: the engine always records the request, and only a hand-built history lacks it.
+		// A record that names NO set cannot name another, so it is still this call's. That is safe to tolerate and not a hole: every await_any_child record the engine writes
+		// carries the set (both recording paths below set Request), and compaction carries it in both directions (extractCompactionState and the expansion), so a stored
+		// history never lacks it; only a hand-built one does (cleat-review's reading of #4307). It is a tolerance of that case, not a promise: a record that does name a set
+		// is compared, whichever position it holds in the run.
 		if rec.EventType == EventTypeAwaitAnyChild && rec.Request != "" && !sameRunIDSet(rec.Request, a.s1) {
 			return fmt.Sprintf("run IDs %s, recorded %s", truncateWithHash(a.s1, maxPayloadLen), truncateWithHash(rec.Request, maxPayloadLen))
 		}
@@ -644,7 +648,7 @@ func (s *execSession) AwaitAllChildren(ctx context.Context, m api.Module, runIDs
 // CONSUMES NOTHING now (the old code consumed the record BEFORE it checked its type or its request, so a divergence moved the step count by one,
 // cleat#4157), and a PENDING record that names other run ids is a divergence where the old code re-checked this call's ids over it. It keeps the rest
 // (the old table pins it): never refused, the request compared as TEXT (the same ids in another order are another request), a pending record answered
-// OVER with later history left unread (cleat#4285), and the child-await suspend word (1<<62, ABI.md 2.23).
+// OVER (with a call the body recorded after it a divergence, and a drain's records left unread: cleat#4285), and the child-await suspend word (1<<62, ABI.md 2.23).
 //
 // It records MANY by the dispatcher's vocabulary because one of its answers records nothing: a request that is not valid JSON answers an error and
 // writes no event, which the shape check reads as declared (RecordsNothing).

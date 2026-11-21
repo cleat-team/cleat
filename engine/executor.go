@@ -272,21 +272,23 @@ func (e *Engine) executeWithBackend(
 		replayHistory = buildFullHistoryFromCompaction(history, e.compactionState)
 		compactedStep = e.compactionState.CompactedStep
 	}
+	compactedRecords := len(replayHistory) - len(history)
 
 	now := e.seedNowMs(replayHistory)
 
 	session := &execSession{
-		engine:       e,
-		history:      replayHistory,
-		isReplay:     len(replayHistory) > 0,
-		nowMs:        now,
-		deferrals:    make(map[string]string),
-		workflowID:   e.workflowID,
-		defName:      e.defName,
-		execRunID:    e.workflowID,
-		tenantID:     e.tenantID,
-		stepCallback: e.stepCallback,
-		chainAnchor:  e.chainAnchor(),
+		engine:           e,
+		history:          replayHistory,
+		compactedRecords: compactedRecords,
+		isReplay:         len(replayHistory) > 0,
+		nowMs:            now,
+		deferrals:        make(map[string]string),
+		workflowID:       e.workflowID,
+		defName:          e.defName,
+		execRunID:        e.workflowID,
+		tenantID:         e.tenantID,
+		stepCallback:     e.stepCallback,
+		chainAnchor:      e.chainAnchor(),
 		// originalInput and eventCount were set only in executeCompiled, the
 		// wazero path that CLI tooling uses. This is the backend path -- the
 		// one a worker runs -- and without them the event cap did two wrong
@@ -616,23 +618,25 @@ func (e *Engine) executeCompiled(ctx context.Context, compiled wazero.CompiledMo
 		replayHistory = buildFullHistoryFromCompaction(history, e.compactionState)
 		compactedStep = e.compactionState.CompactedStep
 	}
+	compactedRecords := len(replayHistory) - len(history)
 
 	now := e.seedNowMs(replayHistory)
 
 	session := &execSession{
-		engine:        e,
-		history:       replayHistory,
-		isReplay:      len(replayHistory) > 0,
-		nowMs:         now,
-		deferrals:     make(map[string]string),
-		workflowID:    e.workflowID,
-		defName:       e.defName,
-		execRunID:     e.workflowID,
-		tenantID:      e.tenantID,
-		originalInput: string(input),
-		eventCount:    e.initialEventCount,
-		stepCallback:  e.stepCallback,
-		chainAnchor:   e.chainAnchor(),
+		engine:           e,
+		history:          replayHistory,
+		compactedRecords: compactedRecords,
+		isReplay:         len(replayHistory) > 0,
+		nowMs:            now,
+		deferrals:        make(map[string]string),
+		workflowID:       e.workflowID,
+		defName:          e.defName,
+		execRunID:        e.workflowID,
+		tenantID:         e.tenantID,
+		originalInput:    string(input),
+		eventCount:       e.initialEventCount,
+		stepCallback:     e.stepCallback,
+		chainAnchor:      e.chainAnchor(),
 	}
 
 	execCtx, stepCancel := context.WithCancel(ctx)
