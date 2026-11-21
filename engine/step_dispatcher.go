@@ -89,6 +89,9 @@ type stepCtx struct {
 	// from there. It is data: the spec decides what it means (a retried call reads len(Prefix) as attempts already spent; a heartbeat
 	// ignores it). nil for a step that did not end inside a run.
 	Prefix []EventRecord
+	// declined is set by RecordsNothing: Fresh took a path that records nothing on purpose and says why, so the shape check does not read it as a
+	// spec that failed to do what it declared.
+	declined bool
 }
 
 // Record records an event where the call records it today. It is the only way a spec's Fresh writes history, which is what lets the
@@ -97,6 +100,15 @@ type stepCtx struct {
 func (c *stepCtx) Record(rec EventRecord) eventPersistence {
 	c.recorded++
 	return c.s.recordEvent(rec)
+}
+
+// RecordsNothing says that this Fresh took a path that records nothing on purpose, and why (the reason is for the reader of the spec; the
+// dispatcher only needs the fact). Without it a multi-record step that returned an error word and recorded nothing is indistinguishable from one
+// that forgot to record: the only other way to record nothing is to refuse with the suspend sentinel. await_promise's no-store answer is the case
+// (it must stay an error word with an error code, which a replay and the guest read).
+func (c *stepCtx) RecordsNothing(why string) {
+	_ = why
+	c.declined = true
 }
 
 // stepSpec is a description of one host call's step.
@@ -169,7 +181,7 @@ type stepSpec struct {
 // stepSpecs lists every spec in the engine. It exists for the dispatcher's tests (step_dispatcher_test.go), which run each property over every
 // spec on it and check the list against the `var x = stepSpec{` declarations in the source, so a spec nobody registered is on no list and is
 // caught. A host call moved onto step adds its spec here in the same change.
-var stepSpecs = []*stepSpec{&createPromiseStep, &resolvePromiseStep, &rejectPromiseStep, &acquireLockStep, &releaseLockStep, &sideEffectStep, &sideEffectRecordedStep, &deferStep, &scheduleCronStep, &deleteCronStep, &listCronsStep, &awaitSignalsStep, &setScopeStep, &signalWorkflowStep, &durableSendStep, &fetchStep}
+var stepSpecs = []*stepSpec{&createPromiseStep, &resolvePromiseStep, &rejectPromiseStep, &acquireLockStep, &releaseLockStep, &sideEffectStep, &sideEffectRecordedStep, &deferStep, &scheduleCronStep, &deleteCronStep, &listCronsStep, &awaitSignalsStep, &setScopeStep, &signalWorkflowStep, &durableSendStep, &fetchStep, &awaitPromiseStep}
 
 // validate says whether a spec is well-formed: it names a replay event, can decode it and can run fresh, and a step that declares itself Pure
 // (and so is never refused in a segment) records nothing.
@@ -283,7 +295,7 @@ func (s *execSession) step(ctx context.Context, m api.Module, sp *stepSpec, args
 	}
 	before := s.stepCount
 	res := sp.Fresh(c)
-	s.checkRecorded(sp, c.recorded, s.stepCount-before, len(c.Prefix) > 0, res == callSuspendSentinel)
+	s.checkRecorded(sp, c.recorded, s.stepCount-before, len(c.Prefix) > 0, res == callSuspendSentinel || c.declined)
 	return res
 }
 

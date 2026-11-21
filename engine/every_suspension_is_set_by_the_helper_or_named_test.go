@@ -26,7 +26,6 @@ var notYetOnTheParkHelper = map[string]struct {
 	"children.go:AwaitChild":                 {1, "a wait; moves with the child waits (W3)"},
 	"children.go:AwaitAnyChild":              {1, "a wait; moves with the child waits (W3)"},
 	"children.go:freshAwaitAllChildren":      {1, "a wait; moves with the child waits (W3)"},
-	"promises.go:AwaitPromise":               {3, "a wait; moves with AwaitPromise (W4)"},
 	"scope.go:freshSetScope":                 {2, "a wait for a lock scope; moves with SetScope (WS-cleat-2)"},
 	"lifecycle.go:ContinueAsNew":             {2, "a terminal call, not a wait; moves with the terminal group (W1)"},
 	"lifecycle.go:ContinueAsNewWithVersion":  {2, "a terminal call, not a wait; moves with the terminal group (W1)"},

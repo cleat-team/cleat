@@ -1871,12 +1871,10 @@ func TestAwaitPromiseReplayAwaitThenFreshResolved(t *testing.T) {
 
 func TestAwaitPromiseReplayDivergence(t *testing.T) {
 	s := newTestExecSession()
-	// A PENDING store, not a nil one. This test is about replay divergence, and
-	// it used to reach the fresh path with no store at all -- so it asserted
-	// suspend for a reason that has nothing to do with divergence, and broke
-	// when a missing store started reporting an error (IMPROVEMENT-PLAN 3.231).
-	// A pending promise suspends legitimately, which is what this wants.
-	s.engine.promiseStore = &mockPromiseStore{}
+	// A PENDING store, not a nil one: with no store the answer is the no-store error and has nothing to do with divergence (IMPROVEMENT-PLAN 3.231,
+	// and the no-store rows of an_await_promise_behaves_as_recorded_before_the_dispatcher_test.go).
+	mock := &mockPromiseStore{}
+	s.engine.promiseStore = mock
 	s.isReplay = true
 	s.history = []EventRecord{{
 		Step:      0,
@@ -1885,22 +1883,21 @@ func TestAwaitPromiseReplayDivergence(t *testing.T) {
 
 	result := s.AwaitPromise(context.Background(), nil, "abc-123", 5000, 0, 0)
 
-	// Divergence: exitReplay is NOT called (unlike CreatePromise).
-	// isReplay stays true, fresh path runs which records await_promise and suspends.
-	if !s.isReplay {
-		t.Error("expected isReplay to remain true (exitReplay not called on mismatch)")
+	// A first record that is none of the call's own types is a replay DIVERGENCE (the cleat#4157 class; cleat#947 was the await_signals case). This test used to assert the opposite and said so in its
+	// comment: "exitReplay is NOT called (unlike CreatePromise). isReplay stays true, fresh path runs which records await_promise and suspends". That
+	// was the defect it pinned: the call ran its fresh path with the history unread and replay still on, and recorded at a step that already held an
+	// event (the cleat#4157 class). Since the move onto the step dispatcher (cleat#4152, W4) it reports a divergence and consumes nothing.
+	if result != packSimpleResult(1, 0) {
+		t.Errorf("expected a divergence (error code 1, nothing written: this call passed no output buffer), got %#x", result)
 	}
-	// Fresh path suspends because the promise is pending.
-	expected := callSuspendSentinel
-	if result != expected {
-		t.Errorf("expected the stop sentinel %#x (suspend), got %#x -- a suspend must not "+
-			"return a word the guest reads as a timeout (cleat#3383)", expected, result)
+	if !s.isReplay || s.stepCount != 0 || len(s.history) != 1 {
+		t.Errorf("a divergence consumes nothing and leaves replay on: isReplay %v, stepCount %d, history %d events; want true, 0, 1", s.isReplay, s.stepCount, len(s.history))
 	}
-	if s.suspendErr == nil {
-		t.Fatal("expected suspendErr non-nil")
+	if s.suspendErr != nil {
+		t.Errorf("expected no suspension, got %+v: a divergence does not wait", s.suspendErr)
 	}
-	if !strings.Contains(s.suspendErr.Reason, "await_promise(abc-123)") {
-		t.Errorf("expected suspendErr reason containing 'await_promise(abc-123)', got %q", s.suspendErr.Reason)
+	if mock.lastGetPromiseID != "" {
+		t.Errorf("the promise store was read (%q): a divergence is decided from the history alone", mock.lastGetPromiseID)
 	}
 }
 

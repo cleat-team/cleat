@@ -113,267 +113,211 @@ var createPromiseStep = stepSpec{
 	},
 }
 
+// AwaitPromise is await_promise as a step (cleat#4152, W4). The wrapper does two things the step cannot: it clears the rejection flag the component
+// path reads (lastAwaitPromiseRejected), and it answers the one case where an engine with NO promise store meets a history it cannot replay (below).
+//
+// The no-store exception. With no promise store configured an await records NOTHING (it returns errNoPromiseStore), so the record at its step
+// belongs to the NEXT call, and on replay the await meets a foreign first record. Before the move that was answered with the same error, consuming
+// nothing and staying in replay; the dispatcher would report it as a divergence, which it is not (nothing is wrong with the history, the engine just
+// cannot ask). So when there is no store, the session is replaying, and the first record is not one of the call's own types, the answer is the
+// error and nothing is consumed. A history that DOES hold the call's own records still replays without a store (a CLI replay of a real history).
+// Everything else that is foreign is a divergence (the cleat#4157 class; cleat#947 was the await_signals case, below).
 func (s *execSession) AwaitPromise(ctx context.Context, m api.Module, promiseID string, timeoutMs int64, resultPtr, resultMaxLen uint32) int64 {
 	s.setAwaitRejected(false)
-	// Set when this call is resuming an await already recorded in history,
-	// rather than beginning one. The deadline belongs to the ORIGINAL await.
-	var (
-		resumingAwait  bool
-		awaitAnchorMs  int64
-		awaitTimeoutMs int64
-	)
-
-	if s.isReplay {
-		if s.stepCount < len(s.history) {
-			rec := s.history[s.stepCount]
-			if rec.EventType == EventTypePromiseResolved {
-				if !s.advanceReplayStep(ctx, &rec) {
-					return 0
-				}
-				written, writtenEC := s.writeOut(ctx, m, resultPtr, rec.PromiseResult, resultMaxLen)
-				return packAwaitPromiseResult(written, false, uint16(writtenEC))
-			}
-			if rec.EventType == EventTypePromiseRejected {
-				if !s.advanceReplayStep(ctx, &rec) {
-					return 0
-				}
-				written, _ := s.writeResult(ctx, m, resultPtr, rec.PromiseError, resultMaxLen)
-				s.setAwaitRejected(true)
-				return packAwaitPromiseResult(written, false, 1)
-			}
-			if rec.EventType == EventTypeAwaitPromise {
-				if !s.advanceReplayStep(ctx, &rec) {
-					return 0
-				}
-				// A recorded NO-WAIT await replays as the timeout it was, from the record alone (cleat#4144). The fresh path below
-				// records an await with a timeout of 0 or less and returns timed out. Consulting the store here returned RESOLVED to a
-				// replay that ran after the promise settled, where the original run had been told it timed out, so a poll loop took a
-				// different branch on its first resume; and it did so with history still unread. The guest's own argument must also be
-				// non-positive, so a recorded 0 that meant "unknown" (written before the timeout was persisted) and is resumed with a
-				// positive argument still takes the resuming path below.
-				if rec.TimeoutMs <= 0 && timeoutMs <= 0 {
-					return packAwaitPromiseResult(0, true, 0)
-				}
-				// Promise was pending in original execution. Check if resolved
-				// now -- and carry the ORIGINAL await's anchor and timeout
-				// forward, because this wake has to be measured against when
-				// the await began, not against itself. See the suspend at the
-				// bottom of this function.
-				awaitAnchorMs = rec.TimestampMs
-				awaitTimeoutMs = rec.TimeoutMs
-
-				// HISTORY CONTINUES PAST THIS RECORD: the await was already answered, so answer it from history and STAY IN
-				// REPLAY (cleat#4177). A pending await can only be left in two ways, and both leave a trace in what follows:
-				//
-				//   - it RESOLVED or was REJECTED: the outcome is recorded at the NEXT step, not over the pending row (the fresh path
-				//     records at s.stepCount, which advanceReplayStep has just moved past this record). So the record right after this
-				//     one is this promise's promise_resolved or promise_rejected.
-				//   - it TIMED OUT: nothing is recorded for a timeout ("the deadline has passed" is monotone, below), so the next record
-				//     is simply the guest's next call. Any other record means the original run took the timeout.
-				//
-				// Leaving replay here instead, as this branch always did, ran every durable call recorded after the await a second time
-				// on every later replay, and answered `resolved` to a replay that ran after the promise had settled where the original
-				// had been told it timed out. Flush's immutability guard kept the duplicates out of the stored history, so the history
-				// read as correct while the effects ran twice.
-				//
-				// WHICH outcome records are the await's own: only one WITHOUT the settlement discriminator. resolve_promise and
-				// reject_promise record the same event types with the same PromiseID, and only Service="promise" with Op="resolve"
-				// or "reject" tells them apart (cleat#4079, ResolvePromise). A workflow that awaits p, times out, and then resolves p
-				// ITSELF with a default records [await_promise, promise_resolved(Op=resolve)] and a call after it: matching on the
-				// event type alone read that settlement as the await's answer, so a later replay returned `resolved` where the
-				// original run was told it timed out, and the call ran again (measured by cleat-review on cleat#4178).
-				//
-				// DIRECTION for histories written before cleat#4079, which have no Op on either: such an outcome is read as the
-				// await's own, which is what this branch did before it looked ahead at all and what an outcome recorded by the
-				// await itself has always looked like. The reading is wrong only for a pre-#4079 workflow that timed out and then
-				// resolved the same promise itself as its very next step, and a record cannot tell the two apart. The await's own
-				// outcome always carries PromiseID, so an empty one is not the await's (nothing writes one).
-				//
-				// KNOWN AMBIGUITY, deliberately resolved toward resolved: [await_promise, promise_resolved(p)] with no Op is also what
-				// a timed-out await followed IMMEDIATELY by a second await of the same already-settled promise records. They are only
-				// both possible when the promise settles in the instant between the timeout and the guest's next call. An await
-				// followed by anything else, which is every shape a retry loop makes, is unambiguous.
-				if s.stepCount < len(s.history) {
-					next := s.history[s.stepCount]
-					sameID := next.PromiseID == promiseID && next.Service == "" && next.Op == ""
-					switch {
-					case next.EventType == EventTypePromiseResolved && sameID:
-						if !s.advanceReplayStep(ctx, &next) {
-							return 0
-						}
-						written, writtenEC := s.writeOut(ctx, m, resultPtr, next.PromiseResult, resultMaxLen)
-						return packAwaitPromiseResult(written, false, uint16(writtenEC))
-					case next.EventType == EventTypePromiseRejected && sameID:
-						if !s.advanceReplayStep(ctx, &next) {
-							return 0
-						}
-						written, _ := s.writeResult(ctx, m, resultPtr, next.PromiseError, resultMaxLen)
-						s.setAwaitRejected(true)
-						return packAwaitPromiseResult(written, false, 1)
-					default:
-						return packAwaitPromiseResult(0, true, 0)
-					}
-				}
-				resumingAwait = true
-				s.exitReplay()
-			}
-		} else {
-			s.exitReplay()
+	if s.engine.promiseStore == nil && s.isReplay && s.stepCount < len(s.history) {
+		switch s.history[s.stepCount].EventType {
+		case EventTypePromiseResolved, EventTypePromiseRejected, EventTypeAwaitPromise:
+		default:
+			return s.awaitPromiseWithoutAStore(ctx, m, resultPtr, resultMaxLen)
 		}
 	}
+	return s.step(ctx, m, &awaitPromiseStep, stepArgs{s1: promiseID, i1: timeoutMs, outPtr: resultPtr, outMaxLen: resultMaxLen})
+}
 
-	// Fresh execution: check promise store.
-	//
-	// With no store there is nothing to await and nothing that could ever
-	// resolve it, so falling through to the suspend below waits forever. Say so
-	// instead. IMPROVEMENT-PLAN 3.231.
-	if s.engine.promiseStore == nil {
-		s.engine.log().ErrorContext(ctx, "await_promise: no promise store configured", "workflow_id", s.workflowID, "tenant_id", s.tenantID)
-		written, _ := s.writeResult(ctx, m, resultPtr, errNoPromiseStore, resultMaxLen)
-		return packAwaitPromiseResult(written, false, 1)
+// awaitPromiseIdentity is the identity check of await_promise: the record must name the promise being awaited, and must be the await's OWN
+// outcome, one WITHOUT the cleat#4079 Service/Op discriminator. resolve_promise and reject_promise record the same event types for the same
+// promise, and only Service="promise" with Op="resolve" or "reject" tells a settlement the workflow made itself from the answer to an await
+// (cleat#4178, which closed it for the record AFTER an await; the first record used to escape it). It is the reverse of settlementIdentity, which
+// is the settling call's check and accepts a record with no discriminator.
+func awaitPromiseIdentity(a stepArgs, rec *EventRecord) string {
+	if rec.PromiseID != a.s1 {
+		return fmt.Sprintf("promise %q, recorded %q", a.s1, rec.PromiseID)
 	}
-	{
-		status, result, errMsg, err := s.engine.promiseStore.GetPromise(ctx, s.workflowID, promiseID)
-		if err == nil && status == "resolved" {
-			rec := EventRecord{
-				Step:          s.stepCount,
-				EventType:     EventTypePromiseResolved,
-				PromiseID:     promiseID,
-				PromiseResult: result,
+	if rec.Service != "" || rec.Op != "" {
+		return fmt.Sprintf("an await's own record, recorded as %s/%s (a settlement the workflow made itself)", rec.Service, rec.Op)
+	}
+	return ""
+}
+
+// awaitPromiseStep is AwaitPromise. Its history is, per call, one of:
+//
+//	[promise_resolved | promise_rejected]            a first read found the promise settled: no await record is written for it
+//	[await]                                          the await timed out, or was a no-wait poll that found nothing (cleat#4144); also a history that ENDS here
+//	[await, promise_resolved | promise_rejected]     the await was recorded, then answered
+//
+// The same shape as await_signals, and Identity is what separates the runs: an await naming another promise, or an outcome naming another
+// promise or carrying the discriminator, is the next call's record and ends the run (an await that timed out, cleat#4177 and #4178). MaxPrefix is 1
+// because a poll loop records [await, await, ...] for the SAME promise. A no-wait call whose recorded await is also no-wait is a run of ONE record,
+// so a resolution after it is the next call's (cleat#4144).
+//
+// What the move tightened, each named and pinned by an_await_promise_move_tightens_only_these_test.go (the rule: identity rows only tighten):
+//   - a recorded outcome naming ANOTHER promise, or a settlement the workflow made itself, was consumed and handed back as this await's answer when
+//     it was the FIRST record; it is a divergence now. The look-ahead after an await always compared both.
+//   - a recorded await naming another promise was consumed as this one's; it is a divergence.
+//   - a first record of another type, which was not a divergence: the call fell through to the fresh path with history still unread and replay still
+//     on, and recorded at a step that already held an event (the cleat#4157 class; the await_signals analogue was cleat#947). It is a divergence, except for the engine with no
+//     promise store (AwaitPromise, above).
+//
+// A KNOWN AMBIGUITY, deliberately resolved toward resolved, and carried over from the old code (the paragraph above its look-ahead; the move dropped it
+// and this puts it back, cleat#4277): [await_promise p, promise_resolved p], neither carrying the Service/Op discriminator, is also what a TIMED-OUT
+// await followed IMMEDIATELY by a second await of the same already-settled promise records. The two shapes are only both possible when the promise
+// settles in the instant between the timeout and the guest's next call, and an await followed by anything else, which is every shape a retry loop makes,
+// is unambiguous. A replay of the ambiguous pair hands the first await the resolution where the original run was told it timed out; it converges unless
+// the timeout branch kept guest-local state. Telling the two apart needs a history-format change and is not decided here (cleat#4277).
+//
+// NEVER REFUSED: Refuse is neverRefuse. The old code had no stopBeforeNewWork check, so a defer body, a worker that is shutting down and a session
+// that has already suspended all recorded the await and suspended as usual (four rows of the characterization table), and that is kept.
+// Whether any of them should be refused is a separate decision.
+var awaitPromiseStep = stepSpec{
+	Name:             "await_promise",
+	Effect:           effectEffect,
+	Records:          recordsMany,
+	Want:             EventTypePromiseResolved,
+	EndsWithoutFinal: true,
+	MaxPrefix:        1,
+	Refuse:           neverRefuse,
+	Identity:         awaitPromiseIdentity,
+	Role: func(a stepArgs, rec *EventRecord) recordRole {
+		switch rec.EventType {
+		case EventTypePromiseResolved, EventTypePromiseRejected:
+			return roleFinal
+		case EventTypeAwaitPromise:
+			if a.i1 <= 0 && rec.TimeoutMs <= 0 {
+				// A no-wait await replays as the timeout it was, from the record alone (cleat#4144). Consulting the store, or a resolution that
+				// follows, returned RESOLVED to a replay that ran after the promise settled where the original run had been told it timed out. The
+				// guest's own argument must also be non-positive, so a recorded 0 that meant "unknown" (written before the timeout was persisted)
+				// and is resumed with a positive argument still takes the waiting path.
+				return roleFinal
 			}
-			s.recordEvent(rec)
-			written, writtenEC := s.writeOut(ctx, m, resultPtr, result, resultMaxLen)
+			return rolePrefix
+		}
+		return roleForeign
+	},
+	DecodeRun: func(c *stepCtx, run []EventRecord) int64 {
+		last := run[len(run)-1]
+		switch last.EventType {
+		case EventTypePromiseResolved:
+			written, writtenEC := c.s.writeOut(c.ctx, c.m, c.args.outPtr, last.PromiseResult, c.args.outMaxLen)
 			return packAwaitPromiseResult(written, false, uint16(writtenEC))
-		}
-		if err == nil && status == "rejected" {
-			rec := EventRecord{
-				Step:         s.stepCount,
-				EventType:    EventTypePromiseRejected,
-				PromiseID:    promiseID,
-				PromiseError: errMsg,
-			}
-			s.recordEvent(rec)
-			written, _ := s.writeResult(ctx, m, resultPtr, errMsg, resultMaxLen)
-			s.setAwaitRejected(true)
+		case EventTypePromiseRejected:
+			written, _ := c.s.writeResult(c.ctx, c.m, c.args.outPtr, last.PromiseError, c.args.outMaxLen)
+			c.s.setAwaitRejected(true)
 			return packAwaitPromiseResult(written, false, 1)
 		}
-	}
-
-	// A timeout of 0 (or less) has no deadline to expire, so it must not suspend: cleat#4144, the cleat#1331 loop that await_signals
-	// guards against in signaller.go. Placed AFTER the settled checks above, so an already-settled promise is still reported and a
-	// 0 ms await degrades to a poll rather than to nothing.
-	//
-	// The suspensions below set Until = now + 0, a deadline of NOW. The run is immediately re-claimable, wakes, replays to the recorded
-	// await, takes the resuming branch (whose awaitTimeoutMs <= 0 arm used to keep waiting with the same deadline of now) and suspends
-	// again, forever, each cycle a legitimate claim that changes nothing.
-	//
-	// Timed out rather than an error, matching await_signals and a durable sleep, where 0 ms means "do not wait". It RECORDS the await,
-	// with the timeout it was given, because a replay must return the same answer without asking the store: recording nothing let a
-	// replay that ran after the promise settled return RESOLVED where the original run was told it timed out (measured by
-	// cleat-review), and left a later event at this step for the replay to trip over. The replay branch above returns the timeout from
-	// this record alone. A poll loop therefore records one event per iteration, which counts toward the event cap.
-	//
-	// Not for a resume that carries a POSITIVE recorded timeout: that deadline belongs to the original await and wins, as it always did.
-	// (A recorded timeout of 0 or less with a non-positive argument never arrives here: it returned from the replay branch.)
-	if timeoutMs <= 0 && !(resumingAwait && awaitTimeoutMs > 0) {
-		// A poll is an event like any other, so it counts toward the event cap and stops at it (cleat#4153). Without this a poll loop
-		// kept recording into a quota the flush refuses, retrying each refused write for the whole flush window.
-		if s.refuseAtEventCap(ctx, m) {
-			return s.suspendingAwaitResult()
-		}
-		s.recordEvent(EventRecord{
-			Step:      s.stepCount,
-			EventType: EventTypeAwaitPromise,
-			PromiseID: promiseID,
-			TimeoutMs: timeoutMs,
-		})
+		// An await with nothing after it that answers it: history CONTINUES past it with something else, and a pending await can only be left in
+		// two ways, both of which leave a trace (cleat#4177). It RESOLVED or was REJECTED, and the outcome is the record right after it; or it TIMED
+		// OUT, and nothing is recorded for a timeout ("the deadline has passed" is monotone), so what follows is the guest's next call. The store is
+		// NOT consulted: leaving replay here ran every durable call recorded after the await a second time on every later replay.
 		return packAwaitPromiseResult(0, true, 0)
-	}
+	},
+	Fresh: func(c *stepCtx) int64 {
+		s, ctx, m := c.s, c.ctx, c.m
+		promiseID, timeoutMs := c.args.s1, c.args.i1
+		reason := fmt.Sprintf("await_promise(%s)", promiseID)
+		timedOut := packAwaitPromiseResult(0, true, 0)
 
-	// Still pending. Either begin an await or resume the one already recorded.
-	//
-	// Resuming is the case that was wrong. This used to record ANOTHER
-	// await_promise event and suspend again with Until = now + timeout, so the
-	// deadline was recomputed from the current instant on every wake and could
-	// never be reached. Measured: a 5000ms timeout still `ready` at generation
-	// 31 three minutes later, burning a worker slot per wake. The timeout
-	// itself fired correctly -- the workflow woke 5.7s in -- there was simply
-	// nothing that reported it, only something that re-armed it. #814.
-	//
-	// The anchor it needs was already in history: the timestamp of the await
-	// event that began the wait. Carrying it makes the deadline a fixed point
-	// rather than one that moves with the observer, which is what a durable
-	// timeout has to be.
-	//
-	// AwaitSignals reaches the same outcome a weaker way: on any wake with no
-	// signal recorded it reports timedOut, on the reasoning that only the
-	// deadline could have woken it ("should not happen", says the comment).
-	// That is true today and stops being true the moment anything else wakes a
-	// suspended workflow. Comparing against the recorded deadline does not
-	// depend on why we woke.
-	if resumingAwait {
-		deadlineMs := awaitAnchorMs + clampGuestMs(awaitTimeoutMs) // clamp: i64::MAX wrapped this negative (cleat#4105)
-		if awaitTimeoutMs <= 0 {
-			// An await recorded before the timeout was persisted, or one with
-			// no timeout at all. Nothing to measure against, so keep waiting
-			// rather than inventing a deadline -- but do not re-record the
-			// await, which is what produced the duplicate events.
-			s.suspendErr = &SuspendError{
-				Reason: fmt.Sprintf("await_promise(%s)", promiseID),
-				Until:  time.Now().Add(guestMsDuration(timeoutMs)),
+		// With no store there is nothing to await: say so and record nothing. Declared, because a step that records nothing and is not a refusal
+		// would otherwise read as a spec that did not do what it declared.
+		if s.engine.promiseStore == nil {
+			c.RecordsNothing("no promise store: nothing to await, and the guest is told so (IMPROVEMENT-PLAN 3.231)")
+			return s.awaitPromiseWithoutAStore(ctx, m, c.args.outPtr, c.args.outMaxLen)
+		}
+
+		// deliverIfSettled is the ONE read of the promise store an await makes, on the first poll, at the replay frontier and after a wake. A settled
+		// promise is recorded and THEN delivered. A store error is read as still pending, as it always was. It is a closure and not a function
+		// because every Record call must sit inside a spec's Fresh.
+		deliverIfSettled := func() (int64, bool) {
+			status, result, errMsg, err := s.engine.promiseStore.GetPromise(ctx, s.workflowID, promiseID)
+			if err != nil {
+				return 0, false
 			}
-			return s.suspendingAwaitResult()
+			switch status {
+			case "resolved":
+				c.Record(EventRecord{Step: s.stepCount, EventType: EventTypePromiseResolved, PromiseID: promiseID, PromiseResult: result})
+				written, writtenEC := s.writeOut(ctx, m, c.args.outPtr, result, c.args.outMaxLen)
+				return packAwaitPromiseResult(written, false, uint16(writtenEC)), true
+			case "rejected":
+				c.Record(EventRecord{Step: s.stepCount, EventType: EventTypePromiseRejected, PromiseID: promiseID, PromiseError: errMsg})
+				written, _ := s.writeResult(ctx, m, c.args.outPtr, errMsg, c.args.outMaxLen)
+				s.setAwaitRejected(true)
+				return packAwaitPromiseResult(written, false, 1), true
+			}
+			return 0, false
 		}
-		// time.Now(), not nowMs.Load(). The latter is a CACHED clock refreshed
-		// on poll cycles (UpdateNowMs), and a cached clock that lags the real
-		// one turns this comparison false while the scheduler, which uses real
-		// time, sees the deadline as already past. The workflow is then woken
-		// immediately, re-suspends against the same past deadline, and spins.
-		// Measured with the cached clock: the timeout was reported correctly
-		// but only after generation 3130, about 34 wakes a second for 91
-		// seconds. A deadline has to be compared against the same clock the
-		// scheduler wakes on.
-		if time.Now().UnixMilli() >= deadlineMs {
-			// Timed out. No event is recorded for this and none is needed:
-			// "the deadline has passed" is monotone, so every later replay
-			// reaching this point decides the same way. Time only moves
-			// forward, which is the property that makes the outcome stable
-			// without a durable record of it.
-			//
-			// This is the one return in the function that IS a timeout, and
-			// it stays a timed-out word. The other three set suspendErr and
-			// return s.suspendingAwaitResult(): a suspending await must not
-			// hand the guest a word it reads as a timeout (cleat#3383).
-			return packAwaitPromiseResult(0, true, 0)
+
+		if len(c.Prefix) > 0 {
+			// The history ENDED INSIDE this run: the await was recorded and not answered, and replay has just ended. The promise may have settled
+			// since, so ask; a settled one is recorded and delivered. If not, the await keeps waiting against its RECORDED deadline, which
+			// belongs to the ORIGINAL await: this wake is measured against when the await began and not against itself (cleat#814, where the
+			// deadline was recomputed from the current instant on every wake and could never be reached).
+			if r, ok := deliverIfSettled(); ok {
+				return r
+			}
+			rec := c.Prefix[0]
+			if rec.TimeoutMs <= 0 {
+				// An await recorded before the timeout was persisted, or one with no timeout at all. There is nothing to measure against, so it
+				// keeps waiting from now for the guest's own timeout rather than inventing a deadline, and does not re-record the await. That
+				// deadline is INVENTED, so it is never handed to a wake source: a wait parked against a deadline of about now would time out on
+				// its first return, where this has always suspended (cleat-review3, #4249).
+				req := parkRequest{
+					Kind: wakePromise, Key: promiseID, Reason: reason,
+					DeadlineMs: s.engine.realNowMs() + clampGuestMs(timeoutMs), Until: time.Now().Add(guestMsDuration(timeoutMs)),
+				}
+				s.suspendFor(req)
+				return s.suspendingAwaitResult()
+			}
+			deadlineMs := rec.TimestampMs + clampGuestMs(rec.TimeoutMs) // clamp: i64::MAX wrapped this negative (cleat#4105)
+			// The real clock, not the cached one (s.nowMs): the latter is refreshed on poll cycles and lags the one the scheduler wakes on, which
+			// turned this comparison false while the scheduler saw the deadline as past. The workflow was woken at once, re-suspended against the
+			// same past deadline and spun (measured: about 34 wakes a second for 91 seconds).
+			if s.engine.realNowMs() >= deadlineMs {
+				// Timed out. No event is recorded and none is needed: "the deadline has passed" is monotone, so every later replay reaching this
+				// point decides the same way. This is the one return here that IS a timeout; a suspending await must not hand the guest a word it
+				// reads as one (cleat#3383).
+				return timedOut
+			}
+			return awaitSuspendOrPark(c, deliverIfSettled, parkRequest{Kind: wakePromise, Key: promiseID, DeadlineMs: deadlineMs, Reason: reason, Until: time.UnixMilli(deadlineMs)}, timedOut)
 		}
-		// Woke early -- something other than the deadline. Wait out the
-		// REMAINDER of the original deadline, and record nothing: the await
-		// event is already in history.
-		s.suspendErr = &SuspendError{
-			Reason: fmt.Sprintf("await_promise(%s)", promiseID),
-			Until:  time.UnixMilli(deadlineMs),
+
+		// Fresh: the store first, so a promise that is already settled is returned and no await is recorded for it.
+		if r, ok := deliverIfSettled(); ok {
+			return r
 		}
-		return s.suspendingAwaitResult()
-	}
+		// A timeout of 0 (or less) has no deadline to expire, so it must not suspend (cleat#4144, the cleat#1331 loop that await_signals guards
+		// against): a deadline of NOW makes the run immediately re-claimable and it wakes, replays to the recorded await and suspends again,
+		// forever. Placed AFTER the settled check, so an already-settled promise is still reported and a 0 ms await degrades to a poll. It RECORDS the
+		// await with the timeout it was given, because a replay must return the same answer without asking the store. A poll is an event like any
+		// other, so it counts toward the event cap and stops at it (cleat#4153).
+		if timeoutMs <= 0 {
+			if s.refuseAtEventCap(ctx, m) {
+				return s.suspendingAwaitResult()
+			}
+			c.Record(EventRecord{Step: s.stepCount, EventType: EventTypeAwaitPromise, PromiseID: promiseID, TimeoutMs: timeoutMs})
+			return timedOut
+		}
+		// First time: record the await WITH its timeout, so a later wake can measure against the original deadline, then wait.
+		c.Record(EventRecord{Step: s.stepCount, EventType: EventTypeAwaitPromise, PromiseID: promiseID, TimeoutMs: timeoutMs})
+		until := time.UnixMilli(s.nowMs).Add(guestMsDuration(timeoutMs))
+		return awaitSuspendOrPark(c, deliverIfSettled, parkRequest{Kind: wakePromise, Key: promiseID, DeadlineMs: until.UnixMilli(), Reason: reason, Until: until}, timedOut)
+	},
+}
 
-	// First time: record the await and suspend.
-	rec := EventRecord{
-		Step:      s.stepCount,
-		EventType: EventTypeAwaitPromise,
-		PromiseID: promiseID,
-		// Persisted so a later wake can measure against the original deadline.
-		// await_signals has always recorded its timeout; await_promise did not,
-		// which is why the deadline had to be recomputed from scratch.
-		TimeoutMs: timeoutMs,
-	}
-	s.recordEvent(rec)
-
-	s.suspendErr = &SuspendError{
-		Reason: fmt.Sprintf("await_promise(%s)", promiseID),
-		Until:  time.UnixMilli(s.nowMs).Add(guestMsDuration(timeoutMs)),
-	}
-
-	return s.suspendingAwaitResult()
+// awaitPromiseWithoutAStore is the answer to an await on an engine with no promise store: with none there is nothing to await and nothing that
+// could ever resolve it, so falling through to a suspend would wait forever. Say so instead (IMPROVEMENT-PLAN 3.231). It records nothing.
+func (s *execSession) awaitPromiseWithoutAStore(ctx context.Context, m api.Module, resultPtr, resultMaxLen uint32) int64 {
+	s.engine.log().ErrorContext(ctx, "await_promise: no promise store configured", "workflow_id", s.workflowID, "tenant_id", s.tenantID)
+	written, _ := s.writeResult(ctx, m, resultPtr, errNoPromiseStore, resultMaxLen)
+	return packAwaitPromiseResult(written, false, 1)
 }
 
 // The discriminator values ResolvePromise and RejectPromise stamp on the events they record (cleat#4079). They are exported
