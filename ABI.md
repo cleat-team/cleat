@@ -1916,9 +1916,13 @@ List the calling tenant's registered cron schedules as a JSON array.
 | `out_ptr` | `i32` | Output buffer for the JSON array |
 | `out_max_len` | `i32` | Output buffer capacity |
 
-**Return packing:** `errCode` / bytes written, in the same shape as
-`cleat_call`. Implemented in `engine/schedules.go`
-(`(*execSession).ListCrons`).
+**Return packing:** the simple layout: `errCode` 0-31 and `resultLen` 32-63 (bytes
+written).
+
+This said "in the same shape as `cleat_call`" until cleat#4297, which was wrong: that is the
+other layout. The engine packs it with `packSimpleResult`, and the Rust and Java guests
+decode it with `decode_simple_result` and `decodeSimpleErrCode` / `decodeSimpleExtra`.
+Implemented in `engine/schedules.go` (`(*execSession).ListCrons`).
 
 #### 2.58 `cleat_poll_work` (internal — Go `wasip1` dispatch protocol)
 
