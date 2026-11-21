@@ -76,6 +76,10 @@ type moduleLRU struct {
 	maxEnts  int
 	maxBytes int64
 	bytes    int64 // sum of every entry's estimate
+	// onEvict, when set, is called with the key of every entry the LRU EVICTS (not one it replaces or drains), after the lock is released and after the entry's
+	// release ran. A held instance refcounts the code it runs, so eviction alone frees nothing while one is held; this is how the resident set learns that the code
+	// under a held run has left the cache, so that it can send the run back (engine.ResidentSet.EvictCode) and holds never pin evicted code.
+	onEvict func(key string)
 }
 
 type moduleEntry struct {
@@ -130,6 +134,7 @@ func (c *moduleLRU) load(key string) (*wasmtime.Module, bool) {
 // gets rather than a silent zero-cost entry.
 func (c *moduleLRU) store(key string, module *wasmtime.Module, wasmLen int) {
 	var releases []func()
+	var evicted []string
 	c.mu.Lock()
 	est := CompiledSizeEstimate(wasmLen)
 	if elem, ok := c.index[key]; ok {
@@ -145,10 +150,13 @@ func (c *moduleLRU) store(key string, module *wasmtime.Module, wasmLen int) {
 	} else {
 		c.index[key] = c.list.PushFront(&moduleEntry{key: key, module: module, bytes: est})
 		c.bytes += est
-		releases = append(releases, c.evictLocked()...)
+		var rel []func()
+		rel, evicted = c.evictLocked()
+		releases = append(releases, rel...)
 	}
 	c.mu.Unlock()
 	runReleases(releases)
+	c.notifyEvicted(evicted)
 }
 
 // evictLocked drops the least recently used entries until the cache is within
@@ -161,8 +169,9 @@ func (c *moduleLRU) store(key string, module *wasmtime.Module, wasmLen int) {
 // alternative is a cache that compiles a large artifact, immediately drops
 // it, and recompiles it on the next call forever. The bound is a target
 // for the SET, and one oversized member is better held than thrashed.
-func (c *moduleLRU) evictLocked() []func() {
+func (c *moduleLRU) evictLocked() ([]func(), []string) {
 	var releases []func()
+	var keys []string
 	for c.list.Len() > 1 && (c.list.Len() > c.maxEnts || c.bytes > c.maxBytes) {
 		oldest := c.list.Back()
 		if oldest == nil {
@@ -171,6 +180,7 @@ func (c *moduleLRU) evictLocked() []func() {
 		c.list.Remove(oldest)
 		entry := oldest.Value.(*moduleEntry)
 		delete(c.index, entry.key)
+		keys = append(keys, entry.key)
 		c.bytes -= entry.bytes
 		// A MODULE is deliberately NOT closed. See the type comment: a
 		// concurrent load may have just handed it out, and the instance that
@@ -186,7 +196,38 @@ func (c *moduleLRU) evictLocked() []func() {
 	if c.bytes < 0 {
 		c.bytes = 0
 	}
-	return releases
+	return releases, keys
+}
+
+// has reports whether key is cached. It does not mark the entry used: asking must not change what the cache evicts.
+func (c *moduleLRU) has(key string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	_, ok := c.index[key]
+	return ok
+}
+
+// setOnEvict installs the eviction hook (see onEvict). It takes the lock only to publish the field.
+func (c *moduleLRU) setOnEvict(f func(key string)) {
+	c.mu.Lock()
+	c.onEvict = f
+	c.mu.Unlock()
+}
+
+// notifyEvicted calls the hook once per evicted key. It runs with NO lock held, so a hook may call back into the cache, and after the entries' releases ran.
+func (c *moduleLRU) notifyEvicted(keys []string) {
+	if len(keys) == 0 {
+		return
+	}
+	c.mu.Lock()
+	f := c.onEvict
+	c.mu.Unlock()
+	if f == nil {
+		return
+	}
+	for _, k := range keys {
+		f(k)
+	}
 }
 
 func runReleases(releases []func()) {
@@ -228,6 +269,7 @@ func (c *moduleLRU) loadHeld(key string, acquire func(held any) any) (any, bool)
 // was told.
 func (c *moduleLRU) storeHeld(key string, held any, release func(), wasmLen int) {
 	var releases []func()
+	var evicted []string
 	c.mu.Lock()
 	est := CompiledSizeEstimate(wasmLen)
 	if elem, ok := c.index[key]; ok {
@@ -241,10 +283,13 @@ func (c *moduleLRU) storeHeld(key string, held any, release func(), wasmLen int)
 	} else {
 		c.index[key] = c.list.PushFront(&moduleEntry{key: key, held: held, release: release, bytes: est})
 		c.bytes += est
-		releases = append(releases, c.evictLocked()...)
+		var rel []func()
+		rel, evicted = c.evictLocked()
+		releases = append(releases, rel...)
 	}
 	c.mu.Unlock()
 	runReleases(releases)
+	c.notifyEvicted(evicted)
 }
 
 // drainHeld releases and removes every held artifact. Modules are left alone,

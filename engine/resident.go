@@ -18,18 +18,40 @@ import (
 // ends on its context, and why a language with no measured cost is not admitted at all.
 //
 // WHAT IS AND IS NOT MEASURED, because the defaults below are only as good as these:
-//   - the memory of a parked instance is measured (design section 9a) for MINIMAL guests of Go, Python and C#, not for real workflows. Only Go is admitted,
-//     and its cost here is the larger of the two measured figures (a guest that had made garbage, 19.6 MiB) rounded UP, not the 2.5 MiB of a minimal one.
+//   - the memory of a held instance is measured for MINIMAL guests, not for real workflows: Go in design section 9a, Python and C# in WS-cleat1's component-held-
+//     instances measurement (2026-11-20, cleat-internal/measurements/component-held-instances-2026-11-20/README.md, arm64 only). Go, Python and C# are admitted. Each
+//     figure below is the measured one ROUNDED UP to a whole MiB, and the more expensive of the measured guests where there were two. What a guest ALLOCATES before it
+//     blocks is not in any figure and adds on top roughly one for one (measured: a guest that touched 64 MiB cost 64 MiB more, in both Python and C#), so a table
+//     entry is a floor for a guest that does real work, never a ceiling.
 //   - the replay cost model (a fixed start-up of 0.44 to 0.67 s per claim) is measured; the cost PER EVENT is not, so it defaults to zero and the
 //     multiplier has no effect until it is. With the defaults the window is the floor.
 //   - the 10x multiplier, the 10 s floor and the 5 min cap are the owner's starting point, not measurements. Tuning them on real workflows is cleat#4187.
 
-// defaultResidentInstanceBytes is what admitting one parked instance of a language is charged against the resident-memory budget. A language absent
-// from this table is REFUSED: there is no figure for it, and "unknown, so probably small" is the wrong way to fail.
+// defaultResidentInstanceBytes is what admitting one held instance of a language is charged against the resident-memory budget. A language absent
+// from this table is REFUSED: there is no figure for it, and "unknown, so probably small" is the wrong way to fail. Java, Rust and JavaScript have no figure.
 var defaultResidentInstanceBytes = map[string]uint64{
 	// design section 9a: 2.5 MiB for a minimal Go guest and 19.6 MiB after the guest had allocated and dropped about 256 MiB. Rounded up from the second.
 	"go": 24 << 20,
+	// The rule for every language is the one Go's line already follows: the LARGER of the measured figures, rounded up, because a too-high charge can only make
+	// residency park less.
+	//
+	// Python: WS-cleat1, per held instance, anonymous (private) memory, which is what the cgroup charges: 12.0 to 12.2 MiB for call_all_plugins (no sharing), 1.3 to 1.6
+	// MiB for python-hello, whose RSS (8.3 MiB) is mostly copy-on-write pages shared with the pre-initialised snapshot (the two guests differ eightfold on one runtime,
+	// cause not established). Design section 9a: 16.2 MiB after a guest had allocated and dropped about 256 MiB, at a 32 MiB and at a 256 MiB cap alike. 16.2 rounded up.
+	"python": 17 << 20,
+	// C#: WS-cleat1, 48.8 MiB anonymous and 49.2 to 49.3 MiB RSS per held instance, the same at every N from 1 to 60. Design section 9a: 65.7 MiB after a guest had
+	// allocated and dropped about 256 MiB at a 256 MiB cap (49.5 at a 64 MiB cap), and 256 MiB is the default since cleat#4200, because a .NET heap sizes itself to the
+	// limit. 65.7 rounded up. The coordinator asked for 49.2; the larger measured figure is the more conservative reading of the same instruction.
+	"csharp": 66 << 20,
 }
+
+// WHAT IS DELIBERATELY NOT CHARGED: the compiled component. WS-cleat1 measured a per-process fixed cost for Python (+493 to +510 MiB) and C# (+81 MiB), and an earlier
+// version of this file charged it to the budget once per distinct component. It was removed, on the coordinator's reading and the code's: compiled components live in an
+// LRU cache (componentCache, cleat#3748) that holds them whether or not anything is held, so a worker that ran the workflow at all already carries that memory and holding
+// does not add it, and the measured figure also contained the Go runtime and wasmtime baseline, which holding obviously does not add either. Charging it made the default
+// budget refuse a second Python definition (512 MiB each against a default of about 860 MiB) for memory the worker was already using. It belongs to the worker's own
+// memory guard (--memory-soft-limit), not to this budget. NOT MEASURED, and so not charged: that a held instance PINS a compiled component the LRU would otherwise have
+// evicted (an instance holds its code alive, so it can); if that is measured to matter, charge that part and only that part.
 
 // Why a wait was not parked, and why a parked run was sent back. They are metric label values and are read by tests, so they are constants.
 const (
@@ -40,6 +62,7 @@ const (
 	residentRefusedMemory   = "memory"    // admitting it would exceed the resident-memory budget
 	residentRefusedPressure = "pressure"  // the worker is at or over its memory soft limit
 	residentRefusedDraining = "draining"  // the worker is shutting down
+	residentRefusedCode     = "code"      // the cache has already evicted the compiled code the run executes (see CodeCached)
 	residentRefusedDeadline = "deadline"  // the run's own context (the wall-clock ceiling, the workflow deadline) ends at or before the wake
 	residentEndedDeadline   = "deadline"  // the timer fired: the caller's clock decides whether the wait is over
 	residentEndedCancelled  = "cancelled" // the run's context ended while parked
@@ -50,6 +73,7 @@ const (
 const (
 	ResidentEvictedShutdown = "shutdown" // the worker began draining
 	ResidentEvictedPressure = "pressure" // the worker reached its memory hard limit
+	ResidentEvictedCode     = "code"     // the cache evicted the compiled code under the run (EvictCode): a hold never outlives its code's cache entry
 )
 
 // ResidencyConfig is the whole policy. The zero value is OFF: MaxRuns is zero, so every wait suspends as it always has.
@@ -57,8 +81,10 @@ type ResidencyConfig struct {
 	// MaxRuns is the most runs held at once. Zero turns residency off. It is deliberately small when it is on, because a parked instance holds an OS
 	// thread (design 4.6: about one per instance) and the thread cost at larger counts was not measured.
 	MaxRuns int
-	// MemoryBudgetBytes bounds the sum of the per-language costs of the runs held. Zero means MaxRuns times the dearest admitted language, which is
-	// the bound MaxRuns already implies.
+	// MemoryBudgetBytes bounds the sum of the per-instance charges of the runs held. Zero means MaxRuns times the dearest admitted language, which is the bound MaxRuns
+	// already implies. That is the bound the TABLE's figures imply and nothing more: the table is the cost of the RUNTIME, not of what a guest allocates before it blocks
+	// (measured: that adds on top roughly one for one), so the default can still be exceeded by the real memory of real guests, which is what --memory-soft-limit is for;
+	// it is NOT a promise that nothing is refused on memory, and it must not be read as one.
 	MemoryBudgetBytes uint64
 	// WindowFloor and WindowCap bound how far ahead a wait may be due and still be parked: window = clamp(ReplayMultiplier x estimated replay, floor, cap).
 	WindowFloor, WindowCap time.Duration
@@ -74,7 +100,7 @@ type ResidencyConfig struct {
 	// 0.3 ms, p90 about 1 ms and at most 9 ms (6.8 ms under -race) on a loaded machine, so 100 ms is about ten times the worst sample. It is not measured for a guest
 	// with real defers or a large history.
 	DeadlineMargin time.Duration
-	// InstanceBytes is the per-language charge; nil means defaultResidentInstanceBytes.
+	// InstanceBytes is the per-language charge for each held instance; nil means defaultResidentInstanceBytes.
 	InstanceBytes map[string]uint64
 	// Pressure reports the worker's memory pressure from 0 (under the soft limit) up to 1 (at the hard limit). A park is refused while it is above
 	// zero. nil means no second guard, which only tests use.
@@ -156,10 +182,16 @@ type ResidentSet struct {
 	parked map[*residentSlot]struct{}
 	bytes  uint64
 	closed bool
+	// codeCached, when set (AttachToCodeCache), says whether the compiled code with this identity is still in the cache. It is read under mu, in the same critical section
+	// that parks a run, which is what closes the race EvictCode alone leaves open: the cache reports an eviction AFTER it releases its own lock, so either admission sees the
+	// code gone and refuses, or the run is already parked when EvictCode takes mu and finds it. There is no lock inversion: nothing holds the cache's lock while taking mu.
+	codeCached func(codeID string) bool
 }
 
 type residentSlot struct {
 	bytes uint64
+	// codeKey is the identity of the code the run executes (ResidentRunInfo.CodeKey); empty means unknown, which EvictCode never matches.
+	codeKey string
 	// evict is closed exactly once, by evictAll, to send the run back; reason says why.
 	evict  chan struct{}
 	reason string
@@ -226,9 +258,48 @@ func (s *ResidentSet) EvictAll(reason string) {
 	s.mu.Unlock()
 }
 
+// EvictCode sends back every held run whose code is cached under key, and leaves the set open. It is called when the compiled-code cache evicts that key
+// (wasmtimeBackend.OnModuleEvicted): a held instance refcounts the code it runs, so without this a hold would keep alive code the cache had decided to free, up to
+// --resident-max-runs times the size of a compiled component (about 500 MiB for Python) of memory no bound accounts for. A run sent back suspends as a refusal would
+// have, nothing is lost, and the next claim replays it (which recompiles the code). Holds therefore never outlive their code's cache entry.
+func (s *ResidentSet) EvictCode(key string) {
+	if s == nil || key == "" {
+		return
+	}
+	s.mu.Lock()
+	for slot := range s.parked {
+		if slot.codeKey == key && slot.reason == "" {
+			slot.reason = ResidentEvictedCode
+			close(slot.evict)
+		}
+	}
+	s.mu.Unlock()
+}
+
+// AttachToCodeCache connects the set to a backend's compiled-code cache, so that when the cache evicts code every held run of it is sent back (EvictCode). It reports
+// whether the backend has a cache to attach to: a backend that is not the wasmtime one, or a build without cgo, has none and nothing is lost by that (nothing is held
+// there). It is a method, and not three lines in the worker's main, so that the end-to-end row exercises the same wiring the worker uses.
+func (s *ResidentSet) AttachToCodeCache(backend any) bool {
+	h, ok := backend.(interface {
+		OnModuleEvicted(func(string))
+		CodeCached(string) bool
+	})
+	if !ok {
+		return false
+	}
+	s.mu.Lock()
+	s.codeCached = h.CodeCached
+	s.mu.Unlock()
+	h.OnModuleEvicted(s.EvictCode)
+	return true
+}
+
 // ResidentRunInfo is what the set needs to know about one run to decide on it.
 type ResidentRunInfo struct {
 	WorkflowID string
+	// CodeKey is the identity of the run's compiled code (CodeID of its wasm bytes); EvictCode matches on it. With no cache attached it is not consulted. WITH one attached an
+	// empty CodeKey is REFUSED, not skipped: a run that names no code can never be sent back by an eviction, so holding it would be a pin nothing could see. The worker always sets it.
+	CodeKey string
 	// Language is the guest's language as its metadata declares it; only a language with a measured cost is admitted.
 	Language string
 	// EventCount is how many events the run's history held when it was claimed, which is what the replay estimate is made from.
@@ -298,7 +369,7 @@ func (r *ResidentRun) Wait(ctx context.Context, req parkRequest) parkOutcome {
 		return refuse(residentRefusedDeadline)
 	}
 
-	slot := &residentSlot{bytes: cost, evict: make(chan struct{})}
+	slot := &residentSlot{bytes: cost, codeKey: r.info.CodeKey, evict: make(chan struct{})}
 	s.mu.Lock()
 	switch {
 	case s.closed:
@@ -313,6 +384,13 @@ func (r *ResidentRun) Wait(ctx context.Context, req parkRequest) parkOutcome {
 		s.mu.Unlock()
 		resume(false)
 		return refuse(residentRefusedMemory)
+	case s.codeCached != nil && (r.info.CodeKey == "" || !s.codeCached(r.info.CodeKey)):
+		// The code was evicted while this run was still executing, so EvictCode had no slot to reach; or the run names no code at all, or code the cache cannot place, and EvictCode could
+		// never reach it either. Holding any of them would pin code the cache decided to free, invisibly. A refused hold suspends as with residency off: it costs one replay, not
+		// correctness, so refusing is the cheap direction and a silent pin is the expensive one.
+		s.mu.Unlock()
+		resume(false)
+		return refuse(residentRefusedCode)
 	}
 	s.parked[slot] = struct{}{}
 	s.bytes += cost
