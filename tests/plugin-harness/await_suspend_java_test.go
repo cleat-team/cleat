@@ -18,11 +18,15 @@ import (
 // host did not refuse and recorded AFTER the pending await; on the resume that call ran again. sleep throws SuspendSignal and the three child awaits
 // now do the same.
 //
-// WHY THE EXISTING JAVA ROW CANNOT SEE THIS, and why this is a separate test. hostcall_java_test.go's AwaitChild row says it "catches a Java binding
-// that returned a value instead of propagating SuspendSignal". It cannot: its fixture does `return result(call, h.awaitChild(...))`, so nothing
-// runs after the await, and the engine records the suspension host-side, so the row reads `suspended` whether the SDK threw or returned an error
-// value. This test makes a call AFTER the await (the fixture entry await_then_call, which drops the await's result on purpose) and counts it at the
-// recording caller and in the recorded history.
+// WHY THE TABLE ROW CANNOT SEE THIS. hostcall_java_test.go's AwaitChild row says it "catches a Java binding that returned a value instead of
+// propagating SuspendSignal". It cannot: its fixture does `return result(call, h.awaitChild(...))`, so nothing runs after the await, and the engine
+// records the suspension host-side, so the row reads `suspended` whether the SDK threw or returned an error value.
+//
+// WHAT THIS ADDS TO TestJavaAwaitCallsHonourTheSuspendSentinel (await_unwinds_sdks_test.go), which IS guest-level: that test records a side_effect
+// after the await and counts event types. It used to want [await, side_effect], which pinned the behaviour this change removes, and I did not see
+// it because I ran a list of Java tests and not the package. It now wants [await]. This test differs in what it counts and in having a control:
+// the fixture entry await_then_call drops the await's result on purpose and makes a DurableCall, counted at the recording caller (what the service
+// received, not only what the history recorded) and in the history, with a no-await control that must make the call.
 //
 // WHAT IT COVERS AND WHAT IT DOES NOT. The call used is DurableCall (service harness-service, operation after_suspend), which is not yet on the
 // replay step dispatcher, so the host's own guard (step 1 of #4285: refuse fresh work after a suspend) does not cover it today, and this
