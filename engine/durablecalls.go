@@ -383,90 +383,99 @@ func (s *execSession) replayCall(ctx context.Context, m api.Module, service, ope
 			return packDurableCallResult(int(written), callErrorUnknown, 1)
 		}
 
-		// Detect a pending call intent: the external call was dispatched
-		// but the outcome was never persisted.  Return ErrAmbiguous so
-		// the caller can check the external service before retrying.
-		if rec.isPendingIntent() {
-			if s.engine.Metrics != nil {
-				s.engine.Metrics.RecordAmbiguousCall(ctx)
-			}
-
-			// cleat#2897, decision (c) on cleat#1984: for an operation declared
-			// to support idempotency-key replay, try that FIRST -- re-dispatch
-			// under the SAME key and let the service's own key table resolve
-			// it, which is the default path a declared service gets. Disjoint
-			// from ambiguityResolver's configured operations by construction
-			// (cleat-worker boot validation), so this never races the lookup
-			// path below for the same operation; it is either one or the
-			// other, decided by which flag named this service.operation.
-			if resp, ok := s.resolveAmbiguityViaKeyReplay(ctx, rec); ok {
-				if s.engine.Metrics != nil {
-					s.engine.Metrics.RecordAmbiguousCall(ctx, attribute.String("outcome", "key_replay_resolved"))
-				}
-				written, writtenEC := s.writeOut(ctx, m, responsePtr, resp, responseMaxLen)
-				return packDurableCallResult(int(written), writeErrorClass(writtenEC), writtenEC)
-			}
-
-			// Ask, before giving up. A resolver that can look the operation up
-			// by its idempotency key turns most ambiguities into non-events:
-			// the outcome is recorded and replay carries on as though the call
-			// had returned normally, which it did -- the crash lost the answer,
-			// not the effect. See IMPROVEMENT-PLAN 1.4 phase E.
-			switch resp, outcome := s.resolveAmbiguity(ctx, rec); outcome {
-			case AmbiguityResolved:
-				if s.engine.Metrics != nil {
-					s.engine.Metrics.RecordAmbiguousCall(ctx, attribute.String("outcome", "resolved"))
-				}
-				written, writtenEC := s.writeOut(ctx, m, responsePtr, resp, responseMaxLen)
-				return packDurableCallResult(int(written), writeErrorClass(writtenEC), writtenEC)
-			case AmbiguityNotSent:
-				// The service confirmed this call never arrived: a definite,
-				// retryable failure, not an ambiguity. Same packing as a fresh
-				// call failure (callFailureCode), so the guest sees an
-				// ordinary Retryable()==true error and its own retry handling
-				// takes it from there -- no engine-side re-dispatch needed.
-				if s.engine.Metrics != nil {
-					s.engine.Metrics.RecordAmbiguousCall(ctx, attribute.String("outcome", "not_sent"))
-				}
-				written, _ := s.writeResult(ctx, m, responsePtr, ambiguityNotSentMessage, responseMaxLen)
-				return packDurableCallResult(int(written), callFailureCode, 1)
-			}
-
-			// Record the condition structurally before writing the message.
-			// The message is for the workflow author; this is for the
-			// operator, who needs to find these with a query rather than a
-			// substring search. See IMPROVEMENT-PLAN 3.24.
-			if s.engine.Metrics != nil {
-				s.engine.Metrics.RecordAmbiguousCall(ctx, attribute.String("outcome", "cannot_say"))
-			}
-			s.recordAmbiguity(rec)
-
-			ambiguousErr := fmt.Sprintf(
-				"[AMBIGUOUS] call outcome unknown at step %d: the external call to %s.%s was dispatched but the response was not recorded before a crash. Check the external service before retrying.",
-				rec.Step, rec.Service, rec.Op)
-			// Not retryable, and this is the case the old blanket "timeout"
-			// got most wrong: the call may well have succeeded. Telling the
-			// guest to retry is telling it to risk a duplicate side effect.
-			written, _ := s.writeResult(ctx, m, responsePtr, ambiguousErr, responseMaxLen)
-			return packDurableCallResult(int(written), callErrorUnknown, 1)
-		}
-
-		if rec.Err != "" {
-			// The classification comes off the event now rather than being
-			// assumed, so a call the caller marked non-retryable replays as
-			// non-retryable. Events written before 2.35 carry no such key and
-			// read back false, which is the constant this used to hardcode.
-			written, _ := s.writeResult(ctx, m, responsePtr, rec.Err, responseMaxLen)
-			return packDurableCallResult(int(written), recordedFailureCode(rec.ErrNonRetryable), 1)
-		}
-
-		written, writtenEC := s.writeOut(ctx, m, responsePtr, rec.Response, responseMaxLen)
-		return packDurableCallResult(int(written), writeErrorClass(writtenEC), writtenEC)
+		return s.answerRecordedCall(ctx, m, rec, responsePtr, responseMaxLen)
 	}
 
 	// Past recorded history — switch to fresh execution.
 	s.exitReplay()
 	return s.freshCall(ctx, m, service, operation, requestJSON, responsePtr, responseMaxLen)
+}
+
+// answerRecordedCall answers a call from the record that was consumed for it: a pending intent (the call was dispatched and the outcome was never
+// recorded) is resolved or reported ambiguous, a recorded failure is replayed as the failure it was and with the class it had, and anything else is the
+// call's recorded response. It is the half of replay that follows the divergence checks, so a call that does its own checking (the retried call, through
+// the step dispatcher, cleat#4152 G3) shares it with replayCall and the two cannot drift. It consumes nothing and records nothing of its own beyond what
+// the ambiguity handling already wrote.
+func (s *execSession) answerRecordedCall(ctx context.Context, m api.Module, rec EventRecord, responsePtr, responseMaxLen uint32) int64 {
+	// Detect a pending call intent: the external call was dispatched
+	// but the outcome was never persisted.  Return ErrAmbiguous so
+	// the caller can check the external service before retrying.
+	if rec.isPendingIntent() {
+		if s.engine.Metrics != nil {
+			s.engine.Metrics.RecordAmbiguousCall(ctx)
+		}
+
+		// cleat#2897, decision (c) on cleat#1984: for an operation declared
+		// to support idempotency-key replay, try that FIRST -- re-dispatch
+		// under the SAME key and let the service's own key table resolve
+		// it, which is the default path a declared service gets. Disjoint
+		// from ambiguityResolver's configured operations by construction
+		// (cleat-worker boot validation), so this never races the lookup
+		// path below for the same operation; it is either one or the
+		// other, decided by which flag named this service.operation.
+		if resp, ok := s.resolveAmbiguityViaKeyReplay(ctx, rec); ok {
+			if s.engine.Metrics != nil {
+				s.engine.Metrics.RecordAmbiguousCall(ctx, attribute.String("outcome", "key_replay_resolved"))
+			}
+			written, writtenEC := s.writeOut(ctx, m, responsePtr, resp, responseMaxLen)
+			return packDurableCallResult(int(written), writeErrorClass(writtenEC), writtenEC)
+		}
+
+		// Ask, before giving up. A resolver that can look the operation up
+		// by its idempotency key turns most ambiguities into non-events:
+		// the outcome is recorded and replay carries on as though the call
+		// had returned normally, which it did -- the crash lost the answer,
+		// not the effect. See IMPROVEMENT-PLAN 1.4 phase E.
+		switch resp, outcome := s.resolveAmbiguity(ctx, rec); outcome {
+		case AmbiguityResolved:
+			if s.engine.Metrics != nil {
+				s.engine.Metrics.RecordAmbiguousCall(ctx, attribute.String("outcome", "resolved"))
+			}
+			written, writtenEC := s.writeOut(ctx, m, responsePtr, resp, responseMaxLen)
+			return packDurableCallResult(int(written), writeErrorClass(writtenEC), writtenEC)
+		case AmbiguityNotSent:
+			// The service confirmed this call never arrived: a definite,
+			// retryable failure, not an ambiguity. Same packing as a fresh
+			// call failure (callFailureCode), so the guest sees an
+			// ordinary Retryable()==true error and its own retry handling
+			// takes it from there -- no engine-side re-dispatch needed.
+			if s.engine.Metrics != nil {
+				s.engine.Metrics.RecordAmbiguousCall(ctx, attribute.String("outcome", "not_sent"))
+			}
+			written, _ := s.writeResult(ctx, m, responsePtr, ambiguityNotSentMessage, responseMaxLen)
+			return packDurableCallResult(int(written), callFailureCode, 1)
+		}
+
+		// Record the condition structurally before writing the message.
+		// The message is for the workflow author; this is for the
+		// operator, who needs to find these with a query rather than a
+		// substring search. See IMPROVEMENT-PLAN 3.24.
+		if s.engine.Metrics != nil {
+			s.engine.Metrics.RecordAmbiguousCall(ctx, attribute.String("outcome", "cannot_say"))
+		}
+		s.recordAmbiguity(rec)
+
+		ambiguousErr := fmt.Sprintf(
+			"[AMBIGUOUS] call outcome unknown at step %d: the external call to %s.%s was dispatched but the response was not recorded before a crash. Check the external service before retrying.",
+			rec.Step, rec.Service, rec.Op)
+		// Not retryable, and this is the case the old blanket "timeout"
+		// got most wrong: the call may well have succeeded. Telling the
+		// guest to retry is telling it to risk a duplicate side effect.
+		written, _ := s.writeResult(ctx, m, responsePtr, ambiguousErr, responseMaxLen)
+		return packDurableCallResult(int(written), callErrorUnknown, 1)
+	}
+
+	if rec.Err != "" {
+		// The classification comes off the event now rather than being
+		// assumed, so a call the caller marked non-retryable replays as
+		// non-retryable. Events written before 2.35 carry no such key and
+		// read back false, which is the constant this used to hardcode.
+		written, _ := s.writeResult(ctx, m, responsePtr, rec.Err, responseMaxLen)
+		return packDurableCallResult(int(written), recordedFailureCode(rec.ErrNonRetryable), 1)
+	}
+
+	written, writtenEC := s.writeOut(ctx, m, responsePtr, rec.Response, responseMaxLen)
+	return packDurableCallResult(int(written), writeErrorClass(writtenEC), writtenEC)
 }
 
 // retryPolicyFitsBudget reports whether a policy's WORST-CASE total backoff is
