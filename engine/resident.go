@@ -109,10 +109,15 @@ type ResidencyConfig struct {
 	// 0.3 ms, p90 about 1 ms and at most 9 ms (6.8 ms under -race) on a loaded machine, so 100 ms is about ten times the worst sample. It is not measured for a guest
 	// with real defers or a large history.
 	DeadlineMargin time.Duration
-	// RecheckInterval is how often a held SIGNAL wait asks the store whether its delivery has arrived. The worker sets it to --poll, so a held run is never later than the same
-	// run with residency off (which waits for the next claim poll) and is then ahead of it by the replay it does not have to do. Zero means signal waits are not held, which is
+	// RecheckInterval is how often a held SIGNAL wait asks the store whether its delivery has arrived. The worker sets it to --poll, so on a dialect with no NOTIFY a held run waits at most one
+	// interval for its signal. On Postgres the NOTIFY listener calls Nudge, which makes the recheck run at once, and this interval is the backstop that finds what a lost nudge would. Zero means signal waits are not held, which is
 	// the safe reading of an unset field. Each recheck is one store read per awaited name per held run, bounded by MaxRuns; it is not a claim check (that runs once, when the wait ends).
 	RecheckInterval time.Duration
+	// NudgeMinInterval is the least time between two rechecks of one held signal wait when a Nudge is what triggers them (the interval tick is not limited by it). Nudge is driven by
+	// the worker's NOTIFY listener, whose channel carries EVERY dispatch wake-up (a start, a completion, a signal: eleven write paths), so without a floor a write-heavy database would
+	// turn each held wait into one store read per write. A nudge that arrives inside the gap is not dropped: it is answered once, when the gap ends, so the wait is never more than this
+	// late and never more than one read per gap. Zero means no floor.
+	NudgeMinInterval time.Duration
 	// InstanceBytes is the per-language charge for each held instance; nil means defaultResidentInstanceBytes.
 	InstanceBytes map[string]uint64
 	// Pressure reports the worker's memory pressure from 0 (under the soft limit) up to 1 (at the hard limit). A park is refused while it is above
@@ -134,6 +139,7 @@ func DefaultResidencyConfig() ResidencyConfig {
 		ReplayFixed:      500 * time.Millisecond,
 		DeadlineMargin:   100 * time.Millisecond,
 		RecheckInterval:  500 * time.Millisecond, // the worker's --poll default
+		NudgeMinInterval: 50 * time.Millisecond,
 	}
 }
 
@@ -154,6 +160,8 @@ func (c ResidencyConfig) Validate() error {
 		return fmt.Errorf("resident deadline margin %s must not be negative", c.DeadlineMargin)
 	case c.RecheckInterval < 0:
 		return fmt.Errorf("resident recheck interval %s must not be negative", c.RecheckInterval)
+	case c.NudgeMinInterval < 0:
+		return fmt.Errorf("resident nudge interval %s must not be negative", c.NudgeMinInterval)
 	}
 	return nil
 }
@@ -202,6 +210,8 @@ type ResidentSet struct {
 	// that parks a run, which is what closes the race EvictCode alone leaves open: the cache reports an eviction AFTER it releases its own lock, so either admission sees the
 	// code gone and refuses, or the run is already parked when EvictCode takes mu and finds it. There is no lock inversion: nothing holds the cache's lock while taking mu.
 	codeCached func(codeID string) bool
+	// nudge is closed and replaced by Nudge, so every held signal wait that fetched it before its last recheck wakes at once (a broadcast; guarded by mu).
+	nudge chan struct{}
 }
 
 type residentSlot struct {
@@ -233,7 +243,7 @@ func NewResidentSet(cfg ResidencyConfig) (*ResidentSet, error) {
 		}
 		cfg.MemoryBudgetBytes = dearest * uint64(cfg.MaxRuns)
 	}
-	return &ResidentSet{cfg: cfg, parked: map[*residentSlot]struct{}{}}, nil
+	return &ResidentSet{cfg: cfg, parked: map[*residentSlot]struct{}{}, nudge: make(chan struct{})}, nil
 }
 
 // Enabled says whether the set will ever park anything.
@@ -453,6 +463,33 @@ func (r *ResidentRun) Wait(ctx context.Context, req parkRequest) parkOutcome {
 	return outcome
 }
 
+// Nudge makes every held signal wait recheck the store NOW instead of at its next interval tick. It is a hint and never the correctness path: the interval recheck still finds whatever a
+// missed nudge would have, so a nudge that is lost, early or spurious costs at most one extra store read. It carries no payload and names no run, because the NOTIFY that drives it
+// carries none (pg_notify with an empty payload): it wakes every held signal wait on this worker, and each one asks its own store question and goes back to holding if the answer is no.
+// A nudge changes nothing else about a hold: a recheck that finds nothing does not return, so it does not restart the run's limits.
+//
+// Safe on a nil set and on a closed one. It is the Postgres half of cleat#4302; the same-worker delivery nudge (handleSignal) is still that issue's.
+func (s *ResidentSet) Nudge() {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return
+	}
+	close(s.nudge)
+	s.nudge = make(chan struct{})
+}
+
+// nudgeChan is the channel the NEXT Nudge closes. A hold fetches it BEFORE it runs a recheck, never after: a nudge that lands while the recheck is running closes the channel the hold is
+// already holding and is seen at once, and a nudge that lands before the fetch is covered by the recheck that follows it (the write it announced is committed before the NOTIFY).
+func (s *ResidentSet) nudgeChan() <-chan struct{} {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.nudge
+}
+
 // holdForSignal is the hold of a signal wait. The run is already admitted: it is in the set, its limits are paused, and its charge is taken. It asks the call's Recheck once STRAIGHT
 // AWAY and then every RecheckInterval, all inside this one hold, and it ends when the recheck finds a delivery (parkWoke), the deadline passes (parkDeadline), the run's context ends,
 // the set sends the run back, or the recheck cannot tell (a refusal, so the run suspends and a later claim reads the store itself).
@@ -482,6 +519,9 @@ func (r *ResidentRun) holdForSignal(ctx context.Context, req parkRequest, slot *
 	if ctx.Err() != nil {
 		return parkRefused, residentEndedCancelled
 	}
+	// Fetched BEFORE the first recheck (see nudgeChan), and again before every later one.
+	nudge := s.nudgeChan()
+	lastCheck := s.cfg.clock.Now()
 	if found, err := recheck(); err != nil {
 		return parkRefused, residentEndedRecheckErr
 	} else if found {
@@ -489,6 +529,24 @@ func (r *ResidentRun) holdForSignal(ctx context.Context, req parkRequest, slot *
 	}
 	deadline, releaseDeadline := s.cfg.clock.After(remaining)
 	defer releaseDeadline()
+	// again rechecks now: it refetches the nudge channel first, and reports whether the hold is over.
+	again := func() (parkOutcome, string, bool) {
+		nudge = s.nudgeChan()
+		lastCheck = s.cfg.clock.Now()
+		found, err := recheck()
+		switch {
+		case err != nil:
+			return parkRefused, residentEndedRecheckErr, true
+		case found:
+			return parkWoke, residentEndedWoke, true
+		}
+		return 0, "", false
+	}
+	// gap is armed when a nudge arrived inside NudgeMinInterval of the last recheck. While it is, the nudge channel is not watched (nudge is nil): the recheck that ends the gap reads
+	// everything committed before it, so the nudges in between are answered by that one read.
+	var gap <-chan time.Time
+	releaseGap := func() {}
+	defer func() { releaseGap() }()
 	for {
 		tick, releaseTick := s.cfg.clock.After(s.cfg.RecheckInterval)
 		select {
@@ -503,12 +561,27 @@ func (r *ResidentRun) holdForSignal(ctx context.Context, req parkRequest, slot *
 			return parkRefused, residentEndedEvicted
 		case <-tick:
 			releaseTick()
-			found, err := recheck()
-			switch {
-			case err != nil:
-				return parkRefused, residentEndedRecheckErr
-			case found:
-				return parkWoke, residentEndedWoke
+			releaseGap()
+			gap, releaseGap = nil, func() {}
+			if out, why, done := again(); done {
+				return out, why
+			}
+		case <-nudge:
+			releaseTick()
+			if wait := s.cfg.NudgeMinInterval - s.cfg.clock.Now().Sub(lastCheck); wait > 0 {
+				nudge = nil
+				releaseGap()
+				gap, releaseGap = s.cfg.clock.After(wait)
+				continue
+			}
+			if out, why, done := again(); done {
+				return out, why
+			}
+		case <-gap:
+			releaseTick()
+			gap, releaseGap = nil, func() {}
+			if out, why, done := again(); done {
+				return out, why
 			}
 		}
 	}

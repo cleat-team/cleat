@@ -32,6 +32,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -2305,9 +2306,11 @@ func main() {
 	// Start PostgreSQL NOTIFY listener for low-latency dispatch wake-up.
 	var notifyCh chan struct{}
 	var closeNotify func()
+	var residentForNudge atomic.Pointer[engine.ResidentSet]
 	if *driver == "postgres" && *notifyChannel != "" {
 		notifyCh = make(chan struct{}, 1)
-		closeNotify = startNotifyListener(*dbURL, *notifyChannel, notifyCh, logger)
+		// The resident set is built later in main (it needs the worker), so the listener reaches it through a pointer set then. Nil until then, and Nudge is nil-safe.
+		closeNotify = startNotifyListener(*dbURL, *notifyChannel, notifyCh, func() { residentForNudge.Load().Nudge() }, logger)
 		defer closeNotify()
 	}
 
@@ -2619,6 +2622,7 @@ func main() {
 		os.Exit(1)
 	}
 	w.resident = resident
+	residentForNudge.Store(resident)
 	// A held run pins the compiled code it executes even after the cache evicts it, so when the cache evicts a module or component every held run of it is sent back:
 	// a hold never outlives its code's cache entry (engine.ResidentSet.EvictCode). Backends made per execution share the cache, so the root backend is enough.
 	resident.AttachToCodeCache(wt)

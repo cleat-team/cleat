@@ -14,7 +14,11 @@ import (
 // When dsn is empty or channel is empty, it returns a no-op close function and
 // notifyCh remains nil — the dispatch loop's nil-channel select case safely
 // blocks forever.
-func startNotifyListener(dsn, channel string, notifyCh chan<- struct{}, logger *slog.Logger) func() {
+//
+// onNotify, when non-nil, is called for EVERY notification, before the dispatch wake-up is queued and whether or not one is already pending. The dispatch channel coalesces (a pending
+// wake-up swallows the next), which is right for a dispatcher and wrong for a hold: a held run is `running`, so a NOTIFY finds nothing to dispatch, and the worker uses this to nudge its
+// held signal waits to recheck the store at once (cleat#4162, ResidentSet.Nudge). It must not block: it runs on the listener's goroutine.
+func startNotifyListener(dsn, channel string, notifyCh chan<- struct{}, onNotify func(), logger *slog.Logger) func() {
 	if dsn == "" || channel == "" {
 		return func() {}
 	}
@@ -40,6 +44,9 @@ func startNotifyListener(dsn, channel string, notifyCh chan<- struct{}, logger *
 		for n := range listener.Notify {
 			if n == nil {
 				return
+			}
+			if onNotify != nil {
+				onNotify()
 			}
 			select {
 			case notifyCh <- struct{}{}:
