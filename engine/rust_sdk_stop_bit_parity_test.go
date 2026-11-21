@@ -74,7 +74,8 @@ func TestTheRustSDKAgreesOnTheStopBit(t *testing.T) {
 //
 // Eight, not nine: this SDK has no call_with_retry.
 var rustCallsTheHostCanRefuse = []sdkRefusableCall{
-	{"cleat_call", "freshCall"},
+	// The plain call goes through step, so its refusal is the dispatcher's and the host method is the site (cleat#4152, G3).
+	{"cleat_call", "DurableCall"},
 	// side_effect_recorded joined in cleat#4113: a fresh lookup in a stopped workflow is refused so the function never runs.
 	{"side_effect_recorded", "SideEffectRecorded"},
 	// delete_cron joined in cleat#4083, with the stop_requested guard in

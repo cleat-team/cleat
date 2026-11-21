@@ -28,7 +28,7 @@ type stopEvent struct {
 // stopSiteEvents maps a host stop site to the FIRST event its call records. Every entry must be a stop point: its type in
 // stoppableFirstEvents, or its (type, op) in stoppableByOp.
 var stopSiteEvents = map[string]stopEvent{
-	"freshCall":            {typ: EventTypeCall},
+	"DurableCall":          {typ: EventTypeCall},
 	"DurableCallWithRetry": {typ: EventTypeCall},
 	// The per-attempt loop of the same host call (cleat#4210): a refused event write stops the run between attempts, with the same sentinel the call's entry
 	// returns, so the SDKs' existing guard on that call covers it.

@@ -79,7 +79,8 @@ func TestTheJavaSDKAgreesOnTheStopBit(t *testing.T) {
 var javaCallsTheHostCanRefuse = []sdkRefusableCall{
 	{"pollUpdate", "DurablePollUpdate"},
 	{"completeUpdate", "DurableCompleteUpdate"},
-	{"cleatCall", "freshCall"},
+	// The plain call goes through step, so its refusal is the dispatcher's and the host method is the site (cleat#4152, G3).
+	{"cleatCall", "DurableCall"},
 	// sideEffect(Supplier) asks cleat_side_effect_recorded first (cleat#4113); a fresh lookup in a stopped workflow is refused.
 	{"sideEffectOnce", "SideEffectRecorded"},
 	{"cleatCallWithRetry", "DurableCallWithRetry"},

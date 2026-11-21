@@ -16,6 +16,7 @@ import (
 	"go/parser"
 	"go/token"
 	"os"
+	"reflect"
 	"sort"
 	"strings"
 	"sync/atomic"
@@ -945,9 +946,18 @@ func TestARecordsOneSpecMayRecordNothingOnlyOnAPathItListed(t *testing.T) {
 		t.Errorf("a recordsOne spec that returned the suspend sentinel and recorded nothing was reported %q, want the shape violation: the sentinel must not excuse it", joined)
 	}
 
-	// THE PIN: no spec in the engine lists a path, so none of them is looser than it was before the field existed. When a spec starts to (DurableCall's
-	// move), this map is what changes, in the same diff, and the reviewer reads each path against the call it is for. A spec added to the registry that
-	// lists a path and is not in this map fails here, which is what makes the opt-in visible and not merely available.
+	// THE PIN: exactly this spec lists paths, and each path is written out here LITERALLY and not through the constants the spec uses, so a reason that is
+	// reworded or a fifth path that is added changes this map in the same diff and the reviewer reads it against the call it is for. A spec added to the
+	// registry that lists a path and is not in this map fails here, which is what makes the opt-in visible and not merely available. (Before DurableCall moved
+	// (cleat#4152, G3) this recorded that NO spec listed one.)
+	want := map[string][]string{
+		"call": {
+			"the workflow was cancelled: the call is not made and the guest is told so",
+			"the worker's heartbeat is presumed lost: the call is not started and the guest is told so",
+			"the worker hard-stopped mid-call: its outcome is unknown, so none is recorded and the next worker replays from before it",
+			"a write-ahead intent that could not be written, completed or honoured: nothing is recorded and the guest is told why",
+		},
+	}
 	listing := map[string][]string{}
 	for _, sp := range stepSpecs {
 		if len(sp.RecordsNothingOn) > 0 {
@@ -957,8 +967,8 @@ func TestARecordsOneSpecMayRecordNothingOnlyOnAPathItListed(t *testing.T) {
 	if len(stepSpecs) < 20 {
 		t.Fatalf("PRECONDITION FAILED: %d registered specs; the scan is not reading the registry", len(stepSpecs))
 	}
-	if len(listing) != 0 {
-		t.Errorf("specs list RecordsNothingOn paths: %v. This test records that none does; a spec that opts in is added to this check in the same change, with the reason for each path", listing)
+	if !reflect.DeepEqual(listing, want) {
+		t.Errorf("the specs that list RecordsNothingOn paths are not the ones this pin records.\n  got:  %q\n  want: %q", listing, want)
 	}
 }
 
