@@ -37,6 +37,9 @@ func (s *execSession) freshCallWithHeartbeat(ctx context.Context, m api.Module, 
 	if s.stopBeforeNewWork() {
 		return callSuspendSentinel
 	}
+	if res, ok := s.refuseIfSuspended("DurableCallWithHeartbeat", callSuspendSentinel); ok {
+		return res
+	}
 
 	// A NON-POSITIVE INTERVAL IS REFUSED BEFORE ANYTHING ELSE, AND THE REFUSAL RECORDS NOTHING. cleat#4105.
 	//

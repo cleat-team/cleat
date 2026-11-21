@@ -167,6 +167,9 @@ func (s *execSession) childWorkflowWithVersion(ctx context.Context, m api.Module
 	if s.stopBeforeNewWork() {
 		return callSuspendSentinel
 	}
+	if res, ok := s.refuseIfSuspended("ChildWorkflow", callSuspendSentinel); ok {
+		return res
+	}
 
 	// Resolve child version by priority:
 	//   1. Explicit version from ChildWorkflowOptions (version > 0 from WASM ABI)
@@ -309,6 +312,8 @@ var awaitChildStep = stepSpec{
 	Refuse:      neverRefuse,
 	Identity:    awaitChildIdentity,
 	OverPending: func(_ stepArgs, rec *EventRecord) bool { return rec.Response == "" && rec.Err == "" },
+	// After a suspension this call answers its OWN suspension word, which its decoders test (ABI.md 2.22), and not the generic stop word (cleat#4285).
+	AfterSuspend: func(*stepCtx) int64 { return packAwaitChildResultSuspend() },
 	Decode: func(c *stepCtx, rec *EventRecord) int64 {
 		if rec.Err != "" {
 			written, _ := c.s.writeResult(c.ctx, c.m, c.args.outPtr, rec.Err, c.args.outMaxLen)
@@ -535,6 +540,8 @@ func (s *execSession) AwaitAnyChild(ctx context.Context, m api.Module, runIDsJSO
 	// AwaitAnyChild can arrive in the same segment, and without this it would
 	// record a second empty suspend row beside the first: [X empty, Y empty].
 	// Same guard, same reason as AwaitSignal (signaller.go).
+	// Its own guard, kept as it was: only the HOST's defer drain is exempt, where the shared refuseIfSuspended also exempts the guest's own (SetDeferPhase), which
+	// would loosen this call. W3b moves it onto the dispatcher, where the spec's refusal applies and that question gets its own measured row (cleat#4285).
 	if s.suspendErr != nil && !s.inDeferDrain {
 		return packAwaitChildResultSuspend()
 	}
@@ -706,6 +713,8 @@ var awaitAllChildrenStep = stepSpec{
 		return ""
 	},
 	OverPending: func(_ stepArgs, rec *EventRecord) bool { return rec.Response == "" },
+	// As await_child: its own suspension word after a suspension (ABI.md 2.23), cleat#4285.
+	AfterSuspend: func(*stepCtx) int64 { return packAwaitChildResultSuspend() },
 	Decode: func(c *stepCtx, rec *EventRecord) int64 {
 		written, writtenEC := c.s.writeOut(c.ctx, c.m, c.args.outPtr, rec.Response, c.args.outMaxLen)
 		return packAwaitChildResult(written, uint32(writtenEC))
@@ -945,6 +954,9 @@ func (s *execSession) runDetached(ctx context.Context, m api.Module, name, input
 	// that reached this would find nothing where an event should be.
 	if s.stopBeforeNewWork() {
 		return 0, callSuspendSentinel
+	}
+	if res, ok := s.refuseIfSuspended("RunDetached", callSuspendSentinel); ok {
+		return 0, res
 	}
 
 	// Resolve child version using the same policy logic as childWorkflowWithVersion.

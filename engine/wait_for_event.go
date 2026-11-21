@@ -159,6 +159,11 @@ func (s *execSession) WaitForEvent(ctx context.Context, m api.Module,
 	if !s.isReplay && s.stopBeforeNewWork() {
 		return callSuspendSentinel
 	}
+	if !s.isReplay {
+		if res, ok := s.refuseIfSuspended("WaitForEvent", callSuspendSentinel); ok {
+			return res
+		}
+	}
 
 	// Durable clock, so replay recomputes the same deadline. See the doc above.
 	deadline := s.nowMs + timeoutMs

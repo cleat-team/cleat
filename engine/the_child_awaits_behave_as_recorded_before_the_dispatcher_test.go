@@ -302,9 +302,9 @@ func TestTheChildAwaitsBehaveAsRecordedBeforeTheDispatcher(t *testing.T) {
 		{name: "await_child fresh: a worker that is shutting down is NOT refused", call: callOfAwaitChild, ids: []string{"c1"}, opts: []EngineOption{WithShutdownSignal(closed)},
 			outcomes: map[string]ChildOutcome{"c1": done("R")},
 			want:     childAwaitWant{result: "R", recs: []childAwaitRec{rec(EventTypeAwaitChild, "R", "", "", "c1")}, step: 1, gets: 1}},
-		{name: "KNOWN DEFECT (cleat#933 shape): await_child in a session that has already suspended records a second await and replaces the suspension", call: callOfAwaitChild, ids: []string{"c1"},
+		{name: "CHANGED BY cleat#4285 (was a KNOWN DEFECT, cleat#933 shape: a second await was recorded and replaced the suspension): await_child in a session that has already suspended is refused with its own suspension word, records nothing and keeps the FIRST suspension", call: callOfAwaitChild, ids: []string{"c1"},
 			mod: func(s *execSession) { s.suspendErr = &SuspendError{Reason: "earlier"} }, outcomes: map[string]ChildOutcome{"c1": pending},
-			want: childAwaitWant{sentinel: true, recs: []childAwaitRec{rec(EventTypeAwaitChild, "", "", "", "c1")}, reason: "await_child(c1)", step: 1, gets: 1}},
+			want: childAwaitWant{sentinel: true, reason: "earlier", step: 0, gets: 0}},
 
 		// =============================== AwaitAllChildren ===============================
 		// ---- replay of an answered await ----
@@ -359,9 +359,9 @@ func TestTheChildAwaitsBehaveAsRecordedBeforeTheDispatcher(t *testing.T) {
 		{name: "await_all fresh: a worker that is shutting down is NOT refused", call: callOfAwaitAllChildren, ids: []string{"c1"}, opts: []EngineOption{WithShutdownSignal(closed)},
 			outcomes: map[string]ChildOutcome{"c1": done("R1")},
 			want:     childAwaitWant{result: `[{"run_id":"c1","result":"R1"}]`, recs: []childAwaitRec{rec(EventTypeAwaitAllChildren, `[{"run_id":"c1","result":"R1"}]`, "", one, "")}, step: 1, gets: 1}},
-		{name: "KNOWN DEFECT (cleat#933 shape): await_all in a session that has already suspended records a second await and replaces the suspension", call: callOfAwaitAllChildren, ids: []string{"c1"},
+		{name: "CHANGED BY cleat#4285 (was a KNOWN DEFECT, cleat#933 shape: a second await was recorded and replaced the suspension): await_all in a session that has already suspended is refused with its own suspension word, records nothing and keeps the FIRST suspension", call: callOfAwaitAllChildren, ids: []string{"c1"},
 			mod: func(s *execSession) { s.suspendErr = &SuspendError{Reason: "earlier"} }, outcomes: map[string]ChildOutcome{"c1": pending},
-			want: childAwaitWant{sentinel: true, recs: []childAwaitRec{rec(EventTypeAwaitAllChildren, "", "", one, "")}, reason: "await_all_children(c1)", step: 1, gets: 1}},
+			want: childAwaitWant{sentinel: true, reason: "earlier", step: 0, gets: 0}},
 
 		// =============================== AwaitAnyChild ===============================
 		// ---- replay of an answered await ----

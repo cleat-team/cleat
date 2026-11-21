@@ -62,6 +62,41 @@ func (s *execSession) stopBeforeNewWork() bool {
 	return s.engine.shutdownObserved()
 }
 
+// callRefusedAfterSuspend is the message of a call that was refused because this execution has already suspended, for the calls whose answer is an
+// ordinary error and not a stop word (cleat#4285).
+const callRefusedAfterSuspend = "the workflow has suspended; this call was not run"
+
+// suspendedAlready reports whether this EXECUTION has already suspended: a call answered the guest with a suspension (a child await, a wait, a
+// stop), or ContinueAsNew set one, and the guest is still running. A guest is told to stop when that happens and some do not (an SDK returns the
+// suspension as an ordinary value, or the guest catches the exception or discards the error: cleat#4285), and every call it makes afterwards is
+// recorded AFTER the pending await and runs AGAIN when the workflow resumes. A defer drain is exempt, whether the HOST runs it (inDeferDrain) or the GUEST
+// does and says so (SetDeferPhase, cleat#3428): the cleanup of a run that is stopping is exactly the work that must still go through.
+func (s *execSession) suspendedAlready() bool {
+	return s.suspendErr != nil && !s.inDeferDrain && !s.guestIsDrainingDefers()
+}
+
+// refuseIfSuspended is the host-side half of cleat#4285: when this execution has already suspended, a call that would start fresh work is refused,
+// runs nothing and records nothing, and answers `word`, the word its own SDK decoder recognises (callSuspendSentinel for every stop site, which
+// DurableCall's decoders and the other five layouts already test first). It returns the answer and true when it refused. One helper for every call
+// off the dispatcher, so that each later migration just moves its call from here to step(), where the same refusal is applied by the spec.
+func (s *execSession) refuseIfSuspended(call string, word int64) (int64, bool) {
+	return s.refuseIfSuspendedWith(call, func() int64 { return word })
+}
+
+// refuseIfSuspendedWith is refuseIfSuspended for a call whose answer is computed (an ordinary error with a message written to the guest's buffer, for a
+// call that is not a stop site and so has no stop word its decoders know). It logs a warning each time, so that a guest or an SDK that keeps running
+// after a suspension is visible to an operator and not only to a replay that later runs a call twice.
+func (s *execSession) refuseIfSuspendedWith(call string, answer func() int64) (int64, bool) {
+	if !s.suspendedAlready() {
+		return 0, false
+	}
+	if s.engine != nil {
+		s.engine.log().WarnContext(context.Background(), "a host call was made after the workflow had already suspended and was refused: the guest did not stop at the suspension (cleat#4285)",
+			"workflow_id", s.workflowID, "call", call, "suspension", s.suspendErr.Reason)
+	}
+	return answer(), true
+}
+
 // setDeferDrain brackets the host's own call to the guest's defer runner. It
 // is unexported and reached by interface assertion from the backend, so no
 // caller outside the engine can permit new work in a defer segment.
@@ -112,6 +147,9 @@ func (s *execSession) freshCall(ctx context.Context, m api.Module, service, oper
 	// call and never ran the registered cleanup). SetScope's refusal (cleat#4091) and AcquireLock's (cleat#4140) are now the dispatcher's, for both ways in (cleat#4211).
 	if s.stopBeforeNewWork() {
 		return callSuspendSentinel
+	}
+	if res, ok := s.refuseIfSuspended("DurableCall", callSuspendSentinel); ok {
+		return res
 	}
 	atomic.AddInt64(&freshCallCount, 1)
 
@@ -634,6 +672,9 @@ func (s *execSession) freshCallWithRetry(ctx context.Context, m api.Module,
 	maxAttempts, initialIntervalMs, backoffCoefficient100x, maxIntervalMs int64,
 	nonRetryableErrorsJSON string,
 	responsePtr, responseMaxLen uint32, attemptsSpent int64, resumeStep int, lastRecordedErr string) int64 {
+	if res, ok := s.refuseIfSuspended("DurableCallWithRetry", callSuspendSentinel); ok {
+		return res
+	}
 
 	// Parse non-retryable error patterns.
 	//
@@ -890,6 +931,11 @@ func (s *execSession) freshCallWithRetry(ctx context.Context, m api.Module,
 }
 
 func (s *execSession) DurableSleep(ctx context.Context, m api.Module, durationMs int64) int64 {
+	// A sleep after a suspension would REPLACE the first suspension with its own (suspendFor assigns), so a run waiting on a child would wake at the sleep's
+	// deadline instead. It answers its own suspend status, which its decoders already test (cleat#4285).
+	if res, ok := s.refuseIfSuspended("DurableSleep", packSleepResult(sleepStatusSuspend, durationMs)); ok {
+		return res
+	}
 	// Sleep is local: it records no event. So what tells us whether a sleep has
 	// already been served is not history but time.
 	//
@@ -1207,6 +1253,9 @@ func (s *execSession) DurableScheduleInvoke(ctx context.Context, m api.Module, s
 	// so a terminated workflow would keep causing side effects on a timer.
 	if s.stopBeforeNewWork() {
 		return callSuspendSentinel
+	}
+	if res, ok := s.refuseIfSuspended("DurableScheduleInvoke", callSuspendSentinel); ok {
+		return res
 	}
 
 	rec := EventRecord{

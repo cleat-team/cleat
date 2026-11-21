@@ -614,6 +614,9 @@ func (s *execSession) freshPluginCall(ctx context.Context, m api.Module,
 	if s.stopBeforeNewWork() {
 		return callSuspendSentinel
 	}
+	if res, ok := s.refuseIfSuspended("PluginCall", callSuspendSentinel); ok {
+		return res
+	}
 	return s.freshPluginCallInternal(ctx, m, pluginName, functionName, inputJSON, responsePtr, responseMaxLen, true)
 }
 
@@ -801,6 +804,9 @@ func (s *execSession) freshPluginCallStreaming(ctx context.Context, m api.Module
 	// call and never ran the registered cleanup). SetScope's refusal (cleat#4091) and AcquireLock's (cleat#4140) are now the dispatcher's, for both ways in (cleat#4211).
 	if s.stopBeforeNewWork() {
 		return callSuspendSentinel
+	}
+	if res, ok := s.refuseIfSuspended("PluginCallStreaming", callSuspendSentinel); ok {
+		return res
 	}
 
 	// Look up the streaming plugin function.
