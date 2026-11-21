@@ -99,9 +99,7 @@ jobs:
       - name: Seeded sample
         run: |
           set -euo pipefail
-          # dbwrite is EXCLUDED from the PR sample until #4166 (the fix for #4160) is on develop: until then that fault finds a real, known defect on
-          # every PR that draws it. REMOVE the exclusion in the PR that follows #4166's merge (tracked: cleat#4192). The nightly full sweep still runs it.
-          CLEAT_CHAOS_SKIP_FAULTS=dbwrite CLEAT_CHAOS_SEED="${{ github.event.pull_request.number }}" CLEAT_CHAOS_MODE=sample CLEAT_CHAOS_SAMPLE=60 CLEAT_CHAOS_SCRIPTS=4 \
+          CLEAT_CHAOS_SEED="${{ github.event.pull_request.number }}" CLEAT_CHAOS_MODE=sample CLEAT_CHAOS_SAMPLE=60 CLEAT_CHAOS_SCRIPTS=4 \
             go test -json -tags chaos -count=1 -timeout 20m ./tests/chaos -run 'TestChaosSeeded' 2>&1 | tee chaos-sample.log
       - uses: actions/upload-artifact@v7
         if: always()
