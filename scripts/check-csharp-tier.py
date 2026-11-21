@@ -69,6 +69,11 @@ EXEMPT = {
     "engine/a_component_gets_the_durable_clock_and_entropy_at_every_wasi_minor_test.go":
         "reads the checked-in engine/testdata/wasi_minor/probe-*.wasm (tiny hand-written components), needs no toolchain and has no "
         "t.Skip; it names componentize-dotnet only in a comment explaining why the WASI minor matters (cleat#4080, C# PR 3)",
+    "engine/a_real_csharp_component_is_held_through_a_sleep_and_fenced_test.go":
+        "reads the checked-in engine/testdata/csharp_defer_order/defer_order.wasm (a prebuilt C# component) and stamps it as csharp in "
+        "the test, needs no toolchain and has no t.Skip (the file is separate from the Python rows precisely so that this is true), so it "
+        "runs in Tier 1 on every machine; it tests the ENGINE's residency, fence and charge accounting on a real component, which belongs "
+        "in engine/ (cleat#4162 part A, cleat#4278)",
     "cmd/cleat/csharp_vet_test.go":
         "tests the determinism VET, a Go lexer and rule table over .cs source text; it reads no component and runs no toolchain, and has "
         "no t.Skip, so it runs in Tier 1 on every machine. Its TestCSharp* names say what the vet is about, not what it needs "
