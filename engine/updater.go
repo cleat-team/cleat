@@ -101,8 +101,9 @@ var pollUpdateStep = stepSpec{
 	Records: recordsOne,
 	Want:    EventTypeUpdateReceived,
 	// A poll records an update_received only when it finds one: with no store, with a store it cannot read, and with nothing pending it answers and records nothing.
-	RecordsNothingOn: []string{pollNothingNoStore, pollNothingUnreadable, pollNothingPending},
-	NoIdentity:       "a poll names nothing: it asks for whatever update is next, so there is no field to compare",
+	RecordsNothingOn:   []string{pollNothingNoStore, pollNothingUnreadable, pollNothingPending},
+	NoIdentity:         "a poll names nothing: it asks for whatever update is next, so there is no field to compare",
+	NoDivergenceDetail: "it had no divergence message: a record of another type at its step was answered with nothing found, WITHOUT advancing and WITHOUT leaving replay, so there was never a message to lose; " + divergenceSweepNote,
 	// A fresh delivery is new work: it runs guest code that can start calls, children and timers. A defer segment exists to run a terminated workflow's cleanup, not to
 	// service new requests (the same reasoning as DurableAwaitSignals and IMPROVEMENT-PLAN 3.84). Not asked when there is no store: that answered 0 first.
 	Refuse: func(s *execSession) bool { return s.engine.updateStore != nil && s.stopBeforeNewWork() },
@@ -178,13 +179,14 @@ func (s *execSession) DurableCompleteUpdate(ctx context.Context, m api.Module, r
 // not-found (#818) and turn every replay into an error (Decode touches nothing, which is what the dispatcher requires of it). It records BEFORE the store writes, and a store
 // that is missing, or a write that fails, is logged and still answers success: the outcome is in the history either way.
 var completeUpdateStep = stepSpec{
-	Name:       "complete_update",
-	Result:     layoutSimple,
-	Effect:     effectEffect,
-	Records:    recordsOne,
-	Want:       EventTypeUpdateCompleted,
-	NoIdentity: "the old code consumed any update_completed record at the step without comparing the request id; comparing it is a tightening, and a separate ruling (cleat#4152 W1)",
-	Decode:     func(*stepCtx, *EventRecord) int64 { return 0 },
+	Name:               "complete_update",
+	Result:             layoutSimple,
+	Effect:             effectEffect,
+	Records:            recordsOne,
+	Want:               EventTypeUpdateCompleted,
+	NoIdentity:         "the old code consumed any update_completed record at the step without comparing the request id; comparing it is a tightening, and a separate ruling (cleat#4152 W1)",
+	NoDivergenceDetail: "its old message was the shared one: the step and both event types; " + divergenceSweepNote,
+	Decode:             func(*stepCtx, *EventRecord) int64 { return 0 },
 	Fresh: func(c *stepCtx) int64 {
 		s, ctx := c.s, c.ctx
 		requestID, result, errMsg := c.args.s1, c.args.s2, c.args.s3
