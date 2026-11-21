@@ -1617,3 +1617,22 @@ func (b *wasmtimeBackend) OnModuleEvicted(f func(key string)) {
 	}
 	b.moduleCache.setOnEvict(func(key string) { f(codeIDOfCacheKey(key)) })
 }
+
+// CodeCached reports whether the code with this CodeID is still in the backend's cache. The resident set asks it when a run is about to be held (ResidentSet.AttachToCodeCache),
+// because EvictCode reaches only runs already held: a run whose code was evicted while it was still EXECUTING would otherwise reach its sleep afterwards and be held against
+// code that is gone. It answers true for anything it cannot judge (no cache, an identity it does not recognise): refusing holds it cannot reason about would turn a gap into
+// an outage.
+func (b *wasmtimeBackend) CodeCached(codeID string) bool {
+	if b == nil || b.moduleCache == nil {
+		return true
+	}
+	var engineID uint64
+	if b.components != nil {
+		engineID = b.components.engineID
+	}
+	key, ok := cacheKeyOfCodeID(codeID, engineID)
+	if !ok {
+		return true
+	}
+	return b.moduleCache.has(key)
+}

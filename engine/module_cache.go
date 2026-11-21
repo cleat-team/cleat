@@ -199,6 +199,14 @@ func (c *moduleLRU) evictLocked() ([]func(), []string) {
 	return releases, keys
 }
 
+// has reports whether key is cached. It does not mark the entry used: asking must not change what the cache evicts.
+func (c *moduleLRU) has(key string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	_, ok := c.index[key]
+	return ok
+}
+
 // setOnEvict installs the eviction hook (see onEvict). It takes the lock only to publish the field.
 func (c *moduleLRU) setOnEvict(f func(key string)) {
 	c.mu.Lock()

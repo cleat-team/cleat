@@ -42,3 +42,15 @@ func codeIDOfCacheKey(key string) string {
 	}
 	return "module:" + key
 }
+
+// cacheKeyOfCodeID is the inverse of codeIDOfCacheKey for ONE engine: the key under which the code with this CodeID is cached, given the engine id the component cache uses. It
+// reports false for an identity it does not recognise, and a caller must then treat the code as cached: a check that refuses what it cannot judge turns a gap into an outage.
+func cacheKeyOfCodeID(codeID string, engineID uint64) (string, bool) {
+	if rest, ok := strings.CutPrefix(codeID, "component:"); ok && rest != "" {
+		return "component:" + rest + ":" + strconv.FormatUint(engineID, 10), true
+	}
+	if rest, ok := strings.CutPrefix(codeID, "module:"); ok && rest != "" {
+		return rest, true
+	}
+	return "", false
+}

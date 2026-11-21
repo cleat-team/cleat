@@ -62,6 +62,7 @@ const (
 	residentRefusedMemory   = "memory"    // admitting it would exceed the resident-memory budget
 	residentRefusedPressure = "pressure"  // the worker is at or over its memory soft limit
 	residentRefusedDraining = "draining"  // the worker is shutting down
+	residentRefusedCode     = "code"      // the cache has already evicted the compiled code the run executes (see CodeCached)
 	residentRefusedDeadline = "deadline"  // the run's own context (the wall-clock ceiling, the workflow deadline) ends at or before the wake
 	residentEndedDeadline   = "deadline"  // the timer fired: the caller's clock decides whether the wait is over
 	residentEndedCancelled  = "cancelled" // the run's context ended while parked
@@ -181,11 +182,15 @@ type ResidentSet struct {
 	parked map[*residentSlot]struct{}
 	bytes  uint64
 	closed bool
+	// codeCached, when set (AttachToCodeCache), says whether the compiled code with this identity is still in the cache. It is read under mu, in the same critical section
+	// that parks a run, which is what closes the race EvictCode alone leaves open: the cache reports an eviction AFTER it releases its own lock, so either admission sees the
+	// code gone and refuses, or the run is already parked when EvictCode takes mu and finds it. There is no lock inversion: nothing holds the cache's lock while taking mu.
+	codeCached func(codeID string) bool
 }
 
 type residentSlot struct {
 	bytes uint64
-	// codeKey is the cache key of the code the run executes (ResidentRunInfo.CodeKey); empty means unknown, which EvictCode never matches.
+	// codeKey is the identity of the code the run executes (ResidentRunInfo.CodeKey); empty means unknown, which EvictCode never matches.
 	codeKey string
 	// evict is closed exactly once, by evictAll, to send the run back; reason says why.
 	evict  chan struct{}
@@ -275,10 +280,16 @@ func (s *ResidentSet) EvictCode(key string) {
 // whether the backend has a cache to attach to: a backend that is not the wasmtime one, or a build without cgo, has none and nothing is lost by that (nothing is held
 // there). It is a method, and not three lines in the worker's main, so that the end-to-end row exercises the same wiring the worker uses.
 func (s *ResidentSet) AttachToCodeCache(backend any) bool {
-	h, ok := backend.(interface{ OnModuleEvicted(func(string)) })
+	h, ok := backend.(interface {
+		OnModuleEvicted(func(string))
+		CodeCached(string) bool
+	})
 	if !ok {
 		return false
 	}
+	s.mu.Lock()
+	s.codeCached = h.CodeCached
+	s.mu.Unlock()
 	h.OnModuleEvicted(s.EvictCode)
 	return true
 }
@@ -373,6 +384,11 @@ func (r *ResidentRun) Wait(ctx context.Context, req parkRequest) parkOutcome {
 		s.mu.Unlock()
 		resume(false)
 		return refuse(residentRefusedMemory)
+	case s.codeCached != nil && r.info.CodeKey != "" && !s.codeCached(r.info.CodeKey):
+		// The code was evicted while this run was still executing, so EvictCode had no slot to reach. Holding it now would pin code the cache decided to free.
+		s.mu.Unlock()
+		resume(false)
+		return refuse(residentRefusedCode)
 	}
 	s.parked[slot] = struct{}{}
 	s.bytes += cost

@@ -4,6 +4,7 @@ package engine
 
 import (
 	"context"
+	"os"
 	"sync"
 	"testing"
 	"time"
@@ -201,5 +202,183 @@ func TestEveryKeyTheCacheUsesMapsToTheCodeIDOfItsBytes(t *testing.T) {
 	// And the two spaces never collide: different bytes, different identity, and a module is never mistaken for a component.
 	if CodeID(core) == CodeID(comp) || CodeID(core)[:7] != "module:" || CodeID(comp)[:10] != "component:" {
 		t.Errorf("the identities are not distinct: core %q, component %q", CodeID(core), CodeID(comp))
+	}
+}
+
+// ---- THE RACE EvictCode ALONE LEAVES OPEN, on the real backend (cleat-review3's finding on 5c364e9d) ----
+//
+// EvictCode reaches only runs that are already held. A run whose code is evicted while it is still EXECUTING (another run's insert into a full cache) reaches its sleep
+// afterwards, is admitted, and is held against code that is gone. So admission also asks the cache (ResidentSet.codeCached, backend CodeCached). These rows evict from inside
+// a host call, which is the guest being mid-execution, for BOTH key spaces, because the last time the key spaces were taken on trust every unit row agreed and the real case
+// was wrong. Each has a control proving the check does not refuse a hold that is legitimate, since a check that refuses too much is an outage and not a safety measure.
+
+// evictingCaller calls evict once, on its first host call, then behaves as inner.
+type evictingCaller struct {
+	inner ServiceCaller
+	once  sync.Once
+	evict func()
+}
+
+func (c *evictingCaller) Call(ctx context.Context, service, op, req string) (string, error) {
+	c.once.Do(c.evict)
+	return c.inner.Call(ctx, service, op, req)
+}
+
+func TestCodeCachedAnswersForBothKeySpacesOfTheRealBackend(t *testing.T) {
+	ctx := context.Background()
+	rt, err := NewRuntime(ctx, 0, 0)
+	if err != nil {
+		t.Fatalf("NewRuntime: %v", err)
+	}
+	t.Cleanup(func() { rt.Close(ctx) })
+	wt, err := NewWasmtimeBackend(ctx, WithWasmtimeModuleCacheMaxEntries(1))
+	if err != nil {
+		t.Fatalf("NewWasmtimeBackend: %v", err)
+	}
+	t.Cleanup(func() { wt.Close(ctx) })
+
+	core, err := os.ReadFile(buildFixtureWasm(t, "residentsleep"))
+	if err != nil {
+		t.Fatalf("reading the core fixture: %v", err)
+	}
+	comp := csharpFixtureStamped(t)
+	langs := append(append([]string{}, WasmtimeLanguages...), "csharp")
+
+	for _, tc := range []struct {
+		name  string
+		bytes []byte
+		entry string
+		input string
+	}{
+		{"a core module", core, "work_sleep_work", `{}`},
+		{"a component", comp, "run", `{"mode":"hello"}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			id := CodeID(tc.bytes)
+			if wt.CodeCached(id) {
+				t.Fatalf("PRECONDITION FAILED: %s reads as cached before anything ran, so a true answer below proves nothing", tc.name)
+			}
+			eng := NewEngine(rt, &mockCaller{}, WithBackends(langs, wt), WithWorkflowID("wf-codecached"))
+			if _, _, _, _, _, err := eng.Execute(ctx, tc.bytes, tc.entry, []byte(tc.input)); err != nil {
+				t.Fatalf("execute: %v", err)
+			}
+			if !wt.CodeCached(id) {
+				t.Errorf("%s ran and was cached, and CodeCached says it is not: every hold of it would be refused", tc.name)
+			}
+			wt.moduleCache.store("some-other-code", &wasmtime.Module{}, 0) // a one-entry cache: this evicts it
+			if wt.CodeCached(id) {
+				t.Errorf("%s was evicted, and CodeCached still says it is cached", tc.name)
+			}
+		})
+	}
+	if !wt.CodeCached("not-an-identity-it-knows") {
+		t.Error("an identity the backend cannot judge must read as cached (fail open)")
+	}
+}
+
+func TestARunWhoseCoreModuleIsEvictedWhileItExecutesIsNotHeldAtItsSleep(t *testing.T) {
+	ctx := context.Background()
+	wasmBytes, err := os.ReadFile(buildFixtureWasm(t, "residentsleep"))
+	if err != nil {
+		t.Fatalf("reading fixture: %v", err)
+	}
+	rt, err := NewRuntime(ctx, 0, 0)
+	if err != nil {
+		t.Fatalf("NewRuntime: %v", err)
+	}
+	t.Cleanup(func() { rt.Close(ctx) })
+	wt, err := NewWasmtimeBackend(ctx, WithWasmtimeModuleCacheMaxEntries(1))
+	if err != nil {
+		t.Fatalf("NewWasmtimeBackend: %v", err)
+	}
+	t.Cleanup(func() { wt.Close(ctx) })
+
+	run := func(evictMidRun bool) (suspended bool, parks, codeRefusals int) {
+		m := newReplayMetrics(t)
+		cfg := DefaultResidencyConfig()
+		cfg.MaxRuns = 2
+		cfg.Metrics = m
+		set, err := NewResidentSet(cfg)
+		if err != nil {
+			t.Fatalf("NewResidentSet: %v", err)
+		}
+		if !set.AttachToCodeCache(wt) { // the worker's own wiring
+			t.Fatal("PRECONDITION FAILED: the wasmtime backend has no code cache to attach to")
+		}
+		var caller ServiceCaller = &phasedWorkCaller{}
+		if evictMidRun {
+			caller = &evictingCaller{inner: caller, evict: func() { wt.moduleCache.store("some-other-code", &wasmtime.Module{}, 0) }}
+		}
+		eng := NewEngine(rt, caller, WithBackends(WasmtimeLanguages, wt), WithWorkflowID("wf-core-evicted-midrun"),
+			WithResidency(set.ForRun(ResidentRunInfo{WorkflowID: "wf-core-evicted-midrun", Language: "go", CodeKey: CodeID(wasmBytes), ClaimCheck: claimStillHeld})))
+		eng.Metrics = m
+		res, _, susp, _, _, execErr := eng.Execute(ctx, wasmBytes, "work_sleep_work", []byte(`{}`))
+		if execErr != nil {
+			t.Fatalf("execute: %v (res %q)", execErr, res)
+		}
+		return susp != nil, residentCounter(t, m, "cleat_resident_parks_total"), residentCounter(t, m, "cleat_resident_refusals_total", `reason="code"`)
+	}
+
+	run(false) // compiles and caches the module first
+	// CONTROL: the check is active (attached) and nothing evicts the code: the hold must still happen, or the check refuses legitimate holds.
+	if susp, parks, refusals := run(false); susp || parks != 1 || refusals != 0 {
+		t.Fatalf("CONTROL FAILED: a core run with its code cached, with the check attached, was suspended=%v parks=%d codeRefusals=%d, want completed in place with 1 hold and 0 refusals", susp, parks, refusals)
+	}
+	// THE RACE: the code is evicted from inside the first host call, while the guest is executing, before it reaches its sleep.
+	susp, parks, refusals := run(true)
+	if !susp || parks != 0 || refusals != 1 {
+		t.Errorf("a run whose code was evicted while it executed: suspended=%v parks=%d codeRefusals=%d, want suspended with 0 holds and 1 refusal (reason code): it was held against code that is gone", susp, parks, refusals)
+	}
+}
+
+func TestARunWhoseComponentIsEvictedWhileItExecutesIsNotHeldAtItsSleep(t *testing.T) {
+	ctx := context.Background()
+	b := csharpFixtureStamped(t)
+	langs := append(append([]string{}, WasmtimeLanguages...), "csharp")
+	rt, err := NewRuntime(ctx, 0, 0)
+	if err != nil {
+		t.Fatalf("NewRuntime: %v", err)
+	}
+	t.Cleanup(func() { rt.Close(ctx) })
+	wt, err := NewWasmtimeBackend(ctx, WithWasmtimeModuleCacheMaxEntries(1))
+	if err != nil {
+		t.Fatalf("NewWasmtimeBackend: %v", err)
+	}
+	t.Cleanup(func() { wt.Close(ctx) })
+
+	run := func(evictMidRun bool) (suspended bool, ops []string, codeRefusals int) {
+		m := newReplayMetrics(t)
+		cfg := DefaultResidencyConfig()
+		cfg.MaxRuns = 2
+		cfg.Metrics = m
+		set, err := NewResidentSet(cfg)
+		if err != nil {
+			t.Fatalf("NewResidentSet: %v", err)
+		}
+		if !set.AttachToCodeCache(wt) {
+			t.Fatal("PRECONDITION FAILED: the wasmtime backend has no code cache to attach to")
+		}
+		mc := &mockCaller{}
+		var caller ServiceCaller = mc
+		if evictMidRun {
+			caller = &evictingCaller{inner: mc, evict: func() { wt.moduleCache.store("some-other-code", &wasmtime.Module{}, 0) }}
+		}
+		eng := NewEngine(rt, caller, WithBackends(langs, wt), WithWorkflowID("wf-component-evicted-midrun"),
+			WithResidency(set.ForRun(ResidentRunInfo{WorkflowID: "wf-component-evicted-midrun", Language: "csharp", CodeKey: CodeID(b), ClaimCheck: claimStillHeld})))
+		eng.Metrics = m
+		_, _, susp, _, _, execErr := eng.Execute(ctx, b, "run", []byte(`{"mode":"sleep"}`))
+		if execErr != nil {
+			t.Fatalf("execute: %v", execErr)
+		}
+		return susp != nil, operationsCalled(mc), residentCounter(t, m, "cleat_resident_refusals_total", `reason="code"`)
+	}
+
+	run(false) // compiles and caches the component first
+	if susp, ops, refusals := run(false); susp || len(ops) != 2 || refusals != 0 {
+		t.Fatalf("CONTROL FAILED: a component with its code cached, with the check attached, was suspended=%v ops=%v codeRefusals=%d, want completed in place (2 calls) and 0 refusals", susp, ops, refusals)
+	}
+	susp, ops, refusals := run(true)
+	if !susp || len(ops) != 1 || refusals != 1 {
+		t.Errorf("a component evicted while it executed: suspended=%v ops=%v codeRefusals=%d, want suspended after 1 call with 1 refusal (reason code): it was held against code that is gone", susp, ops, refusals)
 	}
 }

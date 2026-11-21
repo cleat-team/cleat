@@ -1,7 +1,9 @@
 package engine
 
 import (
+	"sync"
 	"testing"
+	"time"
 )
 
 // A HOLD NEVER OUTLIVES ITS CODE'S CACHE ENTRY. A held instance refcounts the compiled code it runs, so when the module cache evicts that code nothing is freed while a held
@@ -75,4 +77,80 @@ func TestEvictingTheSameCodeTwiceDoesNotSendBackARunTwice(t *testing.T) {
 func TestEvictCodeOnANilSetIsANoOp(t *testing.T) {
 	var s *ResidentSet
 	s.EvictCode("code-a")
+}
+
+// THE RACE THE FIRST VERSION MISSED (cleat-review3's probe). EvictCode reaches only runs that are ALREADY held, so a run whose code is evicted while it is still EXECUTING
+// (another run's insert into a full cache) reaches its sleep afterwards, is admitted, and is held against code that is gone, with nothing left to send it back.
+func TestARunWhoseCodeWasEvictedBeforeItReachedItsSleepIsNotHeld(t *testing.T) {
+	clock := newFakeResidentClock(residentT)
+	m := newReplayMetrics(t)
+	var cached = map[string]bool{"code-a": true}
+	set := newTestResidentSet(t, residentTestConfig(clock, func(c *ResidencyConfig) { c.Metrics = m }))
+	set.codeCached = func(key string) bool { return cached[key] }
+
+	// The eviction fires while no run of code-a is held: there is nothing for EvictCode to reach.
+	delete(cached, "code-a")
+	set.EvictCode("code-a")
+
+	_, held := holdOne(t, set, clock, ResidentRunInfo{Language: "go", CodeKey: "code-a"})
+	if held {
+		t.Fatal("a run was held against code the cache had already evicted: nothing will ever send it back")
+	}
+	if n := residentCounter(t, m, "cleat_resident_refusals_total", `reason="code"`); n != 1 {
+		t.Errorf("the refusal was counted %d time(s) as reason \"code\", want 1", n)
+	}
+	if got := chargedBytes(set); got != 0 {
+		t.Errorf("a refused run left %d bytes charged", got)
+	}
+
+	// CONTROLS. Code still cached is held; a run with no known code is never judged by it; and with no hook installed (a set not attached to a cache) nothing changes.
+	if _, held := holdOne(t, set, clock, ResidentRunInfo{Language: "go", CodeKey: "code-b"}); held {
+		t.Error("PRECONDITION: code-b is not in the cached set and must be refused too, or this control means nothing")
+	}
+	cached["code-b"] = true
+	if _, held := holdOne(t, set, clock, ResidentRunInfo{Language: "go", CodeKey: "code-b"}); !held {
+		t.Error("a run whose code IS cached was refused")
+	}
+	if _, held := holdOne(t, set, clock, ResidentRunInfo{Language: "go"}); !held {
+		t.Error("a run with no CodeKey was refused: it must never be judged by the cache")
+	}
+	set.codeCached = nil
+	if _, held := holdOne(t, set, clock, ResidentRunInfo{Language: "go", CodeKey: "code-zzz"}); !held {
+		t.Error("with no cache attached a run was refused")
+	}
+}
+
+// THE ORDERING THAT MAKES THE CHECK SOUND, forced and not hoped for. The cache removes an entry under its own lock and reports it AFTER releasing that lock, so an eviction can
+// land between admission's "is it still cached?" and the park. That is safe only because the check and the park are ONE critical section of the set's mutex: EvictCode, which
+// needs the same mutex, then waits for the run to be parked and finds it. This row makes the callback launch the eviction at exactly that moment and wait for it. With the check
+// inside the critical section the eviction cannot finish while the callback is still running, so the run is parked and then sent back. With the check outside it (the mutant)
+// the eviction finishes first, finds nothing, and the run is held for good.
+func TestAnEvictionBetweenTheCacheCheckAndTheParkStillSendsTheRunBack(t *testing.T) {
+	clock := newFakeResidentClock(residentT)
+	set := newTestResidentSet(t, residentTestConfig(clock, nil))
+	evictDone := make(chan struct{})
+	var once sync.Once
+	set.codeCached = func(key string) bool {
+		once.Do(func() {
+			go func() { set.EvictCode(key); close(evictDone) }()
+			select {
+			case <-evictDone: // the eviction completed while the check was still in progress: the check is not inside the park's critical section
+			case <-time.After(150 * time.Millisecond): // it is blocked on the set's mutex, as it must be
+			}
+		})
+		return true // the entry was still there when asked; it is removed immediately after
+	}
+	out, held := holdOne(t, set, clock, ResidentRunInfo{Language: "go", CodeKey: "code-a"})
+	if !held {
+		t.Fatal("PRECONDITION FAILED: the run was refused at admission, so the interleaving under test never happened")
+	}
+	mustOutcome(t, out, parkRefused, "a run whose code was evicted between the cache check and the park")
+	select {
+	case <-evictDone:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the eviction never finished")
+	}
+	if n := set.Len(); n != 0 {
+		t.Fatalf("%d run(s) still held after the eviction: it was held against code that is gone", n)
+	}
 }
