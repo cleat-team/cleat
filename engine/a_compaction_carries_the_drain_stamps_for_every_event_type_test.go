@@ -17,20 +17,13 @@ import (
 	"testing"
 )
 
-// cannotBeCompactedYet are the event types compaction has a code for and no capture arm for, so extractCompactionStateFrom refuses a history that holds one (cleat#4316,
-// measured: such a history never compacts). Their stamps cannot be checked until that is fixed, and the entry is NAMED so that is not a silent omission: the test below
-// fails the moment one of them becomes compactable, which is when the entry must go and the type must be covered like the rest.
-var cannotBeCompactedYet = map[EventType]string{
-	EventTypeCallAttemptFailed: "cleat#4316: compaction has a code for it and no capture arm, so a history containing one cannot be compacted",
-}
-
 func TestCompactionCarriesTheDrainStampsForEveryEventType(t *testing.T) {
 	var types []string
 	for et := range eventTypeToCode {
-		if why, exempt := cannotBeCompactedYet[et]; exempt {
-			if _, err := extractCompactionStateFrom(nil, []EventRecord{{Step: 0, EventType: et}}); err == nil {
-				t.Errorf("%s is listed in cannotBeCompactedYet (%s) but now compacts: delete the entry so its stamps are checked like every other type", et, why)
-			}
+		// A type compaction DELIBERATELY refuses has no stamps to carry. The list is the one TestEveryDeclaredEventTypeCompactsOrIsNamedAsRefused keeps, so there is one place
+		// that says what is refused and this test cannot drift from it. It is empty today: every declared type compacts (cleat#4316 gave call_attempt_failed its arm, which is
+		// why this test used to carry a private exemption for it).
+		if _, refused := compactionRefusedEventTypes[et]; refused {
 			continue
 		}
 		types = append(types, string(et))
