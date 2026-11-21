@@ -448,7 +448,7 @@ jobs:
           # removed by cleat#4023.)
           #   go test -list 'TestJavaAwaitCallsHonour' ./...    -> 1 on 2026-11-18
           go test -count=1 -timeout=600s -json \
-            ./... -run 'TestPluginCalls_Wasm|TestHostCalls|HostCallTableCovers|EverySDK|TestACompiledGoWorkflow|TestAnIntParameterIsDecoded|TestCallOptionsTimeoutAtTheWasmBoundary|TestDurableCallWithOptionsAloneIsBound|TestGoAwaitCallsUnwind|TestSideEffectGo|TestSideEffectJava|TestJavaAwaitCallsHonour' \
+            ./... -run 'TestPluginCalls_Wasm|TestHostCalls|HostCallTableCovers|EverySDK|TestACompiledGoWorkflow|TestAnIntParameterIsDecoded|TestCallOptionsTimeoutAtTheWasmBoundary|TestDurableCallWithOptionsAloneIsBound|TestGoAwaitCallsUnwind|TestSideEffectGo|TestSideEffectJava|TestJavaAwaitCallsHonour|TestAJavaGuestStopsAtAChildAwait' \
             2>&1 | tee ../../wasm-integration-report.json
         env:
           # Explicit, not left to the default: Go defaults CGO_ENABLED to 1 only

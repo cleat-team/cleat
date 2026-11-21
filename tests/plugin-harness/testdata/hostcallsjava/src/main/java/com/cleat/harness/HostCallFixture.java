@@ -61,6 +61,31 @@ public class HostCallFixture {
         return "{\"value\":\"" + r.getValue() + "\",\"ran\":" + sideEffectRan + "}";
     }
 
+    /**
+     * cleat#4285: await a child that is still running, IGNORE what the await returns, then make a call.
+     *
+     * <p>The input names the await ({@code "call"}: AwaitChild, AwaitAllChildren, AwaitAnyChild) or "None" for the control that makes the call with no
+     * await before it. The result of the await is dropped on purpose: a guest that handles the returned value and carries on is the case under test, and
+     * {@code exercise_host_call} cannot be that guest, because it returns right after the await, so nothing it does could show whether the SDK stopped
+     * the guest or only reported a value. The call is {@code DurableCall} to a service named {@code after_suspend}, which the harness counts.
+     * Keep this entry point; tests/plugin-harness/await_suspend_java_test.go is its only caller.
+     */
+    @CleatEntry(name = "await_then_call")
+    public static String awaitThenCall(HostCalls h, String input) {
+        String which = extractCall(input);
+        if (which.equals("AwaitChild")) {
+            h.awaitChild(CHILD_RUN_ID);
+        } else if (which.equals("AwaitAllChildren")) {
+            h.awaitAllChildren(new String[] { CHILD_RUN_ID });
+        } else if (which.equals("AwaitAnyChild")) {
+            h.awaitAnyChild(new String[] { CHILD_RUN_ID });
+        } else if (!which.equals("None")) {
+            return "{\"error\":\"fixture: unknown await " + which + "\"}";
+        }
+        h.cleatCall("harness-service", "after_suspend", "{}");
+        return "{\"reached\":true}";
+    }
+
     @CleatEntry(name = "exercise_host_call")
     public static String exerciseHostCall(HostCalls h, String input) {
         String call = extractCall(input);

@@ -1009,7 +1009,9 @@ public class HostCalls {
      * Wait for a child workflow to complete and retrieve its result.
      * <p>
      * If the child has not yet completed, this call triggers a workflow
-     * suspension.  The host resumes the workflow when the child finishes.
+     * suspension: it throws {@link SuspendSignal}, which the generated entry
+     * wrapper turns into the suspend sentinel, so the code after the call does
+     * not run.  The host resumes the workflow when the child finishes.
      *
      * @param runID the child workflow run ID (from
      *              {@link #childWorkflow(String, String)})
@@ -1026,7 +1028,10 @@ public class HostCalls {
 
         // Check for suspension sentinel before decoding the result.
         if (result == Memory.SUSPEND_SENTINEL) {
-            return CleatResult.err("child workflow not yet complete; workflow must suspend");
+            // Throw, as sleep does: the host has recorded the suspension and answered the suspend word, and a guest that is handed an
+            // ordinary value for it can handle that value and carry on, making calls the host records AFTER the pending await and runs
+            // again on the resume (cleat#4285). The word is 1<<62, packAwaitChildResultSuspend, not the stop bit throwIfStopped reads.
+            throw new SuspendSignal();
         }
 
         int errCode = Memory.decodeSimpleErrCode(result);
@@ -2532,7 +2537,8 @@ public class HostCalls {
         // workflow was handed an Ok carrying 64 KiB of buffer instead of being
         // told to suspend (cleat#3430). Same check as awaitAnyChild.
         if (result == Memory.SUSPEND_SENTINEL) {
-            return CleatResult.err("not all child workflows complete yet; workflow must suspend");
+            // Throw, as sleep does (cleat#4285; see awaitChild).
+            throw new SuspendSignal();
         }
 
         int errCode = Memory.decodeSimpleErrCode(result);
@@ -2581,7 +2587,8 @@ public class HostCalls {
 
         // Check for suspension sentinel before decoding the result.
         if (result == Memory.SUSPEND_SENTINEL) {
-            return CleatResult.err("no child workflow yet complete; workflow must suspend");
+            // Throw, as sleep does (cleat#4285; see awaitChild).
+            throw new SuspendSignal();
         }
 
         int errCode = Memory.decodeSimpleErrCode(result);
