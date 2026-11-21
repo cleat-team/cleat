@@ -565,8 +565,13 @@ func TestTheDispatcherExemptionsAreTrueOfTheirCallers(t *testing.T) {
 		t.Errorf("leaveReplay is called from %v, want exactly [step]: the exemption for leaveReplay says its only caller is step, and a second caller would skip the refusal that follows it", callers)
 	}
 	// The second exit from replay (a step that found its own pending record, OverPending) has the same exemption and needs the same proof.
-	if len(pendingCallers) != 1 || pendingCallers[0] != "step" {
-		t.Errorf("leaveReplayAtPending is called from %v, want exactly [step]: its exemption says its only caller is step, and a second caller would skip the refusal that follows it", pendingCallers)
+	// step calls it from two places (an own pending record, and a run that ended at a foreign record), so it is the distinct CALLER FUNCTIONS that must be exactly [step].
+	distinctPending := map[string]bool{}
+	for _, c := range pendingCallers {
+		distinctPending[c] = true
+	}
+	if len(pendingCallers) < 2 || len(distinctPending) != 1 || !distinctPending["step"] {
+		t.Errorf("leaveReplayAtPending is called from %v (call sites), want step only, at least twice: its exemption says its only caller is step, and a second caller would skip the refusal that follows it", pendingCallers)
 	}
 	if records < 3 {
 		t.Fatalf("PRECONDITION FAILED: the scan found %d .Record( calls, want the 3 the promise specs make; it is reading nothing", records)
@@ -577,9 +582,9 @@ func TestTheDispatcherExemptionsAreTrueOfTheirCallers(t *testing.T) {
 
 	// Negative control: the same scan over a source with a second caller of each kind must report them.
 	badStep := `package engine
-func (s *execSession) step() { s.leaveReplay(nil); s.leaveReplayAtPending(nil) }
+func (s *execSession) step() { s.leaveReplay(nil); s.leaveReplayAtPending(nil, 0) }
 func (s *execSession) sneaky() { s.leaveReplay(nil) }
-func (s *execSession) sneakyPending() { s.leaveReplayAtPending(nil) }
+func (s *execSession) sneakyPending() { s.leaveReplayAtPending(nil, 0) }
 var spec = stepSpec{Fresh: func(c *stepCtx) int64 { c.Record(EventRecord{}); return 0 }}
 func (s *execSession) bypass(c *stepCtx) { c.Record(EventRecord{}) }
 `

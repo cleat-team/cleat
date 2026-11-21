@@ -58,13 +58,16 @@ var resumesItsOwnPendingEvent = map[string]EventType{
 }
 
 // pendingResumersThatLeaveHistoryUnread are the calls that find their OWN pending record, do not consume it, and leave replay with the records after it
-// unread (cleat#4285): the child awaits, which record an EMPTY await while a child runs and answer over it. It is a defect kept on purpose by the move
+// unread (cleat#4285): the child awaits, which record an EMPTY await while a child runs and answer over it (await_any_child answers at the NEXT step, and leaves the record after its empties unread). It is a defect kept on purpose by the move
 // onto the dispatcher (stepSpec.OverPending says so), and each entry here MUST still leave history unread: TestThePendingExemptionsStillDescribeSomething
 // fails the moment one does not, which is when #4285's host-side guard and the Java fix have landed and the replay becomes a divergence, and the entry is
 // then deleted. The record is the call's own type, empty, naming what probeArgs gives it.
 var pendingResumersThatLeaveHistoryUnread = map[string]EventRecord{
 	"AwaitChild":       {EventType: EventTypeAwaitChild, RunID: "x"},
 	"AwaitAllChildren": {EventType: EventTypeAwaitAllChildren, Request: "x"},
+	// AwaitAnyChild (W3b) is the third, by a different route: it records an empty await per wake and answers at a LATER step, so the empties are consumed and the
+	// run ends at the next record. When that record is not its own, the spec resumes fresh there (stepSpec.ResumesFreshAtForeign) with it unread.
+	"AwaitAnyChild": {EventType: EventTypeAwaitAnyChild, Request: "x"},
 }
 
 func TestThePendingExemptionsStillDescribeSomething(t *testing.T) {

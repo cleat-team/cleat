@@ -113,6 +113,9 @@ type stepCtx struct {
 	// declined is set by RecordsNothing: Fresh took a path that records nothing on purpose and says why, so the shape check does not read it as a
 	// spec that failed to do what it declared.
 	declined bool
+	// unreadAtForeign is how many history records a run left UNREAD when it ended at a foreign record and the spec resumes fresh there (ResumesFreshAtForeign). step reads it
+	// to leave replay through the named exit, leaveReplayAtPending, and not through leaveReplay, which treats unread history as a violation.
+	unreadAtForeign int
 }
 
 // Record records an event where the call records it today. It is the only way a spec's Fresh writes history, which is what lets the
@@ -190,6 +193,15 @@ type stepSpec struct {
 	// one delivery (measured on the old code by a_await_signals_behaves_as_recorded_before_the_dispatcher_test.go: the first call times out and
 	// the second one pairs). 0 means unlimited, which is a retried call's or SetScope's shape. Needs a Role.
 	MaxPrefix int
+	// ResumesFreshAtForeign, for a MULTI-RECORD step (Role set, Identity required, and not EndsWithoutFinal), makes "prefix records, then a FOREIGN record" end the run the
+	// way "prefix records, then the end of history" does: the prefix records are consumed, replay is left at the foreign record, and Fresh continues with c.Prefix
+	// (cleat#4152, W3b: await_any_child, which records an empty await per wake and answers at a later step, and re-checks its children when it finds only the empties).
+	// Where EndsWithoutFinal says such a run is COMPLETE and DecodeRun answers it, this says the call is not finished: it goes on, fresh.
+	//
+	// THE EXEMPTION THIS CARRIES, AND IT IS THE SAME DEFECT KEPT ON PURPOSE AS OverPending's (cleat#4285). The foreign record is history the call leaves UNREAD, so a call
+	// recorded after the empties runs again. The old code did exactly that and a move changes nothing; it is reported (a warning with the count) and named in
+	// a_host_call_never_leaves_replay_with_history_unread_test.go. It becomes a divergence in #4285 step 3, not before.
+	ResumesFreshAtForeign bool
 	// ForeignFirst, for a multi-record step, answers a call whose FIRST record belongs to another call, WITHOUT consuming it and without leaving
 	// replay, instead of reporting a divergence. ok false means "not answerable", and the divergence follows as usual. It exists for one
 	// case (cleat#4152, W5): a history written before cleat#4151 recorded nothing for a no-wait poll that timed out, so the record at the
@@ -277,6 +289,8 @@ func (sp *stepSpec) validate() error {
 		return fmt.Errorf("step spec %q has an OverPending but is a multi-record step or records nothing: OverPending is a single-record step whose answer is recorded over its own pending record", sp.Name)
 	case sp.ForeignFirst != nil && sp.Role == nil:
 		return fmt.Errorf("step spec %q has a ForeignFirst but no Role: it answers a multi-record step whose first record is another call's", sp.Name)
+	case sp.ResumesFreshAtForeign && (sp.Role == nil || sp.EndsWithoutFinal || sp.Identity == nil):
+		return fmt.Errorf("step spec %q has ResumesFreshAtForeign but is not a multi-record step with an Identity, or also declares EndsWithoutFinal", sp.Name)
 	case sp.MaxPrefix < 0 || (sp.MaxPrefix > 0 && sp.Role == nil):
 		return fmt.Errorf("step spec %q has MaxPrefix %d: it bounds the prefix records of a run, so it needs a Role and cannot be negative", sp.Name, sp.MaxPrefix)
 	case sp.EndsWithoutFinal && sp.Identity == nil:
@@ -367,7 +381,9 @@ func (s *execSession) step(ctx context.Context, m api.Module, sp *stepSpec, args
 			}
 		}
 		if overPending {
-			s.leaveReplayAtPending(sp)
+			s.leaveReplayAtPending(sp, len(s.history)-s.stepCount-1)
+		} else if c.unreadAtForeign > 0 {
+			s.leaveReplayAtPending(sp, c.unreadAtForeign)
 		} else if !sp.StaysInReplayAtFrontier {
 			s.leaveReplay(sp)
 		}
@@ -413,9 +429,9 @@ func (s *execSession) leaveReplay(sp *stepSpec) {
 // so the history is read to its last record when the pending one is last, which is the ordinary resume. Records after it are left unread, which is the
 // kept defect of cleat#4285 (see OverPending): it is reported and not enforced, like every disagreement of this kind, because stopping a production run
 // for it would trade a silent re-run for a loud outage.
-func (s *execSession) leaveReplayAtPending(sp *stepSpec) {
-	if unread := len(s.history) - s.stepCount - 1; unread > 0 && s.engine != nil {
-		s.engine.log().WarnContext(context.Background(), "step left replay at its own pending record with later records unread: a call recorded after it will run again (cleat#4285)",
+func (s *execSession) leaveReplayAtPending(sp *stepSpec, unread int) {
+	if unread > 0 && s.engine != nil {
+		s.engine.log().WarnContext(context.Background(), "step left replay with later records unread, after its own pending record or at the end of its run: a call recorded after them will run again (cleat#4285)",
 			"workflow_id", s.workflowID, "step", sp.Name, "at", s.stepCount, "unread", unread)
 	}
 	s.exitReplay()

@@ -211,6 +211,12 @@ func TestAMultiRecordSpecIsValidatedForItsShape(t *testing.T) {
 	if err := withFlag.validate(); err != nil {
 		t.Fatalf("PRECONDITION FAILED: a multi-record spec with EndsWithoutFinal and an Identity does not validate: %v", err)
 	}
+	// CONTROL for the ResumesFreshAtForeign rules below: the same spec with the flag set (and not EndsWithoutFinal) is valid, so they refuse only the wrong shapes.
+	resumes := runSpec(&ran, &d, &p)
+	resumes.ResumesFreshAtForeign = true
+	if err := resumes.validate(); err != nil {
+		t.Fatalf("PRECONDITION FAILED: a multi-record spec with ResumesFreshAtForeign and an Identity does not validate: %v", err)
+	}
 	// CONTROL for the OverPending rules below: a single-record spec that records one event and has an OverPending is valid, so they refuse only the wrong shapes.
 	single := runSpec(&ran, &d, &p)
 	single.Role, single.DecodeRun, single.Decode, single.Records = nil, nil, func(*stepCtx, *EventRecord) int64 { return 0 }, recordsOne
@@ -240,6 +246,22 @@ func TestAMultiRecordSpecIsValidatedForItsShape(t *testing.T) {
 			sp.Records = recordsNone
 			sp.OverPending = func(stepArgs, *EventRecord) bool { return false }
 		}), "OverPending but is a multi-record step or records nothing"},
+		"ResumesFreshAtForeign with no Identity to bound its runs": {mut(func(sp *stepSpec) {
+			sp.ResumesFreshAtForeign = true
+			sp.Identity = nil
+			sp.NoIdentity = "nothing to compare"
+		}), "ResumesFreshAtForeign but is not a multi-record step with an Identity"},
+		"ResumesFreshAtForeign together with EndsWithoutFinal": {mut(func(sp *stepSpec) {
+			sp.ResumesFreshAtForeign = true
+			sp.EndsWithoutFinal = true
+		}), "ResumesFreshAtForeign but is not a multi-record step with an Identity, or also declares EndsWithoutFinal"},
+		"ResumesFreshAtForeign on a single-record step": {mut(func(sp *stepSpec) {
+			sp.Role = nil
+			sp.DecodeRun = nil
+			sp.Decode = dec
+			sp.Records = recordsOne
+			sp.ResumesFreshAtForeign = true
+		}), "ResumesFreshAtForeign but is not a multi-record step"},
 		"EndsWithoutFinal with no Identity to bound its runs": {mut(func(sp *stepSpec) {
 			sp.EndsWithoutFinal = true
 			sp.Identity = nil

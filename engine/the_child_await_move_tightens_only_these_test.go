@@ -9,10 +9,15 @@ package engine
 // to the places the old code did not look: a recorded record that names ANOTHER call is a divergence, and a divergence consumes NOTHING (cleat#4157).
 // They use the harness of the table (runChildAwaitRow), so the result word, the recorded events, the step count and the store reads are all asserted.
 //
+// W3b (await_any_child) adds its own rows below, each marked the same way: OLD = what the old code did, and the row fails on it.
+//
 // Two rows are here that hold on BOTH codes, and are kept by name because they are the other side of the tightening: a record that names NO child
 // cannot name another, so it is still this call's.
 
-import "testing"
+import (
+	"context"
+	"testing"
+)
 
 func TestTheChildAwaitMoveTightensOnlyThese(t *testing.T) {
 	const (
@@ -38,6 +43,32 @@ func TestTheChildAwaitMoveTightensOnlyThese(t *testing.T) {
 			call: callOfAwaitChild, ids: []string{"c1"}, hist: []EventRecord{{EventType: EventTypeAwaitChild}}, outcomes: map[string]ChildOutcome{"c1": done("R")},
 			want: childAwaitWant{result: "R", recs: []childAwaitRec{{typ: EventTypeAwaitChild, resp: "R", runID: "c1"}}, step: 1, gets: 1}},
 
+		// ---- await_any_child (W3b) ----
+		{name: "OLD consumed it and answered with another set's child: an await_any ANSWER recorded for ANOTHER set of children is a divergence, and consumes nothing (D1)",
+			call: callOfAwaitAnyChild, ids: []string{"c1", "c2"}, hist: []EventRecord{anyRecForTightening(`["c9"]`, `{"run_id":"c9","result":"R9"}`)},
+			want: childAwaitWant{errCode: 1, resultHas: `run IDs ["c1","c2"], recorded ["c9"]`, step: 0, replaying: true}},
+		{name: "OLD consumed another set's empty await and its answer and delivered that answer: an EMPTY await recorded for another set is a divergence too (D1)",
+			call: callOfAwaitAnyChild, ids: []string{"c1", "c2"},
+			hist: []EventRecord{anyRecForTightening(`["c9"]`, ""), anyRecForTightening(`["c9"]`, `{"run_id":"c9","result":"R9"}`)},
+			want: childAwaitWant{errCode: 1, resultHas: `run IDs ["c1","c2"], recorded ["c9"]`, step: 0, replaying: true}},
+		{name: "OLD consumed another set's pending await and answered THIS call's children after it: a lone empty await for another set is a divergence (D1)",
+			call: callOfAwaitAnyChild, ids: []string{"c1", "c2"}, hist: []EventRecord{anyRecForTightening(`["c9"]`, "")}, outcomes: map[string]ChildOutcome{"c1": done("R1")},
+			want: childAwaitWant{errCode: 1, resultHas: `run IDs ["c1","c2"], recorded ["c9"]`, step: 0, replaying: true}},
+		{name: "OLD refused it (a guest drain's await in a session that had suspended): a drain the guest BEGAN BEFORE the suspension goes through, as for await_child and await_all (D2)",
+			call: callOfAwaitAnyChild, ids: []string{"c1"}, outcomes: map[string]ChildOutcome{"c1": done("R1")},
+			mod: func(s *execSession) {
+				s.SetDeferPhase(context.Background(), true)
+				s.suspendErr = &SuspendError{Reason: "earlier"}
+			},
+			want: childAwaitWant{result: `{"run_id":"c1","result":"R1"}`, recs: []childAwaitRec{{typ: EventTypeAwaitAnyChild, resp: `{"run_id":"c1","result":"R1"}`, req: `["c1"]`}}, reason: "earlier", step: 1, gets: 1, getOrder: []string{"c1"}}},
+		{name: "UNCHANGED (holds on both): an await_any answer that names NO set is still this call's",
+			call: callOfAwaitAnyChild, ids: []string{"c1", "c2"}, hist: []EventRecord{anyRecForTightening("", `{"run_id":"c1","result":"R1"}`)},
+			want: childAwaitWant{result: `{"run_id":"c1","result":"R1"}`, step: 1, replaying: true}},
+		{name: "UNCHANGED (holds on both, D4): the empties of two DIFFERENT sets side by side are two calls' pending awaits: the first call's run ends at the second set's record, which is left unread, and the call re-checks",
+			call: callOfAwaitAnyChild, ids: []string{"c1", "c2"}, hist: []EventRecord{anyRecForTightening(`["c1","c2"]`, ""), anyRecForTightening(`["c9"]`, "")},
+			outcomes: map[string]ChildOutcome{"c1": done("R1")},
+			want:     childAwaitWant{result: `{"run_id":"c1","result":"R1"}`, recs: []childAwaitRec{{typ: EventTypeAwaitAnyChild, resp: `{"run_id":"c1","result":"R1"}`, req: `["c1","c2"]`}}, step: 2, gets: 1, getOrder: []string{"c1"}}},
+
 		// ---- await_all_children ----
 		{name: "OLD consumed the record first (step 1) and then diverged: an await_all answer for other run ids is a divergence that consumes NOTHING",
 			call: callOfAwaitAllChildren, ids: []string{"c1", "c2"}, hist: []EventRecord{allRecForTightening(`["c9"]`, `[{"run_id":"c9","result":"x"}]`)},
@@ -60,4 +91,8 @@ func TestTheChildAwaitMoveTightensOnlyThese(t *testing.T) {
 
 func allRecForTightening(req, resp string) EventRecord {
 	return EventRecord{EventType: EventTypeAwaitAllChildren, Request: req, Response: resp}
+}
+
+func anyRecForTightening(req, resp string) EventRecord {
+	return EventRecord{EventType: EventTypeAwaitAnyChild, Request: req, Response: resp}
 }

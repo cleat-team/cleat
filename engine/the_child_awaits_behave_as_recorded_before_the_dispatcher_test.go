@@ -367,9 +367,6 @@ func TestTheChildAwaitsBehaveAsRecordedBeforeTheDispatcher(t *testing.T) {
 		// ---- replay of an answered await ----
 		{name: "await_any replay: a recorded answer is delivered and consumed", call: callOfAwaitAnyChild, ids: []string{"c1", "c2"}, hist: []EventRecord{anyRec(two, `{"run_id":"c1","result":"R1"}`)},
 			want: childAwaitWant{result: `{"run_id":"c1","result":"R1"}`, step: 1, replaying: true}},
-		{name: "KNOWN DEFECT (no identity): await_any replay consumes an answer recorded for ANOTHER set of children as this one's", call: callOfAwaitAnyChild, ids: []string{"c1", "c2"},
-			hist: []EventRecord{anyRec(`["c9"]`, `{"run_id":"c9","result":"R9"}`)},
-			want: childAwaitWant{result: `{"run_id":"c9","result":"R9"}`, step: 1, replaying: true}},
 		{name: "await_any replay: a record of another type is a divergence, and it consumes nothing", call: callOfAwaitAnyChild, ids: []string{"c1", "c2"}, hist: []EventRecord{foreign},
 			want: childAwaitWant{errCode: 1, resultHas: "replay divergence at step 0: expected await_any_child, got side_effect", step: 0, replaying: true}},
 		// ---- replay of a pending await: the empty record is consumed, then every following empty of THIS call (cleat#3391) ----
