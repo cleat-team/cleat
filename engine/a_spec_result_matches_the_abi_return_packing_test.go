@@ -41,7 +41,7 @@ type abiField struct {
 // itself or cleat_<name>, and a spec that resolves to nothing is UNMEASURED.
 func abiImportFor(name string, imports map[string]string) (string, bool) {
 	exceptions := map[string]string{
-		"durable_send": "cleat_send", // §2.46: the spec is named for the event it records, the import for the call it answers
+		"durable_send": "cleat_send", // ABI.md section 2.46: the spec is named for the event it records, the import for the call it answers
 	}
 	if imp, ok := exceptions[name]; ok {
 		_, found := imports[imp]
@@ -298,11 +298,11 @@ func TestTheABIPropertyFailsForAWronglyDeclaredOrUnclassifiableSpec(t *testing.T
 	}
 	// durable_send is the one name that is not cleat_<name>; with its exception it resolves and passes.
 	if v := checkSpecsAgainstABI([]*stepSpec{with("durable_send", layoutSimple)}, abi); len(v) != 0 {
-		t.Errorf("durable_send (ABI §2.46 cleat_send) did not resolve or classify: %v", v)
+		t.Errorf("durable_send (ABI.md section 2.46, cleat_send) did not resolve or classify: %v", v)
 	}
 }
 
-// The documentation defect this test surfaced: ABI §2.57 said list_crons returns "in the same shape as `cleat_call`" (the durable-call layout), while the
+// The documentation defect this test surfaced: ABI.md section 2.57 said list_crons returns "in the same shape as `cleat_call`" (the durable-call layout), while the
 // engine packs it with packSimpleResult and the Rust and Java guests decode it as simple. The corrected sentence is in ABI.md; putting the OLD one back
 // must make the property fail by name, which proves the property is what would have caught it.
 func TestTheABIPropertyCatchesTheListCronsDocumentationDefect(t *testing.T) {
