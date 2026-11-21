@@ -223,6 +223,10 @@ func TestTheChildAwaitsBehaveAsRecordedBeforeTheDispatcher(t *testing.T) {
 	rec := func(typ EventType, resp, errText, req, runID string) childAwaitRec {
 		return childAwaitRec{typ: typ, resp: resp, errText: errText, req: req, runID: runID}
 	}
+	// a debugger that quits at the first consumed record (ReplayQuit): the call returns the zero word, the record IS consumed, and replay is not left
+	quits := func(s *execSession) {
+		s.stepCallback = func(int, *EventRecord, map[string]string) ReplayStepAction { return ReplayQuit }
+	}
 	// a session that is resuming at the END of its history: one foreign record, already consumed
 	atEnd := func(s *execSession) { s.stepCount = 1 }
 
@@ -262,6 +266,11 @@ func TestTheChildAwaitsBehaveAsRecordedBeforeTheDispatcher(t *testing.T) {
 		// ---- a pending record with MORE history after it: the shape the guards exempt "by reading, not by measurement" ----
 		{name: "KNOWN DEFECT (history left unread): await_child replay of an empty record that is FOLLOWED by another record leaves replay with that record unread, so a call recorded after it would run again",
 			call: callOfAwaitChild, ids: []string{"c1"}, hist: []EventRecord{ac("", ""), foreign}, outcomes: map[string]ChildOutcome{"c1": done("R")},
+			want: childAwaitWant{result: "R", recs: []childAwaitRec{rec(EventTypeAwaitChild, "R", "", "", "c1")}, step: 1, gets: 1}},
+		{name: "await_child replay: a debugger's ReplayQuit at an answered record returns the zero word, with the record consumed and replay still on", call: callOfAwaitChild, ids: []string{"c1"},
+			hist: []EventRecord{ac("R", "")}, mod: quits, want: childAwaitWant{step: 1, replaying: true}},
+		{name: "await_child replay: a pending record is never consumed, so a debugger's ReplayQuit is not asked about it", call: callOfAwaitChild, ids: []string{"c1"},
+			hist: []EventRecord{ac("", "")}, mod: quits, outcomes: map[string]ChildOutcome{"c1": done("R")},
 			want: childAwaitWant{result: "R", recs: []childAwaitRec{rec(EventTypeAwaitChild, "R", "", "", "c1")}, step: 1, gets: 1}},
 		// ---- the end of history ----
 		{name: "await_child: the end of history leaves replay and a completed child is recorded", call: callOfAwaitChild, ids: []string{"c1"}, hist: []EventRecord{foreign}, mod: atEnd,
@@ -317,6 +326,8 @@ func TestTheChildAwaitsBehaveAsRecordedBeforeTheDispatcher(t *testing.T) {
 			call: callOfAwaitAllChildren, ids: []string{"c1", "c2"}, hist: []EventRecord{allRec(two, ""), foreign},
 			outcomes: map[string]ChildOutcome{"c1": done("R1"), "c2": done("R2")},
 			want:     childAwaitWant{result: both, recs: []childAwaitRec{rec(EventTypeAwaitAllChildren, both, "", two, "")}, step: 1, gets: 2, getOrder: []string{"c1", "c2"}}},
+		{name: "await_all replay: a debugger's ReplayQuit at an answered record returns the zero word, with the record consumed and replay still on", call: callOfAwaitAllChildren, ids: []string{"c1", "c2"},
+			hist: []EventRecord{allRec(two, both)}, mod: quits, want: childAwaitWant{step: 1, replaying: true}},
 		{name: "await_all: the end of history leaves replay and records the answer", call: callOfAwaitAllChildren, ids: []string{"c1", "c2"}, hist: []EventRecord{foreign}, mod: atEnd,
 			outcomes: map[string]ChildOutcome{"c1": done("R1"), "c2": done("R2")},
 			want:     childAwaitWant{result: both, recs: []childAwaitRec{rec(EventTypeAwaitAllChildren, both, "", two, "")}, step: 2, gets: 2, getOrder: []string{"c1", "c2"}}},
@@ -385,6 +396,8 @@ func TestTheChildAwaitsBehaveAsRecordedBeforeTheDispatcher(t *testing.T) {
 			want: childAwaitWant{sentinel: true, reason: `await_any_child(["c1","c2"])`, step: 1, gets: 2, getOrder: []string{"c1", "c2"}}},
 		{name: "await_any replay: an empty record and no child store suspend and record nothing more", call: callOfAwaitAnyChild, ids: []string{"c1", "c2"}, noStore: true, hist: []EventRecord{anyRec(two, "")},
 			want: childAwaitWant{sentinel: true, reason: `await_any_child(["c1","c2"])`, step: 1}},
+		{name: "await_any replay: a debugger's ReplayQuit at an answered record returns the zero word, with the record consumed and replay still on", call: callOfAwaitAnyChild, ids: []string{"c1", "c2"},
+			hist: []EventRecord{anyRec(two, `{"run_id":"c1","result":"R1"}`)}, mod: quits, want: childAwaitWant{step: 1, replaying: true}},
 		// ---- the end of history ----
 		{name: "await_any: the end of history leaves replay and a completed child is recorded", call: callOfAwaitAnyChild, ids: []string{"c1", "c2"}, hist: []EventRecord{foreign}, mod: atEnd,
 			outcomes: map[string]ChildOutcome{"c1": done("R1")},
