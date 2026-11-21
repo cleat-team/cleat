@@ -92,7 +92,7 @@ func TestThePendingExemptionsStillDescribeSomething(t *testing.T) {
 		for label, mut := range map[string]func(s *execSession){
 			"a drain-stamped later call":            func(s *execSession) { s.history[1].InDeferPhase = true },
 			"a segment-stamped later call":          func(s *execSession) { s.history[1].InDeferSegment = true },
-			"a later call expanded from compaction": func(s *execSession) { s.compactedRecords = 2 },
+			"a later call expanded from compaction": func(s *execSession) { s.unstampedRecords = 2 },
 		} {
 			if s, _ := probe(mut); !leftReplayEarly(s) {
 				t.Errorf("%s with %s: no longer leaves replay with history unread (stepCount=%d of %d, isReplay=%v): the exemption in staleCallAfterPending or this entry is wrong", name, label, s.stepCount, len(s.history), s.isReplay)

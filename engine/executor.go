@@ -267,14 +267,16 @@ func (e *Engine) executeWithBackend(
 	// If compaction state is set, merge virtual compacted events with tail
 	// history to produce a complete replay history for deterministic replay.
 	replayHistory, compactedStep := e.replayHistoryFor(history)
-	compactedRecords := len(replayHistory) - len(history)
+	// How many records at the front were expanded from a state compacted by a build that did NOT carry the drain stamps (cleat#4323): those have an unknown
+	// stamp. Records from a state that carries them are judged by their stamps like any other.
+	unstampedRecords := e.compactionState.unstampedRecords()
 
 	now := e.seedNowMs(replayHistory)
 
 	session := &execSession{
 		engine:           e,
 		history:          replayHistory,
-		compactedRecords: compactedRecords,
+		unstampedRecords: unstampedRecords,
 		isReplay:         len(replayHistory) > 0,
 		nowMs:            now,
 		deferrals:        make(map[string]string),
@@ -608,14 +610,16 @@ func (e *Engine) executeCompiled(ctx context.Context, compiled wazero.CompiledMo
 	// If compaction state is set, merge virtual compacted events with tail history
 	// to produce a complete replay history for deterministic replay.
 	replayHistory, compactedStep := e.replayHistoryFor(history)
-	compactedRecords := len(replayHistory) - len(history)
+	// How many records at the front were expanded from a state compacted by a build that did NOT carry the drain stamps (cleat#4323): those have an unknown
+	// stamp. Records from a state that carries them are judged by their stamps like any other.
+	unstampedRecords := e.compactionState.unstampedRecords()
 
 	now := e.seedNowMs(replayHistory)
 
 	session := &execSession{
 		engine:           e,
 		history:          replayHistory,
-		compactedRecords: compactedRecords,
+		unstampedRecords: unstampedRecords,
 		isReplay:         len(replayHistory) > 0,
 		nowMs:            now,
 		deferrals:        make(map[string]string),

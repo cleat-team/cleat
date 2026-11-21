@@ -112,7 +112,7 @@ func TestTheChildAwaitMoveTightensOnlyThese(t *testing.T) {
 			childAwaitRow{name: "UNCHANGED (holds on both): " + c.label + " replay of its pending record followed by a call a defer SEGMENT recorded (InDeferSegment) leaves that record unread",
 				call: c.call, ids: c.ids, hist: []EventRecord{c.pending, stamped(later, false, true)}, outcomes: c.out, want: c.then},
 			childAwaitRow{name: "UNCHANGED (holds on both): " + c.label + " replay of a pending record followed by a call that was EXPANDED FROM A COMPACTION leaves that record unread: a state compacted before cleat#4310 did not carry the stamps, so an unstamped record there is unknown and not stale",
-				call: c.call, ids: c.ids, hist: []EventRecord{c.pending, later}, outcomes: c.out, mod: func(s *execSession) { s.compactedRecords = 2 }, want: c.then},
+				call: c.call, ids: c.ids, hist: []EventRecord{c.pending, later}, outcomes: c.out, mod: func(s *execSession) { s.unstampedRecords = 2 }, want: c.then},
 			childAwaitRow{name: "UNCHANGED (holds on both): " + c.label + " replay of its pending record followed by a record that is NOT a call's effect (an admin audit row, a delivery) leaves that record unread: re-reading it runs nothing twice",
 				call: c.call, ids: c.ids, hist: []EventRecord{c.pending, {EventType: EventTypeSignalReceived, Service: SignalEventService, Op: "deliver"}}, outcomes: c.out, want: c.then},
 		)

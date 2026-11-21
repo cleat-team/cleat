@@ -691,10 +691,10 @@ type execSession struct {
 	// deferPhaseBeganSuspended is whether the execution had ALREADY suspended when the guest's current drain began (SetDeferPhase(true)). A drain that began before
 	// the suspension is a cleanup that is still in progress (cleat#3429); one that began after it is a wrapper that ran its defers because the guest swallowed
 	// the suspension (cleat#4285). Meaningful only while inDeferPhase.
-	// compactedRecords is how many records at the front of history were EXPANDED from a compaction state and not read from the event rows. The drain stamps
-	// (InDeferPhase, InDeferSegment) were not carried through compaction before cleat#4310, so a record below this index may have no stamp to read: unknown, not
-	// absent (cleat#4285 step 3). States compacted after cleat#4310 do carry them, but nothing in a state says which build wrote it, so the rule stays wide.
-	compactedRecords int
+	// unstampedRecords is how many records at the front of history were expanded from a compaction state by a build that did NOT carry the drain stamps
+	// (InDeferPhase, InDeferSegment), so a record below this index has no stamp to read: unknown, not absent (cleat#4285 step 3). CompactionState.StampedFrom says where
+	// the stamped events of a state begin, so this is that boundary and not the whole expanded prefix (cleat#4323); zero for a history that was not compacted.
+	unstampedRecords int
 
 	deferPhaseBeganSuspended bool
 	awaitRejected            bool // the last AwaitPromise ended in a rejection (cleat#3425)
