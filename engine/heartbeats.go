@@ -14,10 +14,13 @@ func (s *execSession) DurableCallWithHeartbeat(ctx context.Context, m api.Module
 	if s.isReplay {
 		return s.replayCallWithHeartbeat(ctx, m, service, operation, requestJSON, heartbeatIntervalMs, responsePtr, responseMaxLen)
 	}
-	return s.freshCallWithHeartbeat(ctx, m, service, operation, requestJSON, heartbeatIntervalMs, responsePtr, responseMaxLen)
+	return s.freshCallWithHeartbeat(ctx, m, service, operation, requestJSON, heartbeatIntervalMs, responsePtr, responseMaxLen, -1)
 }
 
-func (s *execSession) freshCallWithHeartbeat(ctx context.Context, m api.Module, service, operation, requestJSON string, heartbeatIntervalMs int64, responsePtr, responseMaxLen uint32) int64 {
+// freshCallWithHeartbeat runs the call. resumeStep is -1 for a call that starts here, and otherwise the step a lost worker's FIRST incarnation
+// started the call at, recovered from the heartbeats it recorded (replayCallWithHeartbeat). It decides one thing: the step the idempotency key is
+// derived from. The events this incarnation records still take the session's own steps in order.
+func (s *execSession) freshCallWithHeartbeat(ctx context.Context, m api.Module, service, operation, requestJSON string, heartbeatIntervalMs int64, responsePtr, responseMaxLen uint32, resumeStep int) int64 {
 	// A defer segment's body is refused new work (IMPROVEMENT-PLAN 3.84; the heartbeat call was the eighth fresh path and the last in the
 	// durable-call family, added in 3.111). The refusal lives HERE and not in DurableCallWithHeartbeat: this function is reached from the
 	// non-replay entry AND from replayCallWithHeartbeat at the replay frontier, and a defer segment over a run that has history starts
@@ -71,6 +74,12 @@ func (s *execSession) freshCallWithHeartbeat(ctx context.Context, m api.Module, 
 	// Captured before the goroutine: reading s.stepCount from inside it races
 	// with the session advancing.
 	callStep := s.stepCount
+	// A call resumed after a lost worker keeps the step its FIRST incarnation started at, so every incarnation carries one idempotency key
+	// (cleat#4247). Without this the key was derived from the step AFTER the consumed heartbeats, a different key from the first incarnation's, and a
+	// service that deduplicates on the key performed the call again. The retry call does the same for the same reason (cleat#1145).
+	if resumeStep >= 0 {
+		callStep = resumeStep
+	}
 
 	// Set when the heartbeat loop cancels the call because the workflow was
 	// cancelled, so the result branch can tell that apart from the call failing
@@ -181,10 +190,16 @@ func (s *execSession) freshCallWithHeartbeat(ctx context.Context, m api.Module, 
 
 func (s *execSession) replayCallWithHeartbeat(ctx context.Context, m api.Module, service, operation, requestJSON string, heartbeatIntervalMs int64, responsePtr, responseMaxLen uint32) int64 {
 
-	// Consume any heartbeat events that occurred during the call.
+	// Consume any heartbeat events that occurred during the call. The first one was recorded at the step the call STARTED at (nothing else is
+	// recorded while it runs), which is the step its idempotency key was derived from: remembered in case the history ends inside the call and the
+	// call has to be run again (cleat#4247).
+	firstBeatStep := -1
 	for s.stepCount < len(s.history) {
 		rec := s.history[s.stepCount]
 		if rec.EventType == EventTypeHeartbeat {
+			if firstBeatStep < 0 {
+				firstBeatStep = rec.Step
+			}
 			if !s.advanceReplayStep(ctx, &rec) {
 				return 0
 			}
@@ -269,5 +284,5 @@ func (s *execSession) replayCallWithHeartbeat(ctx context.Context, m api.Module,
 
 	// Past recorded history — switch to fresh execution.
 	s.exitReplay()
-	return s.freshCallWithHeartbeat(ctx, m, service, operation, requestJSON, heartbeatIntervalMs, responsePtr, responseMaxLen)
+	return s.freshCallWithHeartbeat(ctx, m, service, operation, requestJSON, heartbeatIntervalMs, responsePtr, responseMaxLen, firstBeatStep)
 }
