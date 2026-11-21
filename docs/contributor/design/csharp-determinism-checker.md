@@ -37,7 +37,7 @@ TestCSharpDeterminismProbeMeasurements -count=1`.
 | `File`, `Directory` | no filesystem; `File.Exists` answers `false` quietly | error CV009 |
 | `HttpClient` | imports `wasi:http`; **every entry** of the component fails to instantiate | error CV010 |
 | `DateTime.UtcNow/Now`, `DateTimeOffset.UtcNow`, `Random`, `Guid.NewGuid()`, `Task.Yield`, `Console`, `Environment` constants | replay-stable, or harmless | not refused |
-| a catch that swallows `CleatSuspendException` | engine still sees the suspension, but a host call after the catch reaches the service and is recorded | warning CV101 |
+| a catch that swallows `CleatSuspendException` | engine still sees the suspension and the workflow keeps running past it, but the host refuses every host call made after the catch (cleat#4285): none reaches the service or is recorded | warning CV101 |
 
 `HttpClient` is absent from the probe because it would make the probe itself uninstantiable; that
 is the measurement.

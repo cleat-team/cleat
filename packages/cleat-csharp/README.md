@@ -68,8 +68,8 @@ entry blocks on the entry method with `GetAwaiter().GetResult()`, never `.Result
 
 - the engine records the suspension on the host side, so a `catch (Exception)` that swallows it **does not change the
   outcome**, which stays "suspended";
-- but the workflow **keeps running** after the swallowed exception, and the host calls it then makes are real and are
-  recorded in history. The same happens when the exception is captured in a `Task` that has not been awaited yet:
+- but the workflow **keeps running** after the swallowed exception. Since cleat#4285 the host **refuses** the host calls it then makes (none reaches
+  the service or is recorded in history); the code between them still runs. The same happens when the exception is captured in a `Task` that has not been awaited yet:
   code between the capture and the `await` still runs.
 
 Replay reproduces the same sequence, so this is deterministic, but it is not what a Go or Rust workflow does (there the

@@ -159,11 +159,9 @@ func (s *execSession) WaitForEvent(ctx context.Context, m api.Module,
 	if !s.isReplay && s.stopBeforeNewWork() {
 		return callSuspendSentinel
 	}
-	if !s.isReplay {
-		if res, ok := s.refuseIfSuspended("WaitForEvent", callSuspendSentinel); ok {
-			return res
-		}
-	}
+	// NO post-suspension refusal of its own (cleat#4285), on purpose: before its first PluginCall this does nothing but compute a deadline, and every effect it
+	// has goes through PluginCall, which refuses once the execution has suspended and answers the stop word this returns unchanged just below. A guard
+	// here would be unobservable (removing it changes no answer and no record), which is how one was found unpinned in review.
 
 	// Durable clock, so replay recomputes the same deadline. See the doc above.
 	deadline := s.nowMs + timeoutMs

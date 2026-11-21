@@ -61,10 +61,12 @@ func emit(o outcome) (string, error) {
 	return string(b), nil
 }
 
-// unwoundMarker is the SideEffect value recordUnwind writes. It is a recorded
-// event, which is the only thing about this guest the harness can read back:
-// a DurableLog here is not recorded in the history at all (measured).
-const unwoundMarker = "guest-recovered-the-suspend"
+// unwoundKey is the query-state key recordUnwind sets. It is what the harness reads back to know the guest's own recover() ran. This used to be a
+// SideEffect, a RECORDED event after the await, and cleat#4285 made the host refuse every call that would start fresh work once an execution has suspended, which
+// includes that side_effect: the marker could no longer be written, and its absence read as "the guest did not unwind". SetQueryState is the observable that is
+// left, and the right one: it is an in-memory read-model write the host does not record and does not refuse (it starts no work and puts nothing in the history),
+// and Execute returns it. A DurableLog is not an option (it is not recorded and not returned: measured).
+const unwoundKey = "guest-recovered-the-suspend"
 
 // recordUnwind is deferred around the await calls, as
 //
@@ -72,18 +74,19 @@ const unwoundMarker = "guest-recovered-the-suspend"
 //
 // (recover must be called directly by the deferred function, hence the
 // argument). When the guest adapter honours the suspend sentinel it panics with
-// cleat.ErrSuspend, the guest's own recover() sees it, and this records a
-// side_effect AFTER the await record -- evidence from inside the guest that it
-// was unwound rather than killed. An adapter that ignores the sentinel reads
-// the sentinel as a result length; the guest then traps, which no recover()
-// can catch, and nothing is recorded. The engine reports a suspension either
-// way (its suspendErr wins over the trap), so the engine's own status cannot
-// tell the two apart; this can. See cleat#3385.
+// cleat.ErrSuspend, the guest's own recover() sees it, and this sets a query
+// state key -- evidence from inside the guest that it was unwound rather than
+// killed. An adapter that ignores the sentinel reads the sentinel as a result
+// length; the guest then traps, which no recover() can catch, and the key is
+// never set. The engine reports a suspension either way (its suspendErr wins
+// over the trap), so the engine's own status cannot tell the two apart; this
+// can. The history must ALSO hold nothing after the await: the guest stopped,
+// and the host would refuse anything it tried to record. See cleat#3385 and #4285.
 func recordUnwind(h cleat.HostCalls, rv any) {
 	if rv == nil {
 		return
 	}
-	h.SideEffect(func() (string, error) { return unwoundMarker, nil })
+	h.SetQueryState(unwoundKey, "1")
 	panic(rv)
 }
 

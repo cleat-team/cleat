@@ -300,8 +300,8 @@ first commit until the last of the seven PRs tracked in cleat#4080. The language
   checkout, in a pinned linux container (`cleat build --target csharp`; the compiler does not run on macOS), amd64 or arm64.
 - **No C# workflow has been run on a real worker against a database.** The tests drive the engine in process; `tests/crash` has no C# client, and
   MySQL and SQL Server have not been measured for C# at all.
-- **A suspension is an exception and it can be caught.** A `catch (Exception)` that swallows `CleatSuspendException` lets the workflow keep running,
-  and the host calls it then makes are real. The determinism vet warns on it (`CV101`); do not swallow it.
+- **A suspension is an exception and it can be caught.** A `catch (Exception)` that swallows `CleatSuspendException` lets the workflow keep running, though since cleat#4285 the host refuses the host calls it then makes (none reaches
+  the service); the code between them still runs. The determinism vet warns on it (`CV101`); do not swallow it.
 - **`async`/`await` works over host calls only because every awaited task is already complete.** `Task.Delay`, `Task.Run` and a blocking wait on
   an incomplete task throw `PlatformNotSupportedException` (`Task.Yield` returns); to wait, call `HostCalls.Sleep`.
 - **Typed (record) entries** go through a source-generated `JsonSerializerContext` the author writes, and the first one costs about 1.6 MB and 140 ms
