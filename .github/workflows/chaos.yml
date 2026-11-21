@@ -178,6 +178,19 @@ jobs:
             grep -E "\"Action\":\"pass\",\"Package\":\"[^\"]*\",\"Test\":\"${row}\"" chaos-timing.log > /dev/null \
               || { echo "::error::the timing row ${row} reported no pass: the -run pattern selected nothing, or it never finished"; exit 1; }
           done
+      # cleat#4306, the gate PR 3 (residency on by default) ships on: a held signal wait must not resume LATER than a suspended one, end to end, at p50 and p99, on real PostgreSQL with the
+      # default NOTIFY listener on. Real worker binaries, three interleaved arms (held, off, and a control with the nudge removed that must come out LATER, so the row can fail). It sits
+      # behind `chaos timing` so no gating job compiles it, and a loaded runner can end it UNMEASURED, which is a failure and never a pass. Its numbers are in the log, not asserted
+      # beyond the comparison: read chaos-held-vs-off.log for N, p50, p99 and the margin.
+      - name: Held vs residency-off timing (tags chaos timing)
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          go test -json -tags 'chaos timing' -count=1 -timeout 30m ./tests/chaos \
+            -run 'TestAHeldSignalWaitResumesNoLaterThanASuspendedOneOnPostgres' 2>&1 | tee chaos-held-vs-off.log
+          # `go test -run` that selects nothing exits 0, so a renamed row would leave this step green having run nothing. Require its pass event.
+          grep -E '"Action":"pass","Package":"[^"]*","Test":"TestAHeldSignalWaitResumesNoLaterThanASuspendedOneOnPostgres"' chaos-held-vs-off.log > /dev/null \
+            || { echo "::error::the held-vs-off timing row reported no pass: the -run pattern selected nothing, it failed, or it never finished"; exit 1; }
       - uses: actions/upload-artifact@v7
         if: always()
         with:

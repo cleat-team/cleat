@@ -165,3 +165,37 @@ func TestANudgeDoesNotDisturbAHeldTimer(t *testing.T) {
 	clock.fireAll()
 	mustOutcome(t, out, parkDeadline, "the timer's own deadline")
 }
+
+// THE FLOOR HOLDS FOR THE WHOLE HOLD, NOT ONLY ITS FIRST 50 ms (cleat-review3 on #4305, a surviving mutant). The row above puts every nudge right after the admission recheck, so a hold that
+// forgot to move its last-recheck time forward after a later read would still pass it: the floor would hold only until the first gap ended and then never again, and a write storm that began
+// later in the hold would pin the store. Here nudges arrive every 10 ms for 500 ms of fake time, the gap timers are fired as the clock passes them, and the number of reads is bounded by
+// one per gap (about 10) and not one per nudge (50).
+func TestTheNudgeFloorHoldsAcrossTheWholeHoldAndNotJustItsFirstGap(t *testing.T) {
+	set, clock := nudgeSet(t, 50*time.Millisecond)
+	rc := &scriptedRecheck{} // never finds
+	out := park(set.ForRun(ResidentRunInfo{Language: "go"}), context.Background(), signalReq(5000, rc))
+	waitTimers(t, clock, 2)
+	const steps, stepMs = 50, 10 // 500 ms of fake time
+	for i := 0; i < steps; i++ {
+		clock.nowMs.Add(stepMs)
+		set.Nudge()
+		time.Sleep(2 * time.Millisecond) // the hold takes the nudge and arms (or skips) its gap
+		// A fake timer fires only when the test says so, so it must say so only when fake time has REACHED the timer's due time. The gaps here are due on 50 ms boundaries, so the
+		// gap timers (the only ones under 100 ms; the 500 ms ticks and the deadline stay put) are fired on every fifth step. Firing them on every step answers each throttled nudge
+		// at once, which is the same as having no floor: the first version of this row did that, and read 51 reads on the UNMUTATED code.
+		if (i+1)%(50/stepMs) == 0 {
+			clock.fireShorterThan(100 * time.Millisecond)
+		}
+		time.Sleep(3 * time.Millisecond)
+	}
+	notYet(t, out, "after 500 ms of nudges that found nothing")
+	n := rc.count()
+	// One admission read, then at most one per 50 ms gap: 1 + 10 = 11. A little headroom for a gap that ends on a step boundary; nowhere near the 51 an absent floor reads.
+	if n > 14 {
+		t.Errorf("the recheck ran %d times for 50 nudges over 500 ms with a 50 ms floor, want about 11: the floor stopped holding after the first gap", n)
+	}
+	if n < 6 {
+		t.Errorf("the recheck ran only %d times over 500 ms of nudges: the floor is swallowing nudges it should answer, or the row is not exercising it", n)
+	}
+	t.Logf("%d rechecks for 50 nudges over 500 ms (floor 50 ms)", n)
+}
