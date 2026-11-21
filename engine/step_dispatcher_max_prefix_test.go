@@ -137,13 +137,49 @@ func TestAForeignFirstRecordIsAnsweredWithoutConsumingItWhenTheSpecSaysSo(t *tes
 	if got != 7 || s.stepCount != 1 {
 		t.Errorf("[prefix, other]: result %d at step %d, want DecodeRun's 7 at step 1 (the hook is for the first record only)", got, s.stepCount)
 	}
-	// Validation: a hook on a single-record step is a mistake.
-	bad := runSpec(&ran, &dec, &pre)
-	bad.Role = nil
-	bad.DecodeRun = nil
-	bad.Decode = func(*stepCtx, *EventRecord) int64 { return 0 }
-	bad.ForeignFirst = answer
-	if err := bad.validate(); err == nil || !strings.Contains(err.Error(), "ForeignFirst") {
-		t.Errorf("validate on a ForeignFirst without a Role returned %v, want an error naming ForeignFirst", err)
+	// A SINGLE-record step may carry the hook too (cleat#4152, W1: poll_update). It used to be refused at validation, and the test here pinned that as a mistake;
+	// it is the shape a poll needs, so the rule is gone and these rows say what it does instead.
+	var ranSingle int32
+	single := fakeSpec(effectEffect, recordsOne, &ranSingle, recordOneFake)
+	single.ForeignFirst = func(stepArgs) (int64, bool) { return 42, true }
+	if err := single.validate(); err != nil {
+		t.Errorf("validate on a single-record step with a ForeignFirst returned %v, want nil", err)
+	}
+	other := []EventRecord{{Step: 0, EventType: EventTypeSideEffect}} // another call's record: not fakeEvent
+	sSingle := stepSession(nil, other)
+	if got := sSingle.step(ctx, nil, single, stepArgs{}); got != 42 || sSingle.stepCount != 0 || !sSingle.isReplay || ranSingle != 0 {
+		t.Errorf("single-record step, another call's record: result %d at step %d, replaying=%v, ran %d; want the hook's 42, nothing consumed, still replaying, Fresh not run",
+			got, sSingle.stepCount, sSingle.isReplay, ranSingle)
+	}
+	// The hook that says "not answerable" leaves the divergence, which consumes nothing.
+	single.ForeignFirst = func(stepArgs) (int64, bool) { return 42, false }
+	sSingle = stepSession(nil, other)
+	if got := sSingle.step(ctx, nil, single, stepArgs{}); got&0xFF != 1 || sSingle.stepCount != 0 || !sSingle.isReplay {
+		t.Errorf("single-record step, hook says not answerable: result %#x at step %d, want a divergence consuming nothing", got, sSingle.stepCount)
+	}
+	// Its OWN record is still consumed and decoded, whatever the hook would say: the hook is for another call's record only.
+	own := []EventRecord{{Step: 0, EventType: fakeEvent}}
+	single.ForeignFirst = func(stepArgs) (int64, bool) {
+		t.Error("the hook was asked about the step's own record")
+		return 42, true
+	}
+	sSingle = stepSession(nil, own)
+	if got := sSingle.step(ctx, nil, single, stepArgs{}); got != 7 || sSingle.stepCount != 1 {
+		t.Errorf("single-record step, its own record: result %d at step %d, want Decode's 7 at step 1", got, sSingle.stepCount)
+	}
+	// A single-record step that records NOTHING without declining is still a violation, and one that declines on a path it LISTED is not: the shape check is relaxed only by
+	// RecordsNothing under a name in RecordsNothingOn (cleat#4313 made that opt-in; this test used to rely on any RecordsNothing relaxing it).
+	forgot := fakeSpec(effectEffect, recordsOne, &ranSingle, func(*stepCtx) {})
+	sForgot := stepSession(nil, nil)
+	sForgot.step(ctx, nil, forgot, stepArgs{})
+	if len(sForgot.stepViolations) != 1 {
+		t.Errorf("a single-record step that recorded nothing and did not decline reported %v, want exactly one spec violation", sForgot.stepViolations)
+	}
+	declines := fakeSpec(effectEffect, recordsOne, &ranSingle, func(c *stepCtx) { c.RecordsNothing("nothing to record") })
+	declines.RecordsNothingOn = []string{"nothing to record"}
+	sDeclines := stepSession(nil, nil)
+	sDeclines.step(ctx, nil, declines, stepArgs{})
+	if len(sDeclines.stepViolations) != 0 {
+		t.Errorf("a single-record step that declined to record reported %v, want none", sDeclines.stepViolations)
 	}
 }
