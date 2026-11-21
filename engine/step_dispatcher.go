@@ -114,7 +114,7 @@ type stepCtx struct {
 	// ignores it). nil for a step that did not end inside a run.
 	Prefix []EventRecord
 	// declined is set by RecordsNothing: Fresh took a path that records nothing on purpose and says why, so the shape check does not read it as a
-	// spec that failed to do what it declared.
+	// spec that failed to do what it declared (for a single-record step as well as a multi-record one: a poll records only when it finds something).
 	declined bool
 	// declinedWhy is the reason RecordsNothing was given, so a recordsOne spec can be checked against the paths it listed (RecordsNothingOn).
 	declinedWhy string
@@ -231,9 +231,11 @@ type stepSpec struct {
 	// the empties, replayRun refuses it as a divergence before anything is consumed (staleCallAfterPending); what is still left unread, reported with a count, is a
 	// defer drain's record, a record expanded from a compaction and a record that is no call's effect.
 	ResumesFreshAtForeign bool
-	// ForeignFirst, for a multi-record step, answers a call whose FIRST record belongs to another call, WITHOUT consuming it and without leaving
-	// replay, instead of reporting a divergence. ok false means "not answerable", and the divergence follows as usual. It exists for one
-	// case (cleat#4152, W5): a history written before cleat#4151 recorded nothing for a no-wait poll that timed out, so the record at the
+	// ForeignFirst answers a call whose FIRST record belongs to another call (a record of another TYPE for a single-record step, a record whose Role is
+	// foreign for a multi-record one), WITHOUT consuming it and without leaving replay, instead of reporting a divergence. ok false means "not
+	// answerable", and the divergence follows as usual. A SINGLE-record step uses it for a poll (cleat#4152, W1: durable_poll_update): the guest polls
+	// at every suspension and most polls find nothing, so a record that is another call's means "nothing was delivered here on the original run", and ending
+	// replay or reporting a divergence at the first such poll would be wrong. For a multi-record step it exists for one case (cleat#4152, W5): a history written before cleat#4151 recorded nothing for a no-wait poll that timed out, so the record at the
 	// poll's step is the NEXT call's, and the poll's answer was always the timeout (had a signal been found it would have been a record). Dropping
 	// that would turn a resumable history into a divergence, which a migration may not do. It is not called for a record whose Role is not
 	// one of the three (a bug in the spec is always a divergence), and it must not touch the world: it is a pure function of the arguments.
@@ -334,8 +336,6 @@ func (sp *stepSpec) validate() error {
 		return fmt.Errorf("step spec %q is Pure and has an AfterSuspend: a Pure step is never refused", sp.Name)
 	case sp.OverPending != nil && (sp.Role != nil || sp.Records == recordsNone):
 		return fmt.Errorf("step spec %q has an OverPending but is a multi-record step or records nothing: OverPending is a single-record step whose answer is recorded over its own pending record", sp.Name)
-	case sp.ForeignFirst != nil && sp.Role == nil:
-		return fmt.Errorf("step spec %q has a ForeignFirst but no Role: it answers a multi-record step whose first record is another call's", sp.Name)
 	case sp.ResumesFreshAtForeign && (sp.Role == nil || sp.EndsWithoutFinal || sp.Identity == nil):
 		return fmt.Errorf("step spec %q has ResumesFreshAtForeign but is not a multi-record step with an Identity, or also declares EndsWithoutFinal", sp.Name)
 	case sp.MaxPrefix < 0 || (sp.MaxPrefix > 0 && sp.Role == nil):
@@ -432,7 +432,13 @@ func (s *execSession) step(ctx context.Context, m api.Module, sp *stepSpec, args
 		} else if s.stepCount < len(s.history) {
 			rec := s.history[s.stepCount]
 			if rec.EventType != sp.Want {
-				// Not consumed: replayDivergence leaves the record for the call it belongs to (cleat#4157).
+				// A poll answers "nothing here" and leaves the record, and replay, as they were (ForeignFirst).
+				if sp.ForeignFirst != nil {
+					if res, ok := sp.ForeignFirst(args); ok {
+						return res
+					}
+				}
+				// Not consumed: replayDivergenceAt leaves the record for the call it belongs to (cleat#4157).
 				return sp.divergenceAnswer(s.replayDivergenceAt(ctx, m, &rec, sp.Want, sp.divergenceDetailFor(args, &rec), args.outPtr, args.outMaxLen))
 			}
 			if sp.Identity != nil {

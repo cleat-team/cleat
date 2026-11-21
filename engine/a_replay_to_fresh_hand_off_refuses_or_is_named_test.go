@@ -47,7 +47,6 @@ var handOffsThatNeedNoRefusal = map[string]string{
 	"leaveReplayAtPending": "the dispatcher's second exit from replay (cleat#4152, W3a): for a step that found its OWN pending record and does not consume it " +
 		"(OverPending). Its only caller is step, which applies the refusal on the next lines exactly as after leaveReplay, so reaching a call this way " +
 		"skips nothing.",
-	"RegisterUpdateHandler": "registers a handler in the session and records the registration. It performs nothing outside the workflow.",
 }
 
 var (

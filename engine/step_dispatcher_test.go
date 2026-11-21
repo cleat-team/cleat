@@ -16,6 +16,7 @@ import (
 	"go/parser"
 	"go/token"
 	"os"
+	"reflect"
 	"sort"
 	"strings"
 	"sync/atomic"
@@ -945,9 +946,10 @@ func TestARecordsOneSpecMayRecordNothingOnlyOnAPathItListed(t *testing.T) {
 		t.Errorf("a recordsOne spec that returned the suspend sentinel and recorded nothing was reported %q, want the shape violation: the sentinel must not excuse it", joined)
 	}
 
-	// THE PIN: no spec in the engine lists a path, so none of them is looser than it was before the field existed. When a spec starts to (DurableCall's
-	// move), this map is what changes, in the same diff, and the reviewer reads each path against the call it is for. A spec added to the registry that
-	// lists a path and is not in this map fails here, which is what makes the opt-in visible and not merely available.
+	// THE PIN: the specs that list a path are exactly the ones named below, so none of the others is looser than it was before the field existed. When a spec
+	// starts to (DurableCall's move), this map is what changes, in the same diff, and the reviewer reads each path against the call it is for. A spec added to the
+	// registry that lists a path and is not in this map fails here, which is what makes the opt-in visible and not merely available. The strings are written out
+	// here, not taken from the spec's constants, so changing a reason is a diff a reviewer reads.
 	listing := map[string][]string{}
 	for _, sp := range stepSpecs {
 		if len(sp.RecordsNothingOn) > 0 {
@@ -957,8 +959,12 @@ func TestARecordsOneSpecMayRecordNothingOnlyOnAPathItListed(t *testing.T) {
 	if len(stepSpecs) < 20 {
 		t.Fatalf("PRECONDITION FAILED: %d registered specs; the scan is not reading the registry", len(stepSpecs))
 	}
-	if len(listing) != 0 {
-		t.Errorf("specs list RecordsNothingOn paths: %v. This test records that none does; a spec that opts in is added to this check in the same change, with the reason for each path", listing)
+	want := map[string][]string{
+		// poll_update (cleat#4152, W1) records an update_received only when it finds a pending update.
+		"poll_update": {"no update store: nothing to poll", "the pending requests could not be read: the guest is told nothing was found", "no update is pending"},
+	}
+	if !reflect.DeepEqual(listing, want) {
+		t.Errorf("specs that list RecordsNothingOn paths: %v, want exactly %v. A spec that opts in is added to this check in the same change, with the reason for each path", listing, want)
 	}
 }
 

@@ -23,14 +23,14 @@ var notYetOnTheParkHelper = map[string]struct {
 	count int
 	why   string
 }{
-	"children.go:var awaitChildStep":         {1, "a wait for a child: the park helper has no child wake kind, so the spec sets suspendErr itself (W3a)"},
-	"children.go:var awaitAllChildrenStep":   {1, "a wait for every child in a list: as await_child, no child wake kind on the park helper (W3a)"},
-	"children.go:var awaitAnyChildStep":      {1, "a wait for any of a set of children: as the other two child awaits, no child wake kind on the park helper (W3b)"},
-	"scope.go:freshSetScope":                 {2, "a wait for a lock scope; moves with SetScope (WS-cleat-2)"},
-	"lifecycle.go:ContinueAsNew":             {2, "a terminal call, not a wait; moves with the terminal group (W1)"},
-	"lifecycle.go:ContinueAsNewWithVersion":  {2, "a terminal call, not a wait; moves with the terminal group (W1)"},
-	"durablecalls.go:freshCall":              {1, "a shutdown stop, not a wait: nothing to park"},
-	"lifecycle.go:stopAfterFailedEventWrite": {1, "a failed-event-write stop, not a wait: nothing to park"},
+	"children.go:var awaitChildStep":              {1, "a wait for a child: the park helper has no child wake kind, so the spec sets suspendErr itself (W3a)"},
+	"children.go:var awaitAllChildrenStep":        {1, "a wait for every child in a list: as await_child, no child wake kind on the park helper (W3a)"},
+	"children.go:var awaitAnyChildStep":           {1, "a wait for any of a set of children: as the other two child awaits, no child wake kind on the park helper (W3b)"},
+	"scope.go:freshSetScope":                      {2, "a wait for a lock scope; moves with SetScope (WS-cleat-2)"},
+	"lifecycle.go:var continueAsNewStep":          {2, "a terminal call, not a wait: it ENDS the run (Reason continue_as_new), on its replay half and its fresh half (W1)"},
+	"lifecycle.go:var continueAsNewVersionedStep": {2, "a terminal call, not a wait: the same, carrying a version (W1)"},
+	"durablecalls.go:freshCall":                   {1, "a shutdown stop, not a wait: nothing to park"},
+	"lifecycle.go:stopAfterFailedEventWrite":      {1, "a failed-event-write stop, not a wait: nothing to park"},
 }
 
 // suspendSites counts the assignments to suspendErr in one parsed file, keyed by where they sit: "file:Func" for a function or method (including
