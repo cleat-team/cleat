@@ -163,12 +163,12 @@ func (s *execSession) classifyFailure(err error) error {
 // for a branch here and for asserting that the two paths are exclusive; this
 // function is that branch, and recordEventPersisted is the bookkeeping half of
 // recordEvent with the flush removed.
-func (s *execSession) freshCallWithIntent(ctx context.Context, service, operation, requestJSON string, step int) (string, error) {
+func (s *execSession) freshCallWithIntent(ctx context.Context, service, operation, requestJSON string, step int) (resp string, rec EventRecord, checksum string, recorded bool, err error) {
 	st, err := s.engine.intentStore()
 	if err != nil {
 		// Non-retryable by construction: retrying cannot make the store
 		// implement the interface, and the caller must not dispatch.
-		return "", fmt.Errorf("call %s.%s is declared write-ahead-intent but this engine cannot honour it: %w",
+		return "", EventRecord{}, "", false, fmt.Errorf("call %s.%s is declared write-ahead-intent but this engine cannot honour it: %w",
 			service, operation, err)
 	}
 
@@ -194,12 +194,12 @@ func (s *execSession) freshCallWithIntent(ctx context.Context, service, operatio
 		// failed intent write: without a durable intent, a crash mid-call
 		// would be indistinguishable from a call that never happened, which
 		// is the state this operation was declared to avoid.
-		return "", fmt.Errorf("write-ahead intent for %s.%s at step %d: %w", service, operation, step, err)
+		return "", EventRecord{}, "", false, fmt.Errorf("write-ahead intent for %s.%s at step %d: %w", service, operation, step, err)
 	}
 
 	resp, callErr := s.callService(ctx, service, operation, requestJSON, step)
 
-	rec := intent
+	rec = intent
 	rec.Response = resp
 	if callErr != nil {
 		rec.Err = callErr.Error()
@@ -212,7 +212,7 @@ func (s *execSession) freshCallWithIntent(ctx context.Context, service, operatio
 	rec.TimestampMs = time.Now().UnixMilli()
 
 	payload, _ := eventRecordToPayload(rec)
-	checksum := computeEventChecksum(rec, s.lastChecksum)
+	checksum = computeEventChecksum(rec, s.lastChecksum)
 	if err := st.CompleteCallIntent(ctx, s.workflowID, rec, payload, checksum, s.engine.workerID, s.engine.generation); err != nil {
 		// The call HAS been dispatched and its outcome is not durable. Say so
 		// rather than returning the response as though it were recorded: a
@@ -220,11 +220,12 @@ func (s *execSession) freshCallWithIntent(ctx context.Context, service, operatio
 		// that believed this succeeded would disagree with its own history.
 		s.engine.log().ErrorContext(ctx, "call intent completion failed",
 			"workflow_id", s.workflowID, "step", step, "service", service, "operation", operation, "error", err)
-		return "", fmt.Errorf("completing write-ahead intent for %s.%s at step %d: %w", service, operation, step, err)
+		return "", EventRecord{}, "", false, fmt.Errorf("completing write-ahead intent for %s.%s at step %d: %w", service, operation, step, err)
 	}
 
-	s.recordEventPersisted(rec, checksum)
-	return resp, callErr
+	// The caller commits it to the session, through its step handle (stepCtx.RecordPersisted): this function does not, so that the one place a Fresh records
+	// an event is the Fresh itself, where the dispatcher's exemptions scan reads it.
+	return resp, rec, checksum, true, callErr
 }
 
 // recordEventPersisted is recordEvent's bookkeeping for an event that is

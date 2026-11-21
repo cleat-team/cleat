@@ -24,7 +24,14 @@ import (
 //
 // WHAT THIS TABLE IS, AND IS NOT. Each row is a situation and the text is what the series and counters read AFTER it, measured on the code as it
 // stood, and then read against what replayCall and freshCall say they do (the header of each row says which statement it checks). It compares text
-// and the move must leave it byte-identical; it cannot say a count is RIGHT, only that it did not move. Series are read back through the
+// and the move must leave the COUNTS byte-identical; it cannot say a count is RIGHT, only that it did not move.
+//
+// THE MOVE EDITED THIS TABLE, in two ways, and both are for the reviewer. (1) The observer no longer records the result word (`results=`): the words are the
+// call table's (a_call_behaves_as_recorded_before_the_dispatcher_test.go), and the restored divergence detail changes their length, which is not a count.
+// Every row's counts and series are otherwise as recorded. (2) ONE row's counts changed with its meaning: replay_then_a_divergence_then_a_call. Before, the
+// call after a divergence went FRESH (1 fresh call, 1 service call) because the old code consumed the record it diverged on; the dispatcher consumes nothing on
+// a divergence (cleat#4157), so the next call reads the same record and diverges again: 2 replay steps, 2 replay failures, no fresh call, no service call.
+// Every other row is unchanged, including both frontier rows, which are where a move that did not carry the counts would have shown. Series are read back through the
 // exposition text of a real prometheus.Metrics, labels included, so a renamed label or a dropped series is a difference too.
 //
 // NOT COVERED, and not claimed: the cancellation poll, the canStartNewWork refusal, the event cap and the shutdown path all sit AFTER the counts
@@ -86,12 +93,10 @@ func (c g3cCase) observe() string {
 		n = 1
 	}
 	replayBefore, freshBefore := ReplayStepCount(), FreshCallCount()
-	var words []string
 	for i := 0; i < n; i++ {
 		buf := make([]byte, 4096)
 		ctx := context.WithValue(context.Background(), wasmMemBufKey{}, buf)
-		res := s.DurableCall(ctx, nil, "svc", "op", `{}`, 0, 4096)
-		words = append(words, fmt.Sprintf("%#x", res))
+		s.DurableCall(ctx, nil, "svc", "op", `{}`, 0, 4096)
 	}
 	rec := httptest.NewRecorder()
 	m.ServeHTTP().ServeHTTP(rec, httptest.NewRequest("GET", "/metrics", nil))
@@ -102,8 +107,8 @@ func (c g3cCase) observe() string {
 		}
 	}
 	sort.Strings(lines)
-	return fmt.Sprintf("results=%v replayStepCount+=%d freshCallCount+=%d calls_to_service=%d series=%q",
-		words, ReplayStepCount()-replayBefore, FreshCallCount()-freshBefore, caller.attempts, lines)
+	return fmt.Sprintf("replayStepCount+=%d freshCallCount+=%d calls_to_service=%d series=%q",
+		ReplayStepCount()-replayBefore, FreshCallCount()-freshBefore, caller.attempts, lines)
 }
 
 func TestG3cDurableCallCountersBeforeTheDispatcher(t *testing.T) {
@@ -124,15 +129,15 @@ func TestG3cDurableCallCountersBeforeTheDispatcher(t *testing.T) {
 }
 
 var g3cGolden = map[string]string{
-	"fresh":                                "results=[0xb0000000000] replayStepCount+=0 freshCallCount+=1 calls_to_service=1 series=[\"cleat_calls_total{worker_id=\\\"\\\",workflow_name=\\\"def-g3c\\\"} 1\" \"cleat_fresh_steps_total{worker_id=\\\"\\\",workflow_name=\\\"def-g3c\\\"} 1\"]",
-	"replay_a_recorded_call":               "results=[0xb0000000000] replayStepCount+=1 freshCallCount+=0 calls_to_service=0 series=[\"cleat_replay_steps_total{def_name=\\\"def-g3c\\\",worker_id=\\\"\\\"} 1\"]",
-	"replay_frontier_empty_history":        "results=[0xb0000000000] replayStepCount+=1 freshCallCount+=1 calls_to_service=1 series=[\"cleat_calls_total{worker_id=\\\"\\\",workflow_name=\\\"def-g3c\\\"} 1\" \"cleat_fresh_steps_total{worker_id=\\\"\\\",workflow_name=\\\"def-g3c\\\"} 1\" \"cleat_replay_steps_total{def_name=\\\"def-g3c\\\",worker_id=\\\"\\\"} 1\"]",
-	"replay_one_then_the_frontier":         "results=[0xb0000000000 0xb0000000000] replayStepCount+=2 freshCallCount+=1 calls_to_service=1 series=[\"cleat_calls_total{worker_id=\\\"\\\",workflow_name=\\\"def-g3c\\\"} 1\" \"cleat_fresh_steps_total{worker_id=\\\"\\\",workflow_name=\\\"def-g3c\\\"} 1\" \"cleat_replay_steps_total{def_name=\\\"def-g3c\\\",worker_id=\\\"\\\"} 2\"]",
-	"replay_other_event_type":              "results=[0xfd0000000001] replayStepCount+=1 freshCallCount+=0 calls_to_service=0 series=[\"cleat_replay_failures_total{worker_id=\\\"\\\"} 1\" \"cleat_replay_steps_total{def_name=\\\"def-g3c\\\",worker_id=\\\"\\\"} 1\"]",
-	"replay_other_operation":               "results=[0x1050000000001] replayStepCount+=1 freshCallCount+=0 calls_to_service=0 series=[\"cleat_replay_failures_total{worker_id=\\\"\\\"} 1\" \"cleat_replay_steps_total{def_name=\\\"def-g3c\\\",worker_id=\\\"\\\"} 1\"]",
-	"replay_quit":                          "results=[0x0] replayStepCount+=1 freshCallCount+=0 calls_to_service=0 series=[\"cleat_replay_steps_total{def_name=\\\"def-g3c\\\",worker_id=\\\"\\\"} 1\"]",
-	"replay_then_a_divergence_then_a_call": "results=[0x1050000000001 0xb0000000000] replayStepCount+=2 freshCallCount+=1 calls_to_service=1 series=[\"cleat_calls_total{worker_id=\\\"\\\",workflow_name=\\\"def-g3c\\\"} 1\" \"cleat_fresh_steps_total{worker_id=\\\"\\\",workflow_name=\\\"def-g3c\\\"} 1\" \"cleat_replay_failures_total{worker_id=\\\"\\\"} 1\" \"cleat_replay_steps_total{def_name=\\\"def-g3c\\\",worker_id=\\\"\\\"} 2\"]",
-	"suspended_at_the_frontier":            "results=[0x80000000] replayStepCount+=1 freshCallCount+=0 calls_to_service=0 series=[\"cleat_replay_steps_total{def_name=\\\"def-g3c\\\",worker_id=\\\"\\\"} 1\"]",
-	"suspended_fresh":                      "results=[0x80000000] replayStepCount+=0 freshCallCount+=0 calls_to_service=0 series=[]",
-	"suspended_replay_a_recorded_call":     "results=[0xb0000000000] replayStepCount+=1 freshCallCount+=0 calls_to_service=0 series=[\"cleat_replay_steps_total{def_name=\\\"def-g3c\\\",worker_id=\\\"\\\"} 1\"]",
+	"fresh":                                "replayStepCount+=0 freshCallCount+=1 calls_to_service=1 series=[\"cleat_calls_total{worker_id=\\\"\\\",workflow_name=\\\"def-g3c\\\"} 1\" \"cleat_fresh_steps_total{worker_id=\\\"\\\",workflow_name=\\\"def-g3c\\\"} 1\"]",
+	"replay_a_recorded_call":               "replayStepCount+=1 freshCallCount+=0 calls_to_service=0 series=[\"cleat_replay_steps_total{def_name=\\\"def-g3c\\\",worker_id=\\\"\\\"} 1\"]",
+	"replay_frontier_empty_history":        "replayStepCount+=1 freshCallCount+=1 calls_to_service=1 series=[\"cleat_calls_total{worker_id=\\\"\\\",workflow_name=\\\"def-g3c\\\"} 1\" \"cleat_fresh_steps_total{worker_id=\\\"\\\",workflow_name=\\\"def-g3c\\\"} 1\" \"cleat_replay_steps_total{def_name=\\\"def-g3c\\\",worker_id=\\\"\\\"} 1\"]",
+	"replay_one_then_the_frontier":         "replayStepCount+=2 freshCallCount+=1 calls_to_service=1 series=[\"cleat_calls_total{worker_id=\\\"\\\",workflow_name=\\\"def-g3c\\\"} 1\" \"cleat_fresh_steps_total{worker_id=\\\"\\\",workflow_name=\\\"def-g3c\\\"} 1\" \"cleat_replay_steps_total{def_name=\\\"def-g3c\\\",worker_id=\\\"\\\"} 2\"]",
+	"replay_other_event_type":              "replayStepCount+=1 freshCallCount+=0 calls_to_service=0 series=[\"cleat_replay_failures_total{worker_id=\\\"\\\"} 1\" \"cleat_replay_steps_total{def_name=\\\"def-g3c\\\",worker_id=\\\"\\\"} 1\"]",
+	"replay_other_operation":               "replayStepCount+=1 freshCallCount+=0 calls_to_service=0 series=[\"cleat_replay_failures_total{worker_id=\\\"\\\"} 1\" \"cleat_replay_steps_total{def_name=\\\"def-g3c\\\",worker_id=\\\"\\\"} 1\"]",
+	"replay_quit":                          "replayStepCount+=1 freshCallCount+=0 calls_to_service=0 series=[\"cleat_replay_steps_total{def_name=\\\"def-g3c\\\",worker_id=\\\"\\\"} 1\"]",
+	"replay_then_a_divergence_then_a_call": "replayStepCount+=2 freshCallCount+=0 calls_to_service=0 series=[\"cleat_replay_failures_total{worker_id=\\\"\\\"} 2\" \"cleat_replay_steps_total{def_name=\\\"def-g3c\\\",worker_id=\\\"\\\"} 2\"]",
+	"suspended_at_the_frontier":            "replayStepCount+=1 freshCallCount+=0 calls_to_service=0 series=[\"cleat_replay_steps_total{def_name=\\\"def-g3c\\\",worker_id=\\\"\\\"} 1\"]",
+	"suspended_fresh":                      "replayStepCount+=0 freshCallCount+=0 calls_to_service=0 series=[]",
+	"suspended_replay_a_recorded_call":     "replayStepCount+=1 freshCallCount+=0 calls_to_service=0 series=[\"cleat_replay_steps_total{def_name=\\\"def-g3c\\\",worker_id=\\\"\\\"} 1\"]",
 }

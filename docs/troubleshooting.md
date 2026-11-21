@@ -364,7 +364,7 @@ for details of the claim pattern.
 ### Symptom: "replay divergence" errors in logs
 
 ```
-replay divergence at step 0: expected call event, got sleep.
+replay divergence at step 0: expected call, got sleep.
   actual request: { truncated }
   expected request: { truncated }
 Run 'cleat vet' on your workflow code to check for common non-determinism issues

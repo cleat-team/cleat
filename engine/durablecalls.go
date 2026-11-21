@@ -113,11 +113,56 @@ func (s *execSession) refuseIfSuspendedWith(call string, answer func() int64) (i
 // caller outside the engine can permit new work in a defer segment.
 func (s *execSession) setDeferDrain(on bool) { s.inDeferDrain = on }
 
+// callRecordsNothing* name the paths on which a call answers WITHOUT recording the call's event, each by the reason its Fresh gives to RecordsNothing, so callStep
+// can list them (RecordsNothingOn) and a Fresh that records nothing for a reason that is not here is reported (cleat#4152, G3). The event cap is NOT one of them:
+// it records a continue_as_new event, which is counted through ContinueAsNewAtEventCap.
+const (
+	callRecordsNothingCancelled = "the workflow was cancelled: the call is not made and the guest is told so"
+	callRecordsNothingHeartbeat = "the worker's heartbeat is presumed lost: the call is not started and the guest is told so"
+	callRecordsNothingHardStop  = "the worker hard-stopped mid-call: its outcome is unknown, so none is recorded and the next worker replays from before it"
+	callRecordsNothingIntent    = "a write-ahead intent that could not be written, completed or honoured: nothing is recorded and the guest is told why"
+)
+
+// callStep is cleat_call as a dispatcher step (cleat#4152, G3): one call event, in the durable-call result layout. The refusals a stop or a suspension asks for,
+// the replay-to-fresh hand-off at the frontier, the divergence report and the consumption of the record are the dispatcher's; what stays in Fresh is
+// everything the call decides for itself (the cancellation poll, a worker presumed lost, the event cap, a hard stop, a write-ahead intent).
+var callStep = stepSpec{
+	Name:    "call",
+	Effect:  effectEffect,
+	Records: recordsOne,
+	Want:    EventTypeCall,
+	// The guest decodes result<string, call-failure>: a divergence is answered in the durable-call layout (ABI.md, "Return packing" of cleat_call).
+	// AfterSuspend is left nil on purpose, as for every durable-call-family spec: the refusal after a suspension is the dispatcher's and answers the stop word.
+	Result: layoutDurableCall,
+	Identity: func(a stepArgs, rec *EventRecord) string {
+		if rec.Service != a.s1 || rec.Op != a.s2 {
+			return fmt.Sprintf("call %s.%s, recorded %s.%s", a.s1, a.s2, rec.Service, rec.Op)
+		}
+		return ""
+	},
+	RecordsNothingOn: []string{callRecordsNothingCancelled, callRecordsNothingHeartbeat, callRecordsNothingHardStop, callRecordsNothingIntent},
+	// What the plain call printed on a divergence and docs/troubleshooting.md shows: the two request bodies (TestEngineReplayDivergence pins the labels).
+	DivergenceDetail: requestDivergenceDetail,
+	Decode: func(c *stepCtx, rec *EventRecord) int64 {
+		return c.s.answerRecordedCall(c.ctx, c.m, *rec, c.args.outPtr, c.args.outMaxLen)
+	},
+	Fresh: func(c *stepCtx) int64 { return c.s.freshCall(c) },
+}
+
+func init() { registerStepSpec(&callStep) }
+
+// DurableCall is cleat_call. A call made while the session is replaying is a replay step, and it is counted FIRST, before anything is read: the old
+// replayCall counted it before it read the record, so a replay that then diverged, quit or reached the frontier and handed off to a fresh call had been counted
+// too, and the dispatcher counts none of this for any call that goes through it. a_call_emits_the_same_counters_on_replay_and_fresh_before_the_dispatcher_test.go
+// pins the counts and this is what keeps them (cleat#4152, G3).
 func (s *execSession) DurableCall(ctx context.Context, m api.Module, service, operation, requestJSON string, responsePtr, responseMaxLen uint32) int64 {
 	if s.isReplay {
-		return s.replayCall(ctx, m, service, operation, requestJSON, responsePtr, responseMaxLen)
+		if s.engine.Metrics != nil {
+			s.engine.Metrics.RecordReplayStep(ctx, s.defName)
+		}
+		atomic.AddInt64(&replayStepCount, 1)
 	}
-	return s.freshCall(ctx, m, service, operation, requestJSON, responsePtr, responseMaxLen)
+	return s.step(ctx, m, &callStep, stepArgs{s1: service, s2: operation, s3: requestJSON, outPtr: responsePtr, outMaxLen: responseMaxLen})
 }
 
 // requestDivergenceDetail is the detail of a call that carries a request body: the plain call, the retried call and the heartbeat call all printed these two lines
@@ -157,17 +202,13 @@ func (s *execSession) refuseAtEventCap(c *stepCtx) bool {
 	return false
 }
 
-func (s *execSession) freshCall(ctx context.Context, m api.Module, service, operation, requestJSON string, responsePtr, responseMaxLen uint32) int64 {
-	// The refusal lives HERE and not in DurableCall: this function is reached from the non-replay entry AND from replayCall at the replay
-	// frontier, and a defer segment over a run that has history starts in replay, so its body's first new call arrives by the second
-	// way. A refusal only in the entry was skipped (cleat#4143, measured on a real worker: a terminate's segment made the body's next
-	// call and never ran the registered cleanup). SetScope's refusal (cleat#4091) and AcquireLock's (cleat#4140) are now the dispatcher's, for both ways in (cleat#4211).
-	if s.stopBeforeNewWork() {
-		return callSuspendSentinel
-	}
-	if res, ok := s.refuseIfSuspended("DurableCall", callSuspendSentinel); ok {
-		return res
-	}
+// freshCall is the call's Fresh: it runs once the dispatcher has decided fresh work is allowed. The refusal for a stop (a defer segment, a shutdown, a refused
+// event write) and for a session that has already suspended is the dispatcher's, applied on BOTH ways in (a call that arrives fresh and one that reaches the
+// replay frontier), which is what freshCall used to apply itself for the second way after cleat#4143.
+func (s *execSession) freshCall(c *stepCtx) int64 {
+	ctx, m := c.ctx, c.m
+	service, operation, requestJSON := c.args.s1, c.args.s2, c.args.s3
+	responsePtr, responseMaxLen := c.args.outPtr, c.args.outMaxLen
 	atomic.AddInt64(&freshCallCount, 1)
 
 	if s.engine.Metrics != nil {
@@ -205,6 +246,7 @@ func (s *execSession) freshCall(ctx context.Context, m api.Module, service, oper
 		if err == nil && cancelled {
 			// Not retryable: the workflow was cancelled, so repeating the call
 			// is the one thing the caller must not do.
+			c.RecordsNothing(callRecordsNothingCancelled)
 			written, _ := s.writeResult(ctx, m, responsePtr, cancelledCallError, responseMaxLen)
 			return packDurableCallResult(int(written), callErrorUnknown, 1)
 		}
@@ -216,6 +258,7 @@ func (s *execSession) freshCall(ctx context.Context, m api.Module, service, oper
 	// cap (which itself starts new work -- a fresh run via ContinueAsNew --
 	// that a fenced-out worker has no business kicking off either).
 	if s.engine.canStartNewWork != nil && !s.engine.canStartNewWork() {
+		c.RecordsNothing(callRecordsNothingHeartbeat)
 		written, _ := s.writeResult(ctx, m, responsePtr, heartbeatPresumedLostCallError, responseMaxLen)
 		return packDurableCallResult(int(written), callFailureCode, 1)
 	}
@@ -224,7 +267,7 @@ func (s *execSession) freshCall(ctx context.Context, m api.Module, service, oper
 	// ContinueAsNew to start a fresh run with reset event_count. Events are
 	// tracked locally in the session (no DB query per call).
 	if s.engine.maxEventsPerWorkflow > 0 && s.eventCount >= s.engine.maxEventsPerWorkflow && !s.autoContinueAsNewTriggered {
-		s.triggerEventCapContinueAsNew(ctx, m)
+		c.ContinueAsNewAtEventCap()
 		// Refuse the call rather than closing the module.
 		//
 		// This branch used to call m.CloseWithExitCode to stop the guest and
@@ -261,7 +304,15 @@ func (s *execSession) freshCall(ctx context.Context, m api.Module, service, oper
 	// see freshCallWithIntent for why it must not also flow through
 	// recordEvent -- so it returns here rather than falling through.
 	if s.engine.callSemantics(service, operation) == WriteAheadIntent {
-		resp, err := s.freshCallWithIntent(callCtx, service, operation, requestJSON, step)
+		resp, intentRec, intentChecksum, recorded, err := s.freshCallWithIntent(callCtx, service, operation, requestJSON, step)
+		if recorded {
+			c.RecordPersisted(intentRec, intentChecksum)
+		}
+		if err != nil && !recorded {
+			// The intent could not be written, completed or honoured: nothing reached the history. A service error that WAS recorded is an event like any
+			// other and is not this path.
+			c.RecordsNothing(callRecordsNothingIntent)
+		}
 		if DebugTiming {
 			s.engine.log().InfoContext(ctx, "TIMING: freshCallWithIntent", "workflow_id", s.workflowID, "step", step, "call_ms", time.Since(callStart).Milliseconds())
 		}
@@ -285,6 +336,7 @@ func (s *execSession) freshCall(ctx context.Context, m api.Module, service, oper
 		// from before it under the same idempotency key. The error handed to
 		// the guest unwinds its error path, draining its defer table.
 		s.suspendErr = &SuspendError{Reason: shutdownSuspendReason}
+		c.RecordsNothing(callRecordsNothingHardStop)
 		written, _ := s.writeResult(ctx, m, responsePtr, shutdownCallError, responseMaxLen)
 		return packDurableCallResult(int(written), callFailureCode, 1)
 	}
@@ -303,7 +355,7 @@ func (s *execSession) freshCall(ctx context.Context, m api.Module, service, oper
 		Response:  resp,
 		Err:       callErr,
 	}
-	s.recordEvent(rec)
+	c.Record(rec)
 
 	if DebugTiming {
 		s.engine.log().InfoContext(ctx, "TIMING: freshCall", "workflow_id", s.workflowID, "step", rec.Step, "call_ms", callElapsed.Milliseconds())
@@ -316,55 +368,6 @@ func (s *execSession) freshCall(ctx context.Context, m api.Module, service, oper
 
 	written, writtenEC := s.writeOut(ctx, m, responsePtr, resp, responseMaxLen)
 	return packDurableCallResult(int(written), writeErrorClass(writtenEC), writtenEC)
-}
-
-func (s *execSession) replayCall(ctx context.Context, m api.Module, service, operation, requestJSON string, responsePtr, responseMaxLen uint32) int64 {
-
-	if s.engine.Metrics != nil {
-		s.engine.Metrics.RecordReplayStep(ctx, s.defName)
-	}
-	atomic.AddInt64(&replayStepCount, 1)
-
-	if s.stepCount < len(s.history) {
-		rec := s.history[s.stepCount]
-		if !s.advanceReplayStep(ctx, &rec) {
-			return 0
-		}
-
-		if rec.EventType != EventTypeCall {
-			if s.engine.Metrics != nil {
-				s.engine.Metrics.RecordReplayFailure(ctx)
-			}
-			errMsg := fmt.Sprintf("replay divergence at step %d: expected call event, got %s.\n  actual request: %s\n  expected request: %s\nRun 'cleat vet' on your workflow code to check for common non-determinism issues (time.Now(), random values, map iteration, goroutines).",
-				rec.Step, rec.EventType,
-				truncateWithHash(requestJSON, maxPayloadLen),
-				truncateWithHash(rec.Request, maxPayloadLen))
-			// Not retryable: a divergence is a bug in the workflow code, and
-			// running the same call again produces the same divergence.
-			written, _ := s.writeResult(ctx, m, responsePtr, errMsg, responseMaxLen)
-			return packDurableCallResult(int(written), callErrorUnknown, 1)
-		}
-
-		if rec.Service != service || rec.Op != operation {
-			if s.engine.Metrics != nil {
-				s.engine.Metrics.RecordReplayFailure(ctx)
-			}
-			errMsg := fmt.Sprintf("replay divergence at step %d: workflow called %s.%s but history has %s.%s.\n  actual request: %s\n  expected request: %s\nRun 'cleat vet' on your workflow code to check for common non-determinism issues (time.Now(), random values, map iteration, goroutines).",
-				rec.Step, service, operation, rec.Service, rec.Op,
-				truncateWithHash(requestJSON, maxPayloadLen),
-				truncateWithHash(rec.Request, maxPayloadLen))
-			// Not retryable: a divergence is a bug in the workflow code, and
-			// running the same call again produces the same divergence.
-			written, _ := s.writeResult(ctx, m, responsePtr, errMsg, responseMaxLen)
-			return packDurableCallResult(int(written), callErrorUnknown, 1)
-		}
-
-		return s.answerRecordedCall(ctx, m, rec, responsePtr, responseMaxLen)
-	}
-
-	// Past recorded history — switch to fresh execution.
-	s.exitReplay()
-	return s.freshCall(ctx, m, service, operation, requestJSON, responsePtr, responseMaxLen)
 }
 
 // answerRecordedCall answers a call from the record that was consumed for it: a pending intent (the call was dispatched and the outcome was never
