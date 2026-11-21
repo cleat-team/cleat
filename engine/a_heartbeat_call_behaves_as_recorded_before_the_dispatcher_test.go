@@ -165,8 +165,15 @@ func (c g3hCase) observe() string {
 	if c.cancel && beats > 0 {
 		stepNow = fmt.Sprintf("%d+hb+1", startStep)
 	}
-	return fmt.Sprintf("res=%#x wrote=%q isReplay=%v step=%s recorded=[%s] calls=%d others=%d keysFromStep=%v",
+	out := fmt.Sprintf("res=%#x wrote=%q isReplay=%v step=%s recorded=[%s] calls=%d others=%d keysFromStep=%v",
 		res, string(buf[:n]), s.isReplay, stepNow, strings.Join(events, " "), caller.attempts, caller.others, caller.stepsOf("wf-g3h"))
+	// A spec that did not do what it declared is part of what the call did, and is appended ONLY when there is one, so a row that has none reads
+	// exactly as it did before the call moved. The interval refusals record nothing by design and must say so (RefusedWithoutRecording): without
+	// this a spec that forgot to would pass every row (measured: dropping that call left the table green).
+	if len(s.stepViolations) > 0 {
+		out += fmt.Sprintf(" SPEC-VIOLATIONS=%q", s.stepViolations)
+	}
+	return out
 }
 
 const g3hHour = int64(3600 * 1000)
@@ -213,6 +220,29 @@ func g3hCases() map[string]g3hCase {
 	pending.Response, pending.Pending = "", true
 	cases["replay_pending_intent_is_reported_ambiguous"] = g3hCase{mode: "ok", replaying: true, history: []EventRecord{pending}, intervalMs: g3hHour}
 	cases["replay_quit"] = g3hCase{mode: "ok", replaying: true, quit: true, history: []EventRecord{call(0)}, intervalMs: g3hHour}
+	// ROWS ADDED FOR THE MIGRATION (cleat#4152, G3): shapes the dispatcher's Role and Identity read differently from the old replay loop, measured on the
+	// old code first. Heartbeats of ANOTHER operation, a foreign record after the heartbeats, and a stop, a refused write or a zero interval when the
+	// history ends inside the run or at a recorded terminal call.
+	hbOther := hb(0)
+	hbOther.Op = "another"
+	cases["replay_heartbeats_of_another_operation_then_the_call"] = g3hCase{mode: "ok", replaying: true, history: []EventRecord{hbOther, call(1)}, intervalMs: g3hHour}
+	cases["replay_heartbeats_then_a_foreign_record"] = g3hCase{mode: "ok", replaying: true, history: []EventRecord{hb(0), hb(1), {Step: 2, EventType: EventTypeDurableSend, Service: "svc", Op: "op"}}, intervalMs: g3hHour}
+	callOther := call(1)
+	callOther.Op = "another"
+	cases["replay_heartbeats_then_a_call_of_another_operation"] = g3hCase{mode: "ok", replaying: true, history: []EventRecord{hb(0), callOther}, intervalMs: g3hHour}
+	cases["replay_mid_heartbeat_of_another_operation"] = g3hCase{mode: "ok", replaying: true, history: []EventRecord{hbOther}, intervalMs: g3hHour}
+	errAfterBeat := errRec
+	errAfterBeat.Step = 1
+	cases["replay_heartbeats_then_an_error_event"] = g3hCase{mode: "ok", replaying: true, history: []EventRecord{hb(0), errAfterBeat}, intervalMs: g3hHour}
+	pendingAfterBeat := pending
+	pendingAfterBeat.Step = 1
+	cases["replay_heartbeats_then_a_pending_intent"] = g3hCase{mode: "ok", replaying: true, history: []EventRecord{hb(0), pendingAfterBeat}, intervalMs: g3hHour}
+	cases["segment_replay_terminal_call"] = g3hCase{mode: "ok", deferPhase: true, replaying: true, history: []EventRecord{call(0)}, intervalMs: g3hHour}
+	cases["segment_mid_heartbeat"] = g3hCase{mode: "ok", deferPhase: true, replaying: true, history: []EventRecord{hb(0), hb(1)}, intervalMs: g3hHour}
+	cases["write_failed_mid_heartbeat"] = g3hCase{mode: "ok", writeFail: true, replaying: true, history: []EventRecord{hb(0), hb(1)}, intervalMs: g3hHour}
+	cases["shutdown_mid_heartbeat"] = g3hCase{mode: "ok", shutdown: true, replaying: true, history: []EventRecord{hb(0), hb(1)}, intervalMs: g3hHour}
+	cases["replay_mid_heartbeat_interval_zero"] = g3hCase{mode: "ok", replaying: true, history: []EventRecord{hb(0)}, intervalMs: 0}
+	cases["replay_terminal_call_interval_zero"] = g3hCase{mode: "ok", replaying: true, history: []EventRecord{call(0)}, intervalMs: 0}
 	return cases
 }
 
@@ -226,8 +256,29 @@ func g3hCases() map[string]g3hCase {
 //     that ends inside the call resumes it with the idempotency key of the step the FIRST incarnation started at (keysFromStep=[0] and [1]). They
 //     recorded [2] and [3] before the fix, a key derived from a LATER step because the replay consumed the heartbeats before the fresh call took its
 //     step; the retry call keeps the first incarnation's step for the same reason (cleat#1145).
-//   - replay_divergence_wrong_event_type and replay_divergence_other_operation end at step 1: a divergence CONSUMED the record before reporting it
-//     (the #4152 defect), so the call that owns it loses it.
+//   - (MOVED by the heartbeat call's migration onto the dispatcher, cleat#4152 G3, and now pinned as the dispatcher's) the divergence rows. The old
+//     replay loop CONSUMED the heartbeats and then the record at the end of them before reporting a divergence, so the call that owns that record
+//     loses it (the #4152 defect); the dispatcher reads the run first and consumes NOTHING for a divergence (cleat#4157), in its one shared message.
+//     Six rows moved, measured on develop 5c489fb7 against the migrated call, the other 27 byte-identical. In four the answer is the same (error
+//     code 1, call-error code callErrorUnknown, in the durable-call layout) and the message text and the step differ:
+//     replay_divergence_wrong_event_type                         step 1 -> 0
+//     replay_divergence_other_operation                          step 1 -> 0
+//     replay_heartbeats_then_a_foreign_record (added)            step 3 -> 0: the record after the heartbeats was swallowed with them
+//     replay_heartbeats_then_a_call_of_another_operation (added) step 2 -> 0
+//     and TWO the old table could not see, because the old loop never compared a heartbeat's service or operation:
+//     replay_heartbeats_of_another_operation_then_the_call (added)  OLD: the heartbeats of ANOTHER operation were accepted and the recorded
+//     result answered. NEW: a divergence naming the heartbeat.
+//     replay_mid_heartbeat_of_another_operation (added)              OLD: the heartbeats of another operation were consumed and the call was
+//     RESUMED, performing a real service call (calls=1). NEW: a divergence,
+//     no call. This is cleat#4211's shape: a record of the right type accepted
+//     without asking whether it names THIS call.
+//
+// THE LAYOUT IS PINNED BY THESE ROWS, and it was wrong once on the way here. The dispatcher's reporter answers in the SIMPLE layout (the message
+// length at bit 32); this call's guest decodes the DURABLE-CALL layout (length at bits 40-63, call-error code at bits 8-39), so the first version of
+// the move answered every divergence in a layout the guest reads as a garbage call-error code and a one-byte message. I regenerated this table from
+// that output and labelled the changed rows "message shape"; what caught it was heartbeats_test.go, which asserts the call-error code, and the
+// comparison below, which decodes the result's fields instead of comparing it as text. stepSpec.DurableCallResult is the repair, and a mutant that
+// clears it turns every divergence row here red.
 //
 // replay_pending_intent_is_reported_ambiguous: a call record with no outcome (dispatched, the worker lost before the outcome was recorded) is reported
 // to the guest as ambiguous, with no service call and replay left on (cleat-review2, on #4248). WHAT THIS ROW DOES NOT PIN, and an earlier name for
@@ -248,21 +299,33 @@ var g3hGolden = map[string]string{
 	"fresh_service_error":                                    "res=0x1a0000000201 wrote=\"the service is unavailable\" isReplay=false step=1 recorded=[call/step=0/svc.op/err=\"the service is unavailable\"/nonretry=false/code=\"\"] calls=1 others=0 keysFromStep=[0]",
 	"fresh_success":                                          "res=0xb0000000000 wrote=\"{\\\"ok\\\":true}\" isReplay=false step=1 recorded=[call/step=0/svc.op/err=\"\"/nonretry=false/code=\"\"] calls=1 others=0 keysFromStep=[0]",
 	"frontier_is_a_fresh_call":                               "res=0xb0000000000 wrote=\"{\\\"ok\\\":true}\" isReplay=false step=2 recorded=[call/step=1/svc.op/err=\"\"/nonretry=false/code=\"\"] calls=1 others=0 keysFromStep=[1]",
-	"replay_divergence_other_operation":                      "res=0x1050000000001 wrote=\"replay divergence at step 0: workflow called svc.op but history has svc.another.\\n  actual request: {}\\n  expected request: {}\\nRun 'cleat vet' on your workflow code to check for common non-determinism issues (time.Now(), random values, map iteration, goroutines).\" isReplay=true step=1 recorded=[] calls=0 others=0 keysFromStep=[]",
-	"replay_divergence_wrong_event_type":                     "res=0xf60000000001 wrote=\"replay divergence at step 0: expected call event, got durable_send.\\n  actual request: {}\\n  expected request: \\nRun 'cleat vet' on your workflow code to check for common non-determinism issues (time.Now(), random values, map iteration, goroutines).\" isReplay=true step=1 recorded=[] calls=0 others=0 keysFromStep=[]",
+	"replay_divergence_other_operation":                      "res=0x1140000000001 wrote=\"replay divergence at step 0: call_with_heartbeat asked for something other than the call recorded there: call svc.op, recorded svc.another.\\nRun 'cleat vet' on your workflow code to check for common non-determinism issues (time.Now(), random values, map iteration, goroutines).\" isReplay=true step=0 recorded=[] calls=0 others=0 keysFromStep=[]",
+	"replay_divergence_wrong_event_type":                     "res=0xc60000000001 wrote=\"replay divergence at step 0: expected call, got durable_send.\\nRun 'cleat vet' on your workflow code to check for common non-determinism issues (time.Now(), random values, map iteration, goroutines).\" isReplay=true step=0 recorded=[] calls=0 others=0 keysFromStep=[]",
 	"replay_empty_history":                                   "res=0xb0000000000 wrote=\"{\\\"ok\\\":true}\" isReplay=false step=1 recorded=[call/step=0/svc.op/err=\"\"/nonretry=false/code=\"\"] calls=1 others=0 keysFromStep=[0]",
 	"replay_error_event":                                     "res=0x1a0000000201 wrote=\"the service is unavailable\" isReplay=true step=1 recorded=[] calls=0 others=0 keysFromStep=[]",
 	"replay_error_event_non_retryable":                       "res=0x120000000001 wrote=\"workflow cancelled\" isReplay=true step=1 recorded=[] calls=0 others=0 keysFromStep=[]",
+	"replay_heartbeats_of_another_operation_then_the_call":   "res=0x1190000000001 wrote=\"replay divergence at step 0: call_with_heartbeat asked for something other than the heartbeat recorded there: call svc.op, recorded svc.another.\\nRun 'cleat vet' on your workflow code to check for common non-determinism issues (time.Now(), random values, map iteration, goroutines).\" isReplay=true step=0 recorded=[] calls=0 others=0 keysFromStep=[]",
+	"replay_heartbeats_then_a_call_of_another_operation":     "res=0x1140000000001 wrote=\"replay divergence at step 1: call_with_heartbeat asked for something other than the call recorded there: call svc.op, recorded svc.another.\\nRun 'cleat vet' on your workflow code to check for common non-determinism issues (time.Now(), random values, map iteration, goroutines).\" isReplay=true step=0 recorded=[] calls=0 others=0 keysFromStep=[]",
+	"replay_heartbeats_then_a_foreign_record":                "res=0xc60000000001 wrote=\"replay divergence at step 2: expected call, got durable_send.\\nRun 'cleat vet' on your workflow code to check for common non-determinism issues (time.Now(), random values, map iteration, goroutines).\" isReplay=true step=0 recorded=[] calls=0 others=0 keysFromStep=[]",
+	"replay_heartbeats_then_a_pending_intent":                "res=0xb40000000001 wrote=\"[AMBIGUOUS] call outcome unknown at step 1: the external call to svc.op was dispatched but the response was not recorded before a crash. Check the external service before retrying.\" isReplay=true step=2 recorded=[] calls=0 others=0 keysFromStep=[]",
+	"replay_heartbeats_then_an_error_event":                  "res=0x1a0000000201 wrote=\"the service is unavailable\" isReplay=true step=2 recorded=[] calls=0 others=0 keysFromStep=[]",
 	"replay_heartbeats_then_call":                            "res=0xb0000000000 wrote=\"{\\\"ok\\\":true}\" isReplay=true step=3 recorded=[] calls=0 others=0 keysFromStep=[]",
 	"replay_mid_heartbeat_after_a_plain_call":                "res=0xb0000000000 wrote=\"{\\\"ok\\\":true}\" isReplay=false step=4 recorded=[call/step=3/svc.op/err=\"\"/nonretry=false/code=\"\"] calls=1 others=0 keysFromStep=[1]",
+	"replay_mid_heartbeat_interval_zero":                     "res=0x680000000401 wrote=\"cleat: heartbeat interval must be at least 1 ms, got 0 (the host cannot tick at a non-positive interval)\" isReplay=false step=1 recorded=[] calls=0 others=0 keysFromStep=[]",
+	"replay_mid_heartbeat_of_another_operation":              "res=0x1190000000001 wrote=\"replay divergence at step 0: call_with_heartbeat asked for something other than the heartbeat recorded there: call svc.op, recorded svc.another.\\nRun 'cleat vet' on your workflow code to check for common non-determinism issues (time.Now(), random values, map iteration, goroutines).\" isReplay=true step=0 recorded=[] calls=0 others=0 keysFromStep=[]",
 	"replay_mid_heartbeat_resumes_the_call":                  "res=0xb0000000000 wrote=\"{\\\"ok\\\":true}\" isReplay=false step=3 recorded=[call/step=2/svc.op/err=\"\"/nonretry=false/code=\"\"] calls=1 others=0 keysFromStep=[0]",
 	"replay_pending_intent_is_reported_ambiguous":            "res=0xb40000000001 wrote=\"[AMBIGUOUS] call outcome unknown at step 0: the external call to svc.op was dispatched but the response was not recorded before a crash. Check the external service before retrying.\" isReplay=true step=1 recorded=[] calls=0 others=0 keysFromStep=[]",
-	"replay_quit":                                            "res=0x0 wrote=\"\" isReplay=true step=1 recorded=[] calls=0 others=0 keysFromStep=[]",
-	"replay_terminal_call":                                   "res=0xb0000000000 wrote=\"{\\\"ok\\\":true}\" isReplay=true step=1 recorded=[] calls=0 others=0 keysFromStep=[]",
-	"segment_fresh":                                          "res=0x80000000 wrote=\"\" isReplay=false step=0 recorded=[] calls=0 others=0 keysFromStep=[]",
-	"segment_frontier":                                       "res=0x80000000 wrote=\"\" isReplay=false step=1 recorded=[] calls=0 others=0 keysFromStep=[]",
-	"shutdown_fresh":                                         "res=0x80000000 wrote=\"\" isReplay=false step=0 recorded=[] calls=0 others=0 keysFromStep=[]",
-	"write_failed_fresh":                                     "res=0x80000000 wrote=\"\" isReplay=false step=0 recorded=[] calls=0 others=0 keysFromStep=[]",
+	"replay_quit":                        "res=0x0 wrote=\"\" isReplay=true step=1 recorded=[] calls=0 others=0 keysFromStep=[]",
+	"replay_terminal_call":               "res=0xb0000000000 wrote=\"{\\\"ok\\\":true}\" isReplay=true step=1 recorded=[] calls=0 others=0 keysFromStep=[]",
+	"replay_terminal_call_interval_zero": "res=0xb0000000000 wrote=\"{\\\"ok\\\":true}\" isReplay=true step=1 recorded=[] calls=0 others=0 keysFromStep=[]",
+	"segment_fresh":                      "res=0x80000000 wrote=\"\" isReplay=false step=0 recorded=[] calls=0 others=0 keysFromStep=[]",
+	"segment_frontier":                   "res=0x80000000 wrote=\"\" isReplay=false step=1 recorded=[] calls=0 others=0 keysFromStep=[]",
+	"segment_mid_heartbeat":              "res=0x80000000 wrote=\"\" isReplay=false step=2 recorded=[] calls=0 others=0 keysFromStep=[]",
+	"segment_replay_terminal_call":       "res=0xb0000000000 wrote=\"{\\\"ok\\\":true}\" isReplay=true step=1 recorded=[] calls=0 others=0 keysFromStep=[]",
+	"shutdown_fresh":                     "res=0x80000000 wrote=\"\" isReplay=false step=0 recorded=[] calls=0 others=0 keysFromStep=[]",
+	"shutdown_mid_heartbeat":             "res=0x80000000 wrote=\"\" isReplay=false step=2 recorded=[] calls=0 others=0 keysFromStep=[]",
+	"write_failed_fresh":                 "res=0x80000000 wrote=\"\" isReplay=false step=0 recorded=[] calls=0 others=0 keysFromStep=[]",
+	"write_failed_mid_heartbeat":         "res=0x80000000 wrote=\"\" isReplay=false step=2 recorded=[] calls=0 others=0 keysFromStep=[]",
 }
 
 func TestG3hHeartbeatCallBehavesAsRecordedBeforeTheDispatcher(t *testing.T) {
@@ -282,7 +345,9 @@ func TestG3hHeartbeatCallBehavesAsRecordedBeforeTheDispatcher(t *testing.T) {
 			t.Errorf("%s: a situation with no golden row", name)
 		}
 	}
-	if len(g3hGolden) != 21 {
-		t.Errorf("the table has %d rows; this was recorded with 21, so a row was added or removed without saying so", len(g3hGolden))
+	// 21 rows as recorded against the code as it was, plus TWELVE added for the migration (cleat#4152, G3): eight that did not move and four that did
+	// (named in the header above).
+	if len(g3hGolden) != 33 {
+		t.Errorf("the table has %d rows; this was recorded with 33, so a row was added or removed without saying so", len(g3hGolden))
 	}
 }

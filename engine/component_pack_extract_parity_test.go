@@ -163,6 +163,11 @@ func parseDispatchers(t *testing.T) map[string]dispatcherFacts {
 type sessionMethod struct {
 	packers []string
 	callees []string
+	// specs are the step specs a method hands to s.step (the &xStep argument), by variable name. A handler that goes through the dispatcher does not
+	// pack its own word: the layout is the spec's declared Result, so that is what it is measured by (cleat#4152, G3, the first durable-call layout
+	// to move). step itself is NOT followed as a callee: its body reaches the packer of every layout, and following it made a handler that returns the
+	// durable-call layout read as writing at bit 32.
+	specs []string
 }
 
 func parseSessionMethods(t *testing.T) map[string]sessionMethod {
@@ -199,12 +204,74 @@ func parseSessionMethods(t *testing.T) map[string]sessionMethod {
 					}
 				case *ast.SelectorExpr:
 					if x, ok := fun.X.(*ast.Ident); ok && x.Name == "s" {
+						if fun.Sel.Name == "step" {
+							for _, a := range call.Args {
+								if u, ok := a.(*ast.UnaryExpr); ok && u.Op == token.AND {
+									if id, ok := u.X.(*ast.Ident); ok {
+										m.specs = append(m.specs, id.Name)
+									}
+								}
+							}
+							break
+						}
 						m.callees = append(m.callees, fun.Sel.Name)
 					}
 				}
 				return true
 			})
 			out[fn.Name.Name] = m
+		}
+	}
+	return out
+}
+
+// parseSpecLayouts reads, from the source, the Result layout each `var xStep = stepSpec{...}` declares, by variable name. A spec whose Result is not a
+// plain layout identifier is absent from the map, and a handler that goes through it is reported by name, never skipped.
+func parseSpecLayouts(t *testing.T) map[string]string {
+	t.Helper()
+	files, err := filepath.Glob("*.go")
+	if err != nil {
+		t.Fatalf("glob: %v", err)
+	}
+	out := map[string]string{}
+	fset := token.NewFileSet()
+	for _, path := range files {
+		if strings.HasSuffix(path, "_test.go") {
+			continue
+		}
+		f, err := parser.ParseFile(fset, path, nil, 0)
+		if err != nil {
+			continue
+		}
+		for _, decl := range f.Decls {
+			gd, ok := decl.(*ast.GenDecl)
+			if !ok || gd.Tok != token.VAR {
+				continue
+			}
+			for _, sp := range gd.Specs {
+				vs, ok := sp.(*ast.ValueSpec)
+				if !ok || len(vs.Names) != 1 || len(vs.Values) != 1 {
+					continue
+				}
+				lit, ok := vs.Values[0].(*ast.CompositeLit)
+				if !ok {
+					continue
+				}
+				if id, ok := lit.Type.(*ast.Ident); !ok || id.Name != "stepSpec" {
+					continue
+				}
+				for _, e := range lit.Elts {
+					kv, ok := e.(*ast.KeyValueExpr)
+					if !ok {
+						continue
+					}
+					if k, ok := kv.Key.(*ast.Ident); ok && k.Name == "Result" {
+						if v, ok := kv.Value.(*ast.Ident); ok {
+							out[vs.Names[0].Name] = v.Name
+						}
+					}
+				}
+			}
 		}
 	}
 	return out
@@ -238,6 +305,14 @@ func TestEveryComponentDispatcherReadsTheFieldItsHandlerWrote(t *testing.T) {
 		"packAwaitChildResult":   lengthShiftOfPacker(t, "packAwaitChildResult", func(n int) int64 { return packAwaitChildResult(uint32(n), 0) }),
 		"packAwaitPromiseResult": lengthShiftOfPacker(t, "packAwaitPromiseResult", func(n int) int64 { return packAwaitPromiseResult(uint32(n), false, 0) }),
 	}
+	// The length bit a step-delegated handler writes, by the layout its spec declares, measured through the same packers the layouts are built from. The
+	// await-signals layout's length that a component dispatcher reads is its payload length.
+	layoutShift := map[string]int{
+		"layoutSimple":       packerShift["packSimpleResult"],
+		"layoutDurableCall":  packerShift["packDurableCallResult"],
+		"layoutAwaitSignals": lengthShiftOfPacker(t, "packAwaitSignalsResult", func(n int) int64 { return packAwaitSignalsResult(0, uint32(n), false, 0) }),
+	}
+	specLayouts := parseSpecLayouts(t)
 	if extractorShift["extractStringFromPacked"] == extractorShift["extractStringFromSimplePacked"] {
 		t.Fatalf("both extractors read the same bit position (%d). This test can no "+
 			"longer tell a mispairing from a correct one, which makes it vacuous -- "+
@@ -275,6 +350,16 @@ func TestEveryComponentDispatcherReadsTheFieldItsHandlerWrote(t *testing.T) {
 			for s := range shiftsOf(c, seen, depth+1) {
 				got[s] = true
 			}
+		}
+		for _, sp := range m.specs {
+			layout, ok := specLayouts[sp]
+			shift, known := layoutShift[layout]
+			if !ok || !known {
+				t.Errorf("UNMEASURED: %s goes through step with spec %q, whose Result could not be read as a layout identifier (read %q). "+
+					"This is a failure of the check, not a finding about the handler: declare the spec as `var %s = stepSpec{... Result: layoutX ...}`.", name, sp, layout, sp)
+				continue
+			}
+			got[shift] = true
 		}
 		return got
 	}

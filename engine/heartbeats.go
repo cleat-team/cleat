@@ -10,36 +10,56 @@ import (
 	"github.com/cleat-team/cleat/internal/telemetry"
 )
 
-func (s *execSession) DurableCallWithHeartbeat(ctx context.Context, m api.Module, service, operation, requestJSON string, heartbeatIntervalMs int64, responsePtr, responseMaxLen uint32) int64 {
-	if s.isReplay {
-		return s.replayCallWithHeartbeat(ctx, m, service, operation, requestJSON, heartbeatIntervalMs, responsePtr, responseMaxLen)
-	}
-	return s.freshCallWithHeartbeat(ctx, m, service, operation, requestJSON, heartbeatIntervalMs, responsePtr, responseMaxLen, -1)
+// heartbeatStep is the heartbeat call as a dispatcher step (cleat#4152, G3). It is a MULTI-RECORD step: a run of heartbeat events, one per tick while
+// the call ran, then the call's outcome. A history that ends INSIDE the run is a worker lost mid-call, and the call is run again with c.Prefix.
+var heartbeatStep = stepSpec{
+	Name:    "call_with_heartbeat",
+	Effect:  effectEffect,
+	Records: recordsMany,
+	Want:    EventTypeCall,
+	// The guest decodes result<string, call-failure>: a divergence is answered in the durable-call layout (ABI.md, "Return packing" of cleat_call_heartbeat).
+	// AfterSuspend is left nil on purpose: a heartbeat call is refused after a suspension by the dispatcher's own stop refusal, as every durable-call-family
+	// spec is, and a hook of its own would be a second answer to the same question.
+	Result: layoutDurableCall,
+	// The call's service and operation identify it. They are compared on EVERY record of the run, heartbeats included.
+	Identity: func(a stepArgs, rec *EventRecord) string {
+		if rec.Service != a.s1 || rec.Op != a.s2 {
+			return fmt.Sprintf("call %s.%s, recorded %s.%s", a.s1, a.s2, rec.Service, rec.Op)
+		}
+		return ""
+	},
+	Role: func(_ stepArgs, rec *EventRecord) recordRole {
+		switch rec.EventType {
+		case EventTypeHeartbeat:
+			return rolePrefix
+		case EventTypeCall:
+			return roleFinal
+		}
+		return roleForeign
+	},
+	DecodeRun: func(c *stepCtx, run []EventRecord) int64 { return c.s.decodeHeartbeatOutcome(c, &run[len(run)-1]) },
+	Fresh:     func(c *stepCtx) int64 { return c.s.freshCallWithHeartbeat(c) },
 }
 
-// freshCallWithHeartbeat runs the call. resumeStep is -1 for a call that starts here, and otherwise the step a lost worker's FIRST incarnation
-// started the call at, recovered from the heartbeats it recorded (replayCallWithHeartbeat). It decides one thing: the step the idempotency key is
-// derived from. The events this incarnation records still take the session's own steps in order.
-func (s *execSession) freshCallWithHeartbeat(ctx context.Context, m api.Module, service, operation, requestJSON string, heartbeatIntervalMs int64, responsePtr, responseMaxLen uint32, resumeStep int) int64 {
-	// A defer segment's body is refused new work (IMPROVEMENT-PLAN 3.84; the heartbeat call was the eighth fresh path and the last in the
-	// durable-call family, added in 3.111). The refusal lives HERE and not in DurableCallWithHeartbeat: this function is reached from the
-	// non-replay entry AND from replayCallWithHeartbeat at the replay frontier, and a defer segment over a run that has history starts
-	// in replay, so its body's first new call arrives by the second way. A refusal only in the entry was skipped (cleat#4143, measured
-	// on a real worker: a terminate's segment made the body's next call and never ran the registered cleanup). SetScope's refusal
-	// (cleat#4091) and AcquireLock's (cleat#4140) are now the dispatcher's, for both ways in (cleat#4211).
-	//
-	// It is first, before the interval check below and before anything is recorded: ABI.md requires bit 31 to win over any field this
-	// layout carries, and a refusal records no event.
-	//
-	// This one is worse than an ordinary unguarded call rather than equal to it. This function starts a goroutine and a ticker, and
-	// every tick writes an EventTypeHeartbeat through recordEvent -- so an unstopped heartbeat call in a defer segment does not merely
-	// perform the side effect once, it appends history to a workflow that has already terminated, for as long as the call runs.
-	if s.stopBeforeNewWork() {
-		return callSuspendSentinel
-	}
-	if res, ok := s.refuseIfSuspended("DurableCallWithHeartbeat", callSuspendSentinel); ok {
-		return res
-	}
+func init() { registerStepSpec(&heartbeatStep) }
+
+func (s *execSession) DurableCallWithHeartbeat(ctx context.Context, m api.Module, service, operation, requestJSON string, heartbeatIntervalMs int64, responsePtr, responseMaxLen uint32) int64 {
+	return s.step(ctx, m, &heartbeatStep, stepArgs{s1: service, s2: operation, s3: requestJSON, i1: heartbeatIntervalMs, outPtr: responsePtr, outMaxLen: responseMaxLen})
+}
+
+// freshCallWithHeartbeat runs the call: the spec's Fresh. c.Prefix is the heartbeats a lost worker's FIRST incarnation recorded when the history ended
+// inside the call, and it decides one thing: the step the idempotency key is derived from (below). The events this incarnation records still take the
+// session's own steps in order.
+func (s *execSession) freshCallWithHeartbeat(c *stepCtx) int64 {
+	ctx, m := c.ctx, c.m
+	service, operation, requestJSON := c.args.s1, c.args.s2, c.args.s3
+	heartbeatIntervalMs := c.args.i1
+	responsePtr, responseMaxLen := c.args.outPtr, c.args.outMaxLen
+
+	// The refusal for a defer segment, a shutdown and a refused event write is the dispatcher's (step), applied before this runs and on both arrival
+	// paths (cleat#4143, #4211), so bit 31 wins over everything below as it did when this function made the check itself. This function starts a
+	// goroutine and a ticker whose every tick records an event, so a heartbeat call that was not refused in a defer segment would append history to a
+	// workflow that has already terminated for as long as the call ran (IMPROVEMENT-PLAN 3.111).
 
 	// A NON-POSITIVE INTERVAL IS REFUSED BEFORE ANYTHING ELSE, AND THE REFUSAL RECORDS NOTHING. cleat#4105.
 	//
@@ -53,6 +73,7 @@ func (s *execSession) freshCallWithHeartbeat(ctx context.Context, m api.Module, 
 	// did not record, and no service call is made. A value too LARGE is a different case and is not refused: it is clamped below, and
 	// a heartbeat that never ticks inside a hundred years is a legitimate request.
 	if heartbeatIntervalMs <= 0 {
+		c.RecordsNothing("a non-positive interval is refused before anything is recorded: the guest chose a number the host cannot tick at (cleat#4105)")
 		written, _ := s.writeResult(ctx, m, responsePtr,
 			fmt.Sprintf("cleat: heartbeat interval must be at least 1 ms, got %d (the host cannot tick at a non-positive interval)", heartbeatIntervalMs),
 			responseMaxLen)
@@ -77,11 +98,11 @@ func (s *execSession) freshCallWithHeartbeat(ctx context.Context, m api.Module, 
 	// Captured before the goroutine: reading s.stepCount from inside it races
 	// with the session advancing.
 	callStep := s.stepCount
-	// A call resumed after a lost worker keeps the step its FIRST incarnation started at, so every incarnation carries one idempotency key
-	// (cleat#4247). Without this the key was derived from the step AFTER the consumed heartbeats, a different key from the first incarnation's, and a
+	// A call resumed after a lost worker keeps the step its FIRST incarnation started at (the first heartbeat is recorded at the step the call
+	// STARTED at: nothing else is recorded while it runs), so every incarnation carries one idempotency key (cleat#4247). Without this the key was derived from the step AFTER the consumed heartbeats, a different key from the first incarnation's, and a
 	// service that deduplicates on the key performed the call again. The retry call does the same for the same reason (cleat#1145).
-	if resumeStep >= 0 {
-		callStep = resumeStep
+	if len(c.Prefix) > 0 {
+		callStep = c.Prefix[0].Step
 	}
 
 	// Set when the heartbeat loop cancels the call because the workflow was
@@ -111,7 +132,7 @@ func (s *execSession) freshCallWithHeartbeat(ctx context.Context, m api.Module, 
 				Service:   service,
 				Op:        operation,
 			}
-			s.recordEvent(rec)
+			c.Record(rec)
 
 			// Check for cancellation on each heartbeat tick.
 			//
@@ -179,7 +200,7 @@ func (s *execSession) freshCallWithHeartbeat(ctx context.Context, m api.Module, 
 				ErrNonRetryable: nonRetryable,
 				ErrCode:         errClass,
 			}
-			s.recordEvent(rec)
+			c.Record(rec)
 
 			if res.err != nil {
 				written, _ := s.writeResult(ctx, m, responsePtr, callErr, responseMaxLen)
@@ -191,101 +212,46 @@ func (s *execSession) freshCallWithHeartbeat(ctx context.Context, m api.Module, 
 	}
 }
 
-func (s *execSession) replayCallWithHeartbeat(ctx context.Context, m api.Module, service, operation, requestJSON string, heartbeatIntervalMs int64, responsePtr, responseMaxLen uint32) int64 {
-
-	// Consume any heartbeat events that occurred during the call. The first one was recorded at the step the call STARTED at (nothing else is
-	// recorded while it runs), which is the step its idempotency key was derived from: remembered in case the history ends inside the call and the
-	// call has to be run again (cleat#4247).
-	firstBeatStep := -1
-	for s.stepCount < len(s.history) {
-		rec := s.history[s.stepCount]
-		if rec.EventType == EventTypeHeartbeat {
-			if firstBeatStep < 0 {
-				firstBeatStep = rec.Step
-			}
-			if !s.advanceReplayStep(ctx, &rec) {
-				return 0
-			}
-			continue
+// decodeHeartbeatOutcome answers a replayed heartbeat call from its outcome record, the last of the run the dispatcher read. The heartbeats before it
+// are consumed by the dispatcher and carry nothing to decode.
+func (s *execSession) decodeHeartbeatOutcome(c *stepCtx, rec *EventRecord) int64 {
+	ctx, m := c.ctx, c.m
+	responsePtr, responseMaxLen := c.args.outPtr, c.args.outMaxLen
+	// Detect a pending call intent: the external call was dispatched
+	// but the outcome was never persisted.  Return ErrAmbiguous so
+	// the caller can check the external service before retrying.
+	if rec.isPendingIntent() {
+		if s.engine != nil && s.engine.Metrics != nil {
+			s.engine.Metrics.RecordAmbiguousCall(ctx)
 		}
-		break
+		// See the identical call in durablecalls.go: the structural
+		// record is what makes this queryable; the message below is not.
+		s.recordAmbiguity(*rec)
+
+		ambiguousErr := fmt.Sprintf(
+			"[AMBIGUOUS] call outcome unknown at step %d: the external call to %s.%s was dispatched but the response was not recorded before a crash. Check the external service before retrying.",
+			rec.Step, rec.Service, rec.Op)
+		// Not retryable, and this is the case the old blanket "timeout"
+		// got most wrong: the call may well have succeeded. Telling the
+		// guest to retry is telling it to risk a duplicate side effect.
+		written, _ := s.writeResult(ctx, m, responsePtr, ambiguousErr, responseMaxLen)
+		return packDurableCallResult(int(written), callErrorUnknown, 1)
 	}
 
-	// Now find the matching call event.
-	if s.stepCount < len(s.history) {
-		rec := s.history[s.stepCount]
-		if !s.advanceReplayStep(ctx, &rec) {
-			return 0
-		}
-
-		if rec.EventType != EventTypeCall {
-			if s.engine != nil && s.engine.Metrics != nil {
-				s.engine.Metrics.RecordReplayFailure(ctx)
-			}
-			errMsg := fmt.Sprintf("replay divergence at step %d: expected call event, got %s.\n  actual request: %s\n  expected request: %s\nRun 'cleat vet' on your workflow code to check for common non-determinism issues (time.Now(), random values, map iteration, goroutines).",
-				rec.Step, rec.EventType,
-				truncateWithHash(requestJSON, maxPayloadLen),
-				truncateWithHash(rec.Request, maxPayloadLen))
-			// Not retryable: a divergence is a bug in the workflow code, and
-			// running the same call again produces the same divergence.
-			written, _ := s.writeResult(ctx, m, responsePtr, errMsg, responseMaxLen)
-			return packDurableCallResult(int(written), callErrorUnknown, 1)
-		}
-
-		if rec.Service != service || rec.Op != operation {
-			if s.engine != nil && s.engine.Metrics != nil {
-				s.engine.Metrics.RecordReplayFailure(ctx)
-			}
-			errMsg := fmt.Sprintf("replay divergence at step %d: workflow called %s.%s but history has %s.%s.\n  actual request: %s\n  expected request: %s\nRun 'cleat vet' on your workflow code to check for common non-determinism issues (time.Now(), random values, map iteration, goroutines).",
-				rec.Step, service, operation, rec.Service, rec.Op,
-				truncateWithHash(requestJSON, maxPayloadLen),
-				truncateWithHash(rec.Request, maxPayloadLen))
-			// Not retryable: a divergence is a bug in the workflow code, and
-			// running the same call again produces the same divergence.
-			written, _ := s.writeResult(ctx, m, responsePtr, errMsg, responseMaxLen)
-			return packDurableCallResult(int(written), callErrorUnknown, 1)
-		}
-
-		// Detect a pending call intent: the external call was dispatched
-		// but the outcome was never persisted.  Return ErrAmbiguous so
-		// the caller can check the external service before retrying.
-		if rec.isPendingIntent() {
-			if s.engine != nil && s.engine.Metrics != nil {
-				s.engine.Metrics.RecordAmbiguousCall(ctx)
-			}
-			// See the identical call in durablecalls.go: the structural
-			// record is what makes this queryable; the message below is not.
-			s.recordAmbiguity(rec)
-
-			ambiguousErr := fmt.Sprintf(
-				"[AMBIGUOUS] call outcome unknown at step %d: the external call to %s.%s was dispatched but the response was not recorded before a crash. Check the external service before retrying.",
-				rec.Step, rec.Service, rec.Op)
-			// Not retryable, and this is the case the old blanket "timeout"
-			// got most wrong: the call may well have succeeded. Telling the
-			// guest to retry is telling it to risk a duplicate side effect.
-			written, _ := s.writeResult(ctx, m, responsePtr, ambiguousErr, responseMaxLen)
-			return packDurableCallResult(int(written), callErrorUnknown, 1)
-		}
-
-		if rec.Err != "" {
-			// The classification comes off the event, matching how replayCall
-			// (durablecalls.go) handles the same concern for the plain
-			// DurableCall path. freshCallWithHeartbeat has persisted
-			// ErrNonRetryable since the cancelledByWorkflow branch was added
-			// (see the note there); this used to hardcode callFailureCode with
-			// a comment claiming the class "was never persisted", which that
-			// change made false. Both paths must derive the code from the
-			// event the same way, or the same step is retryable on the first
-			// run and non-retryable on the replay of it.
-			written, _ := s.writeResult(ctx, m, responsePtr, rec.Err, responseMaxLen)
-			return packDurableCallResult(int(written), recordedFailureCode(rec.ErrNonRetryable), 1)
-		}
-
-		written, writtenEC := s.writeOut(ctx, m, responsePtr, rec.Response, responseMaxLen)
-		return packDurableCallResult(int(written), writeErrorClass(writtenEC), writtenEC)
+	if rec.Err != "" {
+		// The classification comes off the event, matching how replayCall
+		// (durablecalls.go) handles the same concern for the plain
+		// DurableCall path. freshCallWithHeartbeat has persisted
+		// ErrNonRetryable since the cancelledByWorkflow branch was added
+		// (see the note there); this used to hardcode callFailureCode with
+		// a comment claiming the class "was never persisted", which that
+		// change made false. Both paths must derive the code from the
+		// event the same way, or the same step is retryable on the first
+		// run and non-retryable on the replay of it.
+		written, _ := s.writeResult(ctx, m, responsePtr, rec.Err, responseMaxLen)
+		return packDurableCallResult(int(written), recordedFailureCode(rec.ErrNonRetryable), 1)
 	}
 
-	// Past recorded history — switch to fresh execution.
-	s.exitReplay()
-	return s.freshCallWithHeartbeat(ctx, m, service, operation, requestJSON, heartbeatIntervalMs, responsePtr, responseMaxLen, firstBeatStep)
+	written, writtenEC := s.writeOut(ctx, m, responsePtr, rec.Response, responseMaxLen)
+	return packDurableCallResult(int(written), writeErrorClass(writtenEC), writtenEC)
 }

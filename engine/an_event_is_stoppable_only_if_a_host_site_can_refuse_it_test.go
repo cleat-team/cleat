@@ -33,7 +33,7 @@ var stopSiteEvents = map[string]stopEvent{
 	// The per-attempt loop of the same host call (cleat#4210): a refused event write stops the run between attempts, with the same sentinel the call's entry
 	// returns, so the SDKs' existing guard on that call covers it.
 	"freshCallWithRetry":       {typ: EventTypeCall},
-	"freshCallWithHeartbeat":   {typ: EventTypeCall},
+	"DurableCallWithHeartbeat": {typ: EventTypeCall},
 	"freshPluginCall":          {typ: EventTypePluginCall},
 	"freshPluginCallStreaming": {typ: EventTypePluginCall},
 	"SideEffect":               {typ: EventTypeSideEffect},
