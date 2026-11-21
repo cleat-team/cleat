@@ -12,6 +12,7 @@
 //	{"op":"side_effect","name":"S"}        a frozen non-reproducible value (the clock), then a call that reports the value the guest HELD
 //	{"op":"call_retry","name":"R","attempts":5,"fail":2}   a call under a retry policy; the service fails its first `fail` requests
 //	{"op":"await0","name":"go","hit":"HIT","miss":"MISS"}   a signal wait with no wait, then a call named for the branch taken
+//	{"op":"await_signal","name":"go","ms":8000,"hit":"HIT","miss":"MISS"}   a signal wait that WAITS up to ms, then a call named for the branch taken (cleat#4306)
 //	{"op":"continue_as_new","name":"POST"}   continues as a new run whose only operation is a call named POST
 //	{"op":"await_promise","name":"p","ms":1500,"hit":"RES","miss":"TIMEDOUT"}   await an unresolved promise, then a call named for the outcome
 //	{"op":"set_scope","name":"k"}   enter the virtual object ("chaos","k"): the host takes its key, or suspends while another run holds it
@@ -116,6 +117,22 @@ func Script(h cleat.HostCalls, input string) (string, error) {
 			// A signal wait with NO wait (timeout 0): it returns at once, with a signal if one is already there and a timeout if not. The branch
 			// taken is made visible to the service as a call named for it, so a replay that takes the other branch performs a different effect.
 			_, _, timedOut, err := h.DurableAwaitSignals([]string{o.Name}, 0)
+			if err != nil {
+				return "", err
+			}
+			branch := o.Hit
+			if timedOut {
+				branch = o.Miss
+			}
+			if _, err := h.DurableCall("chaos", branch, request(s.Run, branch, "")); err != nil {
+				return "", err
+			}
+			seen[branch] = "1"
+		case "await_signal":
+			// A signal wait that WAITS for up to o.Ms (cleat#4306). It is await0 with a real timeout: the branch taken is made visible to the service as a call named for it
+			// (o.Hit if the signal arrived, o.Miss if the wait timed out), and the service records WHEN that call arrived, which is how a harness measures the time from a
+			// signal's commit to the guest's next step. A held wait and a suspended-and-replayed one both end in the same call.
+			_, _, timedOut, err := h.DurableAwaitSignals([]string{o.Name}, o.Ms)
 			if err != nil {
 				return "", err
 			}
