@@ -43,6 +43,7 @@ func settlementIdentity(promiseID string, rec *EventRecord, op string) string {
 // still gets through (inDeferDrain). Measured against a real store, cleat#4079 audit row create_promise.
 var createPromiseStep = stepSpec{
 	Name:    "create_promise",
+	Result:  layoutSimple,
 	Effect:  effectEffect,
 	Records: recordsOne,
 	Want:    EventTypeCreatePromise,
@@ -181,7 +182,9 @@ func awaitPromiseIdentity(a stepArgs, rec *EventRecord) string {
 // that has already suspended all recorded the await and suspended as usual (four rows of the characterization table), and that is kept.
 // Whether any of them should be refused is a separate decision.
 var awaitPromiseStep = stepSpec{
-	Name:             "await_promise",
+	Name: "await_promise",
+	// resultLen 32-63, timedOut 16-31, errCode 0-15: the divergence decodes exactly as the simple layout (cleat_await_promise)
+	Result:           layoutSimple,
 	Effect:           effectEffect,
 	Records:          recordsMany,
 	Want:             EventTypePromiseResolved,
@@ -349,6 +352,7 @@ func (s *execSession) ResolvePromise(ctx context.Context, m api.Module, promiseI
 // anything is recorded, so a refused call leaves no event.
 var resolvePromiseStep = stepSpec{
 	Name:    "resolve_promise",
+	Result:  layoutSimple,
 	Effect:  effectEffect,
 	Records: recordsOne,
 	Want:    EventTypePromiseResolved,
@@ -403,6 +407,7 @@ func (s *execSession) RejectPromise(ctx context.Context, m api.Module, promiseID
 // type alone.
 var rejectPromiseStep = stepSpec{
 	Name:    "reject_promise",
+	Result:  layoutSimple,
 	Effect:  effectEffect,
 	Records: recordsOne,
 	Want:    EventTypePromiseRejected,

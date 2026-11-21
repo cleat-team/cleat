@@ -482,6 +482,7 @@ func decodeRecordedSideEffect(c *stepCtx, rec *EventRecord) int64 {
 
 var sideEffectStep = stepSpec{
 	Name:       "side_effect",
+	Result:     layoutSimple,
 	Effect:     effectEffect,
 	Records:    recordsOne,
 	Want:       EventTypeSideEffect,
@@ -537,6 +538,7 @@ func (s *execSession) SideEffectRecorded(ctx context.Context, m api.Module, resp
 // 0 where the lookup used to answer the stop sentinel (the dispatcher answers 0 for every spec; debugger-only).
 var sideEffectRecordedStep = stepSpec{
 	Name:                    "side_effect_recorded",
+	Result:                  layoutSimple,
 	Effect:                  effectEffect,
 	Records:                 recordsNone,
 	Want:                    EventTypeSideEffect,
@@ -600,6 +602,7 @@ func (s *execSession) Fetch(ctx context.Context, m api.Module, method, url, head
 // headers are NOT compared, as before.
 var fetchStep = stepSpec{
 	Name:    "fetch",
+	Result:  layoutSimple,
 	Effect:  effectEffect,
 	Records: recordsOne,
 	Want:    EventTypeFetch,

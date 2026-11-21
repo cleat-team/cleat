@@ -26,7 +26,7 @@ const (
 // first poll already found the answer. Its Role is the multi-record run W2a reads: the await record is the prefix, the outcome the final.
 func awaitSpec(inbox *fakeInbox) *stepSpec {
 	return &stepSpec{
-		Name: "fake_await", Effect: effectEffect, Records: recordsMany, Want: runFinalEvent,
+		Name: "fake_await", Result: layoutSimple, Effect: effectEffect, Records: recordsMany, Want: runFinalEvent,
 		NoIdentity: "a fake await with nothing to compare",
 		Role: func(_ stepArgs, rec *EventRecord) recordRole {
 			switch rec.EventType {

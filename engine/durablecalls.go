@@ -1016,6 +1016,7 @@ func (s *execSession) DurableDefer(ctx context.Context, m api.Module, descriptio
 // replay, and the id is generated from the step. The reviewer decides (Revision 3 of the design).
 var deferStep = stepSpec{
 	Name:       "defer",
+	Result:     layoutSimple,
 	Effect:     effectEffect,
 	Records:    recordsOne,
 	Want:       EventTypeDefer,
@@ -1114,6 +1115,7 @@ func (s *execSession) DurableSend(ctx context.Context, m api.Module, service, op
 // which the old code did not either.
 var durableSendStep = stepSpec{
 	Name:    "durable_send",
+	Result:  layoutSimple,
 	Effect:  effectEffect,
 	Records: recordsOne,
 	Want:    EventTypeDurableSend,

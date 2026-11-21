@@ -299,7 +299,10 @@ func (s *execSession) AwaitChild(ctx context.Context, m api.Module, runID string
 //     child-await suspend word (packAwaitChildResultSuspend, 1<<62, NOT callSuspendSentinel: ABI.md 2.22);
 //   - a pending record is answered OVER, with later history left unread when there is any (cleat#4285: OverPending says so).
 var awaitChildStep = stepSpec{
-	Name:        "await_child",
+	Name: "await_child",
+	// The simple layout: errCode in the low bits and the result length from bit 32 (packAwaitChildResult); the suspend word is 1<<62 and is the
+	// spec's own, not the durable-call stop bit.
+	Result:      layoutSimple,
 	Effect:      effectEffect,
 	Records:     recordsOne,
 	Want:        EventTypeAwaitChild,
@@ -688,7 +691,10 @@ func (s *execSession) AwaitAllChildren(ctx context.Context, m api.Module, runIDs
 // It records MANY by the dispatcher's vocabulary because one of its answers records nothing: a request that is not valid JSON answers an error and
 // writes no event, which the shape check reads as declared (RecordsNothing).
 var awaitAllChildrenStep = stepSpec{
-	Name:    "await_all_children",
+	Name: "await_all_children",
+	// The simple layout: errCode in the low bits and the result length from bit 32 (packAwaitChildResult); the suspend word is 1<<62 and is the
+	// spec's own, not the durable-call stop bit.
+	Result:  layoutSimple,
 	Effect:  effectEffect,
 	Records: recordsMany,
 	Want:    EventTypeAwaitAllChildren,

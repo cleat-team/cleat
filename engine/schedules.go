@@ -75,6 +75,7 @@ func (s *execSession) ScheduleCron(ctx context.Context, m api.Module, workflowNa
 // thing the check exists to catch.
 var scheduleCronStep = stepSpec{
 	Name:    "schedule_cron",
+	Result:  layoutSimple,
 	Effect:  effectEffect,
 	Records: recordsOne,
 	Want:    EventTypeScheduleCron,
@@ -218,6 +219,7 @@ func (s *execSession) DeleteCron(ctx context.Context, m api.Module, scheduleID s
 // (the replay-failure metric) and answers error code 1, as it did.
 var deleteCronStep = stepSpec{
 	Name:    "delete_cron",
+	Result:  layoutSimple,
 	Effect:  effectEffect,
 	Records: recordsOne,
 	Want:    EventTypeDeleteCron,
@@ -302,6 +304,7 @@ func (s *execSession) ListCrons(ctx context.Context, m api.Module, outPtr, outMa
 // overrides.
 var listCronsStep = stepSpec{
 	Name:       "list_crons",
+	Result:     layoutSimple,
 	Effect:     effectEffect,
 	Refuse:     neverRefuse,
 	Records:    recordsOne,

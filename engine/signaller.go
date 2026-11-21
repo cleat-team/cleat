@@ -36,7 +36,9 @@ func (s *execSession) DurableAwaitSignals(ctx context.Context, m api.Module, sig
 // A no-wait call (timeout <= 0) whose recorded await is also no-wait is a run of ONE record, so the delivery that follows it belongs to the next
 // call and is never paired (cleat#4144: the poll loop's [await, delivery] is two calls). That is the Role's dependence on the call's argument.
 var awaitSignalsStep = stepSpec{
-	Name:             "await_signals",
+	Name: "await_signals",
+	// sigNameLen 48-63, payloadLen 32-47, timedOut 16-31, errCode 0-15: its own layout, not the simple one (see resultLayout)
+	Result:           layoutAwaitSignals,
 	Effect:           effectEffect,
 	Records:          recordsMany,
 	Want:             EventTypeSignalReceived,
@@ -491,6 +493,7 @@ func (s *execSession) SignalWorkflow(ctx context.Context, m api.Module, targetRu
 // send recorded before that change, and is accepted unchecked, as the promise settlements accept theirs.
 var signalWorkflowStep = stepSpec{
 	Name:    "signal_workflow",
+	Result:  layoutSimple,
 	Effect:  effectEffect,
 	Records: recordsOne,
 	Want:    EventTypeSignalReceived,

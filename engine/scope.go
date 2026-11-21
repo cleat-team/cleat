@@ -48,6 +48,7 @@ func scopeKeyOf(objectType, instanceKey string) string { return "vo:" + objectTy
 // row set_scope. Clearing a scope is not this step and is never refused.
 var setScopeStep = stepSpec{
 	Name:    "set_scope",
+	Result:  layoutSimple,
 	Effect:  effectEffect,
 	Records: recordsOne,
 	Want:    EventTypeScopeAcquired,
