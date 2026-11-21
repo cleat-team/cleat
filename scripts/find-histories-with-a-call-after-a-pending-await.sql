@@ -10,12 +10,13 @@
 --      promise_resolved / promise_rejected / signal_received are stoppable only by service and op and are left out, which is the narrower and safer reading);
 --   3. that record carries NEITHER drain stamp (payload in_defer_phase / in_defer_segment): a defer drain's own records follow its pending await by design.
 --
--- WHAT IT CANNOT SEE, and the rule treats the same way: events a compaction folded away are no longer rows here (their stamps are unknown to the replay too, so it
--- does not refuse them). WHAT IT MAY OVER-REPORT: a drain written before cleat#1155 carries no stamp, so its records read as the body's here.
+-- WHAT IT CANNOT SEE, A NAMED GAP: events a compaction folded away are no longer rows here, and their drain stamps are unknown to the replay too, so the replay does not
+-- refuse them either. A bad history that was already compacted is therefore neither found by this nor refused at replay: the call after its pending await can still run
+-- twice, as before. There is no script for those. WHAT IT MAY OVER-REPORT: a drain written before cleat#1155 carries no stamp, so its records read as the body's here.
 --
 -- RUN IT AS A ROLE THAT BYPASSES ROW LEVEL SECURITY (event_history is FORCE ROW LEVEL SECURITY): as the table owner without BYPASSRLS it returns no rows, which reads
 -- exactly like "nothing is affected". Check that first with: SELECT count(*) FROM event_history; (0 on a busy system means the role is being filtered).
--- PostgreSQL only. The MySQL and SQL Server equivalents were not written or tested, and --encrypt-sensitive-payloads was not exercised against this query.
+-- PostgreSQL only. MySQL and SQL Server: no script provided (not written or tested), and --encrypt-sensitive-payloads was not exercised against this query.
 
 SELECT p.workflow_id,
        p.step       AS pending_step,
