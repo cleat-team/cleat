@@ -667,7 +667,10 @@ var awaitAllChildrenStep = stepSpec{
 	Want:    EventTypeAwaitAllChildren,
 	Refuse:  neverRefuse,
 	Identity: func(a stepArgs, rec *EventRecord) string {
-		if rec.Request != a.s1 {
+		// Compared only when the record HAS a request. A history compacted by a build before cleat#4325 lost it (compaction did not carry it for this type), and cannot get it
+		// back, so an unguarded comparison failed every replay of such a record (measured on develop: 0x1 where the uncompacted record replays 0x0). The same tolerance as
+		// signal_workflow's target and await_any_child's set; every record that has a request is still checked.
+		if rec.Request != "" && rec.Request != a.s1 {
 			return fmt.Sprintf("run IDs %s, recorded %s", truncateWithHash(a.s1, maxPayloadLen), truncateWithHash(rec.Request, maxPayloadLen))
 		}
 		return ""
