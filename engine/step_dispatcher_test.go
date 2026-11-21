@@ -602,7 +602,7 @@ func dispatcherCallerFacts(t *testing.T, sources map[string]string) (leaveReplay
 				return true
 			}
 			sel, ok := call.Fun.(*ast.SelectorExpr)
-			if !ok || sel.Sel.Name != "Record" {
+			if !ok || (sel.Sel.Name != "Record" && sel.Sel.Name != "RecordPersisted") {
 				return true
 			}
 			recordCalls++
@@ -879,5 +879,149 @@ func TestALookupAtTheFrontierAnswersWithoutLeavingReplay(t *testing.T) {
 	plain.step(ctx, nil, fakeSpec(effectEffect, recordsOne, &ran4, recordOneFake), stepArgs{})
 	if plain.isReplay {
 		t.Error("CONTROL: an ordinary step at the frontier did not leave replay")
+	}
+}
+
+// RecordsNothingOn (cleat#4152, G3, DurableCall): a recordsOne spec may record nothing on a path it LISTED, and on no other. The default for every other spec
+// is the rejection that was always there, so each row below that expects a violation is a row that fails if the field loosened anything globally.
+func TestARecordsOneSpecMayRecordNothingOnlyOnAPathItListed(t *testing.T) {
+	declines := func(why string) func(c *stepCtx) { return func(c *stepCtx) { c.RecordsNothing(why) } }
+	cases := []struct {
+		name   string
+		shape  recordShape
+		listed []string
+		record func(c *stepCtx)
+		want   string // "" means no violation
+	}{
+		{"a listed path, announced under its name", recordsOne, []string{"cancelled"}, declines("cancelled"), ""},
+		{"a listed path, announced under ANOTHER name", recordsOne, []string{"cancelled"}, declines("worker lost"), `records nothing on a path ("worker lost") that its RecordsNothingOn does not list`},
+		{"nothing listed, a path announced: the default rejection stands", recordsOne, nil, declines("cancelled"), `records nothing on a path ("cancelled") that its RecordsNothingOn does not list`},
+		{"a listed path, nothing announced: silence is not a path", recordsOne, []string{"cancelled"}, func(*stepCtx) {}, "but recorded 0"},
+		{"nothing listed, nothing announced: the old rejection", recordsOne, nil, func(*stepCtx) {}, "but recorded 0"},
+		{"a listed path and an event recorded anyway is still one event", recordsOne, []string{"cancelled"}, recordOneFake, ""},
+		{"two events are still two events", recordsOne, []string{"cancelled"}, func(c *stepCtx) { recordOneFake(c); recordOneFake(c) }, "but recorded 2"},
+		// Control: a recordsMany spec could always record nothing and say so, with no list. The field must not have changed that.
+		{"recordsMany, announced, no list: unchanged", recordsMany, nil, declines("anything"), ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			var ran int32
+			s := stepSession(nil, nil)
+			sp := fakeSpec(effectEffect, c.shape, &ran, c.record)
+			sp.RecordsNothingOn = c.listed
+			if c.shape == recordsMany {
+				sp.RecordsNothingOn = nil
+			}
+			s.step(context.Background(), nil, sp, stepArgs{})
+			joined := strings.Join(s.stepViolations, "; ")
+			if c.want == "" && joined != "" {
+				t.Errorf("reported %q for a spec that did what it declared", joined)
+			}
+			if c.want != "" && !strings.Contains(joined, c.want) {
+				t.Errorf("reported %q, want it to contain %q", joined, c.want)
+			}
+		})
+	}
+
+	// The suspend sentinel does not excuse a recordsOne spec: refused is for recordsMany. A Fresh that returns it without recording is reported.
+	var ran int32
+	s := stepSession(nil, nil)
+	sp := fakeSpec(effectEffect, recordsOne, &ran, func(*stepCtx) {})
+	sp.Fresh = func(*stepCtx) int64 { return callSuspendSentinel }
+	s.step(context.Background(), nil, sp, stepArgs{})
+	if joined := strings.Join(s.stepViolations, "; "); !strings.Contains(joined, "but recorded 0") {
+		t.Errorf("a recordsOne spec that returned the suspend sentinel and recorded nothing was reported %q, want the shape violation: the sentinel must not excuse it", joined)
+	}
+
+	// THE PIN: no spec in the engine lists a path, so none of them is looser than it was before the field existed. When a spec starts to (DurableCall's
+	// move), this map is what changes, in the same diff, and the reviewer reads each path against the call it is for. A spec added to the registry that
+	// lists a path and is not in this map fails here, which is what makes the opt-in visible and not merely available.
+	listing := map[string][]string{}
+	for _, sp := range stepSpecs {
+		if len(sp.RecordsNothingOn) > 0 {
+			listing[sp.Name] = sp.RecordsNothingOn
+		}
+	}
+	if len(stepSpecs) < 20 {
+		t.Fatalf("PRECONDITION FAILED: %d registered specs; the scan is not reading the registry", len(stepSpecs))
+	}
+	if len(listing) != 0 {
+		t.Errorf("specs list RecordsNothingOn paths: %v. This test records that none does; a spec that opts in is added to this check in the same change, with the reason for each path", listing)
+	}
+}
+
+func TestRecordsNothingOnIsValidated(t *testing.T) {
+	mk := func(shape recordShape, listed ...string) *stepSpec {
+		var ran int32
+		sp := fakeSpec(effectEffect, shape, &ran, recordOneFake)
+		sp.RecordsNothingOn = listed
+		return sp
+	}
+	for _, c := range []struct {
+		name string
+		sp   *stepSpec
+		want string // "" means valid
+	}{
+		{"recordsOne with a path", mk(recordsOne, "cancelled", "worker lost"), ""},
+		{"recordsOne with no list", mk(recordsOne), ""},
+		{"recordsMany with a list", mk(recordsMany, "cancelled"), "does not declare recordsOne"},
+		{"recordsNone with a list", mk(recordsNone, "cancelled"), "does not declare recordsOne"},
+		{"an empty entry", mk(recordsOne, ""), "empty or repeated"},
+		{"a repeated entry", mk(recordsOne, "cancelled", "cancelled"), "empty or repeated"},
+	} {
+		err := c.sp.validate()
+		switch {
+		case c.want == "" && err != nil:
+			t.Errorf("%s: a well-formed spec was refused: %v", c.name, err)
+		case c.want != "" && (err == nil || !strings.Contains(err.Error(), c.want)):
+			t.Errorf("%s: got %v, want an error containing %q", c.name, err, c.want)
+		}
+	}
+}
+
+// RecordPersisted (cleat#4152, G3, DurableCall): the write-ahead path persists its record itself and must still be COUNTED, or the shape check reads a
+// recorded event as a spec that recorded nothing. The row that matters is the second: a spec that calls recordEventPersisted directly moves the step
+// count and not the handle's, and is reported, which is the only thing that stops the next write-ahead call from skipping the accounting unnoticed.
+func TestRecordPersistedIsCountedAndRecordingPersistedBehindTheHandleIsReported(t *testing.T) {
+	persist := func(c *stepCtx) { c.RecordPersisted(EventRecord{Step: c.s.stepCount, EventType: fakeEvent}, "chain-1") }
+	behind := func(c *stepCtx) {
+		c.s.recordEventPersisted(EventRecord{Step: c.s.stepCount, EventType: fakeEvent}, "chain-1")
+	}
+	for _, c := range []struct {
+		name   string
+		record func(c *stepCtx)
+		want   string
+	}{
+		{"through the handle", persist, ""},
+		{"behind the handle", behind, "recorded 0 event(s) through the handle but the step count moved by 1"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			var ran int32
+			s := stepSession(nil, nil)
+			s.step(context.Background(), nil, fakeSpec(effectEffect, recordsOne, &ran, c.record), stepArgs{})
+			if len(s.history) != 1 || s.stepCount != 1 || s.lastChecksum != "chain-1" {
+				t.Errorf("the persisted record did not reach the session: history=%d stepCount=%d lastChecksum=%q, want 1, 1, chain-1", len(s.history), s.stepCount, s.lastChecksum)
+			}
+			joined := strings.Join(s.stepViolations, "; ")
+			if c.want == "" && joined != "" {
+				t.Errorf("reported %q for a record made through the handle", joined)
+			}
+			if c.want != "" && !strings.Contains(joined, c.want) {
+				t.Errorf("reported %q, want it to contain %q", joined, c.want)
+			}
+		})
+	}
+}
+
+// The scan that requires every Record to sit inside a spec's Fresh must see RecordPersisted as a Record: a second way to record that it did not know
+// about would be a way around the refusal the exemption rests on. Known positive, from source with one of each.
+func TestTheExemptionsScanSeesRecordPersistedToo(t *testing.T) {
+	src := `package engine
+var specP = stepSpec{Fresh: func(c *stepCtx) int64 { c.RecordPersisted(EventRecord{}, ""); return 0 }}
+func (s *execSession) bypassP(c *stepCtx) { c.RecordPersisted(EventRecord{}, "") }
+`
+	_, _, records, inFresh := dispatcherCallerFacts(t, map[string]string{"persisted.go": src})
+	if records != 2 || inFresh != 1 {
+		t.Errorf("the scan found %d RecordPersisted calls of which %d inside a Fresh, want 2 and 1: one inline in a Fresh, one in a function outside any", records, inFresh)
 	}
 }

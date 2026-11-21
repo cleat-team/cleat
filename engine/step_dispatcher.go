@@ -116,6 +116,8 @@ type stepCtx struct {
 	// declined is set by RecordsNothing: Fresh took a path that records nothing on purpose and says why, so the shape check does not read it as a
 	// spec that failed to do what it declared.
 	declined bool
+	// declinedWhy is the reason RecordsNothing was given, so a recordsOne spec can be checked against the paths it listed (RecordsNothingOn).
+	declinedWhy string
 	// unreadAtForeign is how many history records a run left UNREAD when it ended at a foreign record and the spec resumes fresh there (ResumesFreshAtForeign). step reads it
 	// to leave replay through the named exit, leaveReplayAtPending, and not through leaveReplay, which treats unread history as a violation.
 	unreadAtForeign int
@@ -134,8 +136,19 @@ func (c *stepCtx) Record(rec EventRecord) eventPersistence {
 // that forgot to record: the only other way to record nothing is to refuse with the suspend sentinel. await_promise's no-store answer is the case
 // (it must stay an error word with an error code, which a replay and the guest read).
 func (c *stepCtx) RecordsNothing(why string) {
-	_ = why
 	c.declined = true
+	c.declinedWhy = why
+}
+
+// RecordPersisted is Record for an event that the STORE has already made durable and that therefore must not be flushed again: the write-ahead path
+// of a call declared WriteAheadIntent commits its record itself (callintent.go: freshCallWithIntent), computes the checksum from it, and then needs the
+// session's history, step count and checksum chain to catch up without a second write (recordEventPersisted). That path never went through recordEvent
+// and so never through Record, which is what makes it invisible to the shape check: it moves the step count by one and the handle's count by none, and
+// the second is what the first is compared with. Going through here counts the event, so a spec that records this way is held to the shape it declared
+// like every other. A spec that calls recordEventPersisted directly instead is reported, and a test says so (cleat#4152, G3, DurableCall).
+func (c *stepCtx) RecordPersisted(rec EventRecord, checksum string) {
+	c.recorded++
+	c.s.recordEventPersisted(rec, checksum)
 }
 
 // stepSpec is a description of one host call's step.
@@ -234,6 +247,13 @@ type stepSpec struct {
 	// child awaits their own suspension word (1<<62), and list_crons and release_lock an ordinary error (callRefusedAfterSuspend), which keeps them
 	// non-sites. Not allowed on a Pure step, which is never refused.
 	AfterSuspend func(c *stepCtx) int64
+	// RecordsNothingOn, for a spec that declares recordsOne, lists the paths on which its Fresh deliberately records NOTHING, each by the reason it gives
+	// to c.RecordsNothing (cleat#4152, G3: DurableCall answers a cancelled workflow, a hard stop, a worker presumed lost and the event cap without
+	// recording an event, and says so). It is OPT-IN, and the default is the rejection that was always there: a recordsOne spec must record exactly one
+	// event, so a Fresh that returns without recording is reported as a spec that did not do what it declared. Listing a path does not loosen that for
+	// any other path of the same spec: a Fresh that records nothing for a reason it did not list, or says nothing, is still reported. Needs recordsOne
+	// (a recordsMany spec already may record nothing and say so, and a recordsNone one never records), and an entry may not be empty or repeated.
+	RecordsNothingOn []string
 	// Fresh does the work and records, through c.Record, where the call records. It is called only once the dispatcher has decided
 	// fresh work is allowed.
 	Fresh func(c *stepCtx) int64
@@ -304,8 +324,17 @@ func (sp *stepSpec) validate() error {
 		return fmt.Errorf("step spec %q is Pure and has a Refuse: a Pure step is never refused", sp.Name)
 	case sp.StaysInReplayAtFrontier && (sp.Records != recordsNone || sp.Effect == effectPure):
 		return fmt.Errorf("step spec %q stays in replay at the frontier but records or is Pure: only a non-Pure step that records nothing may answer without leaving replay", sp.Name)
+	case len(sp.RecordsNothingOn) > 0 && sp.Records != recordsOne:
+		return fmt.Errorf("step spec %q lists RecordsNothingOn but does not declare recordsOne: only a spec that must record exactly one event needs to name the paths on which it records none", sp.Name)
 	case sp.Effect == effectPure && sp.Records != recordsNone:
 		return fmt.Errorf("step spec %q is Pure and declares it records events: a Pure step is not refused in a segment, so it must record nothing", sp.Name)
+	}
+	seen := map[string]bool{}
+	for _, why := range sp.RecordsNothingOn {
+		if why == "" || seen[why] {
+			return fmt.Errorf("step spec %q has an empty or repeated RecordsNothingOn entry %q: each path is named once, by the reason its Fresh gives to RecordsNothing", sp.Name, why)
+		}
+		seen[why] = true
 	}
 	return nil
 }
@@ -413,7 +442,7 @@ func (s *execSession) step(ctx context.Context, m api.Module, sp *stepSpec, args
 	}
 	before := s.stepCount
 	res := sp.Fresh(c)
-	s.checkRecorded(sp, c.recorded, s.stepCount-before, len(c.Prefix) > 0, res == callSuspendSentinel || c.declined)
+	s.checkRecorded(sp, c.recorded, s.stepCount-before, len(c.Prefix) > 0, res == callSuspendSentinel || c.declined, c.declined, c.declinedWhy)
 	return res
 }
 
@@ -441,11 +470,16 @@ func (s *execSession) leaveReplayAtPending(sp *stepSpec, unread int) {
 }
 
 // checkRecorded compares what a step's Fresh recorded with what its spec declared.
-func (s *execSession) checkRecorded(sp *stepSpec, recorded, stepsTaken int, continuedRun, refused bool) {
+func (s *execSession) checkRecorded(sp *stepSpec, recorded, stepsTaken int, continuedRun, refused, declined bool, declinedWhy string) {
 	ok := true
 	switch sp.Records {
 	case recordsOne:
-		ok = recorded == 1
+		// Exactly one, with ONE exception that a spec must ask for: a path it listed in RecordsNothingOn, taken and announced through RecordsNothing under
+		// that name. `refused` is deliberately not consulted here (it is for recordsMany): returning the suspend sentinel does not excuse a recordsOne spec.
+		ok = recorded == 1 || (recorded == 0 && declined && sp.listsNothingPath(declinedWhy))
+		if recorded == 0 && declined && !ok {
+			s.specViolation(sp, fmt.Sprintf("records nothing on a path (%q) that its RecordsNothingOn does not list", declinedWhy))
+		}
 	case recordsNone:
 		ok = recorded == 0
 	case recordsMany:
@@ -461,6 +495,16 @@ func (s *execSession) checkRecorded(sp *stepSpec, recorded, stepsTaken int, cont
 	if recorded != stepsTaken {
 		s.specViolation(sp, fmt.Sprintf("recorded %d event(s) through the handle but the step count moved by %d", recorded, stepsTaken))
 	}
+}
+
+// listsNothingPath says whether the spec named this reason among the paths on which it records nothing.
+func (sp *stepSpec) listsNothingPath(why string) bool {
+	for _, have := range sp.RecordsNothingOn {
+		if have == why {
+			return true
+		}
+	}
+	return false
 }
 
 // specViolation notes a spec that did not do what it declared. It is a defect in the spec, not in the workflow, so it is logged for the
