@@ -74,7 +74,12 @@ func (s *execSession) ScheduleCron(ctx context.Context, m api.Module, workflowNa
 // otherwise be handed the recorded schedule's ID and carry on believing it had scheduled in the new zone, which is precisely the class of
 // thing the check exists to catch.
 var scheduleCronStep = stepSpec{
-	Name:    "schedule_cron",
+	Name: "schedule_cron",
+	DivergenceDetail: func(a stepArgs, rec *EventRecord) string {
+		return fmt.Sprintf("\n  workflow: %s %q tz=%q input=%s\n  history:  %s %q tz=%q input=%s",
+			a.s1, a.s2, a.s3, truncateWithHash(a.s4, maxPayloadLen),
+			rec.CronWorkflowName, rec.CronExpr, rec.CronTimezone, truncateWithHash(rec.CronInput, maxPayloadLen))
+	},
 	Result:  layoutSimple,
 	Effect:  effectEffect,
 	Records: recordsOne,
@@ -218,11 +223,12 @@ func (s *execSession) DeleteCron(ctx context.Context, m api.Module, scheduleID s
 // gives delete_cron no output buffer (outMaxLen 0), and the dispatcher's reporter writes a message only when there is one. It is counted
 // (the replay-failure metric) and answers error code 1, as it did.
 var deleteCronStep = stepSpec{
-	Name:    "delete_cron",
-	Result:  layoutSimple,
-	Effect:  effectEffect,
-	Records: recordsOne,
-	Want:    EventTypeDeleteCron,
+	Name:               "delete_cron",
+	NoDivergenceDetail: "it had no divergence message of its own before it moved: no removed message was found for it; " + divergenceSweepNote,
+	Result:             layoutSimple,
+	Effect:             effectEffect,
+	Records:            recordsOne,
+	Want:               EventTypeDeleteCron,
 	Identity: func(a stepArgs, rec *EventRecord) string {
 		if rec.CronScheduleID != a.s1 {
 			return fmt.Sprintf("delete schedule %q, recorded %q", a.s1, rec.CronScheduleID)
@@ -303,12 +309,13 @@ func (s *execSession) ListCrons(ctx context.Context, m api.Module, outPtr, outMa
 // The dispatcher has no Read effect class yet (see stepEffect), so it is declared effectEffect, which only matters for the refusal this
 // overrides.
 var listCronsStep = stepSpec{
-	Name:    "list_crons",
-	Result:  layoutSimple,
-	Effect:  effectEffect,
-	Refuse:  neverRefuse,
-	Records: recordsOne,
-	Want:    EventTypeListCrons,
+	Name:               "list_crons",
+	NoDivergenceDetail: "its old message was `ListCrons mismatch.` and `history has: <event type>`: the event type only, which the shared message also names; " + divergenceSweepNote,
+	Result:             layoutSimple,
+	Effect:             effectEffect,
+	Refuse:             neverRefuse,
+	Records:            recordsOne,
+	Want:               EventTypeListCrons,
 	// Not a stop site, so after a suspension it answers an ordinary error and not the stop word its decoders do not know (cleat#4285); that keeps it
 	// a non-site, and nothing runs or records.
 	AfterSuspend: func(c *stepCtx) int64 {

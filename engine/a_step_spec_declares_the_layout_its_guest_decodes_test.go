@@ -28,7 +28,7 @@ import (
 
 func TestAStepSpecWithoutAValidResultLayoutIsRefusedByText(t *testing.T) {
 	ok := func() stepSpec {
-		return stepSpec{Result: layoutSimple, NoIdentity: "x", Name: "x", Want: fakeEvent, Effect: effectEffect, Records: recordsOne,
+		return stepSpec{Result: layoutSimple, NoIdentity: "x", NoDivergenceDetail: "a fake call: nothing to describe", Name: "x", Want: fakeEvent, Effect: effectEffect, Records: recordsOne,
 			Decode: func(*stepCtx, *EventRecord) int64 { return 0 }, Fresh: func(*stepCtx) int64 { return 0 }}
 	}
 	// CONTROL: the spec the cases below start from is valid, so each refusal is attributable to the one thing changed.

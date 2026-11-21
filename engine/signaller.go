@@ -36,7 +36,8 @@ func (s *execSession) DurableAwaitSignals(ctx context.Context, m api.Module, sig
 // A no-wait call (timeout <= 0) whose recorded await is also no-wait is a run of ONE record, so the delivery that follows it belongs to the next
 // call and is never paired (cleat#4144: the poll loop's [await, delivery] is two calls). That is the Role's dependence on the call's argument.
 var awaitSignalsStep = stepSpec{
-	Name: "await_signals",
+	Name:               "await_signals",
+	NoDivergenceDetail: "its old message was the shared one: the step and both event types; " + divergenceSweepNote,
 	// sigNameLen 48-63, payloadLen 32-47, timedOut 16-31, errCode 0-15: its own layout, not the simple one (see resultLayout)
 	Result:           layoutAwaitSignals,
 	Effect:           effectEffect,
@@ -521,11 +522,12 @@ func (s *execSession) SignalWorkflow(ctx context.Context, m api.Module, targetRu
 // signal, and a record that names others is a divergence (the target only where the record has one: see the Identity below). A record WITHOUT the cleat#4102 discriminator (Service/Op) is a delivery, or a
 // send recorded before that change, and is accepted unchecked, as the promise settlements accept theirs.
 var signalWorkflowStep = stepSpec{
-	Name:    "signal_workflow",
-	Result:  layoutSimple,
-	Effect:  effectEffect,
-	Records: recordsOne,
-	Want:    EventTypeSignalReceived,
+	Name:               "signal_workflow",
+	NoDivergenceDetail: "it had no divergence message of its own before it moved: no removed message was found for it; " + divergenceSweepNote,
+	Result:             layoutSimple,
+	Effect:             effectEffect,
+	Records:            recordsOne,
+	Want:               EventTypeSignalReceived,
 	Identity: func(a stepArgs, rec *EventRecord) string {
 		if rec.Service != SignalEventService || rec.Op != SignalOpSend {
 			return ""

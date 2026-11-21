@@ -261,6 +261,16 @@ type stepSpec struct {
 	// child awaits their own suspension word (1<<62), and list_crons and release_lock an ordinary error (callRefusedAfterSuspend), which keeps them
 	// non-sites. Not allowed on a Pure step, which is never refused.
 	AfterSuspend func(c *stepCtx) int64
+	// DivergenceDetail adds what the call ASKED and what was RECORDED to the divergence message the dispatcher reports for it (cleat#4152, G3). The old per-call messages
+	// printed the request (`  actual request: ...` / `  expected request: ...`), a run's IDs, a Fetch's URL and bodies, a schedule's four arguments; the shared
+	// message names only the step and both event types, and the moves that went onto it lost the rest silently, including text docs/troubleshooting.md shows to
+	// users and TestEngineReplayDivergence pins. a is the call's arguments and rec the record that diverged (a record of the wrong TYPE or one that failed Identity);
+	// it returns "" or text that starts with a newline and indents each line by two spaces, and it must not touch the world. Use truncateWithHash on any body, as
+	// the old messages did. Exactly one of this and NoDivergenceDetail is set (validate()), so a call that has detail cannot lose it by being moved without saying so.
+	DivergenceDetail func(a stepArgs, rec *EventRecord) string
+	// NoDivergenceDetail says why a call has nothing to add to a divergence message, when it has nothing: the reason is for the reader of the spec and must say what the
+	// call's old message carried, so a move that dropped detail cannot hide behind it (cleat#4152, G3).
+	NoDivergenceDetail string
 	// RecordsNothingOn, for a spec that declares recordsOne, lists the paths on which its Fresh deliberately records NOTHING, each by the reason it gives
 	// to c.RecordsNothing (cleat#4152, G3: DurableCall answers a cancelled workflow, a hard stop, a worker presumed lost and the event cap without
 	// recording an event, and says so). It is OPT-IN, and the default is the rejection that was always there: a recordsOne spec must record exactly one
@@ -332,6 +342,8 @@ func (sp *stepSpec) validate() error {
 		return fmt.Errorf("step spec %q has MaxPrefix %d: it bounds the prefix records of a run, so it needs a Role and cannot be negative", sp.Name, sp.MaxPrefix)
 	case sp.EndsWithoutFinal && sp.Identity == nil:
 		return fmt.Errorf("step spec %q has EndsWithoutFinal but no Identity: a run that can end without a final is bounded by Identity, and without one it cannot tell its own records from the next call's", sp.Name)
+	case (sp.DivergenceDetail == nil) == (sp.NoDivergenceDetail == ""):
+		return fmt.Errorf("step spec %q must set exactly one of DivergenceDetail and NoDivergenceDetail: a call either says what it asked and what was recorded when it diverges, or says why its old message carried nothing beyond the step and the event types (cleat#4152, G3)", sp.Name)
 	case (sp.Identity == nil) == (sp.NoIdentity == ""):
 		return fmt.Errorf("step spec %q must set exactly one of Identity and NoIdentity: a call either names what identifies it or says why it has nothing to compare", sp.Name)
 	case sp.Refuse != nil && sp.Effect == effectPure:
@@ -351,6 +363,18 @@ func (sp *stepSpec) validate() error {
 		seen[why] = true
 	}
 	return nil
+}
+
+// divergenceSweepNote is the evidence behind a NoDivergenceDetail reason: every engine commit since the dispatcher began that removed a divergence or mismatch message
+// was read (cleat#4152, G3), and none removed more than the reason says for the call. A reason that says otherwise is wrong and the sweep is the thing to re-run.
+const divergenceSweepNote = "checked by reading every engine commit since the dispatcher began that removed a divergence or mismatch message (cleat#4152, G3)"
+
+// divergenceDetailFor is the spec's detail for the record that diverged, or "" when it has none.
+func (sp *stepSpec) divergenceDetailFor(a stepArgs, rec *EventRecord) string {
+	if sp.DivergenceDetail == nil {
+		return ""
+	}
+	return sp.DivergenceDetail(a, rec)
 }
 
 // divergenceAnswer puts the reporter's answer into the layout the spec's guest decodes. The reporter's is the simple layout: error code 1 in the low
@@ -409,11 +433,11 @@ func (s *execSession) step(ctx context.Context, m api.Module, sp *stepSpec, args
 			rec := s.history[s.stepCount]
 			if rec.EventType != sp.Want {
 				// Not consumed: replayDivergence leaves the record for the call it belongs to (cleat#4157).
-				return sp.divergenceAnswer(s.replayDivergence(ctx, m, sp.Want, args.outPtr, args.outMaxLen))
+				return sp.divergenceAnswer(s.replayDivergenceAt(ctx, m, &rec, sp.Want, sp.divergenceDetailFor(args, &rec), args.outPtr, args.outMaxLen))
 			}
 			if sp.Identity != nil {
 				if why := sp.Identity(args, &rec); why != "" {
-					return sp.divergenceAnswer(s.replayIdentityDivergence(ctx, m, sp.Name, why, args.outPtr, args.outMaxLen))
+					return sp.divergenceAnswer(s.replayIdentityDivergenceAt(ctx, m, &rec, sp.Name, why, sp.divergenceDetailFor(args, &rec), args.outPtr, args.outMaxLen))
 				}
 			}
 			if sp.OverPending != nil && sp.OverPending(args, &rec) {

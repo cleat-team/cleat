@@ -120,6 +120,12 @@ func (s *execSession) DurableCall(ctx context.Context, m api.Module, service, op
 	return s.freshCall(ctx, m, service, operation, requestJSON, responsePtr, responseMaxLen)
 }
 
+// requestDivergenceDetail is the detail of a call that carries a request body: the plain call, the retried call and the heartbeat call all printed these two lines
+// when they diverged, and docs/troubleshooting.md shows them. The bodies are truncated with a hash, as the old messages truncated them (cleat#4152, G3).
+func requestDivergenceDetail(a stepArgs, rec *EventRecord) string {
+	return fmt.Sprintf("\n  actual request: %s\n  expected request: %s", truncateWithHash(a.s3, maxPayloadLen), truncateWithHash(rec.Request, maxPayloadLen))
+}
+
 // atEventCap reports whether this session has recorded as many durable events as --max-quota-events allows.
 func (s *execSession) atEventCap() bool {
 	return s.engine.maxEventsPerWorkflow > 0 && s.eventCount >= s.engine.maxEventsPerWorkflow
@@ -497,10 +503,11 @@ func retryPolicyFitsBudget(maxAttempts, initialIntervalMs, backoffCoefficient100
 // running, and the policy is finished from the attempts already spent (cleat#1145) and not restarted. The service and operation identify the call, on
 // EVERY record of the run: the old replay loop compared them on the attempts only by stopping at the first mismatch, and left the record unread.
 var retryStep = stepSpec{
-	Name:    "call_with_retry",
-	Effect:  effectEffect,
-	Records: recordsMany,
-	Want:    EventTypeCall,
+	Name:             "call_with_retry",
+	DivergenceDetail: requestDivergenceDetail,
+	Effect:           effectEffect,
+	Records:          recordsMany,
+	Want:             EventTypeCall,
 	// The guest decodes result<string, call-failure>: a divergence is answered in the durable-call layout (ABI.md, "Return packing" of cleat_call_retry).
 	// AfterSuspend is left nil on purpose, as for every durable-call-family spec: the refusal after a suspension is the dispatcher's own, and answers the stop word.
 	Result: layoutDurableCall,
@@ -1047,13 +1054,14 @@ func (s *execSession) DurableDefer(ctx context.Context, m api.Module, descriptio
 // argument is only the fallback for a record written before descriptions were recorded); it can legitimately differ between a run and its
 // replay, and the id is generated from the step. The reviewer decides (Revision 3 of the design).
 var deferStep = stepSpec{
-	Name:       "defer",
-	Result:     layoutSimple,
-	Effect:     effectEffect,
-	Records:    recordsOne,
-	Want:       EventTypeDefer,
-	NoIdentity: "the description is a guest-chosen label that the record carries and replay re-registers from; the id is generated from the step",
-	Refuse:     func(s *execSession) bool { return s.stopArmed && s.stopBeforeNewWork() },
+	Name:               "defer",
+	NoDivergenceDetail: "its old message was the shared one: the step and both event types; " + divergenceSweepNote,
+	Result:             layoutSimple,
+	Effect:             effectEffect,
+	Records:            recordsOne,
+	Want:               EventTypeDefer,
+	NoIdentity:         "the description is a guest-chosen label that the record carries and replay re-registers from; the id is generated from the step",
+	Refuse:             func(s *execSession) bool { return s.stopArmed && s.stopBeforeNewWork() },
 	Decode: func(c *stepCtx, rec *EventRecord) int64 {
 		s := c.s
 		// The step has been consumed when Decode runs, so the step the record held is stepCount-1; the fallback is what the fresh path below
@@ -1146,11 +1154,12 @@ func (s *execSession) DurableSend(ctx context.Context, m api.Module, service, op
 // one. A send is identified by its service and operation (the design's "target and message name"); the request text is not compared,
 // which the old code did not either.
 var durableSendStep = stepSpec{
-	Name:    "durable_send",
-	Result:  layoutSimple,
-	Effect:  effectEffect,
-	Records: recordsOne,
-	Want:    EventTypeDurableSend,
+	Name:               "durable_send",
+	NoDivergenceDetail: "its old message was `replay divergence: expected durable_send, got a different event`: less than the shared one, and no request; " + divergenceSweepNote,
+	Result:             layoutSimple,
+	Effect:             effectEffect,
+	Records:            recordsOne,
+	Want:               EventTypeDurableSend,
 	Identity: func(a stepArgs, rec *EventRecord) string {
 		if rec.Service != a.s1 || rec.Op != a.s2 {
 			return fmt.Sprintf("send %s.%s, recorded %s.%s", a.s1, a.s2, rec.Service, rec.Op)

@@ -27,7 +27,7 @@ const (
 func awaitSpec(inbox *fakeInbox) *stepSpec {
 	return &stepSpec{
 		Name: "fake_await", Result: layoutSimple, Effect: effectEffect, Records: recordsMany, Want: runFinalEvent,
-		NoIdentity: "a fake await with nothing to compare",
+		NoIdentity: "a fake await with nothing to compare", NoDivergenceDetail: "a fake call: nothing to describe",
 		Role: func(_ stepArgs, rec *EventRecord) recordRole {
 			switch rec.EventType {
 			case runPrefixEvent:

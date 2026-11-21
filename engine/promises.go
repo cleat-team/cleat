@@ -42,11 +42,12 @@ func settlementIdentity(promiseID string, rec *EventRecord, op string) string {
 // promise row at once. In a defer segment that is the workflow BODY running past its recorded history, so it is refused; a defer body
 // still gets through (inDeferDrain). Measured against a real store, cleat#4079 audit row create_promise.
 var createPromiseStep = stepSpec{
-	Name:    "create_promise",
-	Result:  layoutSimple,
-	Effect:  effectEffect,
-	Records: recordsOne,
-	Want:    EventTypeCreatePromise,
+	Name:               "create_promise",
+	NoDivergenceDetail: "its old message was the shared one: the step and both event types; " + divergenceSweepNote,
+	Result:             layoutSimple,
+	Effect:             effectEffect,
+	Records:            recordsOne,
+	Want:               EventTypeCreatePromise,
 	// A promise is identified by its NAME: the id is generated, and replay hands back the recorded one.
 	Identity: func(a stepArgs, rec *EventRecord) string {
 		if rec.PromiseName != a.s1 {
@@ -182,7 +183,8 @@ func awaitPromiseIdentity(a stepArgs, rec *EventRecord) string {
 // that has already suspended all recorded the await and suspended as usual (four rows of the characterization table), and that is kept.
 // Whether any of them should be refused is a separate decision.
 var awaitPromiseStep = stepSpec{
-	Name: "await_promise",
+	Name:               "await_promise",
+	NoDivergenceDetail: "its old message was the shared one: the step and both event types; " + divergenceSweepNote,
 	// resultLen 32-63, timedOut 16-31, errCode 0-15: the divergence decodes exactly as the simple layout (cleat_await_promise)
 	Result:           layoutSimple,
 	Effect:           effectEffect,
@@ -351,11 +353,12 @@ func (s *execSession) ResolvePromise(ctx context.Context, m api.Module, promiseI
 // a segment exists to run cleanup, not to make new calls (cleat#4079, the same refusal DeleteCron got in cleat#4083). It is decided before
 // anything is recorded, so a refused call leaves no event.
 var resolvePromiseStep = stepSpec{
-	Name:    "resolve_promise",
-	Result:  layoutSimple,
-	Effect:  effectEffect,
-	Records: recordsOne,
-	Want:    EventTypePromiseResolved,
+	Name:               "resolve_promise",
+	NoDivergenceDetail: "its old message was the shared one: the step and both event types; " + divergenceSweepNote,
+	Result:             layoutSimple,
+	Effect:             effectEffect,
+	Records:            recordsOne,
+	Want:               EventTypePromiseResolved,
 	Identity: func(a stepArgs, rec *EventRecord) string {
 		return settlementIdentity(a.s1, rec, PromiseOpResolve)
 	},
@@ -406,11 +409,12 @@ func (s *execSession) RejectPromise(ctx context.Context, m api.Module, promiseID
 // its replay compares the promise id and the Service/Op when present, as resolvePromiseStep does, and before cleat#4211 matched by event
 // type alone.
 var rejectPromiseStep = stepSpec{
-	Name:    "reject_promise",
-	Result:  layoutSimple,
-	Effect:  effectEffect,
-	Records: recordsOne,
-	Want:    EventTypePromiseRejected,
+	Name:               "reject_promise",
+	NoDivergenceDetail: "its old message was the shared one: the step and both event types; " + divergenceSweepNote,
+	Result:             layoutSimple,
+	Effect:             effectEffect,
+	Records:            recordsOne,
+	Want:               EventTypePromiseRejected,
 	Identity: func(a stepArgs, rec *EventRecord) string {
 		return settlementIdentity(a.s1, rec, PromiseOpReject)
 	},

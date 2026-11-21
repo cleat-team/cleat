@@ -13,10 +13,11 @@ import (
 // heartbeatStep is the heartbeat call as a dispatcher step (cleat#4152, G3). It is a MULTI-RECORD step: a run of heartbeat events, one per tick while
 // the call ran, then the call's outcome. A history that ends INSIDE the run is a worker lost mid-call, and the call is run again with c.Prefix.
 var heartbeatStep = stepSpec{
-	Name:    "call_with_heartbeat",
-	Effect:  effectEffect,
-	Records: recordsMany,
-	Want:    EventTypeCall,
+	Name:             "call_with_heartbeat",
+	DivergenceDetail: requestDivergenceDetail,
+	Effect:           effectEffect,
+	Records:          recordsMany,
+	Want:             EventTypeCall,
 	// The guest decodes result<string, call-failure>: a divergence is answered in the durable-call layout (ABI.md, "Return packing" of cleat_call_heartbeat).
 	// AfterSuspend is left nil on purpose: a heartbeat call is refused after a suspension by the dispatcher's own stop refusal, as every durable-call-family
 	// spec is, and a hook of its own would be a second answer to the same question.
