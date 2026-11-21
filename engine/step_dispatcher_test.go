@@ -465,7 +465,7 @@ func TestRegisterStepSpecRejectsAMalformedOrRepeatedSpecAndAcceptsAValidOne(t *t
 
 // dispatcherCallerFacts parses non-test sources (name -> source) and returns where leaveReplay is called from, and how many .Record( calls
 // there are in all and how many sit inside the Fresh function of a stepSpec literal.
-func dispatcherCallerFacts(t *testing.T, sources map[string]string) (leaveReplayCallers []string, recordCalls, recordInFresh int) {
+func dispatcherCallerFacts(t *testing.T, sources map[string]string) (leaveReplayCallers, leaveAtPendingCallers []string, recordCalls, recordInFresh int) {
 	t.Helper()
 	fset := token.NewFileSet()
 	for name, src := range sources {
@@ -513,6 +513,9 @@ func dispatcherCallerFacts(t *testing.T, sources map[string]string) (leaveReplay
 				if sel.Sel.Name == "leaveReplay" {
 					leaveReplayCallers = append(leaveReplayCallers, fd.Name.Name)
 				}
+				if sel.Sel.Name == "leaveReplayAtPending" {
+					leaveAtPendingCallers = append(leaveAtPendingCallers, fd.Name.Name)
+				}
 				return true
 			})
 		}
@@ -536,7 +539,7 @@ func dispatcherCallerFacts(t *testing.T, sources map[string]string) (leaveReplay
 			return true
 		})
 	}
-	return leaveReplayCallers, recordCalls, recordInFresh
+	return leaveReplayCallers, leaveAtPendingCallers, recordCalls, recordInFresh
 }
 
 func TestTheDispatcherExemptionsAreTrueOfTheirCallers(t *testing.T) {
@@ -555,11 +558,15 @@ func TestTheDispatcherExemptionsAreTrueOfTheirCallers(t *testing.T) {
 		}
 		sources[e.Name()] = string(b)
 	}
-	callers, records, inFresh := dispatcherCallerFacts(t, sources)
+	callers, pendingCallers, records, inFresh := dispatcherCallerFacts(t, sources)
 
 	// Known positive: the scan must SEE the calls that exist today, or "no second caller" would be what a scan that matches nothing says.
 	if len(callers) != 1 || callers[0] != "step" {
 		t.Errorf("leaveReplay is called from %v, want exactly [step]: the exemption for leaveReplay says its only caller is step, and a second caller would skip the refusal that follows it", callers)
+	}
+	// The second exit from replay (a step that found its own pending record, OverPending) has the same exemption and needs the same proof.
+	if len(pendingCallers) != 1 || pendingCallers[0] != "step" {
+		t.Errorf("leaveReplayAtPending is called from %v, want exactly [step]: its exemption says its only caller is step, and a second caller would skip the refusal that follows it", pendingCallers)
 	}
 	if records < 3 {
 		t.Fatalf("PRECONDITION FAILED: the scan found %d .Record( calls, want the 3 the promise specs make; it is reading nothing", records)
@@ -570,14 +577,93 @@ func TestTheDispatcherExemptionsAreTrueOfTheirCallers(t *testing.T) {
 
 	// Negative control: the same scan over a source with a second caller of each kind must report them.
 	badStep := `package engine
-func (s *execSession) step() { s.leaveReplay(nil) }
+func (s *execSession) step() { s.leaveReplay(nil); s.leaveReplayAtPending(nil) }
 func (s *execSession) sneaky() { s.leaveReplay(nil) }
+func (s *execSession) sneakyPending() { s.leaveReplayAtPending(nil) }
 var spec = stepSpec{Fresh: func(c *stepCtx) int64 { c.Record(EventRecord{}); return 0 }}
 func (s *execSession) bypass(c *stepCtx) { c.Record(EventRecord{}) }
 `
-	cc, rr, rf := dispatcherCallerFacts(t, map[string]string{"bad.go": badStep})
-	if len(cc) != 2 || rr != 2 || rf != 1 {
-		t.Errorf("CONTROL: on a source with a second leaveReplay caller and a Record outside Fresh the scan reported callers=%v records=%d inFresh=%d, want 2 callers, 2 records, 1 in Fresh", cc, rr, rf)
+	cc, pc, rr, rf := dispatcherCallerFacts(t, map[string]string{"bad.go": badStep})
+	if len(cc) != 2 || len(pc) != 2 || rr != 2 || rf != 1 {
+		t.Errorf("CONTROL: on a source with a second caller of each exit and a Record outside Fresh the scan reported callers=%v pendingCallers=%v records=%d inFresh=%d, want 2, 2, 2 records, 1 in Fresh", cc, pc, rr, rf)
+	}
+}
+
+// OverPending (cleat#4152, W3a): a step that finds its OWN pending record does not consume it. It leaves replay with the step count ON that record and runs
+// fresh, and the answer is recorded at that step. Six cases of the one mechanism, on a fake spec whose Fresh counts runs.
+func TestAStepFindingItsOwnPendingRecordLeavesReplayAtItWithoutConsumingIt(t *testing.T) {
+	ctx := context.Background()
+	pendingSpec := func(ran *int32) *stepSpec {
+		sp := fakeSpec(effectEffect, recordsOne, ran, recordOneFake)
+		sp.OverPending = func(_ stepArgs, rec *EventRecord) bool { return rec.Response == "" }
+		return sp
+	}
+	pending := EventRecord{Step: 0, EventType: fakeEvent}
+	answered := EventRecord{Step: 0, EventType: fakeEvent, Response: "r"}
+	other := EventRecord{Step: 1, EventType: EventTypeSideEffect}
+
+	// 1. a pending record that is the LAST one: not consumed, replay left, Fresh runs and records at the same step.
+	var ran int32
+	s := stepSession(nil, []EventRecord{pending})
+	if got := s.step(ctx, nil, pendingSpec(&ran), stepArgs{}); got != 9 || ran != 1 {
+		t.Errorf("a pending record: result %d, Fresh ran %d times, want 9 and 1", got, ran)
+	}
+	if s.isReplay || s.stepCount != 1 || len(s.history) != 2 || s.history[1].Step != 0 {
+		t.Errorf("a pending record: isReplay=%v stepCount=%d history=%d (answer recorded at step %d), want replay left, stepCount 1, 2 records, the answer at step 0",
+			s.isReplay, s.stepCount, len(s.history), s.history[len(s.history)-1].Step)
+	}
+	if len(s.stepViolations) != 0 {
+		t.Errorf("a pending record: the dispatcher reported spec violations: %v", s.stepViolations)
+	}
+
+	// 2. an ANSWERED record is consumed and decoded as any record: Fresh does not run.
+	ran = 0
+	s = stepSession(nil, []EventRecord{answered})
+	if got := s.step(ctx, nil, pendingSpec(&ran), stepArgs{}); got != 7 || ran != 0 || !s.isReplay || s.stepCount != 1 {
+		t.Errorf("an answered record: result %d, ran %d, isReplay=%v stepCount=%d, want 7, 0, still replaying at 1", got, ran, s.isReplay, s.stepCount)
+	}
+
+	// 3. a pending record FOLLOWED by another record: the kept defect (cleat#4152 OverPending doc, cleat#4285). Replay is left with that record unread.
+	ran = 0
+	s = stepSession(nil, []EventRecord{pending, other})
+	s.step(ctx, nil, pendingSpec(&ran), stepArgs{})
+	if ran != 1 || s.isReplay || s.stepCount >= len(s.history) {
+		t.Errorf("a pending record with a record after it: ran %d, isReplay=%v stepCount=%d of %d, want Fresh run, replay left and the later record still unread",
+			ran, s.isReplay, s.stepCount, len(s.history))
+	}
+
+	// 4. a record of another type is a divergence and OverPending is not consulted.
+	ran = 0
+	s = stepSession(nil, []EventRecord{other})
+	sp := pendingSpec(&ran)
+	sp.OverPending = func(stepArgs, *EventRecord) bool {
+		t.Error("OverPending was asked about a record of another type")
+		return true
+	}
+	if got := s.step(ctx, nil, sp, stepArgs{}); got&0xFF != 1 || ran != 0 || !s.isReplay || s.stepCount != 0 {
+		t.Errorf("another type: result %#x ran %d isReplay=%v stepCount=%d, want a divergence, 0 runs, still replaying at 0", got, ran, s.isReplay, s.stepCount)
+	}
+
+	// 5. a pending record that names ANOTHER call is a divergence (Identity comes first), not this call's to answer over.
+	ran = 0
+	s = stepSession(nil, []EventRecord{{Step: 0, EventType: fakeEvent, PromiseID: "other"}})
+	sp = pendingSpec(&ran)
+	sp.NoIdentity = ""
+	sp.Identity = func(_ stepArgs, rec *EventRecord) string {
+		if rec.PromiseID != "mine" {
+			return "recorded " + rec.PromiseID
+		}
+		return ""
+	}
+	if got := s.step(ctx, nil, sp, stepArgs{}); got&0xFF != 1 || ran != 0 || !s.isReplay || s.stepCount != 0 {
+		t.Errorf("a pending record naming another call: result %#x ran %d isReplay=%v stepCount=%d, want a divergence, 0 runs, still replaying at 0", got, ran, s.isReplay, s.stepCount)
+	}
+
+	// 6. the refusal still applies after a step leaves replay at its pending record: the call is refused, not run, and the record is not consumed.
+	ran = 0
+	s = stepSession([]EngineOption{WithDeferPhase()}, []EventRecord{pending})
+	if got := s.step(ctx, nil, pendingSpec(&ran), stepArgs{}); got != callSuspendSentinel || ran != 0 || s.stepCount != 0 {
+		t.Errorf("a refused step over a pending record: result %#x ran %d stepCount=%d, want the stop, 0 runs and the record not consumed", got, ran, s.stepCount)
 	}
 }
 

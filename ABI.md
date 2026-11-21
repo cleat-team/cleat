@@ -951,7 +951,11 @@ Wait for a child workflow to complete.
 | 0-31 | `errCode` |
 | 32-63 | `resultLen` — bytes written to result buffer |
 
-If the child is not complete, the workflow should suspend.
+If the child is not complete, the workflow must suspend.
+
+**Suspension word.** While the child has not finished, the call returns exactly `0x4000000000000000` (`1 << 62`), the same word the workflow export returns to suspend (see *Suspension sentinel*), **not** the stop word `1 << 31` that a refused call returns (see the stop-bit note under `cleat_call`). The two are different bits for a reason: bit 62 is a 1 GiB `resultLen` in this layout, so a decoder that reads the fields before testing the word hands the guest a 1 GiB result. Test `result == 1 << 62` (or mask bit 62) **before** decoding anything else. The same word is returned by `cleat_await_all_children` (§2.23) and `cleat_await_any_child` (§2.53), and the host records the await as an empty `await_*` event and sets the run's suspension before it returns it.
+
+**The guest must stop.** Receiving the word, a guest must unwind and return the suspension from its export. A guest that carries on, because its SDK returned the suspension as an ordinary value or the guest caught the exception or discarded the error, makes calls the host records AFTER the pending await, and on the next resume those calls run again (cleat#4285). That is an exactly-once violation in the guest, not a property of the call.
 
 #### 2.23 `cleat_await_all_children`
 
@@ -976,6 +980,8 @@ Batch await for multiple child workflows. Returns a JSON array of child results.
 |---|---|
 | 0-7 | `errCode` |
 | 32-63 | `resultLen` — bytes written to results buffer |
+
+**Suspension word:** while ANY child in the list is still running, the call returns `1 << 62`, exactly as `cleat_await_child` does (§2.22), and the host records the await empty. The same obligations hold: test the word before decoding, and stop. The request (the JSON list of run IDs) is compared as TEXT on replay: the same IDs in another order are a different request.
 
 #### 2.24 `cleat_run_detached`
 
@@ -1827,6 +1833,8 @@ Companion to `cleat_await_all_children` (§2.23), which waits for all of them.
 **Return packing:** same shape as `cleat_await_child` (§2.22) — `errCode` /
 `resultLen`. Implemented in `engine/children.go`
 (`(*execSession).AwaitAnyChild`).
+
+**Suspension word:** while NO listed child has finished, the call returns `1 << 62`, exactly as `cleat_await_child` does (§2.22), and the host records the await empty. The same obligations hold: test the word before decoding, and stop.
 
 #### 2.54 `cleat_poll_child`
 

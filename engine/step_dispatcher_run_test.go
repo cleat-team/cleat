@@ -211,6 +211,13 @@ func TestAMultiRecordSpecIsValidatedForItsShape(t *testing.T) {
 	if err := withFlag.validate(); err != nil {
 		t.Fatalf("PRECONDITION FAILED: a multi-record spec with EndsWithoutFinal and an Identity does not validate: %v", err)
 	}
+	// CONTROL for the OverPending rules below: a single-record spec that records one event and has an OverPending is valid, so they refuse only the wrong shapes.
+	single := runSpec(&ran, &d, &p)
+	single.Role, single.DecodeRun, single.Decode, single.Records = nil, nil, func(*stepCtx, *EventRecord) int64 { return 0 }, recordsOne
+	single.OverPending = func(stepArgs, *EventRecord) bool { return false }
+	if err := single.validate(); err != nil {
+		t.Fatalf("PRECONDITION FAILED: a single-record spec with an OverPending does not validate: %v", err)
+	}
 	mut := func(f func(sp *stepSpec)) *stepSpec { sp := *runSpec(&ran, &d, &p); f(&sp); return &sp }
 	dec := func(*stepCtx, *EventRecord) int64 { return 0 }
 	// Each fixture is built to reach ITS rule, and the error is asserted by TEXT: a spec refused for the wrong reason is a failure, because then
@@ -219,12 +226,20 @@ func TestAMultiRecordSpecIsValidatedForItsShape(t *testing.T) {
 		spec *stepSpec
 		want string
 	}{
-		"a Role and a Decode":          {mut(func(sp *stepSpec) { sp.Decode = dec }), "needs exactly a DecodeRun"},
-		"a Role and no DecodeRun":      {mut(func(sp *stepSpec) { sp.DecodeRun = nil }), "needs exactly a DecodeRun"},
-		"a Role that records nothing":  {mut(func(sp *stepSpec) { sp.Records = recordsNone }), "records nothing"},
-		"no Role but a DecodeRun":      {mut(func(sp *stepSpec) { sp.Role = nil; sp.Decode = dec }), "single-record step"},
-		"no Role but EndsWithoutFinal": {mut(func(sp *stepSpec) { sp.Role = nil; sp.DecodeRun = nil; sp.EndsWithoutFinal = true; sp.Decode = dec }), "single-record step"},
-		"no Role and no Decode either": {mut(func(sp *stepSpec) { sp.Role = nil; sp.DecodeRun = nil }), "single-record step"},
+		"a Role and a Decode":                {mut(func(sp *stepSpec) { sp.Decode = dec }), "needs exactly a DecodeRun"},
+		"a Role and no DecodeRun":            {mut(func(sp *stepSpec) { sp.DecodeRun = nil }), "needs exactly a DecodeRun"},
+		"a Role that records nothing":        {mut(func(sp *stepSpec) { sp.Records = recordsNone }), "records nothing"},
+		"no Role but a DecodeRun":            {mut(func(sp *stepSpec) { sp.Role = nil; sp.Decode = dec }), "single-record step"},
+		"no Role but EndsWithoutFinal":       {mut(func(sp *stepSpec) { sp.Role = nil; sp.DecodeRun = nil; sp.EndsWithoutFinal = true; sp.Decode = dec }), "single-record step"},
+		"no Role and no Decode either":       {mut(func(sp *stepSpec) { sp.Role = nil; sp.DecodeRun = nil }), "single-record step"},
+		"OverPending on a multi-record step": {mut(func(sp *stepSpec) { sp.OverPending = func(stepArgs, *EventRecord) bool { return false } }), "OverPending but is a multi-record step"},
+		"OverPending on a step that records nothing": {mut(func(sp *stepSpec) {
+			sp.Role = nil
+			sp.DecodeRun = nil
+			sp.Decode = dec
+			sp.Records = recordsNone
+			sp.OverPending = func(stepArgs, *EventRecord) bool { return false }
+		}), "OverPending but is a multi-record step or records nothing"},
 		"EndsWithoutFinal with no Identity to bound its runs": {mut(func(sp *stepSpec) {
 			sp.EndsWithoutFinal = true
 			sp.Identity = nil

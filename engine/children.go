@@ -282,96 +282,85 @@ func (s *execSession) childWorkflowWithVersion(ctx context.Context, m api.Module
 	return packSimpleResult(writtenEC, written)
 }
 
+// AwaitChild waits for one child's result. It is a step on the replay dispatcher (cleat#4152, W3a); awaitChildStep says what it records and how it
+// replays. Its history is ONE record, [await_child]: recorded EMPTY while the child is still running, and answered OVER that same record (the same step,
+// the store's conflict clause reopening it) by the wake that finds the child done.
 func (s *execSession) AwaitChild(ctx context.Context, m api.Module, runID string, resultPtr, resultMaxLen uint32) int64 {
+	return s.step(ctx, m, &awaitChildStep, stepArgs{s1: runID, outPtr: resultPtr, outMaxLen: resultMaxLen})
+}
 
-	if s.isReplay {
-		if s.stepCount < len(s.history) {
-			rec := s.history[s.stepCount]
-			if rec.EventType == EventTypeAwaitChild {
-				if rec.Response != "" || rec.Err != "" {
-					// Cached result available — return it.
-					if !s.advanceReplayStep(ctx, &rec) {
-						return 0
-					}
-					if rec.Err != "" {
-						written, _ := s.writeResult(ctx, m, resultPtr, rec.Err, resultMaxLen)
-						return packAwaitChildResult(written, 1)
-					}
-					written, writtenEC := s.writeOut(ctx, m, resultPtr, rec.Response, resultMaxLen)
-					return packAwaitChildResult(written, uint32(writtenEC))
-				}
-				s.engine.log().InfoContext(ctx, "await_child: no cached result, exitReplay to fresh", "workflow_id", s.workflowID, "runID", runID, "step", rec.Step)
-				// No cached result yet — fall through to fresh to re-check.
-				// Don't advance stepCount; the fresh execution will record
-				// the result at this same step, overwriting the empty event.
-				s.exitReplay()
-			} else {
-				// Event type mismatch — replay divergence.
-				if s.engine.Metrics != nil {
-					s.engine.Metrics.RecordReplayFailure(ctx)
-				}
-				errMsg := fmt.Sprintf("replay divergence at step %d: expected await_child, got %s.\n  run ID: %s\nRun 'cleat vet' on your workflow code to check for common non-determinism issues (time.Now(), random values, map iteration, goroutines).",
-					rec.Step, rec.EventType, runID)
-				written, _ := s.writeResult(ctx, m, resultPtr, errMsg, resultMaxLen)
-				return packAwaitChildResult(written, 1)
-			}
-		} else {
-			s.exitReplay()
-		}
-	}
-
-	// Fresh execution: check child result via store.
-	if s.engine.childWfStore != nil {
-		out, err := s.engine.childWfStore.GetChildResult(context.Background(), runID)
-		// A child that FAILED and a store that could not answer are both
-		// errors to the guest, and they were the same value until cleat#1115:
-		// `err` is a store error, and a failed child arrived as an empty
-		// success. They are now separate conditions with the same handling,
-		// which is deliberate -- the guest can act on neither differently,
-		// and a failed child's message is the more useful of the two.
-		if err != nil || out.Failed {
-			msg := out.Error
-			if err != nil {
-				msg = err.Error()
-			}
-			rec := EventRecord{
-				Step:      s.stepCount,
-				EventType: EventTypeAwaitChild,
-				RunID:     runID,
-				Err:       msg,
-			}
-			s.recordEvent(rec)
-
-			written, _ := s.writeResult(ctx, m, resultPtr, msg, resultMaxLen)
+// awaitChildStep is AwaitChild. What the move to the dispatcher changed, each row named and pinned by the_child_await_move_tightens_only_these_test.go
+// (the rule: identity rows only tighten), and nothing else: a recorded record that names ANOTHER child (an answer or a pending marker) is a
+// divergence and consumes nothing, where the old code answered, or re-checked, as though it were this call's.
+//
+// What it keeps, because the table of the old code pins it (the_child_awaits_behave_as_recorded_before_the_dispatcher_test.go):
+//   - never refused (neverRefuse), as before: no stopBeforeNewWork check here, in a segment's body, after a shutdown or after a failed write;
+//   - a store error is recorded as the child's ANSWER (cleat#1115), a failed child as an error, a child still running as an EMPTY record and the
+//     child-await suspend word (packAwaitChildResultSuspend, 1<<62, NOT callSuspendSentinel: ABI.md 2.22);
+//   - a pending record is answered OVER, with later history left unread when there is any (cleat#4285: OverPending says so).
+var awaitChildStep = stepSpec{
+	Name:        "await_child",
+	Effect:      effectEffect,
+	Records:     recordsOne,
+	Want:        EventTypeAwaitChild,
+	Refuse:      neverRefuse,
+	Identity:    awaitChildIdentity,
+	OverPending: func(_ stepArgs, rec *EventRecord) bool { return rec.Response == "" && rec.Err == "" },
+	Decode: func(c *stepCtx, rec *EventRecord) int64 {
+		if rec.Err != "" {
+			written, _ := c.s.writeResult(c.ctx, c.m, c.args.outPtr, rec.Err, c.args.outMaxLen)
 			return packAwaitChildResult(written, 1)
 		}
-		if out.Completed {
-			rec := EventRecord{
-				Step:      s.stepCount,
-				EventType: EventTypeAwaitChild,
-				RunID:     runID,
-				Response:  out.Result,
+		written, writtenEC := c.s.writeOut(c.ctx, c.m, c.args.outPtr, rec.Response, c.args.outMaxLen)
+		return packAwaitChildResult(written, uint32(writtenEC))
+	},
+	// Fresh runs for a first call AND for a wake that found its own pending record (OverPending), and is the same either way: the answer, or
+	// another empty record and a suspension.
+	Fresh: func(c *stepCtx) int64 {
+		s, ctx, m, runID := c.s, c.ctx, c.m, c.args.s1
+		resultPtr, resultMaxLen := c.args.outPtr, c.args.outMaxLen
+		if s.engine.childWfStore != nil {
+			out, err := s.engine.childWfStore.GetChildResult(context.Background(), runID)
+			// A child that FAILED and a store that could not answer are both
+			// errors to the guest, and they were the same value until cleat#1115:
+			// `err` is a store error, and a failed child arrived as an empty
+			// success. They are now separate conditions with the same handling,
+			// which is deliberate -- the guest can act on neither differently,
+			// and a failed child's message is the more useful of the two.
+			if err != nil || out.Failed {
+				msg := out.Error
+				if err != nil {
+					msg = err.Error()
+				}
+				c.Record(EventRecord{Step: s.stepCount, EventType: EventTypeAwaitChild, RunID: runID, Err: msg})
+				written, _ := s.writeResult(ctx, m, resultPtr, msg, resultMaxLen)
+				return packAwaitChildResult(written, 1)
 			}
-			s.recordEvent(rec)
-
-			written, writtenEC := s.writeOut(ctx, m, resultPtr, out.Result, resultMaxLen)
-			return packAwaitChildResult(written, uint32(writtenEC))
+			if out.Completed {
+				c.Record(EventRecord{Step: s.stepCount, EventType: EventTypeAwaitChild, RunID: runID, Response: out.Result})
+				written, writtenEC := s.writeOut(ctx, m, resultPtr, out.Result, resultMaxLen)
+				return packAwaitChildResult(written, uint32(writtenEC))
+			}
 		}
-	}
 
-	// Child not completed — record event and suspend.
-	rec := EventRecord{
-		Step:      s.stepCount,
-		EventType: EventTypeAwaitChild,
-		RunID:     runID,
-	}
-	s.recordEvent(rec)
+		// Child not completed -- record the await EMPTY and suspend. The empty record is what a later wake finds and answers over.
+		c.Record(EventRecord{Step: s.stepCount, EventType: EventTypeAwaitChild, RunID: runID})
+		s.suspendErr = &SuspendError{
+			Reason: fmt.Sprintf("await_child(%s)", runID),
+		}
+		return packAwaitChildResultSuspend()
+	},
+}
 
-	s.suspendErr = &SuspendError{
-		Reason: fmt.Sprintf("await_child(%s)", runID),
-	}
+func init() { registerStepSpec(&awaitChildStep) }
 
-	return packAwaitChildResultSuspend()
+// awaitChildIdentity: the record must name the child being awaited. A record with NO run id is not another child's (it names nothing), so it is not
+// a divergence: a record that cannot say which child it was for is read as this call's, as the old code read every one.
+func awaitChildIdentity(a stepArgs, rec *EventRecord) string {
+	if rec.RunID != "" && rec.RunID != a.s1 {
+		return fmt.Sprintf("child %q, recorded %q", a.s1, rec.RunID)
+	}
+	return ""
 }
 
 // pollChildIsDeterministic explains why PollChild records no event.
@@ -684,205 +673,163 @@ func (s *execSession) AwaitAnyChild(ctx context.Context, m api.Module, runIDsJSO
 	return packAwaitChildResultSuspend()
 }
 
+// AwaitAllChildren waits for every child in a list. It is a step on the replay dispatcher (cleat#4152, W3a), and like AwaitChild its history is ONE
+// record, [await_all_children], recorded EMPTY while any child is running and answered OVER that record by the wake that finds them all done.
 func (s *execSession) AwaitAllChildren(ctx context.Context, m api.Module, runIDsJSON string, resultsPtr, resultsMaxLen uint32) int64 {
-	if s.isReplay {
-		return s.replayAwaitAllChildren(ctx, m, runIDsJSON, resultsPtr, resultsMaxLen)
-	}
-	return s.freshAwaitAllChildren(ctx, m, runIDsJSON, resultsPtr, resultsMaxLen)
+	return s.step(ctx, m, &awaitAllChildrenStep, stepArgs{s1: runIDsJSON, outPtr: resultsPtr, outMaxLen: resultsMaxLen})
 }
 
-func (s *execSession) freshAwaitAllChildren(ctx context.Context, m api.Module, runIDsJSON string, resultsPtr, resultsMaxLen uint32) int64 {
+// awaitAllChildrenStep is AwaitAllChildren. What the move changed, each row named in the_child_await_move_tightens_only_these_test.go: a divergence
+// CONSUMES NOTHING now (the old code consumed the record BEFORE it checked its type or its request, so a divergence moved the step count by one,
+// cleat#4157), and a PENDING record that names other run ids is a divergence where the old code re-checked this call's ids over it. It keeps the rest
+// (the old table pins it): never refused, the request compared as TEXT (the same ids in another order are another request), a pending record answered
+// OVER with later history left unread (cleat#4285), and the child-await suspend word (1<<62, ABI.md 2.23).
+//
+// It records MANY by the dispatcher's vocabulary because one of its answers records nothing: a request that is not valid JSON answers an error and
+// writes no event, which the shape check reads as declared (RecordsNothing).
+var awaitAllChildrenStep = stepSpec{
+	Name:    "await_all_children",
+	Effect:  effectEffect,
+	Records: recordsMany,
+	Want:    EventTypeAwaitAllChildren,
+	Refuse:  neverRefuse,
+	Identity: func(a stepArgs, rec *EventRecord) string {
+		if rec.Request != a.s1 {
+			return fmt.Sprintf("run IDs %s, recorded %s", truncateWithHash(a.s1, maxPayloadLen), truncateWithHash(rec.Request, maxPayloadLen))
+		}
+		return ""
+	},
+	OverPending: func(_ stepArgs, rec *EventRecord) bool { return rec.Response == "" },
+	Decode: func(c *stepCtx, rec *EventRecord) int64 {
+		written, writtenEC := c.s.writeOut(c.ctx, c.m, c.args.outPtr, rec.Response, c.args.outMaxLen)
+		return packAwaitChildResult(written, uint32(writtenEC))
+	},
+	// Fresh runs for a first call AND for a wake that found its own pending record (OverPending), and is the same either way: the answer, or
+	// another empty record and a suspension.
+	Fresh: func(c *stepCtx) int64 {
+		s, ctx, m, runIDsJSON := c.s, c.ctx, c.m, c.args.s1
+		resultsPtr, resultsMaxLen := c.args.outPtr, c.args.outMaxLen
 
-	var runIDs []string
-	if err := json.Unmarshal([]byte(runIDsJSON), &runIDs); err != nil {
-		written, _ := s.writeResult(ctx, m, resultsPtr, fmt.Sprintf(`[{"error":"invalid runIDs: %v"}]`, err), resultsMaxLen)
-		return packAwaitChildResult(written, 1)
-	}
+		var runIDs []string
+		if err := json.Unmarshal([]byte(runIDsJSON), &runIDs); err != nil {
+			c.RecordsNothing("a request that is not valid JSON answers an error and records no event")
+			written, _ := s.writeResult(ctx, m, resultsPtr, fmt.Sprintf(`[{"error":"invalid runIDs: %v"}]`, err), resultsMaxLen)
+			return packAwaitChildResult(written, 1)
+		}
 
-	// Concurrently await all children.
-	type childOutcome struct {
-		RunID  string `json:"run_id"`
-		Result string `json:"result,omitempty"`
-		Error  string `json:"error,omitempty"`
-	}
+		// Concurrently await all children.
+		type childOutcome struct {
+			RunID  string `json:"run_id"`
+			Result string `json:"result,omitempty"`
+			Error  string `json:"error,omitempty"`
+		}
 
-	outcomes := make([]childOutcome, len(runIDs))
-	// pending is tracked beside outcomes rather than as a field on childOutcome
-	// because childOutcome is marshalled into the result the guest reads: adding
-	// a field there would change the wire format for every caller.
-	pending := make([]bool, len(runIDs))
-	var wg sync.WaitGroup
+		outcomes := make([]childOutcome, len(runIDs))
+		// pending is tracked beside outcomes rather than as a field on childOutcome
+		// because childOutcome is marshalled into the result the guest reads: adding
+		// a field there would change the wire format for every caller.
+		pending := make([]bool, len(runIDs))
+		var wg sync.WaitGroup
 
-	for i, runID := range runIDs {
-		wg.Add(1)
-		go func(idx int, rid string) {
-			defer wg.Done()
-			if s.engine.childWfStore != nil {
-				// context.Background() rather than ctx, deliberately, and NOT
-				// for the usual reason.
-				//
-				// The usual reason is lifetime -- a goroutine that outlives its
-				// caller cannot borrow the caller's context. That is why
-				// adaptive_flush.go:474 and scheduledbackup/routes.go:534 use
-				// Background(), and it does NOT apply here: wg.Wait() below
-				// joins every one of these, so they cannot outlive this call.
-				// gosec's G118 flags this site for exactly that mismatch, and
-				// on lifetime grounds it would be right.
-				//
-				// The reason is durability. Whatever these goroutines produce
-				// is marshalled into the EventRecord recorded a few lines down,
-				// and replayAwaitAllChildren hands `rec.Response` back to the
-				// guest verbatim on every future replay. So cancelling these
-				// queries does not abandon work -- it writes
-				// "context canceled" into the workflow's permanent history and
-				// replays it forever. A transient shutdown would become a
-				// durable wrong answer, which is a strictly worse failure than
-				// the one cancellation avoids.
-				//
-				// The cost is real and is accepted: because wg.Wait() joins,
-				// an unreachable database makes this call block for as long as
-				// the driver takes to give up, and a cancelled ctx will not cut
-				// that short. A bounded context would cap the wait but bakes
-				// the same wrong history on timeout, just later -- it moves the
-				// defect rather than fixing it. Compare
-				// cmd/cleat-worker/memory_controller.go:189, which DOES wrap
-				// Background() in a timeout: nothing there is replayed, so
-				// giving up early loses only a stats row.
-				co, err := s.engine.childWfStore.GetChildResult(context.Background(), rid)
-				if err != nil {
-					outcomes[idx] = childOutcome{RunID: rid, Error: err.Error()}
-				} else if co.Failed {
-					// cleat#1115, same as AwaitAnyChild above: Error was
-					// filled only from the store error, so a failed child
-					// arrived here as a result.
-					outcomes[idx] = childOutcome{RunID: rid, Error: co.Error}
-				} else if co.Completed {
-					outcomes[idx] = childOutcome{RunID: rid, Result: co.Result}
+		for i, runID := range runIDs {
+			wg.Add(1)
+			go func(idx int, rid string) {
+				defer wg.Done()
+				if s.engine.childWfStore != nil {
+					// context.Background() rather than ctx, deliberately, and NOT
+					// for the usual reason.
+					//
+					// The usual reason is lifetime -- a goroutine that outlives its
+					// caller cannot borrow the caller's context. That is why
+					// adaptive_flush.go:474 and scheduledbackup/routes.go:534 use
+					// Background(), and it does NOT apply here: wg.Wait() below
+					// joins every one of these, so they cannot outlive this call.
+					// gosec's G118 flags this site for exactly that mismatch, and
+					// on lifetime grounds it would be right.
+					//
+					// The reason is durability. Whatever these goroutines produce
+					// is marshalled into the EventRecord recorded a few lines down,
+					// and this step's Decode hands `rec.Response` back to the
+					// guest verbatim on every future replay. So cancelling these
+					// queries does not abandon work -- it writes
+					// "context canceled" into the workflow's permanent history and
+					// replays it forever. A transient shutdown would become a
+					// durable wrong answer, which is a strictly worse failure than
+					// the one cancellation avoids.
+					//
+					// The cost is real and is accepted: because wg.Wait() joins,
+					// an unreachable database makes this call block for as long as
+					// the driver takes to give up, and a cancelled ctx will not cut
+					// that short. A bounded context would cap the wait but bakes
+					// the same wrong history on timeout, just later -- it moves the
+					// defect rather than fixing it. Compare
+					// cmd/cleat-worker/memory_controller.go:189, which DOES wrap
+					// Background() in a timeout: nothing there is replayed, so
+					// giving up early loses only a stats row.
+					co, err := s.engine.childWfStore.GetChildResult(context.Background(), rid)
+					if err != nil {
+						outcomes[idx] = childOutcome{RunID: rid, Error: err.Error()}
+					} else if co.Failed {
+						// cleat#1115, same as AwaitAnyChild above: Error was
+						// filled only from the store error, so a failed child
+						// arrived here as a result.
+						outcomes[idx] = childOutcome{RunID: rid, Error: co.Error}
+					} else if co.Completed {
+						outcomes[idx] = childOutcome{RunID: rid, Result: co.Result}
+					} else {
+						// Still running. Not an outcome -- see the suspend below.
+						outcomes[idx] = childOutcome{RunID: rid, Error: "child not completed"}
+						pending[idx] = true
+					}
 				} else {
-					// Still running. Not an outcome -- see the suspend below.
-					outcomes[idx] = childOutcome{RunID: rid, Error: "child not completed"}
+					// No store configured. AwaitChild reaches its suspend on this
+					// same condition, so this does too; the two calls disagreeing
+					// about it was how IMPROVEMENT-PLAN 3.309 was found.
+					outcomes[idx] = childOutcome{RunID: rid, Error: "no child workflow store"}
 					pending[idx] = true
 				}
-			} else {
-				// No store configured. AwaitChild reaches its suspend on this
-				// same condition, so this does too; the two calls disagreeing
-				// about it was how IMPROVEMENT-PLAN 3.309 was found.
-				outcomes[idx] = childOutcome{RunID: rid, Error: "no child workflow store"}
-				pending[idx] = true
-			}
-		}(i, runID)
-	}
-	wg.Wait()
-
-	// Any child still running means this call has not been answered yet, so
-	// suspend rather than reporting "not completed" as that child's result.
-	//
-	// Recording an outcome here would be durable, not transient: the outcomes
-	// are marshalled into the EventRecord below and replayAwaitAllChildren
-	// hands rec.Response back verbatim on every future replay. So "had not
-	// finished when I looked" would become the child's permanent answer, and no
-	// later replay would ever say otherwise -- exactly the failure the comment
-	// above argues against for context cancellation, which is what made this
-	// unintentional rather than a design choice. IMPROVEMENT-PLAN 3.309.
-	//
-	// AwaitChild (children.go, "Child not completed") and AwaitAnyChild both
-	// suspend on this condition; the event is recorded WITHOUT a response so the
-	// replay path falls through to fresh and re-checks. ChildResult has no way
-	// to express "pending" either -- it is {RunID, Result, Error} -- so a caller
-	// could not tell a still-running child from a failed one except by matching
-	// the error string.
-	for i, isPending := range pending {
-		if !isPending {
-			continue
+			}(i, runID)
 		}
-		rec := EventRecord{
-			Step:      s.stepCount,
-			EventType: EventTypeAwaitAllChildren,
-			Request:   runIDsJSON,
-		}
-		s.recordEvent(rec)
+		wg.Wait()
 
-		s.suspendErr = &SuspendError{
-			Reason: fmt.Sprintf("await_all_children(%s)", runIDs[i]),
-		}
-		return packAwaitChildResultSuspend()
-	}
-
-	// Record event.
-	outcomesJSON, _ := json.Marshal(outcomes)
-	rec := EventRecord{
-		Step:      s.stepCount,
-		EventType: EventTypeAwaitAllChildren,
-		Request:   runIDsJSON,
-		Response:  string(outcomesJSON),
-	}
-	s.recordEvent(rec)
-
-	written, writtenEC := s.writeOut(ctx, m, resultsPtr, string(outcomesJSON), resultsMaxLen)
-	return packAwaitChildResult(written, uint32(writtenEC))
-}
-
-func (s *execSession) replayAwaitAllChildren(ctx context.Context, m api.Module, runIDsJSON string, resultsPtr, resultsMaxLen uint32) int64 {
-
-	if s.stepCount < len(s.history) {
-		rec := s.history[s.stepCount]
-
-		// A record with no response is the suspend marker written by the fresh
-		// path when a child was still running. Fall through to fresh to
-		// re-check, exactly as AwaitChild does ("no cached result, exitReplay to
-		// fresh"). Without this half, suspending in the fresh path would replay
-		// as an EMPTY result -- a durable wrong answer traded for a durable
-		// empty one, which is worse because empty reads as success.
+		// Any child still running means this call has not been answered yet, so
+		// suspend rather than reporting "not completed" as that child's result.
 		//
-		// Checked BEFORE advanceReplayStep and without advancing stepCount: the
-		// fresh execution records the real result at this same step, overwriting
-		// the empty event. Everything past this point keeps its existing order.
+		// Recording an outcome here would be durable, not transient: the outcomes
+		// are marshalled into the EventRecord below and the replay of this step
+		// (awaitAllChildrenStep's Decode) hands rec.Response back verbatim on every future replay. So "had not
+		// finished when I looked" would become the child's permanent answer, and no
+		// later replay would ever say otherwise -- exactly the failure the comment
+		// above argues against for context cancellation, which is what made this
+		// unintentional rather than a design choice. IMPROVEMENT-PLAN 3.309.
 		//
-		// An empty response cannot arise any other way -- the completed path
-		// records json.Marshal of a slice, which is "[]" at its shortest, never
-		// "" -- so this does not reinterpret any pre-existing history.
-		if rec.EventType == EventTypeAwaitAllChildren && rec.Response == "" {
-			s.engine.log().InfoContext(ctx, "await_all_children: no cached result, exitReplay to fresh",
-				"workflow_id", s.workflowID, "runIDs", runIDsJSON, "step", rec.Step)
-			s.exitReplay()
-			return s.freshAwaitAllChildren(ctx, m, runIDsJSON, resultsPtr, resultsMaxLen)
-		}
-
-		if !s.advanceReplayStep(ctx, &rec) {
-			return 0
-		}
-
-		if rec.EventType != EventTypeAwaitAllChildren {
-			if s.engine.Metrics != nil {
-				s.engine.Metrics.RecordReplayFailure(ctx)
+		// AwaitChild (awaitChildStep, "Child not completed") and AwaitAnyChild both
+		// suspend on this condition; the event is recorded WITHOUT a response so the
+		// replay finds it pending (OverPending) and re-checks. ChildResult has no way
+		// to express "pending" either -- it is {RunID, Result, Error} -- so a caller
+		// could not tell a still-running child from a failed one except by matching
+		// the error string.
+		for i, isPending := range pending {
+			if !isPending {
+				continue
 			}
-			errMsg := fmt.Sprintf("replay divergence at step %d: expected await_all_children, got %s.\n  actual run IDs: %s\n  expected run IDs: %s\nRun 'cleat vet' on your workflow code to check for common non-determinism issues (time.Now(), random values, map iteration, goroutines).",
-				rec.Step, rec.EventType,
-				truncateWithHash(runIDsJSON, maxPayloadLen),
-				truncateWithHash(rec.Request, maxPayloadLen))
-			written, _ := s.writeResult(ctx, m, resultsPtr, errMsg, resultsMaxLen)
-			return packAwaitChildResult(written, 1)
-		}
-
-		if runIDsJSON != rec.Request {
-			if s.engine.Metrics != nil {
-				s.engine.Metrics.RecordReplayFailure(ctx)
+			c.Record(EventRecord{Step: s.stepCount, EventType: EventTypeAwaitAllChildren, Request: runIDsJSON})
+			s.suspendErr = &SuspendError{
+				Reason: fmt.Sprintf("await_all_children(%s)", runIDs[i]),
 			}
-			errMsg := fmt.Sprintf("replay divergence at step %d: await_all_children run IDs mismatch.\n  actual run IDs: %s\n  expected run IDs: %s\nRun 'cleat vet' on your workflow code to check for common non-determinism issues (time.Now(), random values, map iteration, goroutines).",
-				rec.Step,
-				truncateWithHash(runIDsJSON, maxPayloadLen),
-				truncateWithHash(rec.Request, maxPayloadLen))
-			written, _ := s.writeResult(ctx, m, resultsPtr, errMsg, resultsMaxLen)
-			return packAwaitChildResult(written, 1)
+			return packAwaitChildResultSuspend()
 		}
 
-		written, writtenEC := s.writeOut(ctx, m, resultsPtr, rec.Response, resultsMaxLen)
+		// Record event.
+		outcomesJSON, _ := json.Marshal(outcomes)
+		c.Record(EventRecord{Step: s.stepCount, EventType: EventTypeAwaitAllChildren, Request: runIDsJSON, Response: string(outcomesJSON)})
+
+		written, writtenEC := s.writeOut(ctx, m, resultsPtr, string(outcomesJSON), resultsMaxLen)
 		return packAwaitChildResult(written, uint32(writtenEC))
-	}
-
-	s.exitReplay()
-	return s.freshAwaitAllChildren(ctx, m, runIDsJSON, resultsPtr, resultsMaxLen)
+	},
 }
+
+func init() { registerStepSpec(&awaitAllChildrenStep) }
 
 // detachedStartRefused is the error code of a detached start the child-workflow store refused, the same code child_workflow gives for a
 // start that failed (not_found). The message is in the run-id buffer for StartDetached; RunDetached has no buffer, so its guest sees the code.
