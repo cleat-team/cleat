@@ -1670,17 +1670,21 @@ func (b *wasmtimeBackend) ExecuteComponentCGo(
 	}
 	// Guest execution time, not wall clock: see the bracket in goComponentCallback (cleat#4174). Armed below, immediately before the guest runs.
 	b.budget = newHostBudget(store, execTimeout)
-	// A run held through a wait gets fresh limits when it wakes, and this fence is one of them (the core path registers the same, backend_wasmtime.go). It was
-	// registered before any component could be held, so that admitting one would not leave this builder behind; Python and C# are admitted now. WHAT IS AND IS NOT
-	// SHOWN (a_real_component_is_held_through_a_sleep_and_charged_its_language_test.go): a real component held through a sleep completes in place; a C# run held longer
-	// than the fence is not charged for the hold; a runaway loop after a hold is stopped about one fence after the wake. NOT shown: that the fence is RESTARTED and not
-	// merely re-armed. Neutering restartFence leaves those rows green, because their guests use almost no guest time before the hold; a row that tells them apart needs
-	// a guest that computes before the hold, sized to the machine, and has no component twin yet.
+	// THIS BUILDER DOES NOT REGISTER THE FENCE RESTART, and that is deliberate: a run held through a wait gets fresh limits when it wakes, and this fence is one of them,
+	// but Execute (backend_wasmtime.go) registers the restart BEFORE it dispatches here, and its closure reads b.budget when it runs, by which time that is the budget built
+	// on the line above. There used to be a second registration here. It was redundant: removing it changed nothing, which is how it was found to be an equivalent mutant
+	// and why no test could ever have shown it was needed. Two registrations also made every wake restart the fence twice.
 	//
-	// THIS REGISTRATION IS REDUNDANT with Execute's (backend_wasmtime.go), which registers the same restart BEFORE it dispatches here, and whose closure reads b.budget when
-	// it runs, by which time it is this builder's budget. Removing only this line therefore changes nothing (an equivalent mutant); it is kept so that this builder does
-	// not depend on the order of Execute's body. To test the restart, neuter restartFence or remove both.
-	onLimitsRestart(ctx, func() { b.restartFence(ctx) })
+	// That puts a requirement on every caller, and it is checked and not trusted: TestEveryFunctionThatBuildsTheFenceBudgetRegistersItsRestartOrNamesWhyNot lists this
+	// function as registered by its caller, and TestTheComponentPathIsOnlyReachedThroughExecuteWhichRegistersFirst fails if any other non-test code calls it, or if Execute
+	// stops registering before the dispatch. The tests that call it directly (a_component_is_compiled_once, a_spent_deadline_is_not_a_one_millisecond_budget,
+	// a_component_execution_releases_its_callbacks) hold no run, so a restart is meaningless to them.
+	//
+	// WHAT IS AND IS NOT SHOWN (a_real_component_is_held_through_a_sleep_and_charged_its_language_test.go): a real component held through a sleep completes in place; a C# run
+	// held longer than the fence is not charged for the hold; a runaway loop after a hold is stopped about one fence after the wake. NOT shown by those rows: that the fence
+	// is RESTARTED and not merely re-armed, because their guests use almost no guest time before the hold. The row that tells them apart is
+	// a_held_component_restarts_the_fence_on_real_wasmtime_timing_test.go (a guest that computes before and after the hold, sized to the machine; nightly, behind the timing
+	// tag, PYTHON ONLY); it goes red when restartFence is neutered and when Execute's registration is removed.
 	wasiConfig := wasmtime.NewWasiConfig()
 	wasiConfig.InheritStderr()
 	wasiConfig.SetEnv([]string{"PYTHONHOME", "PYTHONPATH"}, []string{"/", "/"})

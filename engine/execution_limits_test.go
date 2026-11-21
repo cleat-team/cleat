@@ -278,6 +278,13 @@ var fenceBudgetBuildersThatNeverHold = map[string]string{
 	"runGuestDefersAfterKill":    "a post-run defer pass over a killed guest: the same",
 }
 
+// fenceBudgetBuildersRegisteredByTheirCaller are builders that DO hold a run and do not register the restart themselves, because their caller does, before it dispatches to
+// them. Unlike the map above this is a claim about reachability, so a bare entry would be a claim nobody could disagree with: TestTheComponentPathIsOnlyReachedThrough
+// ExecuteWhichRegistersFirst is what checks it, and an entry here with no such check is a hole.
+var fenceBudgetBuildersRegisteredByTheirCaller = map[string]string{
+	"ExecuteComponentCGo": "reached only through Execute (backend_wasmtime.go), which registers the restart before it dispatches; its closure reads b.budget when it runs, so it restarts this builder's budget",
+}
+
 // fenceBuildersIn returns, for each function in src that assigns b.budget = newHostBudget(...), whether it also calls onLimitsRestart.
 func fenceBuildersIn(t *testing.T, name, src string) map[string]bool {
 	t.Helper()
@@ -339,7 +346,12 @@ func TestEveryFunctionThatBuildsTheFenceBudgetRegistersItsRestartOrNamesWhyNot(t
 	}
 	for fn, registers := range all {
 		_, exempt := fenceBudgetBuildersThatNeverHold[fn]
+		_, byCaller := fenceBudgetBuildersRegisteredByTheirCaller[fn]
 		switch {
+		case byCaller && registers:
+			t.Errorf("%s is listed as registered by its caller and registers a restart itself: the entry is stale, and the restart would run twice on every wake", fn)
+		case byCaller:
+			// Allowed, and checked by TestTheComponentPathIsOnlyReachedThroughExecuteWhichRegistersFirst.
 		case !registers && !exempt:
 			t.Errorf("%s builds the fence budget and does not register its restart: a held run on that path would be killed for the work of both segments. Register it, or name it in fenceBudgetBuildersThatNeverHold with the reason it can never hold", fn)
 		case registers && exempt:
