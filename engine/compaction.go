@@ -281,6 +281,15 @@ type CompactedEvent struct {
 	// persists it and `cleatctl replay` prints it, so a compacted failed attempt would otherwise read as attempt 0.
 	Attempt int `json:"att,omitempty"`
 
+	// InDeferPhase and InDeferSegment mirror the same-named EventRecord fields, and like TimestampMs they are set for EVERY event type and not inside a per-type case: a
+	// record's stamp says WHEN it was recorded (by a defer drain, by a defer segment), not what it is (cleat#4310). They were left out, so a compacted record read as
+	// "written by the workflow body" whatever it was, and everything that reads the stamps (lastStoppableIndex, fastForwardToStop, the redrive refusal, and the check for
+	// a call recorded after a pending child await) was blind to the compacted part of a history. omitempty is safe: false is already "not stamped", and a state written
+	// before this field existed reads back false, which for it means UNKNOWN and not "recorded by the body": the stamps of events compacted before the fix are gone and
+	// cannot be recovered.
+	InDeferPhase   bool `json:"idp,omitempty"`
+	InDeferSegment bool `json:"ids,omitempty"`
+
 	// NewVersion mirrors EventRecord.NewVersion for a continue_as_new event.
 	// ContinueAsNewWithVersion reads rec.NewVersion straight off the replayed
 	// event to decide which workflow version to restart as (lifecycle.go); a
@@ -567,6 +576,9 @@ func extractCompactionStateFrom(prev *CompactionState, events []EventRecord) (*C
 			// switch below: Now() during replay needs it regardless of
 			// which event carried it. See the field doc on CompactedEvent.
 			TimestampMs: ev.TimestampMs,
+			// The drain stamps are universal in the same way (cleat#4310).
+			InDeferPhase:   ev.InDeferPhase,
+			InDeferSegment: ev.InDeferSegment,
 		}
 		switch ev.EventType {
 		case EventTypeCall:
@@ -798,6 +810,9 @@ func buildFullHistoryFromCompaction(tail []EventRecord, cs *CompactionState) []E
 			// TimestampMs is restored for every event, mirroring the
 			// universal (not per-type) assignment in extractCompactionState.
 			TimestampMs: ce.TimestampMs,
+			// And the drain stamps (cleat#4310).
+			InDeferPhase:   ce.InDeferPhase,
+			InDeferSegment: ce.InDeferSegment,
 		}
 		switch ce.Type {
 		case EventCodeCall:

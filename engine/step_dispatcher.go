@@ -495,8 +495,10 @@ func (s *execSession) leaveReplayAtPending(sp *stepSpec, unread int) {
 //     healthy history, and re-reading them runs nothing twice;
 //   - it carries neither drain stamp (InDeferPhase, InDeferSegment): a defer body that awaits a child during the guest's own drain records its later
 //     defers after the pending await by design (cleat#3429), the same exemption the host applies when it refuses (guestDrainIsExempt);
-//   - it was read from an event row and not expanded from a compaction: compaction does not carry the stamps (compactedRecords), so a record below that index
-//     has an UNKNOWN stamp, and treating unknown as absent would fail a healthy workflow.
+//   - it was read from an event row and not expanded from a compaction (compactedRecords): a record below that index may have an UNKNOWN stamp, because a state
+//     compacted by a build before cleat#4310 did not carry the stamps and cannot be told apart from one compacted after, and treating unknown as absent would
+//     fail a healthy workflow. The exemption is deliberately still wide: it covers records compacted after cleat#4310 too, which do carry them, until a follow-up
+//     can tell the two kinds of state apart.
 func (s *execSession) staleCallAfterPending(from int) int {
 	for i := max(from, s.compactedRecords); i < len(s.history); i++ {
 		rec := s.history[i]

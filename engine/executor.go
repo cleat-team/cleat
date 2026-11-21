@@ -266,12 +266,7 @@ func (e *Engine) executeWithBackend(
 	}
 	// If compaction state is set, merge virtual compacted events with tail
 	// history to produce a complete replay history for deterministic replay.
-	compactedStep := 0
-	replayHistory := history
-	if e.compactionState != nil && len(history) > 0 {
-		replayHistory = buildFullHistoryFromCompaction(history, e.compactionState)
-		compactedStep = e.compactionState.CompactedStep
-	}
+	replayHistory, compactedStep := e.replayHistoryFor(history)
 	compactedRecords := len(replayHistory) - len(history)
 
 	now := e.seedNowMs(replayHistory)
@@ -612,12 +607,7 @@ func (e *Engine) executeCompiled(ctx context.Context, compiled wazero.CompiledMo
 
 	// If compaction state is set, merge virtual compacted events with tail history
 	// to produce a complete replay history for deterministic replay.
-	compactedStep := 0
-	replayHistory := history
-	if e.compactionState != nil && len(history) > 0 {
-		replayHistory = buildFullHistoryFromCompaction(history, e.compactionState)
-		compactedStep = e.compactionState.CompactedStep
-	}
+	replayHistory, compactedStep := e.replayHistoryFor(history)
 	compactedRecords := len(replayHistory) - len(history)
 
 	now := e.seedNowMs(replayHistory)
@@ -1122,4 +1112,18 @@ func guestLanguageDisplayName(lang string) string {
 		return "AssemblyScript"
 	}
 	return lang
+}
+
+// replayHistoryFor is the history a replay runs against: the tail the store handed back, preceded by the compacted prefix when the run has been compacted, and the step
+// the compaction covers (what stripCompactedEvents removes again from the history the execution returns). BOTH executor paths (the backend path and the wazero dev
+// path) call it, so the rule below exists once and a test through one covers the other.
+//
+// A compaction state means the run HAS been compacted, so the replay history is the expanded prefix followed by whatever tail remains, and the tail may be EMPTY: a
+// limit of 1 compacts the whole history. This used to require a non-empty tail, so an empty one skipped the expansion and the workflow started over, repeating every
+// call it had made (cleat#4314: a run of ten calls compacted after its fourth sent the service ten calls, not six).
+func (e *Engine) replayHistoryFor(history []EventRecord) (replayHistory []EventRecord, compactedStep int) {
+	if e.compactionState == nil {
+		return history, 0
+	}
+	return buildFullHistoryFromCompaction(history, e.compactionState), e.compactionState.CompactedStep
 }

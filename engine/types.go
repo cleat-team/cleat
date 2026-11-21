@@ -692,7 +692,8 @@ type execSession struct {
 	// the suspension is a cleanup that is still in progress (cleat#3429); one that began after it is a wrapper that ran its defers because the guest swallowed
 	// the suspension (cleat#4285). Meaningful only while inDeferPhase.
 	// compactedRecords is how many records at the front of history were EXPANDED from a compaction state and not read from the event rows. The drain stamps
-	// (InDeferPhase, InDeferSegment) are not carried through compaction, so a record below this index has no stamp to read: unknown, not absent (cleat#4285 step 3).
+	// (InDeferPhase, InDeferSegment) were not carried through compaction before cleat#4310, so a record below this index may have no stamp to read: unknown, not
+	// absent (cleat#4285 step 3). States compacted after cleat#4310 do carry them, but nothing in a state says which build wrote it, so the rule stays wide.
 	compactedRecords int
 
 	deferPhaseBeganSuspended bool
