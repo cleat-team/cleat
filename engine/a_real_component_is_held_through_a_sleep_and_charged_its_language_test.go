@@ -196,9 +196,6 @@ func TestCSharpComponentIsHeldThroughADurableSleepAndChargedAsCSharp(t *testing.
 }
 
 func TestPythonComponentIsHeldThroughADurableSleepAndChargedAsPython(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping Python WASM integration test in short mode")
-	}
 	h := newPythonWasmTestHelper(t)
 	if !h.toolsAvailable() {
 		if toolchainRequired("python") {
@@ -337,9 +334,6 @@ func TestAHeldCSharpRunLongerThanTheFenceIsNotChargedForTheHold(t *testing.T) {
 // computes, sized to the machine, before the hold, as the core path's timing row does (a_held_wait_restarts_the_fence_on_real_wasmtime_timing_test.go). That row has no
 // component twin yet. What does cover the restart without a clock is the arithmetic test and the structural test that every builder of the fence budget registers it.
 func TestPythonRunawayLoopAfterAHoldIsStoppedByTheFenceAWholeFenceAfterTheWake(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping Python WASM integration test in short mode")
-	}
 	h := newPythonWasmTestHelper(t)
 	if !h.toolsAvailable() {
 		if toolchainRequired("python") {
