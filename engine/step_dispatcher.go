@@ -184,6 +184,10 @@ type stepSpec struct {
 	// replay here leaves it unread, so the call runs again. The old code did exactly that and this keeps it, so a move changes nothing; it is
 	// reported (a warning with the count) and named in a_host_call_never_leaves_replay_with_history_unread_test.go, whose entry fails the moment the
 	// behaviour changes. It becomes a divergence when #4285's host-side guard and the Java fix have landed, and not before.
+	//
+	// WHAT A PENDING MARKER RESTS ON, a store invariant and not a rule of this field: the two child awaits tell "pending" from "answered" by an EMPTY
+	// answer, so a finished child's answer must never be empty. coerceResultJSON stores an empty result as {} and nonEmptyChildError keeps a failure's
+	// message non-empty; without either, a finished child would read as still pending and be answered over (noted by the reviewer of #4290).
 	OverPending func(a stepArgs, rec *EventRecord) bool
 	// Fresh does the work and records, through c.Record, where the call records. It is called only once the dispatcher has decided
 	// fresh work is allowed.
