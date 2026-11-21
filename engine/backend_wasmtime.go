@@ -9,12 +9,9 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
-
-	"github.com/cespare/xxhash/v2"
 
 	"github.com/bytecodealliance/wasmtime-go/v48"
 
@@ -825,8 +822,7 @@ func (b *wasmtimeBackend) Execute(ctx context.Context, wasmBytes []byte, entryPo
 	// Skip for modules that don't import from WASI (AS, Rust cdylib, TeaVM)
 	// to avoid wasmtime-go v44 nil pointer dereference during fn.Call.
 	// Look up or populate cached per-WASM metadata (envNeeded, hasWasi, language).
-	wHash := xxhash.Sum64(wasmBytes)
-	wKey := strconv.FormatUint(wHash, 16)
+	wKey := moduleCacheKey(wasmBytes)
 	var meta *wasmMeta
 	if cached, ok := b.metaCache.Load(wKey); ok {
 		meta = cached.(*wasmMeta)
@@ -1605,4 +1601,19 @@ func (b *wasmtimeBackend) writeWorkToFixedMemory(mem *wasmtime.Memory, store was
 	if inputLen > 0 {
 		copy(data[fixedWorkOffset+8+entryLen:fixedWorkOffset+8+entryLen+inputLen], input[:inputLen])
 	}
+}
+
+// OnModuleEvicted registers f to be called with the CodeID of every compiled module or component the backend's cache EVICTS (see moduleLRU.onEvict), after the lock is
+// released. A held instance refcounts the code it runs, so eviction alone frees nothing while one is held: the worker uses this to send back every held run of the
+// evicted code (ResidentSet.EvictCode), so that a hold never pins code the cache had decided to free. Backends made per execution share the cache, so one registration on
+// the root backend covers them. A nil f clears it.
+func (b *wasmtimeBackend) OnModuleEvicted(f func(key string)) {
+	if b == nil || b.moduleCache == nil {
+		return
+	}
+	if f == nil {
+		b.moduleCache.setOnEvict(nil)
+		return
+	}
+	b.moduleCache.setOnEvict(func(key string) { f(codeIDOfCacheKey(key)) })
 }

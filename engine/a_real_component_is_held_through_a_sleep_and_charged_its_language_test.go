@@ -94,7 +94,6 @@ func tryExecuteAComponent(t *testing.T, wasmBytes []byte, backendLangs []string,
 		opts = append(opts, WithResidency(set.ForRun(ResidentRunInfo{
 			WorkflowID: "wf-held-component-" + component,
 			Language:   wasm.DetectLanguage(wasmBytes),
-			Component:  component,
 			ClaimCheck: func(context.Context) error {
 				wokeAt.CompareAndSwap(0, time.Now().UnixNano())
 				checks.Add(1)
@@ -181,9 +180,9 @@ func TestPythonComponentIsHeldThroughADurableSleepAndChargedAsPython(t *testing.
 	shortOn := executeAComponent(t, b, WasmtimeLanguages, `{"sleep_ms":400}`, true, "held-sleep@1")
 	requireHeldInPlace(t, "the Python component", short, shortOn)
 
-	want := defaultResidentInstanceBytes["python"] + defaultResidentFixedBytes["python"]
+	want := defaultResidentInstanceBytes["python"]
 	if shortOn.maxCharged != want {
-		t.Errorf("while held the set was charged at most %d bytes, want the Python instance plus its fixed cost = %d", shortOn.maxCharged, want)
+		t.Errorf("while held the set was charged at most %d bytes, want the Python instance charge = %d (the compiled component is deliberately not charged)", shortOn.maxCharged, want)
 	}
 
 	// THE SCALING CONTROL. A guest that ignores its input also completes and exits cleanly, so the sleep length is asked for twice and the gap between the guest's
@@ -213,8 +212,8 @@ func TestPythonComponentIsHeldThroughADurableSleepAndChargedAsPython(t *testing.
 // WHAT THIS DOES NOT SHOW, AND IT WAS TESTED: that the fence is RESTARTED at the wake, as opposed to re-armed. Neutering the restart itself (restartFence's
 // budget.restart) leaves this row GREEN: 1.936 s after the wake against a fence of 2 s, as with it (1.959 s). A restart differs from a re-arm only for a guest that had
 // ALREADY used part of its fence when the hold began, and this one has not (componentize-py pre-initialises the interpreter at build time, so there is almost no guest
-// time before the first host call; a hypothesis about this guest, not a measurement). The twin that does tell them apart is a_held_component_restarts_the_fence_on_real_
-// wasmtime_timing_test.go.
+// time before the first host call; a hypothesis about this guest, not a measurement). A row that does tell them apart is a FOLLOW-UP, not yet in the tree: a component twin of the core
+// spin_sleep_spin timing row (a guest that computes before AND after the hold, sized to the machine, nightly, Python only).
 //
 // A WARNING ABOUT THE OBVIOUS MUTANT, which this comment used to describe wrongly: removing only the component builder's onLimitsRestart registration (component_cgo.go) is
 // an EQUIVALENT mutant. Execute registers the same restart (backend_wasmtime.go) BEFORE it dispatches to the component path, and the closure reads b.budget when it runs,

@@ -2619,6 +2619,9 @@ func main() {
 		os.Exit(1)
 	}
 	w.resident = resident
+	// A held run pins the compiled code it executes even after the cache evicts it, so when the cache evicts a module or component every held run of it is sent back:
+	// a hold never outlives its code's cache entry (engine.ResidentSet.EvictCode). Backends made per execution share the cache, so the root backend is enough.
+	resident.AttachToCodeCache(wt)
 	metricsInstance.RecordDesiredConcurrency(context.Background(), int64(*concurrency))
 	globalWorker = w
 

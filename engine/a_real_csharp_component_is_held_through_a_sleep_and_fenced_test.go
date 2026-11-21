@@ -41,10 +41,10 @@ func TestCSharpComponentIsHeldThroughADurableSleepAndChargedAsCSharp(t *testing.
 	on := executeAComponent(t, b, langs, input, true, "csharp-fixture@1")
 	requireHeldInPlace(t, "the C# component", off, on)
 
-	want := defaultResidentInstanceBytes["csharp"] + defaultResidentFixedBytes["csharp"]
+	want := defaultResidentInstanceBytes["csharp"]
 	if on.maxCharged != want {
-		t.Errorf("while held the set was charged at most %d bytes, want the C# instance plus its fixed cost = %d. A figure of %d would be the Python charge: this run was charged as the wrong language.",
-			on.maxCharged, want, defaultResidentInstanceBytes["python"]+defaultResidentFixedBytes["python"])
+		t.Errorf("while held the set was charged at most %d bytes, want the C# instance charge = %d. A figure of %d would be the Python charge: this run was charged as the wrong language.",
+			on.maxCharged, want, defaultResidentInstanceBytes["python"])
 	}
 	// A hold cannot be shorter than the sleep it waits out.
 	if on.gap < 350*time.Millisecond {
