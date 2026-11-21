@@ -5,9 +5,12 @@
 -- a divergence ("... ignored a child-await suspension before 0.6.0 (cleat#4285) ... Terminate or reset the workflow"). This lists the workflows that will hit it, so they
 -- can be terminated or reset BEFORE the upgrade. It reads the same three things the replay rule reads and nothing else:
 --
---   1. a pending await:  event_type in the three child awaits and an empty response;
---   2. a LATER record that is a call's effect: the event types the engine itself calls stoppable (engine/stop_at_last_stoppable.go, stoppableFirstEvents;
---      promise_resolved / promise_rejected / signal_received are stoppable only by service and op and are left out, which is the narrower and safer reading);
+--   1. a pending await, as each await's own replay reads it: an await_all_children or await_any_child with an EMPTY response, and an await_child with an empty
+--      response AND an empty error (a child that failed is an answer, not a pending marker: engine/children.go, OverPending);
+--   2. a LATER record that is a call's effect: the engine's own isStoppableEvent (engine/stop_at_last_stoppable.go), which is stoppableFirstEvents (listed by type
+--      below) PLUS the three that are stoppable only by service and op (stoppableByOp): a promise resolve, a promise reject and a signal send. An earlier version of this
+--      file left those three out as "the narrower reading"; the replay refuses them, so it under-reported. A test derives the expected set from the Go table, so the two
+--      cannot drift apart without a test going red;
 --   3. that record carries NEITHER drain stamp (payload in_defer_phase / in_defer_segment): a defer drain's own records follow its pending await by design.
 --
 -- WHAT IT CANNOT SEE, A NAMED GAP: events a compaction folded away are no longer rows here, and their drain stamps are unknown to the replay too, so the replay does not
@@ -31,10 +34,14 @@ JOIN event_history l
 JOIN workflow_leases w
   ON w.id = p.workflow_id
  AND w.tenant_id = p.tenant_id
-WHERE p.event_type IN ('await_child', 'await_all_children', 'await_any_child')
+WHERE ((p.event_type = 'await_child' AND coalesce(p.error, '') = '')
+       OR p.event_type IN ('await_all_children', 'await_any_child'))
   AND coalesce(p.response, '') = ''
-  AND l.event_type IN ('call', 'await_signals', 'child_workflow', 'plugin_call', 'run_detached', 'side_effect', 'durable_send', 'defer',
-                       'fetch', 'acquire_lock', 'schedule_cron', 'durable_schedule_invoke')
+  AND (l.event_type IN ('call', 'await_signals', 'child_workflow', 'plugin_call', 'run_detached', 'side_effect', 'durable_send', 'defer',
+                        'fetch', 'acquire_lock', 'schedule_cron', 'durable_schedule_invoke')
+       OR (l.event_type = 'promise_resolved' AND l.service = 'promise' AND l.operation = 'resolve')
+       OR (l.event_type = 'promise_rejected' AND l.service = 'promise' AND l.operation = 'reject')
+       OR (l.event_type = 'signal_received'  AND l.service = 'signal'  AND l.operation = 'send'))
   AND coalesce(l.payload ->> 'in_defer_phase', 'false')   <> 'true'
   AND coalesce(l.payload ->> 'in_defer_segment', 'false') <> 'true'
   AND w.status NOT IN ('done', 'failed', 'dead_lettered', 'terminated', 'cancelled')
