@@ -132,3 +132,82 @@ func TestTwoHeartbeatTicksNeverRunAtTheSameTime(t *testing.T) {
 		t.Errorf("up to %d HeartbeatBatchFenced calls ran at once, want 1: the ticks overlapped", got)
 	}
 }
+
+// cleat-review3 on #4276. The tick heartbeats and fences what w.inflight holds for a run ID, and a claim stores by ID alone, so a run this worker re-claims
+// while it is still holding the previous execution REPLACES that execution there: the tick covers the successor, nothing ever fences the held one, and a check that
+// read only the fence marker answered "still mine". The held execution's outbound call could then go out beside the successor's.
+func TestAHeldExecutionThatASuccessorOnThisWorkerReplacedIsLostEvenThoughNothingFencedIt(t *testing.T) {
+	var sent [][]engine.GenerationKey
+	w, held, execCtx := claimCheckFixture(func(_ context.Context, _ string, runs []engine.GenerationKey) ([]string, error) {
+		sent = append(sent, append([]engine.GenerationKey(nil), runs...))
+		return nil, nil // the store reports nothing lost: it has the successor's lease
+	})
+	// The same worker claims the run again, as generation 4, while generation 3 is still held.
+	succCtx := registerInflightExecution(w, "held-run", "test-def", 4)
+	successor := &engine.WorkflowInstance{ID: "held-run", DefName: "test-def", Generation: 4}
+
+	err := w.claimStillMine(context.Background(), held)
+
+	if !errors.Is(err, errClaimLost) {
+		t.Fatalf("the replaced generation-3 execution got %v, want errClaimLost", err)
+	}
+	// What makes this the hole and not an ordinary lost run: nothing fenced or cancelled generation 3 and the store never heard of it, so the old answer was nil.
+	if w.runIsFenced("held-run", 3) || execCtx.Err() != nil {
+		t.Errorf("PRECONDITION: generation 3 was fenced (%v) or cancelled (%v) by something else, so the case is not the one measured", w.runIsFenced("held-run", 3), execCtx.Err())
+	}
+	for _, batch := range sent {
+		for _, k := range batch {
+			if k.Generation == 3 {
+				t.Errorf("a heartbeat was sent for generation 3 (%v): the superseded execution was still covered, so the case is not the one measured", batch)
+			}
+		}
+	}
+
+	// The control: the successor, which IS the registered execution, is still held, and the successor is not disturbed by the other's check.
+	if err := w.claimStillMine(context.Background(), successor); err != nil {
+		t.Errorf("the registered generation-4 execution got %v, want nil", err)
+	}
+	if succCtx.Err() != nil || w.runIsFenced("held-run", 4) {
+		t.Errorf("the successor was cancelled (%v) or fenced (%v) by its predecessor's check", succCtx.Err(), w.runIsFenced("held-run", 4))
+	}
+}
+
+func TestAnExecutionWithNoRegistrationAtAllIsLost(t *testing.T) {
+	w, held, _ := claimCheckFixture(func(context.Context, string, []engine.GenerationKey) ([]string, error) { return nil, nil })
+	w.inflight.Delete("held-run") // its own teardown ran, or it was never registered
+
+	if err := w.claimStillMine(context.Background(), held); !errors.Is(err, errClaimLost) {
+		t.Fatalf("an execution that is not registered got %v, want errClaimLost", err)
+	}
+}
+
+// A replacement that lands WHILE the tick is in flight: the snapshot the tick took held generation 3 and the store answers "nothing lost", so only a second look
+// after the tick can see that a successor registered in the meantime. Without it the answer is nil.
+func TestAReplacementThatLandsWhileTheTickIsInFlightIsStillLost(t *testing.T) {
+	var w *Worker
+	w, held, _ := claimCheckFixture(func(context.Context, string, []engine.GenerationKey) ([]string, error) {
+		registerInflightExecution(w, "held-run", "test-def", 4) // the claim lands mid-tick
+		return nil, nil
+	})
+
+	if err := w.claimStillMine(context.Background(), held); !errors.Is(err, errClaimLost) {
+		t.Fatalf("a successor registered during the tick left the held execution with %v, want errClaimLost", err)
+	}
+}
+
+// An execution that is already known to be replaced is answered without a store round trip: the check costs a tick, and a lost answer needs none.
+func TestAnExecutionAlreadyReplacedIsAnsweredWithoutAskingTheStore(t *testing.T) {
+	calls := 0
+	w, held, _ := claimCheckFixture(func(context.Context, string, []engine.GenerationKey) ([]string, error) {
+		calls++
+		return nil, nil
+	})
+	registerInflightExecution(w, "held-run", "test-def", 4)
+
+	if err := w.claimStillMine(context.Background(), held); !errors.Is(err, errClaimLost) {
+		t.Fatalf("got %v, want errClaimLost", err)
+	}
+	if calls != 0 {
+		t.Errorf("the store was asked %d time(s) about an execution already known to be replaced, want 0", calls)
+	}
+}

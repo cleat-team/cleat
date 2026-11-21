@@ -103,6 +103,9 @@ type heldRunOptions struct {
 	settle func(context.Context, engine.WorkflowStore, string) error
 	// storeDownAtWake makes the heartbeat call fail from the moment the run is asleep, so the claim check at the wake cannot get an answer.
 	storeDownAtWake bool
+	// replacedAtHold registers a successor execution of the run (the next generation) in w.inflight while the run is held, which is what this worker re-claiming a
+	// run it still holds does. The store is not touched: its lease is still the held execution's, so nothing but the registration says the execution was replaced.
+	replacedAtHold bool
 }
 
 func runTerminatedWhileSleeping(t *testing.T, o heldRunOptions) heldRunOutcome {
@@ -206,6 +209,9 @@ func runTerminatedWhileSleeping(t *testing.T, o heldRunOptions) heldRunOutcome {
 		if err := o.settle(ctx, store, wfID); err != nil {
 			t.Fatalf("settling the run (residency=%v, status before: %s): %v\nworker logs:\n%s", residency, out.statusAtSettle, err, logs.String())
 		}
+	}
+	if o.replacedAtHold {
+		registerInflightExecution(w, wfID, defName, claimed.Generation+1)
 	}
 	if o.heartbeatRightAfter {
 		// The ticker firing straight after the settle, which is the best case: the fenced heartbeat sees the lease's generation move and fences the run (setup.go).
@@ -418,5 +424,27 @@ func TestTheClaimCheckAnswersHeldLostAndUnknownAsThreeDifferentThings(t *testing
 	}
 	if registered[unknown.ID].Err() != nil {
 		t.Errorf("an unanswerable check cancelled the execution")
+	}
+}
+
+// cleat-review3 on #4276: a run this worker re-claims while it still holds the previous execution replaces that execution in w.inflight, so the tick never covers the
+// held one and a check that read only the fence marker said "still mine". The unit tests pin the answer; this one runs it through a real held run.
+//
+// WHAT IT CAN AND CANNOT SEE. After the held execution suspends, this worker re-claims the run and replays it, and the replay makes the call too, so the service's
+// call count cannot tell "the held execution acted" from "its replacement did". The check's own WARN line can: it is written only on the lost path, so it is the
+// observable that says the held execution was sent back at its wake and not resumed.
+func TestAHeldExecutionThatThisWorkerReplacedWhileItWasHeldIsSentBackAtItsWake(t *testing.T) {
+	const lostLine = "no longer holds its claim at its wake"
+	replaced := runTerminatedWhileSleeping(t, heldRunOptions{residency: true, replacedAtHold: true})
+	control := runTerminatedWhileSleeping(t, heldRunOptions{residency: true})
+
+	if !replaced.heldAtTerminate || !control.heldAtTerminate {
+		t.Fatalf("PRECONDITION FAILED: the run was not held (replaced=%v, control=%v), so nothing about a held run was measured", replaced.heldAtTerminate, control.heldAtTerminate)
+	}
+	if strings.Contains(control.logs, lostLine) {
+		t.Fatalf("PRECONDITION FAILED: the control, which replaced nothing, logged %q, so the line does not mean what this test reads it as:\n%s", lostLine, control.logs)
+	}
+	if !strings.Contains(replaced.logs, lostLine) {
+		t.Errorf("a held execution this worker had replaced was resumed at its wake (no %q in the worker's log):\n%s", lostLine, replaced.logs)
 	}
 }

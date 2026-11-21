@@ -4906,14 +4906,37 @@ func (w *Worker) claimStillMine(ctx context.Context, wf *engine.WorkflowInstance
 		v, ok := w.fencedRuns.Load(wf.ID)
 		return ok && v.(int64) == wf.Generation
 	}
-	if fenced() {
-		return errClaimLost // the ticker already learned of it
+	// THE CHECK ANSWERS FOR THIS EXECUTION, NOT FOR ITS RUN ID. The tick sends and fences whatever w.inflight holds for an ID, and claiming stores by ID alone, so a
+	// successor this SAME worker claimed (a store hand-off it won back before its next tick) replaces the held execution there: the tick then heartbeats the
+	// successor, never fences this one, and a check that read only the fence marker would call it still mine, so its outbound call could go out beside the
+	// successor's. The store's generation fence hides that for writes, not for a call. Absent or another generation means it is no longer the registered
+	// execution, which is lost. (cleat-review3 on #4276: held at generation 3, a successor registered at 4, the check answered nil.) Read again after the tick,
+	// because a claim can land while the tick is in flight.
+	superseded := func() bool {
+		v, ok := w.inflight.Load(wf.ID)
+		cur, isWf := v.(*engine.WorkflowInstance)
+		return !ok || !isWf || cur.Generation != wf.Generation
 	}
-	landed := w.heartbeatAndFenceInFlight()
-	if fenced() {
-		w.logger.WarnContext(ctx, "a held run no longer holds its claim at its wake (terminated, cancelled or reclaimed while held); it is suspended instead of resumed",
+	lostBecause := func() string {
+		switch {
+		case fenced():
+			return "terminated, cancelled or reclaimed while held"
+		case superseded():
+			return "replaced by a newer execution of the same run on this worker"
+		}
+		return ""
+	}
+	sendBack := func(why string) error {
+		w.logger.WarnContext(ctx, "a held run no longer holds its claim at its wake ("+why+"); it is suspended instead of resumed",
 			"worker_id", w.id, "workflow_id", wf.ID, "def_name", wf.DefName, "generation", wf.Generation)
 		return errClaimLost
+	}
+	if why := lostBecause(); why != "" {
+		return sendBack(why) // the ticker already learned of it, or a successor replaced this execution
+	}
+	landed := w.heartbeatAndFenceInFlight()
+	if why := lostBecause(); why != "" {
+		return sendBack(why)
 	}
 	if !landed {
 		w.logger.WarnContext(ctx, "a held run could not revalidate its claim; it is suspended instead of resumed",
