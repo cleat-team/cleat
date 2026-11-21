@@ -446,7 +446,7 @@ func payloadKeyVersionsFromFlags() payloadKeyVersions {
 func main() {
 	flag.Parse()
 
-	// The residency policy, validated where an operator reads it. Off unless --resident-max-runs is above zero, but a nonsense policy is refused either way.
+	// The residency policy, validated where an operator reads it. On by default (--resident-max-runs is 8; 0 turns it off), and a nonsense policy is refused either way.
 	residencyCfg, residencyErr := residencyConfigFromFlags()
 	if residencyErr != nil {
 		fmt.Fprintln(os.Stderr, residencyErr)
