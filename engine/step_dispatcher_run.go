@@ -42,7 +42,7 @@ read:
 		case rolePrefix, roleFinal:
 			// For a spec whose run can end without a final, Identity finds the end: a record that names another call, after at least one record
 			// of this run, belongs to the next call and is not read here.
-			if sp.EndsWithoutFinal && len(run) > 0 && sp.Identity != nil && sp.Identity(args, &rec) != "" {
+			if (sp.EndsWithoutFinal || sp.ResumesFreshAtForeign) && len(run) > 0 && sp.Identity != nil && sp.Identity(args, &rec) != "" {
 				foreign = i
 				break read
 			}
@@ -85,7 +85,7 @@ read:
 	if unknown >= 0 {
 		return sp.divergenceAnswer(s.replayDivergenceAt(ctx, m, &s.history[unknown], sp.Want, args.outPtr, args.outMaxLen)), false
 	}
-	if !final && foreign >= 0 && !sp.EndsWithoutFinal {
+	if !final && foreign >= 0 && !sp.EndsWithoutFinal && !sp.ResumesFreshAtForeign {
 		return sp.divergenceAnswer(s.replayDivergenceAt(ctx, m, &s.history[foreign], sp.Want, args.outPtr, args.outMaxLen)), false
 	}
 	for k := range run {
@@ -94,8 +94,11 @@ read:
 			return 0, false
 		}
 	}
-	if !final && foreign < 0 {
+	if !final && (foreign < 0 || sp.ResumesFreshAtForeign) {
 		c.Prefix = run
+		if foreign >= 0 {
+			c.unreadAtForeign = len(s.history) - s.stepCount // step leaves replay through leaveReplayAtPending, which names and reports it
+		}
 		return 0, true
 	}
 	return sp.DecodeRun(c, run), false

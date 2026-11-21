@@ -14,12 +14,11 @@ import (
 	"testing"
 )
 
-// callsNeedingNoPostSuspendRefusal names the host calls that need no call to refuseIfSuspended, with the reason: they start no fresh work, or (AwaitAnyChild) they carry their own equivalent guard. A call is here because the reason is true of it, and
+// callsNeedingNoPostSuspendRefusal names the host calls that need no call to refuseIfSuspended, with the reason: they start no fresh work. A call is here because the reason is true of it, and
 // TestThePostSuspendExemptionsStillDescribeSomething fails when one is covered after all, so an entry cannot outlive its reason.
 var callsNeedingNoPostSuspendRefusal = map[string]string{
 	// Each reason is what was MEASURED of the call (2026-11-20): none of these records an event or assigns a suspension, which is what makes a repeat after
 	// an ignored suspension harmless. A call that gains either must leave this list.
-	"AwaitAnyChild":        "HAS ITS OWN equivalent guard (suspendErr != nil && !inDeferDrain, answering 1<<62), kept verbatim because the shared helper also exempts the guest's own drain and would loosen it; W3b moves the call onto the dispatcher",
 	"DurableLog":           "writes a log line and nothing else, and not even that on replay",
 	"GetScope":             "reads the scope; records nothing, sets no suspension",
 	"JsonParse":            "a pure function of its arguments",

@@ -528,160 +528,111 @@ func sameRunIDSet(a, b string) bool {
 	return true
 }
 
+// AwaitAnyChild returns the first of a set of children to finish. It is a step on the replay dispatcher (cleat#4152, W3b). Its history is a RUN: any number of
+// EMPTY await_any_child records (one per wake that found every child still running; cleat#3391 histories hold two), then the answer, a NON-EMPTY record at a later
+// step.
 func (s *execSession) AwaitAnyChild(ctx context.Context, m api.Module, runIDsJSON string, resultPtr, resultMaxLen uint32) int64 {
-	// resumedFromSuspend is set when this call replayed one or more empty
-	// (suspend) records and is now re-checking fresh. See the comment where the
-	// suspend would be recorded below.
-	resumedFromSuspend := false
+	return s.step(ctx, m, &awaitAnyChildStep, stepArgs{s1: runIDsJSON, outPtr: resultPtr, outMaxLen: resultMaxLen})
+}
 
-	// A segment that has already decided to suspend does not start another
-	// await. The guest keeps running after a suspend sentinel -- AssemblyScript
-	// gets a null back and Rust an Err it may ignore -- so a second, different
-	// AwaitAnyChild can arrive in the same segment, and without this it would
-	// record a second empty suspend row beside the first: [X empty, Y empty].
-	// Same guard, same reason as AwaitSignal (signaller.go).
-	// Its own guard, kept as it was: only the HOST's defer drain is exempt, where the shared refuseIfSuspended also exempts the guest's own (SetDeferPhase), which
-	// would loosen this call. W3b moves it onto the dispatcher, where the spec's refusal applies and that question gets its own measured row (cleat#4285).
-	if s.suspendErr != nil && !s.inDeferDrain {
-		return packAwaitChildResultSuspend()
-	}
-
-	if s.isReplay {
-		if s.stepCount < len(s.history) {
-			rec := s.history[s.stepCount]
-			if rec.EventType == EventTypeAwaitAnyChild {
-				if !s.advanceReplayStep(ctx, &rec) {
-					return 0
-				}
-				if rec.Response != "" {
-					written, writtenEC := s.writeOut(ctx, m, resultPtr, rec.Response, resultMaxLen)
+// awaitAnyChildStep is AwaitAnyChild. The run vocabulary of the dispatcher fits it: an empty await of THIS set is a prefix record, a non-empty one of this set is the
+// final, and any other record is foreign. What the move changed, each row named in the_child_await_move_tightens_only_these_test.go: a record that names ANOTHER set
+// of children is a divergence that consumes nothing, answered or empty (the old code consumed an answer recorded for another set as this call's, and compared the
+// empties that follow a first record with THAT record's set and not with this call's), and the old call's own already-suspended guard is the dispatcher's refusal now,
+// which also exempts a guest drain that BEGAN BEFORE the suspension (cleat#3429), as await_child and await_all_children do since W3a (pinned by a row).
+//
+// It keeps the rest, pinned by the old table: never refused, the set compared as a SET (any order), the child-await suspend word (1<<62), a store error recorded as the
+// answer, and the two ways a run ends without an answer. The history ending after the empties resumes fresh with c.Prefix, and a call that resumes records no second
+// empty row (cleat#3391). A FOREIGN record after the empties does the same thing (ResumesFreshAtForeign): the call re-checks its children with that record left
+// UNREAD, so a call recorded after the empties runs again; that is the defect kept on purpose (cleat#4285), warned about and named in the history-unread guard.
+//
+// WHAT THE EMPTY MARKER RESTS ON is a store invariant and not a rule of this spec: an answer is told from a pending await by its Response being EMPTY, so a finished
+// child's answer must never be (the answer is JSON with a run_id, so it never is).
+var awaitAnyChildStep = stepSpec{
+	Name: "await_any_child",
+	// The simple layout, as the other two child awaits (ABI.md 2.24): errCode in the low bits, the length from bit 32; the suspend word is 1<<62 and the spec's own.
+	Result:                layoutSimple,
+	Effect:                effectEffect,
+	Records:               recordsMany,
+	Want:                  EventTypeAwaitAnyChild,
+	Refuse:                neverRefuse,
+	ResumesFreshAtForeign: true,
+	// After a suspension this call answers its own suspension word, as the other two child awaits (cleat#4285).
+	AfterSuspend: func(*stepCtx) int64 { return packAwaitChildResultSuspend() },
+	Identity: func(a stepArgs, rec *EventRecord) string {
+		// A record that names NO set cannot name another, so it is still this call's: the engine always records the request, and only a hand-built history lacks it.
+		if rec.EventType == EventTypeAwaitAnyChild && rec.Request != "" && !sameRunIDSet(rec.Request, a.s1) {
+			return fmt.Sprintf("run IDs %s, recorded %s", truncateWithHash(a.s1, maxPayloadLen), truncateWithHash(rec.Request, maxPayloadLen))
+		}
+		return ""
+	},
+	Role: func(_ stepArgs, rec *EventRecord) recordRole {
+		switch {
+		case rec.EventType != EventTypeAwaitAnyChild:
+			return roleForeign
+		case rec.Response == "":
+			return rolePrefix
+		}
+		return roleFinal
+	},
+	DecodeRun: func(c *stepCtx, run []EventRecord) int64 {
+		written, writtenEC := c.s.writeOut(c.ctx, c.m, c.args.outPtr, run[len(run)-1].Response, c.args.outMaxLen)
+		return packSimpleResult(writtenEC, written)
+	},
+	Fresh: func(c *stepCtx) int64 {
+		s, ctx, m := c.s, c.ctx, c.m
+		runIDsJSON := c.args.s1
+		var runIDs []string
+		if err := json.Unmarshal([]byte(runIDsJSON), &runIDs); err != nil {
+			c.RecordsNothing("a request that is not valid JSON answers an error and records no event")
+			written, _ := s.writeResult(ctx, m, c.args.outPtr, fmt.Sprintf(`{"error":"invalid runIDs: %v"}`, err), c.args.outMaxLen)
+			return int64(uint64(written)<<32 | 1)
+		}
+		// Sorted, so that a replay after a suspend produces the same answer as the original execution when several children happen to be complete.
+		sort.Strings(runIDs)
+		type outcome struct {
+			RunID  string `json:"run_id"`
+			Result string `json:"result,omitempty"`
+			Error  string `json:"error,omitempty"`
+		}
+		if s.engine.childWfStore != nil {
+			for _, rid := range runIDs {
+				co, err := s.engine.childWfStore.GetChildResult(context.Background(), rid)
+				if err != nil || co.Completed {
+					var out outcome
+					out.RunID = rid
+					switch {
+					case err != nil:
+						out.Error = err.Error()
+					case co.Failed:
+						// cleat#1115: this filled Error only from the STORE error, so a child that failed was returned to the guest with Error empty and
+						// Result "{}" -- a success.
+						out.Error = co.Error
+					default:
+						out.Result = co.Result
+					}
+					outJSON, _ := json.Marshal(out)
+					c.Record(EventRecord{Step: s.stepCount, EventType: EventTypeAwaitAnyChild, Request: runIDsJSON, Response: string(outJSON)})
+					written, writtenEC := s.writeOut(ctx, m, c.args.outPtr, string(outJSON), c.args.outMaxLen)
 					return packSimpleResult(writtenEC, written)
 				}
-				// Empty response: this was a suspend (no child was done yet).
-				// Look at what follows it. If an await_any_child record with a
-				// non-empty response comes next, that is the re-execution result:
-				// consume it and return the cached result. This avoids a
-				// non-deterministic fall-through to fresh where multiple children
-				// might show as completed on replay.
-				//
-				// Every directly following EMPTY record of THIS call is skipped
-				// first, not only the first one (cleat#3391). Histories written
-				// before this fix hold two of them for a child that took more than
-				// one wake, and peeking at just the next record found the second
-				// empty one, concluded there was no cached result, and went fresh
-				// again on every wake.
-				//
-				// "Of this call" is the Request comparison below. Adjacent empties
-				// are NOT always the same call: the guest keeps running after a
-				// suspend, so one segment can record [X empty, Y empty], and
-				// replaying X across Y's records would hand Y's result to X.
-				for s.stepCount < len(s.history) {
-					nextRec := s.history[s.stepCount]
-					if nextRec.EventType != EventTypeAwaitAnyChild || !sameRunIDSet(nextRec.Request, rec.Request) {
-						break
-					}
-					if !s.advanceReplayStep(ctx, &nextRec) {
-						return 0
-					}
-					if nextRec.Response != "" {
-						written, writtenEC := s.writeOut(ctx, m, resultPtr, nextRec.Response, resultMaxLen)
-						return packSimpleResult(writtenEC, written)
-					}
-				}
-				// No cached re-execution result — fall through to fresh.
-				resumedFromSuspend = true
-				s.exitReplay()
-			} else {
-				// Event type mismatch — replay divergence.
-				if s.engine.Metrics != nil {
-					s.engine.Metrics.RecordReplayFailure(ctx)
-				}
-				errMsg := fmt.Sprintf("replay divergence at step %d: expected await_any_child, got %s", rec.Step, rec.EventType)
-				written, _ := s.writeResult(ctx, m, resultPtr, errMsg, resultMaxLen)
-				return int64(uint64(written)<<32 | 1)
-			}
-		} else {
-			s.exitReplay()
-		}
-	}
-
-	// Fresh execution: poll children in deterministic order and return the
-	// first completed one. Sorted order guarantees that replay after a suspend
-	// produces the same result as the original execution when multiple children
-	// happen to be complete.
-	var runIDs []string
-	if err := json.Unmarshal([]byte(runIDsJSON), &runIDs); err != nil {
-		written, _ := s.writeResult(ctx, m, resultPtr, fmt.Sprintf(`{"error":"invalid runIDs: %v"}`, err), resultMaxLen)
-		return int64(uint64(written)<<32 | 1)
-	}
-
-	// Sort for deterministic polling order.
-	sort.Strings(runIDs)
-
-	type outcome struct {
-		RunID  string `json:"run_id"`
-		Result string `json:"result,omitempty"`
-		Error  string `json:"error,omitempty"`
-	}
-
-	if s.engine.childWfStore != nil {
-		for _, rid := range runIDs {
-			co, err := s.engine.childWfStore.GetChildResult(context.Background(), rid)
-			if err != nil || co.Completed {
-				var out outcome
-				out.RunID = rid
-				switch {
-				case err != nil:
-					out.Error = err.Error()
-				case co.Failed:
-					// cleat#1115: this filled Error only from the STORE error,
-					// so a child that failed was returned to the guest with
-					// Error empty and Result "{}" -- a success.
-					out.Error = co.Error
-				default:
-					out.Result = co.Result
-				}
-				outJSON, _ := json.Marshal(out)
-				rec := EventRecord{
-					Step:      s.stepCount,
-					EventType: EventTypeAwaitAnyChild,
-					Request:   runIDsJSON,
-					Response:  string(outJSON),
-				}
-				s.recordEvent(rec)
-				written, writtenEC := s.writeOut(ctx, m, resultPtr, string(outJSON), resultMaxLen)
-				return packSimpleResult(writtenEC, written)
 			}
 		}
-	}
 
-	// No child completed — suspend.
-	//
-	// A call that has already recorded its suspend does not record another
-	// one (cleat#3391). The first wake that finds the child still running
-	// writes the empty record; every later wake replays it and, with the child
-	// still running, has nothing new to say. Recording again put a second empty
-	// row at the next step, then hit the conflict clause that only reopens
-	// await_child, await_promise and await_all_children, so when the child did
-	// finish its result was dropped against that second row, and each following
-	// wake re-ran the parent from here: a StartChild after the await started a
-	// new child every time. Left unrecorded, the result lands at the next step
-	// as an ordinary insert, and a replay finds it after the one suspend record.
-	if !resumedFromSuspend {
-		rec := EventRecord{
-			Step:      s.stepCount,
-			EventType: EventTypeAwaitAnyChild,
-			Request:   runIDsJSON,
+		// No child completed: suspend. A call that has already recorded its suspend does not record another one (cleat#3391): the first wake that finds the
+		// children still running writes the empty record, and every later wake replays it (c.Prefix is that run) and has nothing new to say. Recording again
+		// put a second empty row at the next step, which the conflict clause that reopens await_child, await_promise and await_all_children does not reopen,
+		// so when a child did finish its result was dropped against that second row and each following wake re-ran the parent from here. Left unrecorded, the
+		// result lands at the next step as an ordinary insert, and a replay finds it after the one suspend record.
+		if len(c.Prefix) == 0 {
+			c.Record(EventRecord{Step: s.stepCount, EventType: EventTypeAwaitAnyChild, Request: runIDsJSON})
 		}
-		s.recordEvent(rec)
-	}
-
-	s.suspendErr = &SuspendError{
-		Reason: fmt.Sprintf("await_any_child(%s)", runIDsJSON),
-	}
-
-	return packAwaitChildResultSuspend()
+		s.suspendErr = &SuspendError{Reason: fmt.Sprintf("await_any_child(%s)", runIDsJSON)}
+		return packAwaitChildResultSuspend()
+	},
 }
+
+func init() { registerStepSpec(&awaitAnyChildStep) }
 
 // AwaitAllChildren waits for every child in a list. It is a step on the replay dispatcher (cleat#4152, W3a), and like AwaitChild its history is ONE
 // record, [await_all_children], recorded EMPTY while any child is running and answered OVER that record by the wake that finds them all done.
