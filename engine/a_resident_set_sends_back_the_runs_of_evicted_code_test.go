@@ -103,7 +103,8 @@ func TestARunWhoseCodeWasEvictedBeforeItReachedItsSleepIsNotHeld(t *testing.T) {
 		t.Errorf("a refused run left %d bytes charged", got)
 	}
 
-	// CONTROLS. Code still cached is held; a run with no known code is never judged by it; and with no hook installed (a set not attached to a cache) nothing changes.
+	// CONTROLS. Code still cached is held; a run that names NO code is refused when a cache is attached (EvictCode could never reach it, so holding it would be a pin nothing sees);
+	// and with no hook installed (a set not attached to a cache) nothing changes.
 	if _, held := holdOne(t, set, clock, ResidentRunInfo{Language: "go", CodeKey: "code-b"}); held {
 		t.Error("PRECONDITION: code-b is not in the cached set and must be refused too, or this control means nothing")
 	}
@@ -111,10 +112,13 @@ func TestARunWhoseCodeWasEvictedBeforeItReachedItsSleepIsNotHeld(t *testing.T) {
 	if _, held := holdOne(t, set, clock, ResidentRunInfo{Language: "go", CodeKey: "code-b"}); !held {
 		t.Error("a run whose code IS cached was refused")
 	}
-	if _, held := holdOne(t, set, clock, ResidentRunInfo{Language: "go"}); !held {
-		t.Error("a run with no CodeKey was refused: it must never be judged by the cache")
+	if _, held := holdOne(t, set, clock, ResidentRunInfo{Language: "go"}); held {
+		t.Error("a run with no CodeKey was held with a cache attached: EvictCode can never reach it, so it would be a pin nothing sees")
 	}
 	set.codeCached = nil
+	if _, held := holdOne(t, set, clock, ResidentRunInfo{Language: "go"}); !held {
+		t.Error("with no cache attached a run with no CodeKey was refused")
+	}
 	if _, held := holdOne(t, set, clock, ResidentRunInfo{Language: "go", CodeKey: "code-zzz"}); !held {
 		t.Error("with no cache attached a run was refused")
 	}

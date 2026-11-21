@@ -297,8 +297,8 @@ func (s *ResidentSet) AttachToCodeCache(backend any) bool {
 // ResidentRunInfo is what the set needs to know about one run to decide on it.
 type ResidentRunInfo struct {
 	WorkflowID string
-	// CodeKey is the identity of the run's compiled code (CodeID of its wasm bytes); EvictCode matches on it. Empty means the run is never sent back by an
-	// eviction, which is the old behaviour and is what a caller that does not know its code gets.
+	// CodeKey is the identity of the run's compiled code (CodeID of its wasm bytes); EvictCode matches on it. With no cache attached it is not consulted. WITH one attached an
+	// empty CodeKey is REFUSED, not skipped: a run that names no code can never be sent back by an eviction, so holding it would be a pin nothing could see. The worker always sets it.
 	CodeKey string
 	// Language is the guest's language as its metadata declares it; only a language with a measured cost is admitted.
 	Language string
@@ -384,8 +384,10 @@ func (r *ResidentRun) Wait(ctx context.Context, req parkRequest) parkOutcome {
 		s.mu.Unlock()
 		resume(false)
 		return refuse(residentRefusedMemory)
-	case s.codeCached != nil && r.info.CodeKey != "" && !s.codeCached(r.info.CodeKey):
-		// The code was evicted while this run was still executing, so EvictCode had no slot to reach. Holding it now would pin code the cache decided to free.
+	case s.codeCached != nil && (r.info.CodeKey == "" || !s.codeCached(r.info.CodeKey)):
+		// The code was evicted while this run was still executing, so EvictCode had no slot to reach; or the run names no code at all, or code the cache cannot place, and EvictCode could
+		// never reach it either. Holding any of them would pin code the cache decided to free, invisibly. A refused hold suspends as with residency off: it costs one replay, not
+		// correctness, so refusing is the cheap direction and a silent pin is the expensive one.
 		s.mu.Unlock()
 		resume(false)
 		return refuse(residentRefusedCode)

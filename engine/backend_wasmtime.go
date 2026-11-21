@@ -1620,8 +1620,9 @@ func (b *wasmtimeBackend) OnModuleEvicted(f func(key string)) {
 
 // CodeCached reports whether the code with this CodeID is still in the backend's cache. The resident set asks it when a run is about to be held (ResidentSet.AttachToCodeCache),
 // because EvictCode reaches only runs already held: a run whose code was evicted while it was still EXECUTING would otherwise reach its sleep afterwards and be held against
-// code that is gone. It answers true for anything it cannot judge (no cache, an identity it does not recognise): refusing holds it cannot reason about would turn a gap into
-// an outage.
+// code that is gone. It answers true only where nothing CAN be evicted (no cache at all). An identity it does not recognise answers FALSE: that means the key space changed under
+// it, and a silent true would be a pin nobody could see. A refused hold suspends as with residency off, so being wrong in that direction costs a replay and is caught at once by
+// the in-place control rows, where being wrong the other way is caught by nothing.
 func (b *wasmtimeBackend) CodeCached(codeID string) bool {
 	if b == nil || b.moduleCache == nil {
 		return true
@@ -1632,7 +1633,7 @@ func (b *wasmtimeBackend) CodeCached(codeID string) bool {
 	}
 	key, ok := cacheKeyOfCodeID(codeID, engineID)
 	if !ok {
-		return true
+		return false
 	}
 	return b.moduleCache.has(key)
 }

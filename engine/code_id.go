@@ -44,7 +44,8 @@ func codeIDOfCacheKey(key string) string {
 }
 
 // cacheKeyOfCodeID is the inverse of codeIDOfCacheKey for ONE engine: the key under which the code with this CodeID is cached, given the engine id the component cache uses. It
-// reports false for an identity it does not recognise, and a caller must then treat the code as cached: a check that refuses what it cannot judge turns a gap into an outage.
+// reports false for an identity it does not recognise, and a caller must then treat the code as NOT cached: an identity this file does not know means the key space changed, and
+// answering "cached" for it would hold runs against code nothing can send back. Refusing costs a replay; a silent pin costs memory nobody accounts for.
 func cacheKeyOfCodeID(codeID string, engineID uint64) (string, bool) {
 	if rest, ok := strings.CutPrefix(codeID, "component:"); ok && rest != "" {
 		return "component:" + rest + ":" + strconv.FormatUint(engineID, 10), true

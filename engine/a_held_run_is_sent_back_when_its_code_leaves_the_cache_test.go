@@ -271,8 +271,8 @@ func TestCodeCachedAnswersForBothKeySpacesOfTheRealBackend(t *testing.T) {
 			}
 		})
 	}
-	if !wt.CodeCached("not-an-identity-it-knows") {
-		t.Error("an identity the backend cannot judge must read as cached (fail open)")
+	if wt.CodeCached("not-an-identity-it-knows") || wt.CodeCached("") || wt.CodeCached("module:") || wt.CodeCached("component:") {
+		t.Error("an identity the backend cannot place read as cached: that is a silent pin, since nothing could ever send such a run back")
 	}
 }
 
