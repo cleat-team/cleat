@@ -81,8 +81,18 @@ read the opposite on the same detector: `cleat_resident_runs` 0 and the run park
 
 **Two facts about the detector.** The counter exports no series at all until its first increment, so a worker that has never held a run has no `cleat_resident_runs` line: "the page
 is real (it carries other `cleat_` series) and the series is absent" is zero, and an unreadable page is unknown, not zero (the first version treated absence as unreadable and could
-not tell its own control from a broken scrape, and waited out the whole budget). And a cold start compiles the module (about 2.8 s measured), so the sleep is 8 s, long enough to be
-asleep when the kill lands.
+not tell its own control from a broken scrape, and waited out the whole budget). And **the 8 s sleep is not there for the cold-start compile**: in this scenario the compile happens before call A, not during the sleep (WS-cleat1's review of #4273), and the sleep's
+deadline is anchored at A's recorded event, not at the claim (`DurableSleep` takes `max(s.nowMs, s.Now(ctx))`, and `Now` is the last history event's timestamp; cleat-review3's reading of the
+code at `3c662e32`, consistent with one measurement and **not measured directly**). So 8 s only has to outlast the detection (a 100 ms poll plus a metrics scrape) and the kill.
+
+**What a kill costs, measured (cleat-review3 on #4273, from the recording service's own `request.At` timestamps, not by the author of this section):** the time from effect A to effect B was
+**9.2 to 9.5 s with residency off** and **40 to 41 s with it on**. With residency off the sleeping run is a *parked row* (ready, unassigned, a wake time ahead), so the next worker claims it
+at its wake time. A held run is still `running`, assigned to the dead worker, so nothing claims it until the reaper does, after its start-up grace. The harness ages the dead worker's
+lease (`ageLease`) instead of waiting out the real reclaim window, because that window cannot go below about 37 s and a sweep over it would be unaffordable, so **the production window
+comes on top and is NOT measured**. **These timing figures are from cleat-review3's machine alone, under heavy load (load average 15 to 40), and have not been reproduced on another.** Exactly-once holds either way; this is latency (cleat#4275 is the fast path, for 0.7.0).
+
+**Why the second worker has residency off, and what a residency-on second worker needs.** The reclaim lands about 40 s after A, so a replayed 8 s sleep is already due and would never
+park: a residency-on reclaimer would measure nothing about residency. A row for it needs a sleep longer than the reclaim delay.
 
 **Not covered, stated so it is not discovered later:** a kill at the instant the timer fires (the wake and the claim check); a held run with real defers or a long history; a signal
 wait (the signal wake source is a later change); a second worker with residency on; MySQL and SQL Server. About 75 s with the harness's build, so it runs in the nightly full sweep

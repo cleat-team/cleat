@@ -119,6 +119,8 @@ func executeKilledWhileHeld(t *testing.T, env *env, residency bool) heldOutcome 
 		n, ok := residentRuns(addr)
 		if residency {
 			// Held: the worker says it holds a run, and the store still has the run RUNNING and assigned to it.
+			// parkedNow swallows its query error as false, so on this residency-on side a store error reads as "not parked". The metric still has to say held (n >= 1), so
+			// that cannot make the detector pass on its own; it can only make the precondition succeed when the store was unreadable and the run was in fact parked.
 			held := ok && n >= 1 && !parkedNow(env.db, run)
 			return held, fmt.Sprintf("cleat_resident_runs=%v (readable=%v), parked in the store=%v", n, ok, parkedNow(env.db, run))
 		}
