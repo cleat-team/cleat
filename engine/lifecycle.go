@@ -498,6 +498,8 @@ var sideEffectStep = stepSpec{
 	},
 }
 
+func init() { registerStepSpec(&sideEffectStep) }
+
 // sideEffectNotRecorded is the status SideEffectRecorded returns when the history holds no value for this step. It is not an error code: a
 // guest that gets it computes the value and calls SideEffect, which records it.
 const sideEffectNotRecorded byte = 2
@@ -543,6 +545,8 @@ var sideEffectRecordedStep = stepSpec{
 	Decode:                  decodeRecordedSideEffect,
 	Fresh:                   func(*stepCtx) int64 { return packSimpleResult(sideEffectNotRecorded) },
 }
+
+func init() { registerStepSpec(&sideEffectRecordedStep) }
 
 func (s *execSession) WorkflowID(ctx context.Context, m api.Module, idPtr, idMaxLen uint32) int64 {
 
@@ -662,6 +666,8 @@ var fetchStep = stepSpec{
 		return packSimpleResult(writtenEC, written)
 	},
 }
+
+func init() { registerStepSpec(&fetchStep) }
 
 // JsonParse validates and canonicalises input using the host's encoding/json.
 //

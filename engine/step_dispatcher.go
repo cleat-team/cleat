@@ -178,10 +178,32 @@ type stepSpec struct {
 	Fresh func(c *stepCtx) int64
 }
 
-// stepSpecs lists every spec in the engine. It exists for the dispatcher's tests (step_dispatcher_test.go), which run each property over every
-// spec on it and check the list against the `var x = stepSpec{` declarations in the source, so a spec nobody registered is on no list and is
-// caught. A host call moved onto step adds its spec here in the same change.
-var stepSpecs = []*stepSpec{&createPromiseStep, &resolvePromiseStep, &rejectPromiseStep, &acquireLockStep, &releaseLockStep, &sideEffectStep, &sideEffectRecordedStep, &deferStep, &scheduleCronStep, &deleteCronStep, &listCronsStep, &awaitSignalsStep, &setScopeStep, &signalWorkflowStep, &durableSendStep, &fetchStep, &awaitPromiseStep}
+// stepSpecs is the registry of every spec in the engine, filled by registerStepSpec: each spec registers itself in an init() beside its own declaration,
+// so a host call moved onto step adds its spec to the registry by being written, in the file it lives in, and not by an edit to a list every move touched
+// (which three open PRs conflicted on, one after another, in one week of 2026-11). It exists for the dispatcher's tests (step_dispatcher_test.go), which
+// run each property over every spec on it, and for the check below that every declaration is registered.
+var stepSpecs []*stepSpec
+
+// registerStepSpec adds a spec to the registry. A malformed spec is a programming error, so it stops the process at start-up, as a bad regexp does, and
+// not at the first workflow that reaches the call: it is validated HERE, once, for every spec, which is what the old start-up loop did for the list. Two
+// specs may not share a name or a pointer: a duplicate is a spec registered twice, or two calls that would be indistinguishable in a divergence message.
+func registerStepSpec(sp *stepSpec) { registerStepSpecInto(&stepSpecs, sp) }
+
+// registerStepSpecInto is registerStepSpec over a list the caller names, so the rules can be tested without touching the real registry.
+func registerStepSpecInto(list *[]*stepSpec, sp *stepSpec) {
+	if err := sp.validate(); err != nil {
+		panic(err)
+	}
+	for _, have := range *list {
+		switch {
+		case have == sp:
+			panic(fmt.Errorf("step spec %q is registered twice", sp.Name))
+		case have.Name == sp.Name:
+			panic(fmt.Errorf("two step specs are named %q: a divergence could not say which call it was", sp.Name))
+		}
+	}
+	*list = append(*list, sp)
+}
 
 // validate says whether a spec is well-formed: it names a replay event, can decode it and can run fresh, and a step that declares itself Pure
 // (and so is never refused in a segment) records nothing.
@@ -215,16 +237,6 @@ func (sp *stepSpec) validate() error {
 		return fmt.Errorf("step spec %q is Pure and declares it records events: a Pure step is not refused in a segment, so it must record nothing", sp.Name)
 	}
 	return nil
-}
-
-// A malformed spec is a programming error, so it stops the process at start-up, as a bad regexp does, and not at the first workflow that
-// reaches the call. The dispatcher's tests run the same check and the registry against the source.
-func init() {
-	for _, sp := range stepSpecs {
-		if err := sp.validate(); err != nil {
-			panic(err)
-		}
-	}
 }
 
 // neverRefuse is a Refuse for a step that is NEVER refused: not in a segment's body, not after a worker shutdown and not after an event that could

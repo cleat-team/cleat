@@ -185,6 +185,8 @@ var awaitSignalsStep = stepSpec{
 	},
 }
 
+func init() { registerStepSpec(&awaitSignalsStep) }
+
 // awaitSuspendOrPark is the wait: park if this session may and there is a wake source, else suspend (production today: every wait suspends). timedOut is
 // the word the call hands back when the deadline has passed: await_signals and await_promise pack it differently, and the loop is the same.
 //
@@ -538,6 +540,8 @@ var signalWorkflowStep = stepSpec{
 		return signalOutcomeCode(outcome)
 	},
 }
+
+func init() { registerStepSpec(&signalWorkflowStep) }
 
 // consumeDelivered removes a delivery from this workflow's queue, after the
 // signal_received event recording it is durable.
