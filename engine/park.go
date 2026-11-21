@@ -78,6 +78,15 @@ type parkRequest struct {
 	// Reason and Until are the suspension a refusal sets, so that each call keeps its own message and wake time exactly as it had them inline.
 	Reason string
 	Until  time.Time
+	// Recheck is, for a wait that a STORE WRITE wakes (wakeSignal), the read that finds the write: does a delivery of what this call waits for exist now? The resident set runs
+	// it once straight after it admits the run, which closes the window between the call's last read and the hold (a signal committed in that window is found, not lost), and then
+	// every RecheckInterval INSIDE ONE hold. It must be PURE: it must not consume, record an event or touch guest memory, because the call's own read after the wake does all
+	// three. An error means "could not tell": the hold ends as a refusal, the run suspends, and a later claim replays it and reads the store itself. A signal wait with no Recheck
+	// cannot be woken and is refused, never parked. Nil for a timer.
+	//
+	// It is inside one hold and not a periodic woke because a return from Wait that is not a refusal restarts the run's limits segment (the wall-clock ceiling, the workflow deadline
+	// and the fence): a source that returned woke every interval would restart them on every no-op wake and let a looping hold outlive its own ceiling.
+	Recheck func(ctx context.Context) (found bool, err error)
 }
 
 func (r parkRequest) validate() error {

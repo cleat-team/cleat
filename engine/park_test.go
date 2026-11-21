@@ -78,9 +78,24 @@ func TestTheWakeSourceIsHandedTheRequestUnmodified(t *testing.T) {
 	ws := &scriptedWake{answer: always(parkWoke)}
 	s := parkSession(ws)
 	want := goodReq()
+	// A func is not comparable, so the request is compared field by field and the Recheck is proved to be the SAME function: the helper must not drop it or swap it, and the only
+	// way to tell two funcs apart is to call the one the source received and see that it is the one handed in.
+	called := 0
+	want.Recheck = func(context.Context) (bool, error) { called++; return false, nil }
 	s.parkOrSuspend(context.Background(), want)
-	if len(ws.reqs) != 1 || ws.reqs[0] != want {
-		t.Errorf("the wake source saw %+v, want %+v", ws.reqs, want)
+	if len(ws.reqs) != 1 {
+		t.Fatalf("the wake source was asked %d times, want 1", len(ws.reqs))
+	}
+	got := ws.reqs[0]
+	if got.Recheck == nil {
+		t.Fatal("the wake source received no Recheck: the helper dropped it")
+	}
+	if _, err := got.Recheck(context.Background()); err != nil || called != 1 {
+		t.Errorf("the Recheck the source received is not the one handed in (it ran the caller's function %d times, want 1; err %v)", called, err)
+	}
+	if got.Kind != want.Kind || got.Key != want.Key || got.Baseline != want.Baseline || got.DeadlineMs != want.DeadlineMs || got.Reason != want.Reason || !got.Until.Equal(want.Until) {
+		t.Errorf("the wake source saw kind %v key %q baseline %d deadline %d reason %q until %v, want kind %v key %q baseline %d deadline %d reason %q until %v",
+			got.Kind, got.Key, got.Baseline, got.DeadlineMs, got.Reason, got.Until, want.Kind, want.Key, want.Baseline, want.DeadlineMs, want.Reason, want.Until)
 	}
 }
 

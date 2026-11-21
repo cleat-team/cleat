@@ -55,18 +55,27 @@ var defaultResidentInstanceBytes = map[string]uint64{
 
 // Why a wait was not parked, and why a parked run was sent back. They are metric label values and are read by tests, so they are constants.
 const (
-	residentRefusedKind     = "kind"      // only timers have a caller on the park helper so far
-	residentRefusedLanguage = "language"  // no measured cost for this language
-	residentRefusedWindow   = "window"    // due later than the window allows: parking it would hold the run for nothing
-	residentRefusedCount    = "count"     // the resident-run limit is reached
-	residentRefusedMemory   = "memory"    // admitting it would exceed the resident-memory budget
-	residentRefusedPressure = "pressure"  // the worker is at or over its memory soft limit
-	residentRefusedDraining = "draining"  // the worker is shutting down
-	residentRefusedCode     = "code"      // the cache has already evicted the compiled code the run executes (see CodeCached)
-	residentRefusedDeadline = "deadline"  // the run's own context (the wall-clock ceiling, the workflow deadline) ends at or before the wake
-	residentEndedDeadline   = "deadline"  // the timer fired: the caller's clock decides whether the wait is over
-	residentEndedCancelled  = "cancelled" // the run's context ended while parked
-	residentEndedEvicted    = "evicted"   // the set sent the run back (see the eviction reasons)
+	residentRefusedKind     = "kind"           // a kind with no wake source here (only timers and signals have one), or a signal wait that carries no Recheck
+	residentRefusedLanguage = "language"       // no measured cost for this language
+	residentRefusedWindow   = "window"         // due later than the window allows: parking it would hold the run for nothing
+	residentRefusedCount    = "count"          // the resident-run limit is reached
+	residentRefusedMemory   = "memory"         // admitting it would exceed the resident-memory budget
+	residentRefusedPressure = "pressure"       // the worker is at or over its memory soft limit
+	residentRefusedDraining = "draining"       // the worker is shutting down
+	residentRefusedCode     = "code"           // the cache has already evicted the compiled code the run executes (see CodeCached)
+	residentRefusedDeadline = "deadline"       // the run's own context (the wall-clock ceiling, the workflow deadline) ends at or before the wake
+	residentEndedDeadline   = "deadline"       // the timer fired: the caller's clock decides whether the wait is over
+	residentEndedCancelled  = "cancelled"      // the run's context ended while parked
+	residentEndedEvicted    = "evicted"        // the set sent the run back (see the eviction reasons)
+	residentEndedWoke       = "woke"           // a signal wait's recheck found a delivery: the call reads and consumes it
+	residentEndedRecheckErr = "recheck_failed" // a signal wait's recheck could not tell, so the hold ended as a refusal and the run suspends
+)
+
+// The results of one recheck, the label of cleat_resident_rechecks_total.
+const (
+	residentRecheckFound = "found"
+	residentRecheckNone  = "none"
+	residentRecheckError = "error"
 )
 
 // The reasons a parked run is sent back, exported because the worker names them when it evicts.
@@ -100,6 +109,10 @@ type ResidencyConfig struct {
 	// 0.3 ms, p90 about 1 ms and at most 9 ms (6.8 ms under -race) on a loaded machine, so 100 ms is about ten times the worst sample. It is not measured for a guest
 	// with real defers or a large history.
 	DeadlineMargin time.Duration
+	// RecheckInterval is how often a held SIGNAL wait asks the store whether its delivery has arrived. The worker sets it to --poll, so a held run is never later than the same
+	// run with residency off (which waits for the next claim poll) and is then ahead of it by the replay it does not have to do. Zero means signal waits are not held, which is
+	// the safe reading of an unset field. Each recheck is one store read per awaited name per held run, bounded by MaxRuns; it is not a claim check (that runs once, when the wait ends).
+	RecheckInterval time.Duration
 	// InstanceBytes is the per-language charge for each held instance; nil means defaultResidentInstanceBytes.
 	InstanceBytes map[string]uint64
 	// Pressure reports the worker's memory pressure from 0 (under the soft limit) up to 1 (at the hard limit). A park is refused while it is above
@@ -120,6 +133,7 @@ func DefaultResidencyConfig() ResidencyConfig {
 		ReplayMultiplier: 10,
 		ReplayFixed:      500 * time.Millisecond,
 		DeadlineMargin:   100 * time.Millisecond,
+		RecheckInterval:  500 * time.Millisecond, // the worker's --poll default
 	}
 }
 
@@ -138,6 +152,8 @@ func (c ResidencyConfig) Validate() error {
 		return fmt.Errorf("resident replay cost estimates must not be negative")
 	case c.DeadlineMargin < 0:
 		return fmt.Errorf("resident deadline margin %s must not be negative", c.DeadlineMargin)
+	case c.RecheckInterval < 0:
+		return fmt.Errorf("resident recheck interval %s must not be negative", c.RecheckInterval)
 	}
 	return nil
 }
@@ -325,8 +341,8 @@ func (s *ResidentSet) ForRun(info ResidentRunInfo) *ResidentRun {
 	return &ResidentRun{set: s, info: info}
 }
 
-// Wait parks the run until the timer is due, the run's context ends, or the set sends it back. Only a timer is parked so far: the other kinds have no
-// caller on the park helper yet (park.go), and a kind that can be requested but cannot be woken is refused, never parked.
+// Wait parks the run until the wait is over, the run's context ends, or the set sends it back. A timer ends when it is due. A signal wait ends when its Recheck finds a delivery,
+// or at its deadline. The other kinds have no wake source here, and a kind that can be requested but cannot be woken is refused, never parked.
 func (r *ResidentRun) Wait(ctx context.Context, req parkRequest) parkOutcome {
 	s := r.set
 	refuse := func(reason string) parkOutcome {
@@ -335,7 +351,12 @@ func (r *ResidentRun) Wait(ctx context.Context, req parkRequest) parkOutcome {
 		}
 		return parkRefused
 	}
-	if req.Kind != wakeTimer {
+	if req.Kind != wakeTimer && req.Kind != wakeSignal {
+		return refuse(residentRefusedKind)
+	}
+	// A signal wait is woken by a store write, so it is held only if the call supplied the read that finds the write and the set knows how often to run it. Held without one, it would
+	// sit until its deadline, which is the latency regression this kind exists to avoid.
+	if req.Kind == wakeSignal && (req.Recheck == nil || s.cfg.RecheckInterval <= 0) {
 		return refuse(residentRefusedKind)
 	}
 	cost, ok := s.cfg.InstanceBytes[r.info.Language]
@@ -399,15 +420,19 @@ func (r *ResidentRun) Wait(ctx context.Context, req parkRequest) parkOutcome {
 		m.AddResidentRuns(ctx, 1)
 	}
 
-	fired, release := s.cfg.clock.After(remaining)
-	defer release()
 	outcome, ended := parkRefused, residentEndedCancelled
-	select {
-	case <-fired:
-		outcome, ended = parkDeadline, residentEndedDeadline
-	case <-ctx.Done():
-	case <-slot.evict:
-		ended = residentEndedEvicted
+	if req.Kind == wakeSignal {
+		outcome, ended = r.holdForSignal(ctx, req, slot, remaining)
+	} else {
+		fired, release := s.cfg.clock.After(remaining)
+		defer release()
+		select {
+		case <-fired:
+			outcome, ended = parkDeadline, residentEndedDeadline
+		case <-ctx.Done():
+		case <-slot.evict:
+			ended = residentEndedEvicted
+		}
 	}
 
 	s.mu.Lock()
@@ -426,4 +451,65 @@ func (r *ResidentRun) Wait(ctx context.Context, req parkRequest) parkOutcome {
 		}
 	}
 	return outcome
+}
+
+// holdForSignal is the hold of a signal wait. The run is already admitted: it is in the set, its limits are paused, and its charge is taken. It asks the call's Recheck once STRAIGHT
+// AWAY and then every RecheckInterval, all inside this one hold, and it ends when the recheck finds a delivery (parkWoke), the deadline passes (parkDeadline), the run's context ends,
+// the set sends the run back, or the recheck cannot tell (a refusal, so the run suspends and a later claim reads the store itself).
+//
+// The first recheck is the ordering that closes the lost-wakeup window: the call read the store, then asked to be held, and a signal committed between those two is found here and not
+// missed until the next tick. It is the same shape as the cache check at admission (a check made after the thing that could make it stale is registered), and it is run before the
+// first timer is armed so that a delivery that is already there never waits an interval.
+//
+// WHAT THIS DOES NOT DO: it does not return a wake that found nothing. A return that is not a refusal restarts the run's limits (Wait's tail), so a periodic woke would restart the
+// wall-clock ceiling on every tick. The ticks are rechecks, not returns.
+func (r *ResidentRun) holdForSignal(ctx context.Context, req parkRequest, slot *residentSlot, remaining time.Duration) (parkOutcome, string) {
+	s := r.set
+	recheck := func() (found bool, err error) {
+		found, err = req.Recheck(ctx)
+		if m := s.cfg.Metrics; m != nil {
+			result := residentRecheckNone
+			switch {
+			case err != nil:
+				result = residentRecheckError
+			case found:
+				result = residentRecheckFound
+			}
+			m.RecordResidentRecheck(ctx, req.Kind.String(), result)
+		}
+		return found, err
+	}
+	if ctx.Err() != nil {
+		return parkRefused, residentEndedCancelled
+	}
+	if found, err := recheck(); err != nil {
+		return parkRefused, residentEndedRecheckErr
+	} else if found {
+		return parkWoke, residentEndedWoke
+	}
+	deadline, releaseDeadline := s.cfg.clock.After(remaining)
+	defer releaseDeadline()
+	for {
+		tick, releaseTick := s.cfg.clock.After(s.cfg.RecheckInterval)
+		select {
+		case <-deadline:
+			releaseTick()
+			return parkDeadline, residentEndedDeadline
+		case <-ctx.Done():
+			releaseTick()
+			return parkRefused, residentEndedCancelled
+		case <-slot.evict:
+			releaseTick()
+			return parkRefused, residentEndedEvicted
+		case <-tick:
+			releaseTick()
+			found, err := recheck()
+			switch {
+			case err != nil:
+				return parkRefused, residentEndedRecheckErr
+			case found:
+				return parkWoke, residentEndedWoke
+			}
+		}
+	}
 }

@@ -1,0 +1,4 @@
+---
+section: added
+---
+- **A run held through a signal wait (`await_signals`) now resumes within one `--poll` interval of the signal arriving, instead of being suspended and replayed (cleat#4162).** Residency is still OFF unless `--resident-max-runs` is above zero, and still EXPERIMENTAL; nothing changes for a worker that does not set it. A held signal wait asks the store whether its signal has arrived once straight after it is held and then every `--poll`, on PostgreSQL, MySQL and SQL Server alike, so it is never later than the same run with residency off. **At the defaults only short request/reply waits (a timeout up to about 10 s) are held; long approval waits are not, by design.** A signal that lands just before a held run is sent back is not lost: the release wakes the run at once. Each check is counted by the new `cleat_resident_rechecks_total{kind,result}`. Promises, children and updates are not held yet.
