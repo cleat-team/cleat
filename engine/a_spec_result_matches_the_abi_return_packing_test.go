@@ -37,13 +37,18 @@ type abiField struct {
 	lo, hi int
 }
 
+// abiImportExceptions are the specs whose Name is not their host import or cleat_<name>. They are the one place this check can be defeated by a mistake
+// made twice in the same direction (an entry pointing at a simple import and a Result declared simple agree with each other), so
+// TestTheABIImportExceptionsArePinnedToTheirDocumentedSections states each one again, as a literal, against the documentation and not against the spec.
+var abiImportExceptions = map[string]string{
+	"durable_send":        "cleat_send",           // ABI.md section 2.46: the spec is named for the event it records, the import for the call it answers
+	"call_with_heartbeat": "cleat_call_heartbeat", // ABI.md section 2.3: the spec is the call's behaviour (a run of heartbeats, then the outcome), the import its name
+}
+
 // abiImportFor maps a spec's Name to its host call's ABI import. The exceptions are explicit and visible: a name that is not here must be the import
 // itself or cleat_<name>, and a spec that resolves to nothing is UNMEASURED.
 func abiImportFor(name string, imports map[string]string) (string, bool) {
-	exceptions := map[string]string{
-		"durable_send": "cleat_send", // ABI.md section 2.46: the spec is named for the event it records, the import for the call it answers
-	}
-	if imp, ok := exceptions[name]; ok {
+	if imp, ok := abiImportExceptions[name]; ok {
 		_, found := imports[imp]
 		return imp, found
 	}
@@ -347,5 +352,46 @@ func TestTheABIPropertyReportsASpecWhoseRowTheParserCannotReadAsUnmeasured(t *te
 	ok := map[string]string{"cleat_y": "#### 2.98 `cleat_y`\n\n(func (import \"env\" \"cleat_y\"))\n\n**Return packing:** `errCode` only (0 = success).\n"}
 	if v := checkSpecsAgainstSections([]*stepSpec{{Name: "y", Result: layoutSimple}}, ok); len(v) != 0 {
 		t.Errorf("CONTROL FAILED: a readable simple row reported %v", v)
+	}
+}
+
+// PIN for the exceptions above (cleat#4152 G3; cleat-review3's case: an entry and a declaration wrong in the SAME direction agree with each other and pass
+// the property). The expectations here are literals, stated once more and against the documentation: which import each exceptional spec answers, and the
+// layout that import documents, which is the layout the spec must declare. Editing the entry and the spec's Result together cannot satisfy this.
+func TestTheABIImportExceptionsArePinnedToTheirDocumentedSections(t *testing.T) {
+	secs := abiSections(readABI(t))
+	pinned := []struct {
+		spec   string
+		imp    string
+		layout resultLayout
+	}{
+		{"durable_send", "cleat_send", layoutSimple},
+		{"call_with_heartbeat", "cleat_call_heartbeat", layoutDurableCall},
+	}
+	if len(pinned) != len(abiImportExceptions) {
+		t.Errorf("abiImportExceptions has %d entries and this pin lists %d: every exception needs its own pin, stated as a literal here", len(abiImportExceptions), len(pinned))
+	}
+	byName := map[string]*stepSpec{}
+	for _, sp := range stepSpecs {
+		byName[sp.Name] = sp
+	}
+	for _, p := range pinned {
+		if got, ok := abiImportFor(p.spec, secs); !ok || got != p.imp {
+			t.Errorf("spec %s resolves to %q (found=%v), pinned to %q", p.spec, got, ok, p.imp)
+		}
+		got, why, err := classifyABI(p.imp, secs, 0)
+		if err != nil {
+			t.Errorf("the pinned import %s for %s cannot be classified: %v", p.imp, p.spec, err)
+		} else if got != p.layout {
+			t.Errorf("the pinned import %s documents %s (%s), pinned to %s: the pin and ABI.md disagree", p.imp, layoutName(got), why, layoutName(p.layout))
+		}
+		sp, ok := byName[p.spec]
+		if !ok {
+			t.Errorf("PRECONDITION FAILED: no registered spec named %s, so its pin checks nothing", p.spec)
+			continue
+		}
+		if sp.Result != p.layout {
+			t.Errorf("spec %s declares %s, pinned to %s", p.spec, layoutName(sp.Result), layoutName(p.layout))
+		}
 	}
 }
