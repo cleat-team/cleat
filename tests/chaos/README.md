@@ -66,6 +66,61 @@ write). The boundaries are service requests, and these calls make none. A mutant
 final-status check (a replay divergence), not by the row check; the row check's two branches were each proven by a guest mutant (a resolve that never happens;
 a create made twice).
 
+## Ops whose effect the recording service cannot see (cleat#4241)
+
+`signal`, `cron_create`, `cron_delete`, `cron_list` (both guests) and `send` (both guests). Their effect lands in a table or on a goroutine, so each has an oracle of its own,
+and each oracle was proven by an engine mutant that makes the specific double effect real (below); a clean sweep alone says nothing about whether the oracle could see.
+
+| op | where the effect lands | what is read back |
+|---|---|---|
+| `signal` (a signal `sig-<name>` to the run itself) | `workflow_signals` | exactly one row per send, across a kill and a reclaim (scenario `signals`) |
+| `cron_create`, `cron_delete` | `workflow_schedules` | see the next paragraph (scenario `crons`) |
+| `cron_list` | the recorded list, answered on replay | the count the guest held, reported on two calls (scenario `cron_list`) |
+| `send` (fire-and-forget to the service as `send_<name>`) | the service, from a goroutine | AT MOST once; never repeated by a reclaim, never made by a terminated run (scenarios `sends`) |
+
+**A row count cannot see a replay that re-ran a cron call,** and this is why the cron scenarios change the world between the run and its replay. `schedule_cron` derives its id from
+`(tenant, workflow, step)` and creates the row idempotently, so a replay that ran it fresh finds the row it made and the count stays at one. In `crons` the harness deletes cron C's row
+after the run created it and puts cron D's row back after the run deleted it, and the run must end with C absent and D present: a replay that re-created C or re-deleted D leaves a
+mark a count never would. In `cron_list` the harness adds a schedule only AFTER the run's `list_crons` event is durable, so any later answer that includes it was read from the table and
+not from the record. Every wait in these helpers is on what is DURABLE (a row, an event in `event_history`), never on what the worker merely did: a worker killed before its event was
+flushed owes the replay nothing, and acting earlier would make a legitimate fresh read look like a bug.
+
+**`send` has its own scenario list** (`fireAndForgetScenarios`) because the engine records a send BEFORE it dispatches it and a replay dispatches nothing, so a kill in between loses the send
+for good. The generic oracle demands exactly once and would call that a failure; the two verifiers read the exemption off the scenario's own `send` ops (`atMostOnceOps`), which leaves every other
+scenario as it was. The terminate sweep skips the send's OWN boundaries, for a measured reason: the send's request is made by a goroutine concurrently with the body, which has already moved on,
+so with the send held the body made `B`, `send_T` and `C` within 14 ms, before the kill, and "what the body had done at the kill" cannot be read off the golden order there.
+
+**The reclaim sweep does not skip those boundaries, but it allows for the same fact (cleat-review3, measured on a loaded machine).** With the send held, the body may already have PERFORMED the next call
+(`B`) before the kill, and its event is not yet durable, so the reclaim repeats it: the ordinary at-least-once window, for the call the kill actually interrupted. `verifyReclaim` therefore allows ONE extra
+success in total across the plain `call` ops scripted after the send, because the body moves past a call only once its record is durable and so at most one call is in that state. Everything else stays
+exact: a call before the send, two calls, a call three times, or the send itself repeated are still violations. **A retried call after a send gets no allowance** (it can show more than one success in that
+window), so a scenario that puts one there fails loudly until the allowance is extended on purpose. The window is milliseconds wide, so `a_send_boundary_reclaim_oracle_test.go` drives the verifier with the
+measured request sequences instead of waiting for the machine to be loaded enough.
+
+**A hook that drives a scenario (`Scenario.Drive`) returns the reason it did not act**, and a reclaim run that finished with a Drive that did not act is reported UNMEASURED (a failure of the check, not a
+finding about the engine), as is the golden run. The two cron hooks report; `resolveWhenSuspended` still returns `""` always, which is unchanged behaviour on purpose.
+
+**Known positives, each made by mutating the engine and reading the failure (all restored by content afterwards):**
+
+| mutant | caught by | boundaries that fail | that pass |
+|---|---|---|---|
+| a replay of `signal_workflow` delivers again | `signal:S: 2 row(s)` | the four at or after the first signal | the two before it (nothing replayed) |
+| a replay creates the schedule again at the SAME id | `cron:C: 1 row(s), want 0` and nothing else | all four | none |
+| a replay deletes the schedule again | `cron:D: 0 row(s), want 1` | the two after the delete was recorded | the two before it |
+| a replay of `list_crons` reads the table afresh | `carried held value "n=2", want "n=1"` | the four where a replayed list feeds a fresh request | the two after both calls |
+| a replay dispatches the recorded send again | `succeeded 2 time(s), at most 1`, in both sweeps | every boundary after the first send | the two before it |
+
+The fourth row needed a stronger oracle than the harness had. "One op reported two different held values" cannot see a replay that is wrong EVERY time it is asked: in a `before` case the
+aborted first arrival is not in the request list, so the only value the service sees is the wrong one, and the first version of this scenario passed that mutant at three boundaries of
+four. The count is deterministic, so `heldExpect` compares it with the right answer.
+
+**Not covered, and why:** `fetch` (G1b) cannot be driven by this harness at all. Both guests' SDKs route `fetch` through `call("http", "fetch")`, the ordinary durable-call path, so neither
+imports the `cleat_fetch` host call the dispatcher moved (`python-sdk/cleat_sdk/host_calls.py`, `Routes through call('http', 'fetch', ...) — no separate WASM import needed`; the Go SDK's
+`DurableFetch` says the same). And a worker's egress floor always refuses loopback (`--enable-workflow-fetch`'s help text), so a counting endpoint in the test process is unreachable for a
+black-box worker; the only override, `AllowLoopback`, is test-only and `TestNoProductionCodeAllowsLoopbackEgress` forbids setting it in production code. Driving `cleat_fetch` needs a guest
+language that imports it directly (Rust or Java) and an endpoint the floor permits. Also not covered: a kill INSIDE one of these calls (between the store write and the event being recorded: the
+boundaries are service requests and these calls make none), `schedule_invoke`, and MySQL and SQL Server.
+
 ## Kill while a run is held (cleat#4162)
 
 `TestChaosSigkillWhileAHeldRunSleepsThenReclaim`. The other faults land on a request to the recording service, and a run held in memory through a sleep makes none, so none of
@@ -100,5 +155,5 @@ wait (the signal wake source is a later change); a second worker with residency 
 
 ## Not yet
 
-Signal and promise polls (#4153), `continue_as_new` (#4159), cancel, the Python guest, a slow-service op (a response longer
+Signal and promise polls (#4153), `continue_as_new` (#4159), cancel, a slow-service op (a response longer
 than the instance timeout), seeds, the CI sample/full split, MySQL and SQL Server.

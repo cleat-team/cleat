@@ -378,7 +378,11 @@ func deliverSignal(t *testing.T, db *sql.DB, id, name string) {
 // resolveWhenSuspended resolves the run's promise once the run has parked on it (a parked run reads status 'ready' with its wake time at the
 // await's deadline, well in the future), the way the API does: the promise row, the lease's promise
 // sequence advanced, and the wake time brought forward.
-func resolveWhenSuspended(db *sql.DB, run string) {
+//
+// It returns "" always, and that is deliberate and not an oversight: it acts whether or not it saw the run park (a timed-out wait falls through
+// to the resolve), and the promise scenarios are judged by promiseViolations, which reads the rows themselves. Reporting a timeout here would turn
+// scenarios that pass today into UNMEASURED ones, which is a change to those scenarios and not to this fix. The cron hooks report; see Scenario.Drive.
+func resolveWhenSuspended(db *sql.DB, run string) string {
 	deadline := time.Now().Add(runBudget)
 	for time.Now().Before(deadline) {
 		var n int
@@ -392,6 +396,7 @@ func resolveWhenSuspended(db *sql.DB, run string) {
 	_, _ = db.Exec(`UPDATE workflow_promises SET status = 'resolved', result = '"ok"'::jsonb, resolved_at = now() WHERE workflow_id = $1`, run)
 	_, _ = db.Exec(`UPDATE workflow_leases SET promise_seq = promise_seq + 1,
 		next_wake_at = CASE WHEN status IN ('ready', 'suspended') THEN now() ELSE next_wake_at END WHERE id = $1`, run)
+	return ""
 }
 
 func ownerExec(t *testing.T, db *sql.DB, q string) {
