@@ -20,6 +20,12 @@ func residencyConfigFromFlags() (engine.ResidencyConfig, error) {
 	cfg.ReplayMultiplier = *residentReplayMultiplier
 	cfg.ReplayFixed = *residentReplayFixed
 	cfg.ReplayPerEvent = *residentReplayPerEvent
+	// A HELD signal wait asks the store whether its delivery has arrived at the worker's own poll interval, so on a dialect with no NOTIFY a held run waits at most one interval for its signal, where the same run with residency off waits for the next claim poll and then
+	// replays. On Postgres the NOTIFY listener nudges the held waits instead (ResidentSet.Nudge), and the interval is only the backstop. Only a positive --poll overrides the engine's default (the same 500ms): a zero or negative value is not an interval, and it must
+	// not fail the boot of a worker that does not use residency at all, which Validate would do for a negative one.
+	if *pollInterval > 0 {
+		cfg.RecheckInterval = *pollInterval
+	}
 	if err := cfg.Validate(); err != nil {
 		return cfg, fmt.Errorf("residency flags: %w", err)
 	}

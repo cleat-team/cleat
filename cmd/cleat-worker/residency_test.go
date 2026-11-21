@@ -73,6 +73,40 @@ type residencyView struct {
 	fixed, perEvent time.Duration
 }
 
+// --poll IS the recheck interval of a held signal wait (cleat#4162, 2b-i), which is what makes "a held run is never later than the same run with residency off" true. The stock value
+// equals the engine's default, so the stock row alone is also true of a function that ignores the flag: the control is a value that is not the default.
+func TestThePollFlagIsTheRecheckIntervalOfAHeldSignalWait(t *testing.T) {
+	stockFlag(t, "poll")
+	defer stockFlag(t, "poll")
+	cfg, err := residencyConfigFromFlags()
+	if err != nil {
+		t.Fatalf("the stock flags are refused: %v", err)
+	}
+	if cfg.RecheckInterval != 500*time.Millisecond {
+		t.Errorf("the stock recheck interval is %s, want 500ms (the stock --poll)", cfg.RecheckInterval)
+	}
+	setFlag(t, "poll", "250ms")
+	cfg, err = residencyConfigFromFlags()
+	if err != nil {
+		t.Fatalf("--poll=250ms was refused: %v", err)
+	}
+	if cfg.RecheckInterval != 250*time.Millisecond {
+		t.Errorf("--poll=250ms gave a recheck interval of %s: the flag does not reach the policy, so a held run would recheck at a different cadence than residency-off waits for", cfg.RecheckInterval)
+	}
+	// A value that is not an interval is not used, and must not refuse the boot of a worker that does not use residency.
+	for _, v := range []string{"0s", "-1s"} {
+		setFlag(t, "poll", v)
+		cfg, err = residencyConfigFromFlags()
+		if err != nil {
+			t.Errorf("--poll=%s refused the boot through the residency policy: %v", v, err)
+			continue
+		}
+		if cfg.RecheckInterval != 500*time.Millisecond {
+			t.Errorf("--poll=%s gave a recheck interval of %s, want the 500ms default", v, cfg.RecheckInterval)
+		}
+	}
+}
+
 func TestAResidencyFlagThatCannotMeanWhatItSaysIsRefused(t *testing.T) {
 	for _, c := range []struct{ flag, value string }{
 		{"resident-max-runs", "-1"},

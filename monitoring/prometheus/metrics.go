@@ -76,6 +76,7 @@ type Metrics struct {
 	residentParks           metric.Int64Counter
 	residentRefusals        metric.Int64Counter
 	residentEvictions       metric.Int64Counter
+	residentRechecks        metric.Int64Counter
 	replayShortHistories    metric.Int64Counter
 	replayChecksumFailures  metric.Int64Counter
 	ambiguousCalls          metric.Int64Counter
@@ -303,6 +304,14 @@ func New(cfg Config) (*Metrics, error) {
 	)
 	if err != nil {
 		return nil, fmt.Errorf("cleat_resident_evictions_total: %w", err)
+	}
+
+	m.residentRechecks, err = meter.Int64Counter(
+		"cleat_resident_rechecks_total",
+		metric.WithDescription("Store reads a HELD signal wait made to see whether its delivery had arrived, by what it waited for and the result (found: a delivery was there and the run resumes; none: nothing yet; error: the store could not be read, so the hold ended and the run suspended). This is the cost of holding such a wait: one read per awaited name per held run per --poll interval, bounded by --resident-max-runs"),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("cleat_resident_rechecks_total: %w", err)
 	}
 
 	m.replayShortHistories, err = meter.Int64Counter(
@@ -1087,6 +1096,12 @@ func (m *Metrics) RecordResidentPark(ctx context.Context, kind, outcome string) 
 func (m *Metrics) RecordResidentRefusal(ctx context.Context, kind, reason string) {
 	attrs := m.mergeAttrs(attribute.String("kind", kind), attribute.String("reason", reason))
 	m.residentRefusals.Add(ctx, 1, metric.WithAttributes(attrs...))
+}
+
+// RecordResidentRecheck counts one store read a held signal wait made to see whether its delivery had arrived. It is the visible cost of holding a signal wait.
+func (m *Metrics) RecordResidentRecheck(ctx context.Context, kind, result string) {
+	attrs := m.mergeAttrs(attribute.String("kind", kind), attribute.String("result", result))
+	m.residentRechecks.Add(ctx, 1, metric.WithAttributes(attrs...))
 }
 
 // RecordResidentEviction counts a held run the worker sent back before its wait was due.

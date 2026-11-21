@@ -6,6 +6,7 @@ package main
 
 import (
 	"strconv"
+	"time"
 
 	"github.com/cleat-team/cleat/cleat"
 )
@@ -97,4 +98,21 @@ func SleepLongThenCall(h cleat.HostCalls, input string) (string, error) {
 		return "", err
 	}
 	return `{"status":"ok"}`, nil
+}
+
+// AwaitGoThenCall waits for a signal named "go", then makes one call, and returns what the wait saw (cleat#4162, 2b-i). The call after the wait is what a test can see: a wait that was HELD
+// lets the guest reach the call in the same execution, and a wait that SUSPENDED stops the execution before it. The timeout is the first number in the input, in milliseconds (3000 if none).
+func AwaitGoThenCall(h cleat.HostCalls, input string) (string, error) {
+	ms := digits(input)
+	if ms == 0 {
+		ms = 3000
+	}
+	r := h.AwaitSignals([]string{"go"}, time.Duration(ms)*time.Millisecond)
+	if _, err := h.DurableCall("work", "after_await", `{}`); err != nil {
+		return "", err
+	}
+	if r.TimedOut {
+		return `{"status":"timed_out"}`, nil
+	}
+	return `{"status":"signalled","payload":` + r.Payload + `}`, nil
 }

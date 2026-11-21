@@ -20,6 +20,8 @@ type fakeResidentClock struct {
 	nowMs  atomic.Int64
 	mu     sync.Mutex
 	timers []chan time.Time
+	// durs[i] is the duration timers[i] was started with, so a test can fire the recheck ticks without firing the deadline.
+	durs []time.Duration
 	// armed receives once for every timer a park starts, so a test can wait for "the run is parked" without sleeping.
 	armed chan struct{}
 }
@@ -32,13 +34,40 @@ func newFakeResidentClock(nowMs int64) *fakeResidentClock {
 
 func (c *fakeResidentClock) Now() time.Time { return time.UnixMilli(c.nowMs.Load()) }
 
-func (c *fakeResidentClock) After(time.Duration) (<-chan time.Time, func()) {
+func (c *fakeResidentClock) After(d time.Duration) (<-chan time.Time, func()) {
 	ch := make(chan time.Time, 1)
 	c.mu.Lock()
 	c.timers = append(c.timers, ch)
+	c.durs = append(c.durs, d)
 	c.mu.Unlock()
-	c.armed <- struct{}{}
+	// Not blocking: a held signal wait arms a new tick timer every interval, and a test that does not drain armed must not hang the hold.
+	select {
+	case c.armed <- struct{}{}:
+	default:
+	}
 	return ch, func() {}
+}
+
+// fireShorterThan fires every started timer whose duration is below d: with a recheck interval well under the wait's remaining time, that is the ticks and not the deadline.
+func (c *fakeResidentClock) fireShorterThan(d time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for i, ch := range c.timers {
+		if c.durs[i] >= d {
+			continue
+		}
+		select {
+		case ch <- c.Now():
+		default:
+		}
+	}
+}
+
+// timerCount is how many timers have been started.
+func (c *fakeResidentClock) timerCount() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return len(c.timers)
 }
 
 // fireAll fires every timer that has been started.

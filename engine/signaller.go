@@ -143,8 +143,9 @@ var awaitSignalsStep = stepSpec{
 			}
 			req := parkRequest{
 				Kind: wakeSignal, Key: names, DeadlineMs: deadline,
-				Reason: fmt.Sprintf("await_signals(%s, %dms) [replayed]", rec.SignalNames, rec.TimeoutMs),
-				Until:  time.UnixMilli(deadline),
+				Reason:  fmt.Sprintf("await_signals(%s, %dms) [replayed]", rec.SignalNames, rec.TimeoutMs),
+				Until:   time.UnixMilli(deadline),
+				Recheck: signalRecheckFor(s, names),
 			}
 			if rec.TimestampMs == 0 || rec.TimeoutMs <= 0 {
 				// The deadline above is INVENTED (a record with no timestamp, or no timeout, has none), and it lies at about now. It must not be
@@ -181,13 +182,41 @@ var awaitSignalsStep = stepSpec{
 		until := time.UnixMilli(s.nowMs).Add(guestMsDuration(timeoutMs))
 		return awaitSuspendOrPark(c, deliverIfWaiting, parkRequest{
 			Kind: wakeSignal, Key: names, DeadlineMs: until.UnixMilli(),
-			Reason: fmt.Sprintf("await_signals(%s, %dms)", names, timeoutMs),
-			Until:  until,
+			Reason:  fmt.Sprintf("await_signals(%s, %dms)", names, timeoutMs),
+			Until:   until,
+			Recheck: signalRecheckFor(s, names),
 		}, packAwaitSignalsResult(0, 0, true, 0))
 	},
 }
 
 func init() { registerStepSpec(&awaitSignalsStep) }
+
+// signalRecheckFor is the read a HELD signal wait runs to find its delivery without being woken by anything (parkRequest.Recheck): is a delivery of any asked name waiting? It asks the
+// same store, for the same workflow and in the same order as deliverIfWaiting, and PollSignal does not consume, so this changes nothing. It does not record an event or write to the
+// guest: after a wake the call's own read, deliverIfWaiting, does that, so the delivery still reaches the guest through the one path replay uses.
+//
+// Unlike deliverIfWaiting, which reads a store error as "nothing found", this returns it: a hold that cannot tell must end and let the run suspend, because a wait that reads every
+// error as "not yet" would hold a run for its whole deadline against a store that is down. A nil store returns nil, which means the wait cannot be held (nothing could wake it).
+func signalRecheckFor(s *execSession, names string) func(ctx context.Context) (bool, error) {
+	if s.engine.signalStore == nil {
+		return nil
+	}
+	list := parseSignalNames(names)
+	workflowID := s.engine.workflowID
+	store := s.engine.signalStore
+	return func(ctx context.Context) (bool, error) {
+		for _, name := range list {
+			_, found, err := store.PollSignal(ctx, workflowID, name)
+			if err != nil {
+				return false, err
+			}
+			if found {
+				return true, nil
+			}
+		}
+		return false, nil
+	}
+}
 
 // awaitSuspendOrPark is the wait: park if this session may and there is a wake source, else suspend (production today: every wait suspends). timedOut is
 // the word the call hands back when the deadline has passed: await_signals and await_promise pack it differently, and the loop is the same.
