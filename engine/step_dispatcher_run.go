@@ -73,20 +73,20 @@ read:
 		}
 	}
 	if len(run) == 0 {
-		return sp.divergenceAnswer(s.replayDivergenceAt(ctx, m, &s.history[s.stepCount], sp.Want, args.outPtr, args.outMaxLen)), false
+		return sp.divergenceAnswer(s.replayDivergenceAt(ctx, m, &s.history[s.stepCount], sp.Want, sp.divergenceDetailFor(args, &s.history[s.stepCount]), args.outPtr, args.outMaxLen)), false
 	}
 	if sp.Identity != nil {
 		for k := range run {
 			if why := sp.Identity(args, &run[k]); why != "" {
-				return sp.divergenceAnswer(s.replayIdentityDivergenceAt(ctx, m, &run[k], sp.Name, why, args.outPtr, args.outMaxLen)), false
+				return sp.divergenceAnswer(s.replayIdentityDivergenceAt(ctx, m, &run[k], sp.Name, why, sp.divergenceDetailFor(args, &run[k]), args.outPtr, args.outMaxLen)), false
 			}
 		}
 	}
 	if unknown >= 0 {
-		return sp.divergenceAnswer(s.replayDivergenceAt(ctx, m, &s.history[unknown], sp.Want, args.outPtr, args.outMaxLen)), false
+		return sp.divergenceAnswer(s.replayDivergenceAt(ctx, m, &s.history[unknown], sp.Want, sp.divergenceDetailFor(args, &s.history[unknown]), args.outPtr, args.outMaxLen)), false
 	}
 	if !final && foreign >= 0 && !sp.EndsWithoutFinal && !sp.ResumesFreshAtForeign {
-		return sp.divergenceAnswer(s.replayDivergenceAt(ctx, m, &s.history[foreign], sp.Want, args.outPtr, args.outMaxLen)), false
+		return sp.divergenceAnswer(s.replayDivergenceAt(ctx, m, &s.history[foreign], sp.Want, sp.divergenceDetailFor(args, &s.history[foreign]), args.outPtr, args.outMaxLen)), false
 	}
 	if !final && foreign >= 0 && sp.ResumesFreshAtForeign {
 		// The empties are followed by another call's record, which the step would leave UNREAD: if that record is a call the guest's body made after being told

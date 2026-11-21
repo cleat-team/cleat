@@ -37,12 +37,13 @@ func lockIdentity(a stepArgs, rec *EventRecord) string {
 // where a defer segment's body reaches its first new call because a segment starts in replay (cleat#4101, measured against a real store: the
 // segment body took the lock when the refusal lived only in the non-replay branch).
 var acquireLockStep = stepSpec{
-	Name:     "acquire_lock",
-	Result:   layoutSimple,
-	Effect:   effectEffect,
-	Records:  recordsOne,
-	Want:     EventTypeAcquireLock,
-	Identity: lockIdentity,
+	Name:               "acquire_lock",
+	NoDivergenceDetail: "its old message was the shared one: the step and both event types; " + divergenceSweepNote,
+	Result:             layoutSimple,
+	Effect:             effectEffect,
+	Records:            recordsOne,
+	Want:               EventTypeAcquireLock,
+	Identity:           lockIdentity,
 	Decode: func(c *stepCtx, rec *EventRecord) int64 {
 		if rec.Err != "" {
 			return packAcquireLockResult(false, 1)
@@ -121,13 +122,14 @@ func init() { registerStepSpec(&acquireLockStep) }
 // refused and ReleaseLock releases and records. A cleanup that cannot give a lock back leaves it held for its lease, so the move keeps that and
 // declares it, where it used to be an entry in a list of exemptions. Whether a segment's body should be able to release is a separate decision.
 var releaseLockStep = stepSpec{
-	Name:     "release_lock",
-	Result:   layoutSimple,
-	Effect:   effectEffect,
-	Refuse:   neverRefuse,
-	Records:  recordsOne,
-	Want:     EventTypeReleaseLock,
-	Identity: lockIdentity,
+	Name:               "release_lock",
+	NoDivergenceDetail: "its old message was the shared one: the step and both event types; " + divergenceSweepNote,
+	Result:             layoutSimple,
+	Effect:             effectEffect,
+	Refuse:             neverRefuse,
+	Records:            recordsOne,
+	Want:               EventTypeReleaseLock,
+	Identity:           lockIdentity,
 	// Not a stop site: after a suspension it answers the ordinary error code its decoders know (cleat#4285). Nothing is released, so the lock stays held until
 	// its lease runs out, which is the cost of a guest that ignored the suspension.
 	AfterSuspend: func(*stepCtx) int64 { return int64(1) },

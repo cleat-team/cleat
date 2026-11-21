@@ -47,11 +47,12 @@ func scopeKeyOf(objectType, instanceKey string) string { return "vo:" + objectTy
 // concurrency-key store and blocks every live workflow that wants the same virtual object. Measured against a real store, cleat#4079 audit
 // row set_scope. Clearing a scope is not this step and is never refused.
 var setScopeStep = stepSpec{
-	Name:    "set_scope",
-	Result:  layoutSimple,
-	Effect:  effectEffect,
-	Records: recordsOne,
-	Want:    EventTypeScopeAcquired,
+	Name:               "set_scope",
+	NoDivergenceDetail: "its old message was the shared one: the step and both event types; " + divergenceSweepNote,
+	Result:             layoutSimple,
+	Effect:             effectEffect,
+	Records:            recordsOne,
+	Want:               EventTypeScopeAcquired,
 	// The scope key is what identifies the call: a record that names another scope is another call's. A first record used to escape this
 	// comparison (cleat#4211) and was accepted as this call's, which adopted the guest's scope on the strength of a record for a different one.
 	Identity: func(a stepArgs, rec *EventRecord) string {

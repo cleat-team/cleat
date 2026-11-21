@@ -303,7 +303,8 @@ func (s *execSession) AwaitChild(ctx context.Context, m api.Module, runID string
 //   - a pending record is answered OVER. Later history after it is a divergence when it holds a call the body recorded, and is left unread when it holds only a
 //     drain's records, compacted records or no call's effect (cleat#4285: OverPending says so).
 var awaitChildStep = stepSpec{
-	Name: "await_child",
+	Name:             "await_child",
+	DivergenceDetail: func(a stepArgs, _ *EventRecord) string { return fmt.Sprintf("\n  run ID: %s", a.s1) },
 	// The simple layout: errCode in the low bits and the result length from bit 32 (packAwaitChildResult); the suspend word is 1<<62 and is the
 	// spec's own, not the durable-call stop bit.
 	Result:      layoutSimple,
@@ -550,7 +551,8 @@ func (s *execSession) AwaitAnyChild(ctx context.Context, m api.Module, runIDsJSO
 // WHAT THE EMPTY MARKER RESTS ON is a store invariant and not a rule of this spec: an answer is told from a pending await by its Response being EMPTY, so a finished
 // child's answer must never be (the answer is JSON with a run_id, so it never is).
 var awaitAnyChildStep = stepSpec{
-	Name: "await_any_child",
+	Name:               "await_any_child",
+	NoDivergenceDetail: "its old message was `expected await_any_child, got <type>`: the step and the event type only; " + divergenceSweepNote,
 	// The simple layout, as the other two child awaits (ABI.md 2.24): errCode in the low bits, the length from bit 32; the suspend word is 1<<62 and the spec's own.
 	Result:                layoutSimple,
 	Effect:                effectEffect,
@@ -654,6 +656,9 @@ func (s *execSession) AwaitAllChildren(ctx context.Context, m api.Module, runIDs
 // writes no event, which the shape check reads as declared (RecordsNothing).
 var awaitAllChildrenStep = stepSpec{
 	Name: "await_all_children",
+	DivergenceDetail: func(a stepArgs, rec *EventRecord) string {
+		return fmt.Sprintf("\n  actual run IDs: %s\n  expected run IDs: %s", truncateWithHash(a.s1, maxPayloadLen), truncateWithHash(rec.Request, maxPayloadLen))
+	},
 	// The simple layout: errCode in the low bits and the result length from bit 32 (packAwaitChildResult); the suspend word is 1<<62 and is the
 	// spec's own, not the durable-call stop bit.
 	Result:  layoutSimple,

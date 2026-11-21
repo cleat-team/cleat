@@ -35,7 +35,7 @@ func rtRecord(step int) EventRecord {
 // history is missing (counting each as one effect) and records them through c.Record.
 func rtSpec(effects *int32) *stepSpec {
 	return &stepSpec{
-		Name: "rt_retry", Result: layoutSimple, Effect: effectEffect, Records: recordsMany, Want: EventTypeCall,
+		Name: "rt_retry", Result: layoutSimple, Effect: effectEffect, Records: recordsMany, Want: EventTypeCall, NoDivergenceDetail: "a fake call: nothing to describe",
 		Identity: func(a stepArgs, rec *EventRecord) string {
 			if rec.Service != rtSvc || rec.Op != rtOp {
 				return fmt.Sprintf("%s.%s, recorded %s.%s", rtSvc, rtOp, rec.Service, rec.Op)

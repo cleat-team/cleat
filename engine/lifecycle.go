@@ -492,13 +492,14 @@ func decodeRecordedSideEffect(c *stepCtx, rec *EventRecord) int64 {
 }
 
 var sideEffectStep = stepSpec{
-	Name:       "side_effect",
-	Result:     layoutSimple,
-	Effect:     effectEffect,
-	Records:    recordsOne,
-	Want:       EventTypeSideEffect,
-	NoIdentity: "the value is the event: a side effect records the non-deterministic output itself, and the guest's own computation of it differs between a run and its replay by construction",
-	Decode:     decodeRecordedSideEffect,
+	Name:               "side_effect",
+	NoDivergenceDetail: "its old message was `expected side_effect event, got <type>`: the step and the event type only; " + divergenceSweepNote,
+	Result:             layoutSimple,
+	Effect:             effectEffect,
+	Records:            recordsOne,
+	Want:               EventTypeSideEffect,
+	NoIdentity:         "the value is the event: a side effect records the non-deterministic output itself, and the guest's own computation of it differs between a run and its replay by construction",
+	Decode:             decodeRecordedSideEffect,
 	Fresh: func(c *stepCtx) int64 {
 		c.Record(EventRecord{
 			Step:             c.s.stepCount,
@@ -549,6 +550,7 @@ func (s *execSession) SideEffectRecorded(ctx context.Context, m api.Module, resp
 // 0 where the lookup used to answer the stop sentinel (the dispatcher answers 0 for every spec; debugger-only).
 var sideEffectRecordedStep = stepSpec{
 	Name:                    "side_effect_recorded",
+	NoDivergenceDetail:      "its old message was `expected side_effect event, got <type>`: the step and the event type only; " + divergenceSweepNote,
 	Result:                  layoutSimple,
 	Effect:                  effectEffect,
 	Records:                 recordsNone,
@@ -612,7 +614,12 @@ func (s *execSession) Fetch(ctx context.Context, m api.Module, method, url, head
 // differs; the old text quoted both bodies and the recorded response. The identity is what the old code compared (method, url, body); the
 // headers are NOT compared, as before.
 var fetchStep = stepSpec{
-	Name:    "fetch",
+	Name: "fetch",
+	DivergenceDetail: func(a stepArgs, rec *EventRecord) string {
+		return fmt.Sprintf("\n  workflow: %s %s\n  history: %s %s\n  actual body: %s\n  expected body: %s\n  expected response: %s",
+			a.s1, a.s2, rec.FetchMethod, rec.FetchURL,
+			truncateWithHash(a.s4, maxPayloadLen), truncateWithHash(rec.FetchBody, maxPayloadLen), truncateWithHash(rec.FetchResponse, maxPayloadLen))
+	},
 	Result:  layoutSimple,
 	Effect:  effectEffect,
 	Records: recordsOne,

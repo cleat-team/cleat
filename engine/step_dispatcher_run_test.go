@@ -24,7 +24,7 @@ func runRec(step int, et EventType, name string) EventRecord {
 // compares). decodeSaw receives the run DecodeRun was handed; prefixSaw the c.Prefix Fresh was handed.
 func runSpec(ran *int32, decodeSaw *[]EventRecord, prefixSaw *[]EventRecord) *stepSpec {
 	return &stepSpec{
-		Name: "fake_run", Result: layoutSimple, Effect: effectEffect, Records: recordsMany, Want: runFinalEvent,
+		Name: "fake_run", Result: layoutSimple, Effect: effectEffect, Records: recordsMany, Want: runFinalEvent, NoDivergenceDetail: "a fake call: nothing to describe",
 		Identity: func(a stepArgs, rec *EventRecord) string {
 			if rec.ScopeKey != a.s1 {
 				return "name " + a.s1 + ", recorded " + rec.ScopeKey
