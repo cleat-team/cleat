@@ -64,7 +64,7 @@ The host must check for this value before decoding the normal result. Suspension
 | `cleat_release_lock`, `cleat_register_update_handler` | the ordinary error code `1` |
 | every other call that records or runs something (service calls, plugin calls, child workflows, `cleat_side_effect`, locks, signals, updates, `cleat_continue_as_new`, and the rest) | the stop word `1 << 31`, which those calls' decoders already test first |
 
-Reads that start nothing (`cleat_now`, `cleat_random`, `cleat_uuid`, the polls, the JSON helpers, version and id reads, query state) are not refused. A **defer drain is exempt**, whether the host runs it or the guest runs its own and reports it with `cleat_defer_phase`: the cleanup of a stopping run is exactly the work that must still go through. Nothing in this changes what a well-behaved guest sees, because it has already returned.
+Reads that start nothing (`cleat_now`, `cleat_random`, `cleat_uuid`, the polls, the JSON helpers, version and id reads, query state) are not refused. A **defer drain is exempt** when the host runs it, and when the guest runs its own and reports it with `cleat_defer_phase` **only if that drain began before the suspension** (a cleanup in progress whose body awaited a child) **or the suspension is a `cleat_continue_as_new`** (the end of the run, whose defers must run). A drain that begins **after** a wait suspension is not exempt: it is an SDK wrapper running the defers because the guest swallowed the suspension, and its calls are refused like any other. A suspended workflow has not exited, so its cleanup is still pending and runs when the workflow ends. Nothing in this changes what a well-behaved guest sees, because it has already returned.
 
 ### Input/Output format
 

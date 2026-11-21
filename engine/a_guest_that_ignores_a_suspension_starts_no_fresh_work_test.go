@@ -129,22 +129,31 @@ func TestAGuestThatIgnoresASuspensionStartsNoFreshWork(t *testing.T) {
 					t.Errorf("control: the call did nothing while NOT suspended, so its refusal above measured nothing")
 				}
 			}
-			// SUSPENDED, in a defer drain: the cleanup still goes through, whether the GUEST runs it and says so (SetDeferPhase) or the HOST runs it
-			// (inDeferDrain, which brackets the host's own call to the guest's defer runner). Two flags, so two arms: removing either exemption must fail one.
+			// SUSPENDED and DRAINING DEFERS. Four arms, driven through the real SetDeferPhase in the order each case describes, because which came first decides it:
+			//   exempt:  the HOST's drain (inDeferDrain); the guest's drain that BEGAN BEFORE the suspension (a cleanup whose body then awaited a child, cleat#3429);
+			//            a guest's drain after a CONTINUE-AS-NEW (the end of the run, whose defers must run).
+			//   refused: a guest's drain that began AFTER a wait suspension: the wrapper of an SDK whose guest swallowed the suspension runs the defers, and its calls
+			//            would be recorded after the pending await and run again on resume (cleat#4285; Java's catch (Exception), C#'s EntryHost; found in review).
 			if r.noControl == "" {
 				for _, drain := range []struct {
-					name string
-					set  func(*execSession)
+					name   string
+					setup  func(s *execSession)
+					exempt bool
 				}{
-					{"the guest's own drain (SetDeferPhase)", func(s *execSession) { s.inDeferPhase = true }},
-					{"the host's drain (inDeferDrain)", func(s *execSession) { s.inDeferDrain = true }},
+					{"the host's drain (inDeferDrain)", func(s *execSession) { s.suspendErr = first; s.inDeferDrain = true }, true},
+					{"the guest's drain that began BEFORE the suspension (cleat#3429)", func(s *execSession) { s.SetDeferPhase(context.Background(), true); s.suspendErr = first }, true},
+					{"the guest's drain after a CONTINUE-AS-NEW", func(s *execSession) {
+						s.suspendErr = &SuspendError{Reason: "continue_as_new"}
+						s.SetDeferPhase(context.Background(), true)
+					}, true},
+					{"the guest's drain that began AFTER a wait suspension", func(s *execSession) { s.suspendErr = first; s.SetDeferPhase(context.Background(), true) }, false},
 				} {
 					d := newIgnoredSuspendWorld()
-					d.s.suspendErr = first
-					drain.set(d.s)
+					drain.setup(d.s)
+					susp := d.s.suspendErr
 					r.call(d.s)
-					if !d.ran(0, 0, 0, first) {
-						t.Errorf("a call inside %s was refused: cleanup must still go through", drain.name)
+					if ran := d.ran(0, 0, 0, susp); ran != drain.exempt {
+						t.Errorf("inside %s: did work = %v, want %v", drain.name, ran, drain.exempt)
 					}
 				}
 			}

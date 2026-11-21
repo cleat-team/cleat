@@ -679,16 +679,20 @@ type unflushedEvent struct {
 
 // execSession implements HostHandler for a single execution or replay.
 type execSession struct {
-	engine        *Engine
-	history       []EventRecord
-	stepCount     int
-	isReplay      bool
-	nowMs         int64
-	randomSeq     int64 // monotonic counter for deterministic Random()
-	suspendErr    *SuspendError
-	deferrals     map[string]string // registered defer callbacks (deferID -> description)
-	inDeferPhase  bool              // true while the guest is draining its defer table (cleat#1155)
-	awaitRejected bool              // the last AwaitPromise ended in a rejection (cleat#3425)
+	engine       *Engine
+	history      []EventRecord
+	stepCount    int
+	isReplay     bool
+	nowMs        int64
+	randomSeq    int64 // monotonic counter for deterministic Random()
+	suspendErr   *SuspendError
+	deferrals    map[string]string // registered defer callbacks (deferID -> description)
+	inDeferPhase bool              // true while the guest is draining its defer table (cleat#1155)
+	// deferPhaseBeganSuspended is whether the execution had ALREADY suspended when the guest's current drain began (SetDeferPhase(true)). A drain that began before
+	// the suspension is a cleanup that is still in progress (cleat#3429); one that began after it is a wrapper that ran its defers because the guest swallowed
+	// the suspension (cleat#4285). Meaningful only while inDeferPhase.
+	deferPhaseBeganSuspended bool
+	awaitRejected            bool // the last AwaitPromise ended in a rejection (cleat#3425)
 	// unflushed is every event this execution recorded that the engine did NOT write because per-step flush is off, in the order
 	// recorded, each with the predecessor checksum it was chained from. A successful or suspended segment hands these to the
 	// worker, which writes them at finalization. A FAILED one has no finalization: nothing wrote them, and the worker's

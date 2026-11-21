@@ -69,10 +69,21 @@ const callRefusedAfterSuspend = "the workflow has suspended; this call was not r
 // suspendedAlready reports whether this EXECUTION has already suspended: a call answered the guest with a suspension (a child await, a wait, a
 // stop), or ContinueAsNew set one, and the guest is still running. A guest is told to stop when that happens and some do not (an SDK returns the
 // suspension as an ordinary value, or the guest catches the exception or discards the error: cleat#4285), and every call it makes afterwards is
-// recorded AFTER the pending await and runs AGAIN when the workflow resumes. A defer drain is exempt, whether the HOST runs it (inDeferDrain) or the GUEST
-// does and says so (SetDeferPhase, cleat#3428): the cleanup of a run that is stopping is exactly the work that must still go through.
+// recorded AFTER the pending await and runs AGAIN when the workflow resumes. A defer drain is exempt when the HOST runs it (inDeferDrain), and when the
+// GUEST runs its own and says so (SetDeferPhase) only if that drain began BEFORE the suspension or the suspension is a continue-as-new (guestDrainIsExempt).
 func (s *execSession) suspendedAlready() bool {
-	return s.suspendErr != nil && !s.inDeferDrain && !s.guestIsDrainingDefers()
+	return s.suspendErr != nil && !s.inDeferDrain && !s.guestDrainIsExempt()
+}
+
+// guestDrainIsExempt reports whether the guest is draining its own defer table in a way a post-suspension refusal must not stop. Two cases, and the narrowness
+// is the point: (1) the drain BEGAN BEFORE the suspension, a cleanup in progress whose body then awaited a child (cleat#3429); (2) the suspension IS the end
+// of the run, a continue-as-new, whose registered defers belong to this execution and must run (suspendedForContinueAsNew). A drain that began AFTER a wait
+// suspension is neither: it is a wrapper running the defers because the guest swallowed the suspension (Java's catch (Exception), C#'s EntryHost), and its
+// calls would be recorded after the pending await and run again on resume, which is cleat#4285. Reported by the reviewer of #4295.
+func (s *execSession) guestDrainIsExempt() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.inDeferPhase && (!s.deferPhaseBeganSuspended || s.suspendedForContinueAsNew())
 }
 
 // refuseIfSuspended is the host-side half of cleat#4285: when this execution has already suspended, a call that would start fresh work is refused,
@@ -1323,6 +1334,9 @@ func (s *execSession) DurableScheduleInvoke(ctx context.Context, m api.Module, s
 // trapped guest records nothing more.
 func (s *execSession) SetDeferPhase(_ context.Context, on bool) int64 {
 	s.mu.Lock()
+	if on && !s.inDeferPhase {
+		s.deferPhaseBeganSuspended = s.suspendErr != nil
+	}
 	s.inDeferPhase = on
 	s.mu.Unlock()
 	return 0
