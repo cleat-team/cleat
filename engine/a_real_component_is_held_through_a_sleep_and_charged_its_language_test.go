@@ -4,8 +4,10 @@ package engine
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -47,11 +49,24 @@ type heldRun struct {
 	// maxCharged is the most the set was charged at any sample while Execute ran. It is sampled, so it is a floor on what the set held: it can miss a hold that
 	// was shorter than the sampling interval, which is why the caller asserts it only for a hold it knows lasts far longer than that.
 	maxCharged uint64
+	// wokeAt is when the held run's claim check ran, which is the wake (zero if it never woke); endedAt is when Execute returned.
+	wokeAt, endedAt time.Time
 	// claimChecks is how many times the held run asked whether it still owned its claim (once per wake).
 	claimChecks int32
 }
 
 func executeAComponent(t *testing.T, wasmBytes []byte, backendLangs []string, input string, resident bool, component string) heldRun {
+	t.Helper()
+	out, err := tryExecuteAComponent(t, wasmBytes, backendLangs, input, resident, component, nil)
+	if err != nil {
+		t.Fatalf("execute (resident=%v): %v", resident, err)
+	}
+	return out
+}
+
+// tryExecuteAComponent is executeAComponent for a caller that expects the execution to be able to fail (the fence rows), with backend options and a bound on the
+// whole workflow so that a fence that does NOT fire fails the row in seconds instead of hanging it.
+func tryExecuteAComponent(t *testing.T, wasmBytes []byte, backendLangs []string, input string, resident bool, component string, backendOpts []WasmtimeOption, engineOpts ...EngineOption) (heldRun, error) {
 	t.Helper()
 	ctx := context.Background()
 	rt, err := NewRuntime(ctx, 0, 0)
@@ -59,7 +74,7 @@ func executeAComponent(t *testing.T, wasmBytes []byte, backendLangs []string, in
 		t.Fatalf("NewRuntime: %v", err)
 	}
 	t.Cleanup(func() { rt.Close(ctx) })
-	wt, err := NewWasmtimeBackend(ctx)
+	wt, err := NewWasmtimeBackend(ctx, backendOpts...)
 	if err != nil {
 		t.Fatalf("NewWasmtimeBackend: %v", err)
 	}
@@ -67,6 +82,7 @@ func executeAComponent(t *testing.T, wasmBytes []byte, backendLangs []string, in
 
 	caller := &timedCaller{mockCaller: &mockCaller{}}
 	var checks atomic.Int32
+	var wokeAt atomic.Int64
 	var set *ResidentSet
 	opts := []EngineOption{WithBackends(backendLangs, wt), WithWorkflowID("wf-held-component-" + component)}
 	if resident {
@@ -80,10 +96,14 @@ func executeAComponent(t *testing.T, wasmBytes []byte, backendLangs []string, in
 			WorkflowID: "wf-held-component-" + component,
 			Language:   wasm.DetectLanguage(wasmBytes),
 			Component:  component,
-			ClaimCheck: func(context.Context) error { checks.Add(1); return nil },
+			ClaimCheck: func(context.Context) error {
+				wokeAt.CompareAndSwap(0, time.Now().UnixNano())
+				checks.Add(1)
+				return nil
+			},
 		})))
 	}
-	eng := NewEngine(rt, caller, opts...)
+	eng := NewEngine(rt, caller, append(opts, engineOpts...)...)
 
 	var maxCharged atomic.Uint64
 	stop := make(chan struct{})
@@ -105,12 +125,16 @@ func executeAComponent(t *testing.T, wasmBytes []byte, backendLangs []string, in
 		}()
 	}
 	res, _, susp, _, _, err := eng.Execute(ctx, wasmBytes, "run", []byte(input))
+	endedAt := time.Now()
 	close(stop)
 	wg.Wait()
-	if err != nil {
-		t.Fatalf("execute (resident=%v): %v", resident, err)
+	out := heldRun{result: res, suspended: susp != nil, ops: operationsCalled(caller.mockCaller), maxCharged: maxCharged.Load(), claimChecks: checks.Load(), endedAt: endedAt}
+	if w := wokeAt.Load(); w != 0 {
+		out.wokeAt = time.Unix(0, w)
 	}
-	out := heldRun{result: res, suspended: susp != nil, ops: operationsCalled(caller.mockCaller), maxCharged: maxCharged.Load(), claimChecks: checks.Load()}
+	if err != nil {
+		return out, err
+	}
 	if len(caller.times) >= 2 {
 		out.gap = caller.times[1].Sub(caller.times[0])
 	}
@@ -119,7 +143,7 @@ func executeAComponent(t *testing.T, wasmBytes []byte, backendLangs []string, in
 			t.Errorf("the set is still charged %d bytes after the execution ended: a charge was not given back", got)
 		}
 	}
-	return out
+	return out, nil
 }
 
 // requireHeldInPlace asserts the two things that together say "held, not replayed": both calls ran in ONE execution, and the held run asked about its claim.
@@ -215,5 +239,146 @@ func TestPythonComponentIsHeldThroughADurableSleepAndChargedAsPython(t *testing.
 	}
 	if longOn.gap < 1450*time.Millisecond {
 		t.Errorf("a 1500 ms sleep held the run for only %s: the guest ignored its input (sleep_ms binds by NAME) or did not sleep", longOn.gap)
+	}
+}
+
+// THE EXECUTION FENCE ON A C# COMPONENT (cleat#4278). The fixture's `spin` mode is a guest busy-loop whose own comment says it is "killed by the epoch fence", and no
+// test ever selected it, so nothing in CI ran busy C# guest code under the fence. Measured when this was written: it is stopped at 5 ms, 300 ms and 2 s fences, native
+// and on linux arm64. A first attempt at the held-versus-fence row below used the fixture's sleep mode as its liveness control and FAILED: that mode uses under one epoch
+// tick of guest time before its first host call, so a 5 ms fence has nothing to interrupt in it. The control has to be a guest that actually runs.
+func csharpFixtureStamped(t *testing.T) []byte {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join("testdata", "csharp_defer_order", "defer_order.wasm"))
+	if err != nil {
+		t.Fatalf("read the C# fixture: %v", err)
+	}
+	b, err = wasm.WriteMetadata(b, &wasm.Metadata{Language: "csharp"})
+	if err != nil {
+		t.Fatalf("stamp the fixture: %v", err)
+	}
+	if got := wasm.DetectLanguage(b); got != "csharp" {
+		t.Fatalf("PRECONDITION FAILED: the stamped fixture is detected as %q, not csharp", got)
+	}
+	return b
+}
+
+// requireFenced runs the busy-loop mode under a fence and asserts it was the FENCE that stopped it: the message names the fence's own budget, which a workflow
+// deadline (set here far above the fence as a backstop, so a missing fence fails in seconds and not never) would not.
+func requireFenced(t *testing.T, b []byte, langs []string, fence time.Duration) {
+	t.Helper()
+	start := time.Now()
+	_, err := tryExecuteAComponent(t, b, langs, `{"mode":"spin"}`, false, "csharp-fixture@1",
+		[]WasmtimeOption{WithWasmtimeExecutionTimeout(fence)}, WithDefaultWorkflowTimeout(20*time.Second))
+	if err == nil {
+		t.Fatalf("a busy C# guest ran to completion under a %s fence", fence)
+	}
+	want := fmt.Sprintf("execution time limit exceeded (%s wall-clock budget", fence)
+	if !strings.Contains(err.Error(), want) {
+		t.Fatalf("a busy C# guest under a %s fence stopped for another reason after %s (want the message to contain %q): %v", fence, time.Since(start).Round(time.Millisecond), want, err)
+	}
+}
+
+func TestABusyCSharpGuestIsStoppedByTheExecutionFence(t *testing.T) {
+	b := csharpFixtureStamped(t)
+	langs := append(append([]string{}, WasmtimeLanguages...), "csharp")
+	executeAComponent(t, b, langs, `{"mode":"hello"}`, false, "csharp-fixture@1") // compile and cache first
+
+	for _, fence := range []time.Duration{300 * time.Millisecond, 2 * time.Second} {
+		t.Run(fence.String(), func(t *testing.T) { requireFenced(t, b, langs, fence) })
+	}
+
+	// The control: the same fixture and the same short fence, a mode that does NOT spin, completes. Without it "the fence stops the guest" is also what a fence that
+	// stops EVERY guest, spinning or not, would show.
+	if _, err := tryExecuteAComponent(t, b, langs, `{"mode":"hello"}`, false, "csharp-fixture@1",
+		[]WasmtimeOption{WithWasmtimeExecutionTimeout(300 * time.Millisecond)}, WithDefaultWorkflowTimeout(20*time.Second)); err != nil {
+		t.Fatalf("PRECONDITION FAILED: a guest that does not spin was stopped by the same 300 ms fence: %v", err)
+	}
+}
+
+// A run held for longer than the fence is not charged for the hold: a held wait is host time (cleat#4174), so a 400 ms hold completes under a 250 ms fence. Its
+// liveness control is the one above, the fence STOPS a busy guest at that same 250 ms. What this does not show is that the fence is restarted at the wake on the
+// component path, which needs a guest that computes before and after the hold (the core path's timing row); it is not measured on a component.
+func TestAHeldCSharpRunLongerThanTheFenceIsNotChargedForTheHold(t *testing.T) {
+	b := csharpFixtureStamped(t)
+	langs := append(append([]string{}, WasmtimeLanguages...), "csharp")
+	const fence = 250 * time.Millisecond
+	fenceOpt := []WasmtimeOption{WithWasmtimeExecutionTimeout(fence)}
+	bound := WithDefaultWorkflowTimeout(20 * time.Second)
+	const input = `{"mode":"sleep"}` // the fixture sleeps 400 ms
+
+	executeAComponent(t, b, langs, `{"mode":"hello"}`, false, "csharp-fixture@1") // compile and cache first
+	requireFenced(t, b, langs, fence)                                             // the fence is live on this path at this value
+
+	off, err := tryExecuteAComponent(t, b, langs, input, false, "csharp-fixture@1", fenceOpt, bound)
+	if err != nil || !off.suspended {
+		t.Fatalf("PRECONDITION FAILED: with residency off and a %s fence the guest did not simply suspend (err=%v, suspended=%v), so its own execution does not fit the fence", fence, err, off.suspended)
+	}
+	on, err := tryExecuteAComponent(t, b, langs, input, true, "csharp-fixture@1", fenceOpt, bound)
+	if err != nil {
+		t.Fatalf("a C# run held for 400 ms was stopped by a %s fence: the hold was charged to the guest's execution budget: %v", fence, err)
+	}
+	if on.suspended || len(on.ops) != 2 {
+		t.Fatalf("the held run did not finish in place under a %s fence: suspended=%v ops=%v", fence, on.suspended, on.ops)
+	}
+	if on.gap < 350*time.Millisecond {
+		t.Errorf("the two calls were %s apart: the run did not hold through the 400 ms sleep, so the fence was never tested against a hold longer than itself", on.gap)
+	}
+}
+
+// A RUNAWAY LOOP AFTER A HOLD IS STOPPED BY THE FENCE, ON THE COMPONENT PATH (the case residency creates: a held run waking into a runaway loop). The time is measured
+// from the claim check, which runs at the wake, to the moment Execute returned with the fence's own error, and it is asserted from BELOW (a stopped guest can only be
+// stopped late, so a lower bound cannot flake under load): the guest must have been given about a whole fence after the wake and not stopped at once, which is what
+// a fence that kept charging during the 400 ms hold would do.
+//
+// WHAT THIS DOES NOT SHOW, AND IT WAS TESTED: that the fence is RESTARTED at the wake, as opposed to re-armed. Removing the component path's restart registration
+// (component_cgo.go, onLimitsRestart) leaves this row GREEN: 1.996 s after the wake against a fence of 2 s, the same as with it (1.959 s). A restart only differs from a
+// re-arm for a guest that had ALREADY used part of its fence when the hold began, and this one has not: componentize-py pre-initialises the interpreter at build time,
+// so there is almost no guest time before the first host call (a hypothesis about this guest, not a measurement). Showing a restart on a component needs a guest that
+// computes, sized to the machine, before the hold, as the core path's timing row does (a_held_wait_restarts_the_fence_on_real_wasmtime_timing_test.go). That row has no
+// component twin yet. What does cover the restart without a clock is the arithmetic test and the structural test that every builder of the fence budget registers it.
+func TestPythonRunawayLoopAfterAHoldIsStoppedByTheFenceAWholeFenceAfterTheWake(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping Python WASM integration test in short mode")
+	}
+	h := newPythonWasmTestHelper(t)
+	if !h.toolsAvailable() {
+		if toolchainRequired("python") {
+			t.Fatalf("Python WASM prerequisites not met, but %s declares python: %s", requireToolchainEnv, h.missingTools())
+		}
+		t.Skip("Python WASM prerequisites not met: " + h.missingTools())
+	}
+	b, err := os.ReadFile(h.compileWorkflow(t, "held_sleep_then_spin_workflow.py", "held_sleep_then_spin"))
+	if err != nil {
+		t.Fatalf("read the compiled guest: %v", err)
+	}
+	const fence = 2 * time.Second
+	fenceOpt := []WasmtimeOption{WithWasmtimeExecutionTimeout(fence)}
+	bound := WithDefaultWorkflowTimeout(60 * time.Second) // a backstop only: a missing fence fails in a minute instead of hanging
+	const input = `{"sleep_ms":400}`
+
+	// CONTROL: residency off. The run suspends at the sleep after one call and never reaches the loop, so the loop only runs after a hold.
+	off, err := tryExecuteAComponent(t, b, WasmtimeLanguages, input, false, "spin-after-hold@1", fenceOpt, bound)
+	if err != nil || !off.suspended || len(off.ops) != 1 {
+		t.Fatalf("PRECONDITION FAILED: with residency off the run did not simply suspend after one call (err=%v suspended=%v ops=%v)", err, off.suspended, off.ops)
+	}
+
+	on, err := tryExecuteAComponent(t, b, WasmtimeLanguages, input, true, "spin-after-hold@1", fenceOpt, bound)
+	if err == nil {
+		t.Fatalf("a runaway loop after a hold ran to completion under a %s fence", fence)
+	}
+	want := fmt.Sprintf("execution time limit exceeded (%s wall-clock budget", fence)
+	if !strings.Contains(err.Error(), want) {
+		t.Fatalf("the run was stopped, but not by the fence (want the message to contain %q): %v", want, err)
+	}
+	if on.claimChecks != 1 || on.wokeAt.IsZero() || len(on.ops) != 1 {
+		t.Fatalf("PRECONDITION FAILED: the run was not held and woken (claim checks %d, ops %v), so the post-wake time below is not a wake-to-kill time", on.claimChecks, on.ops)
+	}
+	postWake := on.endedAt.Sub(on.wokeAt)
+	t.Logf("held 400 ms; the loop after the wake was stopped %s after the claim check, against a fence of %s", postWake.Round(time.Millisecond), fence)
+	if postWake < fence-150*time.Millisecond {
+		t.Errorf("the loop after the wake was stopped only %s after it, against a fence of %s: the guest was not given about a whole fence after the wake: the hold was charged to it, or the fence was cut short", postWake, fence)
+	}
+	if postWake > fence+10*time.Second {
+		t.Errorf("the loop after the wake ran %s against a fence of %s", postWake, fence)
 	}
 }
