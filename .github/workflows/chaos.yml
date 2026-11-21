@@ -165,13 +165,19 @@ jobs:
       # sweep step failed, so a red sweep cannot hide it.
       - name: Timing rows (build tag timing)
         if: ${{ !cancelled() }}
+        env:
+          # The component twin compiles a Python guest, and the toolchain was installed above. Declared so that a missing tool FAILS the row instead of skipping it:
+          # a skip here would read as a pass.
+          CLEAT_REQUIRE_TOOLCHAINS: python
         run: |
           set -euo pipefail
           go test -json -tags timing -count=1 -timeout 30m ./engine/ \
-            -run 'TestAHeldWaitRestartsTheExecutionFenceOnRealWasmtime' 2>&1 | tee chaos-timing.log
-          # `go test -run` that selects nothing exits 0 ("no tests to run"), so a renamed test would leave this step green having run nothing. Require its pass event.
-          grep -E '"Action":"pass","Package":"[^"]*","Test":"TestAHeldWaitRestartsTheExecutionFenceOnRealWasmtime"' chaos-timing.log > /dev/null \
-            || { echo "::error::the timing row reported no pass: the -run pattern selected nothing, or it never finished"; exit 1; }
+            -run 'TestAHeldWaitRestartsTheExecutionFenceOnRealWasmtime|TestPythonAHeldWaitRestartsTheExecutionFenceOnAComponent' 2>&1 | tee chaos-timing.log
+          # `go test -run` that selects nothing exits 0 ("no tests to run"), so a renamed test would leave this step green having run nothing. Require EACH row's pass event.
+          for row in TestAHeldWaitRestartsTheExecutionFenceOnRealWasmtime TestPythonAHeldWaitRestartsTheExecutionFenceOnAComponent; do
+            grep -E "\"Action\":\"pass\",\"Package\":\"[^\"]*\",\"Test\":\"${row}\"" chaos-timing.log > /dev/null \
+              || { echo "::error::the timing row ${row} reported no pass: the -run pattern selected nothing, or it never finished"; exit 1; }
+          done
       - uses: actions/upload-artifact@v7
         if: always()
         with:

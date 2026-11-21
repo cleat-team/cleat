@@ -45,6 +45,8 @@ type heldRun struct {
 	// execution here builds its own backend, so it includes compiling the component (seconds for Python), which would swamp a 400 ms sleep and make any bound on it
 	// vacuous. Zero when fewer than two calls were made.
 	gap time.Duration
+	// callTimes is when each outbound call arrived, in order.
+	callTimes []time.Time
 	// maxCharged is the most the set was charged at any sample while Execute ran. It is sampled, so it is a floor on what the set held: it can miss a hold that
 	// was shorter than the sampling interval, which is why the caller asserts it only for a hold it knows lasts far longer than that.
 	maxCharged uint64
@@ -130,11 +132,12 @@ func tryExecuteAComponent(t *testing.T, wasmBytes []byte, backendLangs []string,
 	if w := wokeAt.Load(); w != 0 {
 		out.wokeAt = time.Unix(0, w)
 	}
-	if err != nil {
-		return out, err
-	}
+	out.callTimes = append([]time.Time(nil), caller.times...)
 	if len(caller.times) >= 2 {
 		out.gap = caller.times[1].Sub(caller.times[0])
+	}
+	if err != nil {
+		return out, err
 	}
 	if set != nil {
 		if got := chargedBytes(set); got != 0 {
