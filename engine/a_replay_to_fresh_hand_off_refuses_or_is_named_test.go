@@ -27,6 +27,7 @@ package engine
 // Run the known positives below before trusting a pass: they show each scan reports an entry with no check.
 
 import (
+	"fmt"
 	goscan "go/scanner"
 	"go/token"
 	"os"
@@ -226,18 +227,56 @@ func engineMethodBodies(t *testing.T) map[string]string {
 	return out
 }
 
+// handOffCanaries are functions that must be seen calling exitReplay(): replay halves of the same kind as replayCall that still leave replay themselves.
+// replaySetScope was the third canary until SetScope moved onto the dispatcher (cleat#4211), which now owns that hand-off, and replaySideEffect before it
+// (cleat#4152, G1a). When one of these moves, replace it with another that does, and the failure names which one went.
+var handOffCanaries = []string{"replayCall", "replayPluginCall", "replayCallWithHeartbeat"}
+
+// handOffScanProblem says why the hand-off scan cannot be trusted on this tree, or "" when it saw what it is meant to see. It is a function of the scan's
+// OUTPUT so a known positive can hand it a scan that saw nothing (TestTheHandOffScanVacuityCheckRefusesAScanThatSawNothing).
+//
+// WHAT IT ASKS, and why it is not a count. This used to be `examined < 20`: a census of how many functions still call exitReplay(). That is a population
+// every migration onto the step dispatcher SHRINKS, by design, so the floor failed on the first migration that crossed it (cleat#4232: develop alone
+// stood at exactly 20 after #4256, and #4232 took it to 19) and would fail again at the next. A floor on a number that is meant to fall measures how
+// far the migration has got, not whether the scan is reading the right thing. What it asks instead holds at any size of that population:
+//   - the scan SAW the hand-offs it must (every canary calls exitReplay(), checked by the caller);
+//   - it saw at least one that is REFUSED, so it can tell a refused hand-off from an unrefused one (a scan that reports everything as unrefused, or
+//     nothing, is reading the wrong thing);
+//   - when any exemption is named, it saw at least one hand-off that is NAMED, not refused. That half is conditional on the exemption list being
+//     non-empty, because the list may only shrink and deleting its last entry is the intended outcome, not a failure of the scan
+//     (TestEveryHandOffExemptionStillDescribesSomething checks each entry is still a real unrefused hand-off);
+//   - a small bound, below the number of canaries, so an empty scan is refused even before the kinds are looked at.
+//
+// The dispatcher's own steps (stepSpecs) are deliberately NOT added to the population: len(stepSpecs) does not depend on the scan, so a scan that saw
+// nothing (examined 0) plus the registry's steps would still clear a combined floor, which is the vacuous pass this guards against.
+func handOffScanProblem(examined int, unrefused []string) string {
+	refused := examined - len(unrefused)
+	named := 0
+	for _, n := range unrefused {
+		if _, ok := handOffsThatNeedNoRefusal[n]; ok {
+			named++
+		}
+	}
+	switch {
+	case examined < len(handOffCanaries):
+		return fmt.Sprintf("the scan found %d function(s) that call exitReplay(), fewer than the %d canaries that must be seen; it is reading the wrong thing", examined, len(handOffCanaries))
+	case refused < 1:
+		return fmt.Sprintf("the scan found %d hand-off(s) and reported every one of them unrefused: it cannot tell a refused hand-off from an unrefused one, so it would not notice a missing check", examined)
+	case len(handOffsThatNeedNoRefusal) > 0 && named < 1:
+		return fmt.Sprintf("the scan found %d hand-off(s) and none of the %d named exemptions among its unrefused ones: it reports nothing unrefused, so it would pass whatever the tree said", examined, len(handOffsThatNeedNoRefusal))
+	}
+	return ""
+}
+
 func TestEveryReplayToFreshHandOffReachesARefusalOrIsNamed(t *testing.T) {
 	bodies := engineMethodBodies(t)
 	unrefused, examined := unrefusedHandOffs(bodies)
 
 	// Vacuity, per thing rather than per total: a floor alone is satisfied by the wrong things being present.
-	if examined < 20 {
-		t.Fatalf("the scan found %d functions that call exitReplay(); it is reading the wrong thing and would pass whatever the tree said", examined)
+	if problem := handOffScanProblem(examined, unrefused); problem != "" {
+		t.Fatal(problem)
 	}
-	// replaySetScope was the third canary until SetScope moved onto the dispatcher (cleat#4211), which now owns that hand-off, and replaySideEffect before it
-	// (cleat#4152, G1a). replayPluginCall and replayCallWithHeartbeat are replay halves of the same kind as replayCall that still call exitReplay themselves.
-	// When one of these moves, replace it with another that does, and the failure below names which one went.
-	for _, canary := range []string{"replayCall", "replayPluginCall", "replayCallWithHeartbeat"} {
+	for _, canary := range handOffCanaries {
 		if !callsInCode(bodies[canary], "exitReplay") {
 			t.Fatalf("canary %s was not seen calling exitReplay(); the scan is reading the wrong thing", canary)
 		}
@@ -254,6 +293,39 @@ func TestEveryReplayToFreshHandOffReachesARefusalOrIsNamed(t *testing.T) {
 			"handOffsThatNeedNoRefusal.\n\nA defer segment over a run with history starts in replay, so its body's first new call arrives "+
 			"through this hand-off and nothing refuses it (cleat#4143). Put the check at the top of the fresh* function the hand-off "+
 			"reaches, as freshCall does, or name the function here with the reason it needs none.", strings.Join(bad, ", "))
+	}
+}
+
+// TestTheHandOffScanVacuityCheckRefusesAScanThatSawNothing is the known positive for the check above: handed the output of a scan that read the wrong
+// thing, it must say so. A check that accepts every input also "passes" the tree.
+func TestTheHandOffScanVacuityCheckRefusesAScanThatSawNothing(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		examined  int
+		unrefused []string
+		wantSub   string
+	}{
+		{"the scan saw nothing", 0, nil, "fewer than"},
+		{"the scan saw only the registry's steps and no hand-off", 0, nil, "fewer than"},
+		{"every hand-off reported unrefused", 5, []string{"a", "b", "c", "d", "e"}, "cannot tell a refused hand-off"},
+		{"nothing reported unrefused, though exemptions are named", 5, nil, "none of the"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := handOffScanProblem(tc.examined, tc.unrefused)
+			if got == "" || !strings.Contains(got, tc.wantSub) {
+				t.Fatalf("handOffScanProblem(%d, %v) = %q, want a problem naming %q", tc.examined, tc.unrefused, got, tc.wantSub)
+			}
+		})
+	}
+	// And it accepts a scan that saw both kinds, at ANY size of the population: the live tree's shape, and a much smaller one.
+	var named []string
+	for n := range handOffsThatNeedNoRefusal {
+		named = append(named, n)
+	}
+	for _, examined := range []int{len(handOffCanaries) + len(named) + 1, 40, 400} {
+		if got := handOffScanProblem(examined, named); got != "" {
+			t.Errorf("handOffScanProblem(%d, the named exemptions) = %q, want none: a scan that saw both kinds must pass at any population size", examined, got)
+		}
 	}
 }
 
@@ -318,13 +390,15 @@ func TestEveryFrontierAnswerReachesARefusalOrIsNamed(t *testing.T) {
 	unrefused, examined := unrefusedFrontierAnswers(bodies, neverRefusedSpecs(t))
 
 	// Vacuity per thing: the lookup that escaped the first scan, and a function that spells the predicate and DOES refuse.
-	for _, canary := range []string{"SideEffectRecorded", "replayPluginCallStreaming"} {
+	frontierCanaries := []string{"SideEffectRecorded", "replayPluginCallStreaming"}
+	for _, canary := range frontierCanaries {
 		if !answersAtTheFrontier(bodies[canary]) {
 			t.Fatalf("canary %s was not seen answering at the frontier; the scan is reading the wrong thing and would pass whatever the tree said", canary)
 		}
 	}
-	if examined < 2 {
-		t.Fatalf("the scan found %d frontier answers, want at least the two canaries", examined)
+	// The bound is the number of canaries, not a census: tied to the list so a canary added or removed cannot leave a stale literal behind.
+	if examined < len(frontierCanaries) {
+		t.Fatalf("the scan found %d frontier answers, want at least the %d canaries", examined, len(frontierCanaries))
 	}
 
 	var bad []string

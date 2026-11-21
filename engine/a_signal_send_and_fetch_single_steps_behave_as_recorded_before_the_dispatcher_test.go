@@ -259,6 +259,15 @@ func g1bCharacterize(t *testing.T, gc g1bCall) map[string]string {
 
 // g1bGolden is the table recorded against the code as it was (develop 6fc6340d), one string per (call, situation): the reference the migration is
 // checked against. A row that changes is a behaviour change, and the PR that changes it says so.
+//
+// SIX ROWS WERE CHANGED ON PURPOSE when these calls moved onto step() (cleat#4152, G1b); every other row is byte-identical to the recording:
+//   - signal_workflow/replay_other_target_and_name and durable_send/replay_other_service_and_op: a replay that finds a record naming another
+//     target and signal, or another service and operation, is now a divergence (res=0x1, nothing consumed, step 0); it used to be accepted as
+//     the recorded send and answered success. This is the identity the design's table gives them.
+//   - fetch/divergence: the record of a different call is a divergence that consumes nothing (step 1 -> 0), in the shared message.
+//   - fetch/replay_other_{method,url,body}: the same two changes (nothing consumed; the shared message, whose why-string names the method and
+//     url or the differing body, instead of the old text that quoted both bodies and the recorded response). Headers are still not compared,
+//     which fetch/replay_other_headers pins.
 var g1bGolden = map[string]map[string]string{
 	"signal_workflow": {
 		"divergence":                       "res=0x1 wrote=\"\" isReplay=true step=0 recorded=[] deliveries=[] sends=[] fetches=[]",
@@ -269,7 +278,7 @@ var g1bGolden = map[string]map[string]string{
 		"frontier":                         "res=0x0 wrote=\"\" isReplay=false step=2 recorded=[signal_received/step=1/svc=\"signal\"/op=\"send\"/resp=\"\"/sig=\"go\"/payload=\"{\\\"n\\\":1}\"/run=\"target-run\"/req=\"\"/err=\"\"/fm=\"\"/fu=\"\"/fb=\"\"/fr=\"\"] deliveries=[target-run/go/{\"n\":1}] sends=[] fetches=[]",
 		"replay":                           "res=0x0 wrote=\"\" isReplay=true step=1 recorded=[] deliveries=[] sends=[] fetches=[]",
 		"replay_delivery_or_legacy_record": "res=0x0 wrote=\"\" isReplay=true step=1 recorded=[] deliveries=[] sends=[] fetches=[]",
-		"replay_other_target_and_name":     "res=0x0 wrote=\"\" isReplay=true step=1 recorded=[] deliveries=[] sends=[] fetches=[]",
+		"replay_other_target_and_name":     "res=0x1 wrote=\"\" isReplay=true step=0 recorded=[] deliveries=[] sends=[] fetches=[]",
 		"replay_outcome_not_found":         "res=-0xfffffffc wrote=\"\" isReplay=true step=1 recorded=[] deliveries=[] sends=[] fetches=[]",
 		"replay_outcome_unknown":           "res=-0xfffffffd wrote=\"\" isReplay=true step=1 recorded=[] deliveries=[] sends=[] fetches=[]",
 		"replay_quit":                      "res=0x0 wrote=\"\" isReplay=true step=1 recorded=[] deliveries=[] sends=[] fetches=[]",
@@ -284,7 +293,7 @@ var g1bGolden = map[string]map[string]string{
 		"fresh":                       "res=0x0 wrote=\"\" isReplay=false step=1 recorded=[durable_send/step=0/svc=\"svc\"/op=\"notify\"/resp=\"\"/sig=\"\"/payload=\"\"/run=\"\"/req=\"{\\\"to\\\":\\\"x\\\"}\"/err=\"\"/fm=\"\"/fu=\"\"/fb=\"\"/fr=\"\"] deliveries=[] sends=[svc.notify({\"to\":\"x\"})] fetches=[]",
 		"frontier":                    "res=0x0 wrote=\"\" isReplay=false step=2 recorded=[durable_send/step=1/svc=\"svc\"/op=\"notify\"/resp=\"\"/sig=\"\"/payload=\"\"/run=\"\"/req=\"{\\\"to\\\":\\\"x\\\"}\"/err=\"\"/fm=\"\"/fu=\"\"/fb=\"\"/fr=\"\"] deliveries=[] sends=[svc.notify({\"to\":\"x\"})] fetches=[]",
 		"replay":                      "res=0x0 wrote=\"\" isReplay=true step=1 recorded=[] deliveries=[] sends=[] fetches=[]",
-		"replay_other_service_and_op": "res=0x0 wrote=\"\" isReplay=true step=1 recorded=[] deliveries=[] sends=[] fetches=[]",
+		"replay_other_service_and_op": "res=0x1 wrote=\"\" isReplay=true step=0 recorded=[] deliveries=[] sends=[] fetches=[]",
 		"replay_quit":                 "res=0x0 wrote=\"\" isReplay=true step=1 recorded=[] deliveries=[] sends=[] fetches=[]",
 		"segment_fresh":               "res=0x80000000 wrote=\"\" isReplay=false step=0 recorded=[] deliveries=[] sends=[] fetches=[]",
 		"segment_frontier":            "res=0x80000000 wrote=\"\" isReplay=false step=1 recorded=[] deliveries=[] sends=[] fetches=[]",
@@ -293,17 +302,17 @@ var g1bGolden = map[string]map[string]string{
 		"write_failed_frontier":       "res=0x80000000 wrote=\"\" isReplay=false step=1 recorded=[] deliveries=[] sends=[] fetches=[]",
 	},
 	"fetch": {
-		"divergence":            "res=0x12100000001 wrote=\"replay divergence at step 0: Fetch mismatch.\\n  workflow: GET https://example.test/a\\n  history:  \\n  actual body: \\n  expected body: \\n  expected response: \\nRun 'cleat vet' on your workflow code to check for common non-determinism issues (time.Now(), random values, map iteration, goroutines).\" isReplay=true step=1 recorded=[] deliveries=[] sends=[] fetches=[]",
+		"divergence":            "res=0xbf00000001 wrote=\"replay divergence at step 0: expected fetch, got call.\\nRun 'cleat vet' on your workflow code to check for common non-determinism issues (time.Now(), random values, map iteration, goroutines).\" isReplay=true step=0 recorded=[] deliveries=[] sends=[] fetches=[]",
 		"fresh":                 "res=0xb00000000 wrote=\"{\\\"ok\\\":true}\" isReplay=false step=1 recorded=[fetch/step=0/svc=\"\"/op=\"\"/resp=\"\"/sig=\"\"/payload=\"\"/run=\"\"/req=\"\"/err=\"\"/fm=\"GET\"/fu=\"https://example.test/a\"/fb=\"\"/fr=\"{\\\"ok\\\":true}\"] deliveries=[] sends=[] fetches=[GET https://example.test/a ]",
 		"fresh_fetch_error":     "res=0xd00000001 wrote=\"egress denied\" isReplay=false step=1 recorded=[fetch/step=0/svc=\"\"/op=\"\"/resp=\"\"/sig=\"\"/payload=\"\"/run=\"\"/req=\"\"/err=\"egress denied\"/fm=\"GET\"/fu=\"https://example.test/a\"/fb=\"\"/fr=\"{\\\"ok\\\":true}\"] deliveries=[] sends=[] fetches=[GET https://example.test/a ]",
 		"fresh_no_fetcher":      "res=0x11c00000001 wrote=\"cleat_fetch is disabled: this engine has no Fetcher. A cleat-worker serves cleat_fetch only when started with --enable-workflow-fetch (off by default; docs/operations/egress-policy.md); an embedding host supplies engine.WithFetcher(...). Workflow  attempted GET https://example.test/a\" isReplay=false step=1 recorded=[fetch/step=0/svc=\"\"/op=\"\"/resp=\"\"/sig=\"\"/payload=\"\"/run=\"\"/req=\"\"/err=\"cleat_fetch is disabled: this engine has no Fetcher. A cleat-worker serves cleat_fetch only when started with --enable-workflow-fetch (off by default; docs/operations/egress-policy.md); an embedding host supplies engine.WithFetcher(...). Workflow  attempted GET https://example.test/a\"/fm=\"GET\"/fu=\"https://example.test/a\"/fb=\"\"/fr=\"\"] deliveries=[] sends=[] fetches=[]",
 		"frontier":              "res=0xb00000000 wrote=\"{\\\"ok\\\":true}\" isReplay=false step=2 recorded=[fetch/step=1/svc=\"\"/op=\"\"/resp=\"\"/sig=\"\"/payload=\"\"/run=\"\"/req=\"\"/err=\"\"/fm=\"GET\"/fu=\"https://example.test/a\"/fb=\"\"/fr=\"{\\\"ok\\\":true}\"] deliveries=[] sends=[] fetches=[GET https://example.test/a ]",
 		"replay":                "res=0x1100000000 wrote=\"{\\\"recorded\\\":true}\" isReplay=true step=1 recorded=[] deliveries=[] sends=[] fetches=[]",
 		"replay_error_record":   "res=0xd00000001 wrote=\"egress denied\" isReplay=true step=1 recorded=[] deliveries=[] sends=[] fetches=[]",
-		"replay_other_body":     "res=0x15200000001 wrote=\"replay divergence at step 0: Fetch mismatch.\\n  workflow: GET https://example.test/a\\n  history: GET https://example.test/a\\n  actual body: \\n  expected body: changed\\n  expected response: {\\\"recorded\\\":true}\\nRun 'cleat vet' on your workflow code to check for common non-determinism issues (time.Now(), random values, map iteration, goroutines).\" isReplay=true step=1 recorded=[] deliveries=[] sends=[] fetches=[]",
+		"replay_other_body":     "res=0x12e00000001 wrote=\"replay divergence at step 0: fetch asked for something other than the fetch recorded there: GET https://example.test/a with a different body: \\\"\\\", recorded \\\"changed\\\".\\nRun 'cleat vet' on your workflow code to check for common non-determinism issues (time.Now(), random values, map iteration, goroutines).\" isReplay=true step=0 recorded=[] deliveries=[] sends=[] fetches=[]",
 		"replay_other_headers":  "res=0x1100000000 wrote=\"{\\\"recorded\\\":true}\" isReplay=true step=1 recorded=[] deliveries=[] sends=[] fetches=[]",
-		"replay_other_method":   "res=0x14c00000001 wrote=\"replay divergence at step 0: Fetch mismatch.\\n  workflow: GET https://example.test/a\\n  history: POST https://example.test/a\\n  actual body: \\n  expected body: \\n  expected response: {\\\"recorded\\\":true}\\nRun 'cleat vet' on your workflow code to check for common non-determinism issues (time.Now(), random values, map iteration, goroutines).\" isReplay=true step=1 recorded=[] deliveries=[] sends=[] fetches=[]",
-		"replay_other_url":      "res=0x14b00000001 wrote=\"replay divergence at step 0: Fetch mismatch.\\n  workflow: GET https://example.test/a\\n  history: GET https://example.test/b\\n  actual body: \\n  expected body: \\n  expected response: {\\\"recorded\\\":true}\\nRun 'cleat vet' on your workflow code to check for common non-determinism issues (time.Now(), random values, map iteration, goroutines).\" isReplay=true step=1 recorded=[] deliveries=[] sends=[] fetches=[]",
+		"replay_other_method":   "res=0x12600000001 wrote=\"replay divergence at step 0: fetch asked for something other than the fetch recorded there: GET https://example.test/a, recorded POST https://example.test/a.\\nRun 'cleat vet' on your workflow code to check for common non-determinism issues (time.Now(), random values, map iteration, goroutines).\" isReplay=true step=0 recorded=[] deliveries=[] sends=[] fetches=[]",
+		"replay_other_url":      "res=0x12500000001 wrote=\"replay divergence at step 0: fetch asked for something other than the fetch recorded there: GET https://example.test/a, recorded GET https://example.test/b.\\nRun 'cleat vet' on your workflow code to check for common non-determinism issues (time.Now(), random values, map iteration, goroutines).\" isReplay=true step=0 recorded=[] deliveries=[] sends=[] fetches=[]",
 		"replay_quit":           "res=0x0 wrote=\"\" isReplay=true step=1 recorded=[] deliveries=[] sends=[] fetches=[]",
 		"segment_fresh":         "res=0x80000000 wrote=\"\" isReplay=false step=0 recorded=[] deliveries=[] sends=[] fetches=[]",
 		"segment_frontier":      "res=0x80000000 wrote=\"\" isReplay=false step=1 recorded=[] deliveries=[] sends=[] fetches=[]",

@@ -169,7 +169,7 @@ type stepSpec struct {
 // stepSpecs lists every spec in the engine. It exists for the dispatcher's tests (step_dispatcher_test.go), which run each property over every
 // spec on it and check the list against the `var x = stepSpec{` declarations in the source, so a spec nobody registered is on no list and is
 // caught. A host call moved onto step adds its spec here in the same change.
-var stepSpecs = []*stepSpec{&createPromiseStep, &resolvePromiseStep, &rejectPromiseStep, &acquireLockStep, &releaseLockStep, &sideEffectStep, &sideEffectRecordedStep, &deferStep, &scheduleCronStep, &deleteCronStep, &listCronsStep, &awaitSignalsStep, &setScopeStep}
+var stepSpecs = []*stepSpec{&createPromiseStep, &resolvePromiseStep, &rejectPromiseStep, &acquireLockStep, &releaseLockStep, &sideEffectStep, &sideEffectRecordedStep, &deferStep, &scheduleCronStep, &deleteCronStep, &listCronsStep, &awaitSignalsStep, &setScopeStep, &signalWorkflowStep, &durableSendStep, &fetchStep}
 
 // validate says whether a spec is well-formed: it names a replay event, can decode it and can run fresh, and a step that declares itself Pure
 // (and so is never refused in a segment) records nothing.
