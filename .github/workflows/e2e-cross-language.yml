@@ -395,6 +395,9 @@ jobs:
       # Python WASM toolchain
       # ------------------------------------------------------------------
       - name: Install Python WASM toolchain
+        env:
+          WASM_TOOLS_VERSION: "1.263.0"
+          WASM_TOOLS_SHA256: "21c036c1740a0552124c79c6e2170cb61c5b016005671a6d5bc06cf642165431"
         run: |
           pip install --upgrade pip
           pip install componentize-py
@@ -403,10 +406,23 @@ jobs:
           #
           # Measured on this job (e6cf2185): the step was 111s, almost all of
           # it compiling wasm-tools from source. The release tarball is a
-          # download. Same fetch and the same offline digest check as
-          # tier1-gate.yml's "Install wasm-tools", including
-          # --retry-all-errors and a file rather than a pipe -- see that step
-          # for the measurements behind both.
+          # download. Fetched by scripts/fetch-wasm-tools.sh, the same script
+          # and the same offline digest check as tier1-gate.yml's "Fetch
+          # wasm-tools", and to a file rather than a pipe.
+          #
+          # cleat#4346: this step was `curl --retry 5 --retry-delay 2`, a
+          # window of about ten seconds. On 2026-11-22 (merge-group run
+          # 44983148824, #4344) shard 2 got six 403s from the release host
+          # inside it and the step ended, taking an approved PR out of the
+          # merge queue while the other three shards passed. The script keeps
+          # retrying any HTTP error, 403 and 429 included, with a backoff and
+          # jitter, for about four minutes. Its header has the bound, and its
+          # --self-test (run by ci.yml's Lint job) refuses the first N requests
+          # with 403, 429 and 504 to measure it.
+          #
+          # NOT cached, unlike tier1-gate.yml, on purpose: this workflow does
+          # not run on a develop push, so no run would save an entry that a
+          # later merge group could restore (a cache is scoped to its ref).
           #
           # PINNED, and 1.263.0 is the version `cargo install wasm-tools`
           # resolved on 2026-11-15. Unpinned, every shard recompiles whatever
@@ -428,14 +444,11 @@ jobs:
           # subject sha256 21c036c1...5431. CI then enforces it offline: a
           # required check has already been failed once by a transient 503
           # from this fetch (tier1-gate.yml records it), and a repeat network
-          # call would be a new way to flake.
-          curl -sSLf --retry 5 --retry-delay 2 --retry-all-errors \
-            -o /tmp/wasm-tools.tar.gz \
-            "https://github.com/bytecodealliance/wasm-tools/releases/download/v1.263.0/wasm-tools-1.263.0-x86_64-linux.tar.gz"
-          echo "21c036c1740a0552124c79c6e2170cb61c5b016005671a6d5bc06cf642165431  /tmp/wasm-tools.tar.gz" \
-            | sha256sum -c -
-          tar xzf /tmp/wasm-tools.tar.gz -C /tmp
-          sudo mv /tmp/wasm-tools-*/wasm-tools /usr/local/bin/wasm-tools
+          # call would be a new way to flake. The script checks the digest on
+          # the downloaded file and refuses a mismatch without retrying it.
+          bash scripts/fetch-wasm-tools.sh "${RUNNER_TEMP}/wasm-tools.tar.gz"
+          tar xzf "${RUNNER_TEMP}/wasm-tools.tar.gz" -C "${RUNNER_TEMP}"
+          sudo mv "${RUNNER_TEMP}"/wasm-tools-*/wasm-tools /usr/local/bin/wasm-tools
           wasm-tools --version
 
       - name: Install Python SDK

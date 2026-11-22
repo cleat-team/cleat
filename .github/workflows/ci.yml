@@ -384,14 +384,17 @@ jobs:
           scripts/check-onboarding-go-version.sh
           LINT_GUARD_EOF
 
-      # scripts/fetch-wasm-tools.sh is what tier1-gate.yml's two "Install
-      # wasm-tools" steps run, and it is the only code between a required check
-      # and a GitHub release-asset outage (cleat#3693). Its --self-test serves
-      # it a scripted local release (cold cache, warm cache, a bad cache entry,
-      # wrong bytes, three 504s then success, a permanent outage) and asserts
-      # the sha256 is checked on every path and the retry window is bounded. It
-      # needs no network beyond loopback and takes about fifteen seconds. Exit 2
-      # is "could not run", and fails this step like exit 1.
+      # scripts/fetch-wasm-tools.sh is what tier1-gate.yml's two "Fetch
+      # wasm-tools" steps and e2e-cross-language.yml's "Install Python WASM
+      # toolchain" step run, and it is the only code between a required check
+      # and a GitHub release-asset outage (cleat#3693, cleat#4346). Its
+      # --self-test serves it a scripted local release (cold cache, warm cache,
+      # a bad cache entry, wrong bytes, 504s, 403s and 429s each followed by
+      # success, a permanent outage, a stalled server) and asserts the sha256 is
+      # checked on every path, the retry window is bounded, and the backoff
+      # jitter stays in its bounds, varies, and is what the loop actually sleeps. It needs no network beyond
+      # loopback and took about 37 seconds on 2026-11-22 (36.0 s and 38.4 s). Exit 2 is "could not run", and
+      # fails this step like exit 1.
       - name: wasm-tools fetch self-test
         if: always() && (needs.edit-gate.outputs.skip != 'true')
         run: |
