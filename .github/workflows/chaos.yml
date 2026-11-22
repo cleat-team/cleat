@@ -45,7 +45,7 @@ on:
         required: false
         default: "1"
       mode:
-        description: "sample (bounded) or full (every boundary x every fault)"
+        description: "sample (bounded) or full (every boundary x every fault) run the Chaos full sweep job; pr-sample runs the Chaos sample job exactly as a pull request does, with `seed` standing in for the PR number"
         required: false
         default: "full"
       resident_max_runs:
@@ -63,7 +63,10 @@ permissions:
 jobs:
   chaos-sample:
     name: Chaos sample
-    if: github.event_name == 'pull_request'
+    # A pull request, or a dispatch with mode=pr-sample: the SAME job, the same command line, runner image and service container, with the seed taken from
+    # the `seed` input where there is no PR number. It exists so the sample can be run at a seed of our choosing (cleat#4169's stability window counts
+    # distinct seeds, and a seed is a PR number, so re-pushing one PR adds none). No other mode reaches this job.
+    if: github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && github.event.inputs.mode == 'pr-sample')
     runs-on: ubuntu-latest
     # The sample is sized to finish in about seven minutes (measured: 24 runs took 3m05s in the first CI run, cleat#4188; 60 is ~7 min); the step's own go test -timeout is 20m, so a hung worker reaches its goroutine dump
     # before this cap.
@@ -100,11 +103,21 @@ jobs:
       # ONE go test process: the worker build and the database migration cost ~50 s and happen once per process, so the whole sample runs in this
       # single invocation (setup-go's cache keeps the Go build cache between jobs). The seed is the PR number, so each PR samples differently and
       # a re-run of the same PR repeats. A failure prints the seed, the script and a one-line command that replays it.
+      # The configuration is set as step env and echoed from it, so the line in the log is what the test run was given, not a restatement of it: a
+      # dispatched run counts toward the stability window only if this line reads the seed that was asked for, SAMPLE=60 and SCRIPTS=4.
       - name: Seeded sample
+        env:
+          CLEAT_CHAOS_SEED: ${{ github.event.pull_request.number || github.event.inputs.seed }}
+          CLEAT_CHAOS_MODE: sample
+          CLEAT_CHAOS_SAMPLE: "60"
+          CLEAT_CHAOS_SCRIPTS: "4"
         run: |
           set -euo pipefail
-          CLEAT_CHAOS_SEED="${{ github.event.pull_request.number }}" CLEAT_CHAOS_MODE=sample CLEAT_CHAOS_SAMPLE=60 CLEAT_CHAOS_SCRIPTS=4 \
-            go test -json -tags chaos -count=1 -timeout 20m ./tests/chaos -run 'TestChaosSeeded' 2>&1 | tee chaos-sample.log
+          echo "chaos-sample config: event=${{ github.event_name }} CLEAT_CHAOS_SEED=${CLEAT_CHAOS_SEED} CLEAT_CHAOS_MODE=${CLEAT_CHAOS_MODE} CLEAT_CHAOS_SAMPLE=${CLEAT_CHAOS_SAMPLE} CLEAT_CHAOS_SCRIPTS=${CLEAT_CHAOS_SCRIPTS} CLEAT_CHAOS_RESIDENT_MAX_RUNS='${CLEAT_CHAOS_RESIDENT_MAX_RUNS:-}'"
+          # This job does not take the residency input (it runs the product default, which is the point); refuse it rather than ignore it silently.
+          test -z "${{ github.event.inputs.resident_max_runs }}" || { echo "::error::resident_max_runs is not an input of the sample job; leave it empty with mode=pr-sample"; exit 1; }
+          test -n "${CLEAT_CHAOS_SEED}" || { echo "::error::no seed: neither a pull request number nor the seed input"; exit 1; }
+          go test -json -tags chaos -count=1 -timeout 20m ./tests/chaos -run 'TestChaosSeeded' 2>&1 | tee chaos-sample.log
       - uses: actions/upload-artifact@v7
         if: always()
         with:
@@ -114,7 +127,7 @@ jobs:
 
   chaos-full:
     name: Chaos full sweep
-    if: github.event_name != 'pull_request'
+    if: github.event_name != 'pull_request' && !(github.event_name == 'workflow_dispatch' && github.event.inputs.mode == 'pr-sample')
     runs-on: ubuntu-latest
     timeout-minutes: 340
     services:
