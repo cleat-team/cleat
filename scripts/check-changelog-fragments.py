@@ -18,7 +18,9 @@ The changed-file list is `status<TAB>path` per line (git's --name-status; the CI
 where `git diff base...HEAD` needs a merge base the shallow checkout lacks).
 """
 import argparse
+import json
 import os
+import shutil
 import re
 import subprocess
 import sys
@@ -143,26 +145,33 @@ def ci_step_script(path):
     return "\n".join(l for l in body if "--self-test" not in l).strip() + "\n"
 
 
-def run_ci_step(work, script, root, event, files, body, body_fetch_fails=False, queue_ref="", pr_body=""):
-    """Runs the step's own shell, as the runner does (`bash -e`), with a stand-in `gh` that serves `files` and `body` and nothing else.
+def run_ci_step(work, script, root, event, files, body, body_fetch_fails=False, queue_ref="", pr_body="", head_ref="docs/x", ref_fetch_fails=False):
+    """Runs the step's own shell, as the runner does (`bash -e`), with a stand-in `gh` that serves `files` and a pull-request JSON document (`body`, which
+    may be None for a null body, and `head_ref`) and nothing else. The stand-in applies the step's OWN `--jq` expression to that document with real `jq`, so a
+    null body and the head ref are read through the expressions that run in CI; `gh` and `jq` agree on raw string output, which is all these expressions use.
     Returns (failure_recorded, combined_output); the step records a failed guard in LINT_FAILURES_FILE rather than by its exit status. Everything is made under
     `work`, which the caller removes."""
     d = tempfile.mkdtemp(dir=work)
     os.makedirs(os.path.join(d, "bin"))
     open(os.path.join(d, "files.tsv"), "w").write(files)
-    open(os.path.join(d, "body.txt"), "w").write(body)
+    open(os.path.join(d, "pr.json"), "w").write(json.dumps({"body": body, "head": {"ref": head_ref}}))
     gh = os.path.join(d, "bin", "gh")
-    open(gh, "w").write('#!/bin/bash\nfor a in "$@"; do case "$a" in */files*) cat "$FAKE_DIR/files.tsv"; exit 0;; esac; done\n'
-                        'if [ -n "$FAKE_BODY_FAILS" ]; then echo "gh: HTTP 502" >&2; exit 1; fi\ncat "$FAKE_DIR/body.txt"\n')
+    # args: api [--paginate] <endpoint> [--jq <expr>]. Any call it does not know fails, so a step that asks for something else is not silently served.
+    open(gh, "w").write('#!/bin/bash\nep=""; expr=""\nwhile [ $# -gt 0 ]; do case "$1" in --jq) expr="$2"; shift;; api|--paginate) ;; *) ep="$1";; esac; shift; done\n'
+                        'case "$ep" in */files*) cat "$FAKE_DIR/files.tsv"; exit 0;; esac\n'
+                        'case "$ep" in repos/o/r/pulls/[0-9]*) ;; *) echo "stand-in gh: unexpected endpoint $ep" >&2; exit 1;; esac\n'
+                        'case "$expr" in *head*) [ -n "$FAKE_REF_FAILS" ] && { echo "gh: HTTP 502" >&2; exit 1; };; *body*) [ -n "$FAKE_BODY_FAILS" ] && { echo "gh: HTTP 502" >&2; exit 1; };; esac\n'
+                        'jq -r "$expr" "$FAKE_DIR/pr.json"\n')
     os.chmod(gh, 0o755)
     open(os.path.join(d, "step.sh"), "w").write(script)
     env = dict(os.environ, PATH=os.path.join(d, "bin") + os.pathsep + os.environ["PATH"], FAKE_DIR=d, GH_TOKEN="x", GITHUB_REPOSITORY="o/r",
                LINT_FAILURES_FILE=os.path.join(d, "failures.txt"), EVENT_NAME=event, QUEUE_REF=queue_ref, PR_BODY=pr_body, PR_NUMBER="4370" if event == "pull_request" else "",
                HEAD_REF="docs/x" if event == "pull_request" else "")
-    if body_fetch_fails:
-        env["FAKE_BODY_FAILS"] = "1"
-    else:
-        env.pop("FAKE_BODY_FAILS", None)
+    for name, on in (("FAKE_BODY_FAILS", body_fetch_fails), ("FAKE_REF_FAILS", ref_fetch_fails)):
+        if on:
+            env[name] = "1"
+        else:
+            env.pop(name, None)
     p = subprocess.run(["bash", "-e", os.path.join(d, "step.sh")], cwd=root, env=env, capture_output=True, text=True)
     failed = os.path.exists(env["LINT_FAILURES_FILE"]) and os.path.getsize(env["LINT_FAILURES_FILE"]) > 0
     return failed, p.stdout + p.stderr
@@ -172,6 +181,9 @@ def queue_path_self_test(bad):
     """The merge-queue branch of the CI step, run for real. A queue run has no body in its event, so the step fetches it; cleat#4370 was dequeued because it
     did not, and the escape it declared could not be seen. Every verdict below is read together with the TEXT that explains it, because a fetch that fails
     and a guard that refuses both leave the failure file non-empty."""
+    if shutil.which("jq") is None:
+        bad.append("`jq` is not on PATH, so the stand-in gh could not apply the step's --jq expressions and the merge-queue path was not tested")
+        return
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     script = ci_step_script(os.path.join(root, CI_WORKFLOW) if not os.path.isabs(CI_WORKFLOW) else CI_WORKFLOW)
     if script is None or "merge_group" not in script:
@@ -219,6 +231,27 @@ def _queue_path_cases(bad, work, script, root):
     # and the pull_request path still takes its body from the environment
     case("pull_request run, escape in the environment body", False, ["changelog-edit escape: r"], event="pull_request", pr_body="changelog-edit: r\n")
     case("pull_request run, no escape", True, ["edits CHANGELOG.md directly"], event="pull_request", pr_body="")
+    # the head ref (cleat#4374): the release/* and hotfix/* exemption must work through the queue, the name must stay data, and a failed read must fail closed
+    nob = "Refs #1.\n"
+    case("a direct CHANGELOG.md edit from release/v0.6.0", False, ["OK: changelog guard"], ["edits CHANGELOG.md directly"], body=nob, head_ref="release/v0.6.0")
+    case("a direct CHANGELOG.md edit from hotfix/x", False, ["OK: changelog guard"], ["edits CHANGELOG.md directly"], body=nob, head_ref="hotfix/x")
+    case("a direct CHANGELOG.md edit from fix/x", True, ["edits CHANGELOG.md directly"], body=nob, head_ref="fix/x")
+    case("the head ref cannot be read", True, ["could not read the PR head ref of #4370 from the API"], ["OK: changelog guard", "expected one argument"],
+         body=nob, head_ref="release/v0.6.0", ref_fetch_fails=True)
+    case("the head ref cannot be read, for a change that needs no branch", True, ["could not read the PR head ref of #4370 from the API"],
+         ["OK: changelog guard"], files="M\tdocs/a.md\n", body="", ref_fetch_fails=True)
+    case("the head ref reads as empty", True, ["could not read the PR head ref of #4370 from the API"], ["OK: changelog guard"], body=nob, head_ref="")
+    case("the head ref reads as empty, for a change that needs no branch", True, ["could not read the PR head ref of #4370 from the API"], ["OK: changelog guard"],
+         files="M\tdocs/a.md\n", body="", head_ref="")
+    # a branch name is attacker-chosen: shell syntax in it must not run, and a leading '-' must not be read as an option (the guard must still reach a verdict)
+    hostile_ref = "fix/$(touch %s)`touch %s`;touch %s" % ((sentinel,) * 3)
+    case("a branch name made of shell syntax", True, ["edits CHANGELOG.md directly"], body=nob, head_ref=hostile_ref)
+    if os.path.exists(sentinel):
+        bad.append("queue path: text in the branch name RAN as shell (the sentinel file exists)")
+    case("a branch name that begins with a dash", True, ["edits CHANGELOG.md directly"], ["expected one argument", "usage:"], body=nob, head_ref="-pr-number=1")
+    # a null body is a body with nothing in it, not a failed fetch: it must read as "no escape" for a change that needs one and be accepted for one that does not
+    case("a null body, for a CHANGELOG edit", True, ["edits CHANGELOG.md directly"], ["could not read the PR body"], body=None)
+    case("a null body, for a change that needs no body", False, ["OK: changelog guard"], ["could not read the PR body"], files="M\tdocs/a.md\n", body=None)
 
 
 def self_test():
@@ -291,7 +324,7 @@ def self_test():
         return 3
     print("OK: check-changelog-fragments self-test (refuses shipped code with no fragment, a direct CHANGELOG.md edit and a reasonless escape; "
           "accepts a fragment, a fold, a release branch, the escape, and a tests/docs/CI-only change; and runs the CI step's merge-queue path against "
-          "a stand-in `gh`: the escape is read from the fetched body, a body that cannot be fetched fails closed, and a body of shell syntax stays data)")
+          "a stand-in `gh`: the escape is read from the fetched body, a body or head ref that cannot be read fails closed, release/* and hotfix/* are exempt through the queue, and a body or branch name of shell syntax stays data)")
     return 0
 
 
