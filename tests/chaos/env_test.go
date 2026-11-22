@@ -266,9 +266,6 @@ func (s *syncWriter) Write(p []byte) (int, error) {
 	return s.w.Write(p)
 }
 
-// startWorker launches a worker with a 1s heartbeat. The reclaim window cannot be shortened below ~37s (cmd/cleat-worker refuses a
-// --reclaim-timeout under minimumReclaimAfter, whose largest term is a fixed 30s), so a kill is followed by ageLease, which ages the dead
-// worker's heartbeat in the database: the lease EXPIRES the way it would after the wait, without spending the wait on every boundary.
 // residencyOff is what a caller passes when residency being OFF is part of what it measures (a run parked in the store, a control arm): the knob below must not turn it on.
 var residencyOff = []string{"--resident-max-runs", "0"}
 
@@ -288,6 +285,9 @@ func residencyFlags(extra []string) []string {
 	return []string{"--resident-max-runs", v}
 }
 
+// startWorker launches a worker with a 1s heartbeat. The reclaim window cannot be shortened below ~37s (cmd/cleat-worker refuses a
+// --reclaim-timeout under minimumReclaimAfter, whose largest term is a fixed 30s), so a kill is followed by ageLease, which ages the dead
+// worker's heartbeat in the database: the lease EXPIRES the way it would after the wait, without spending the wait on every boundary.
 func startWorker(t *testing.T, bin, taskQueue, svcURL string, extra ...string) *worker {
 	t.Helper()
 	ownerDB := ownerDSN()
