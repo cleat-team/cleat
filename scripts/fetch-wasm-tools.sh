@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Put a sha256-verified wasm-tools release tarball at <dest>, from the cache
 # if <dest> is already there and still verifies, from the GitHub release
-# otherwise. Used by tier1-gate.yml's two "Fetch wasm-tools" steps (cleat#3693),
-# which sit between actions/cache/restore and actions/cache/save.
+# otherwise. Used by tier1-gate.yml's two "Fetch wasm-tools" steps (cleat#3693)
+# and by e2e-cross-language.yml's "Fetch wasm-tools" step (cleat#4346), each of
+# which sits between actions/cache/restore and actions/cache/save.
 #
 # WHY THIS EXISTS. The install used to be one `curl --retry 5 --retry-delay 2`
 # and nothing else. On 2026-11-08 `develop` c67b11f3's `Tier 1 Gate -- rest
@@ -10,6 +11,14 @@
 # release asset in about ten seconds, then exit 22. The retry window was shorter
 # than the outage, and a required check went red for a reason that said nothing
 # about the code under test.
+#
+# e2e-cross-language.yml kept the old one-line `curl --retry 5 --retry-delay 2`
+# and met the same thing as a 403: on 2026-11-22 (merge-group run 44983148824,
+# #4344) `Cross-Language WASM E2E` shard 2 got six 403s in about ten seconds and
+# the step ended, taking an approved PR out of the merge queue while the other
+# three shards, which ran the same step, passed. Any HTTP error status is
+# retried here (`curl -f`), 403 and 429 included, so this is the one place the
+# policy lives.
 #
 # WHAT IT DOES.
 #
@@ -35,9 +44,11 @@
 # THE RETRY BOUND. No new attempt starts once 240 s have elapsed since the
 # script began, and one attempt is itself bounded by --connect-timeout 15 and
 # --max-time 60, so the script returns within about 300 s of starting whatever
-# the server does. Between attempts it sleeps 5, 10, 20, 40, 60, 60 ... s, and
-# it does not sleep if the sleep alone would pass the 240 s mark. The old
-# window was ~10 s.
+# the server does. Between attempts it sleeps 5, 10, 20, 40, 60, 60 ... s, each
+# plus a random 0 to half of itself (jitter: the four shards of one workflow
+# start this step together and would otherwise retry in lockstep), and it does
+# not sleep if the sleep alone would pass the 240 s mark. The old window was
+# ~10 s.
 #
 # EXIT: 0 a verified tarball is at <dest>; 1 it could not be obtained or
 # failed the check; 2 a usage error or, under --self-test, a tool the test
@@ -63,6 +74,15 @@ set -euo pipefail
 verify() {
   # $1 = file. Output is left visible: "<file>: OK" or "FAILED" is the log line.
   echo "${WASM_TOOLS_SHA256}  $1" | sha256sum -c -
+}
+
+# backoff_wait <delay>: sets WAIT_S to <delay> plus a random 0..delay/2 inclusive
+# (jitter). A global and not `$(...)`: a command substitution is a subshell and
+# would draw from a copy of $RANDOM's state, so successive calls could repeat.
+# The modulus makes the jitter 0 for a delay of 1, which keeps the self-test's
+# budget cases exact.
+backoff_wait() {
+  WAIT_S=$(($1 + RANDOM % ($1 / 2 + 1)))
 }
 
 fetch() {
@@ -97,12 +117,14 @@ fetch() {
     if curl -sSLf --connect-timeout 15 --max-time "$max_time" -o "$part" "$url"; then
       break
     fi
-    if [ $((SECONDS + delay)) -ge "$budget" ]; then
+    backoff_wait "$delay"
+    local wait="$WAIT_S"
+    if [ $((SECONDS + wait)) -ge "$budget" ]; then
       echo "::error::wasm-tools: could not download ${url} after ${attempt} attempt(s) in ${SECONDS}s (retry budget ${budget}s)"
       return 1
     fi
-    echo "wasm-tools: attempt ${attempt} failed after ${SECONDS}s; retrying in ${delay}s"
-    sleep "$delay"
+    echo "wasm-tools: attempt ${attempt} failed after ${SECONDS}s; retrying in ${wait}s"
+    sleep "$wait"
     delay=$((delay * 2))
     [ "$delay" -le 60 ] || delay=60
   done
@@ -145,7 +167,7 @@ self_test() {
   }
   trap cleanup EXIT
 
-  # A scripted release server: the first $2 requests get a 504, the rest get
+  # A scripted release server: the first $2 requests get status $5 (default 504), the rest get
   # $1's bytes; a negative $2 means it accepts the connection and then says
 # nothing (the "Read timed out" shape of a half-dead release endpoint). It
 # counts requests in $4 so a case can say how many times the
@@ -156,6 +178,7 @@ import http.server, sys, time
 payload = open(sys.argv[1], "rb").read()
 fail_first = int(sys.argv[2])
 portfile, hitsfile = sys.argv[3], sys.argv[4]
+fail_status = int(sys.argv[5]) if len(sys.argv) > 5 else 504
 hits = 0
 
 
@@ -169,7 +192,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             time.sleep(120)
             return
         if hits <= fail_first:
-            self.send_response(504)
+            self.send_response(fail_status)
             self.end_headers()
             return
         self.send_response(200)
@@ -196,11 +219,11 @@ PY
   local good_sha
   good_sha="$(sha256sum "$work/good.tgz" | cut -d' ' -f1)"
 
-  # start_server <payload> <fail_first>; sets $url and $hits_file
+  # start_server <payload> <fail_first> [status]; sets $url and $hits_file
   start_server() {
     stop_server
     rm -f "$work/port" "$work/hits"
-    python3 -I "$work/server.py" "$1" "$2" "$work/port" "$work/hits" &
+    python3 -I "$work/server.py" "$1" "$2" "$work/port" "$work/hits" "${3:-504}" &
     server_pid=$!
     local i=0
     while [ ! -s "$work/port" ]; do
@@ -294,6 +317,45 @@ PY
     "$([ $rc -eq 0 ] && [ "$(server_hits)" = 4 ] && [ "$(dest_sha)" = "$good_sha" ] && echo 0 || echo 1)" \
     "exit=$rc hits=$(server_hits) elapsed=${elapsed}s"
 
+  # 5b. the status that actually took a merge-queue run down (cleat#4346): 403
+  # from the release host, and 429 as the rate-limit form of the same refusal.
+  # The waits the log reports are checked against the jitter's BOUNDS (a first
+  # delay of 2 allows 2-3 s then 4-6 s). That catches a wait that overshoots or
+  # that does not back off, and it does NOT catch jitter being removed: with no
+  # jitter the waits are exactly 2 s and 4 s, inside the bounds. Case 5c is the
+  # one that does.
+  reset_cache; start_server "$work/good.tgz" 2 403
+  run_case refused403 0 60 2
+  local w1 w2
+  w1="$(printf '%s\n' "$out" | sed -n 's/.*attempt 1 failed after [0-9]*s; retrying in \([0-9]*\)s.*/\1/p')"
+  w2="$(printf '%s\n' "$out" | sed -n 's/.*attempt 2 failed after [0-9]*s; retrying in \([0-9]*\)s.*/\1/p')"
+  expect "two 403s then success is ridden out, backing off 2-3 s then 4-6 s" \
+    "$([ $rc -eq 0 ] && [ "$(server_hits)" = 3 ] && [ "$(dest_sha)" = "$good_sha" ] && [ -n "$w1" ] && [ -n "$w2" ] && [ "$w1" -ge 2 ] && [ "$w1" -le 3 ] && [ "$w2" -ge 4 ] && [ "$w2" -le 6 ] && echo 0 || echo 1)" \
+    "exit=$rc hits=$(server_hits) waits=${w1:-?},${w2:-?}"
+
+  # 5c. the jitter itself, through the function the retry loop calls. 100 draws
+  # at a delay of 8 must all lie in 8..12 and must not all be equal: a script
+  # that drops the jitter draws 8 every time, and one whose jitter is unbounded
+  # leaves the range. A fresh process per draw, as in production, so a shared
+  # $RANDOM state cannot make the draws agree. Chance of 100 equal draws from
+  # five values by luck: 5^-99.
+  local draws bad=0 lo=999 hi=0 d
+  draws="$(for _ in $(seq 1 100); do bash "$self" --backoff-wait 8; done)"
+  for d in $draws; do
+    [ "$d" -ge 8 ] && [ "$d" -le 12 ] || bad=$((bad + 1))
+    [ "$d" -ge "$lo" ] || lo=$d
+    [ "$d" -le "$hi" ] || hi=$d
+  done
+  expect "the backoff jitter stays within 0..delay/2 and actually varies" \
+    "$([ "$(printf '%s\n' "$draws" | grep -c .)" = 100 ] && [ "$bad" = 0 ] && [ "$lo" != "$hi" ] && echo 0 || echo 1)" \
+    "draws=$(printf '%s\n' "$draws" | grep -c .) out_of_range=$bad min=$lo max=$hi"
+
+  reset_cache; start_server "$work/good.tgz" 3 429
+  run_case refused429 0 30 1
+  expect "three 429s then success is ridden out" \
+    "$([ $rc -eq 0 ] && [ "$(server_hits)" = 4 ] && [ "$(dest_sha)" = "$good_sha" ] && echo 0 || echo 1)" \
+    "exit=$rc hits=$(server_hits)"
+
   # 6. an outage longer than the budget: gives up, bounded, says so.
   reset_cache; start_server "$work/good.tgz" 1000000
   run_case down 1 6 1
@@ -319,6 +381,10 @@ PY
 
 case "${1:-}" in
   --self-test) self_test ;;
+  --backoff-wait)
+    backoff_wait "${2:?usage: fetch-wasm-tools.sh --backoff-wait <delay>}"
+    echo "$WAIT_S"
+    ;;
   "" | -h | --help)
     sed -n '2,/^set -euo/p' "$0" | sed '$d' >&2
     exit 2
