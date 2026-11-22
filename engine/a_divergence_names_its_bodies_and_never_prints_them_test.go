@@ -45,7 +45,7 @@ func TestRedactedBodyIsItsSizeAndAShortHashAndNothingElse(t *testing.T) {
 		})
 	}
 	// equal bodies read the same and different ones differently: the comparison a divergence about a request is read for
-	if redactedBody(r4321Act) != redactedBody(r4321Act) || redactedBody(r4321Act) == redactedBody(r4321Rec) {
+	if redactedBody(r4321Act) != redactedBody(strings.Clone(r4321Act)) || redactedBody(r4321Act) == redactedBody(r4321Rec) {
 		t.Error("two bodies must read the same when equal and differently when not")
 	}
 }
