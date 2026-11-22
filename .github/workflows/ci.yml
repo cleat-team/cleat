@@ -864,8 +864,10 @@ jobs:
       # API straight into a file, and neither is interpolated into the script. The queue's event carries no body, but the `changelog-edit:` escape
       # lives only in the body, so a queue run that did not read it refused every direct CHANGELOG.md edit the pull request had legitimately declared
       # (cleat#4370, the first PR to use the escape). A fetch that fails is a failed check, exit 2, and never "a PR with no escape". The queue's ref
-      # names no branch, so the release/* and hotfix/* exemption is not available there (--branch ""). scripts/check-changelog-fragments.py
-      # --self-test runs THIS step against a stand-in `gh`, in the three queue cases and a hostile body.
+      # names no branch either, so the release/* and hotfix/* exemption needs the head ref read the same way (cleat#4374): into a variable, passed as
+      # `--branch="$X"` so a name that begins with `-` cannot be read as an option, and never evaluated. The exemption is by branch NAME, here and on a
+      # pull_request run alike. scripts/check-changelog-fragments.py --self-test runs THIS step against a stand-in `gh`, in the queue cases, a
+      # hostile body and a hostile branch name.
       - name: Changelog fragment guard
         if: always() && (needs.edit-gate.outputs.skip != 'true')
         env:
@@ -893,7 +895,12 @@ jobs:
               echo "UNMEASURED: could not read the PR body of #${QN} from the API. This is a failure of the check, not a finding about the PR." >&2
               exit 2
             fi
-            python3 scripts/check-changelog-fragments.py --files-file /tmp/changed-files.tsv --body-file /tmp/pr-body.txt --branch "" --pr-number "$QN"
+            # The head ref is untrusted text too. It is held in a variable, never evaluated, and an empty read fails closed like a failed one.
+            if ! QHEAD=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${QN}" --jq '.head.ref') || [ -z "$QHEAD" ]; then
+              echo "UNMEASURED: could not read the PR head ref of #${QN} from the API. This is a failure of the check, not a finding about the PR." >&2
+              exit 2
+            fi
+            python3 scripts/check-changelog-fragments.py --files-file /tmp/changed-files.tsv --body-file /tmp/pr-body.txt --branch="$QHEAD" --pr-number "$QN"
           else
             echo "note: no pull request number to read (a push, or a queue ref that did not parse): fragments only"
             python3 scripts/check-changelog-fragments.py --fragments-only
