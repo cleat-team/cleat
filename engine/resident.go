@@ -25,7 +25,7 @@ import (
 //     entry is a floor for a guest that does real work, never a ceiling.
 //   - the replay cost model (a fixed start-up of 0.44 to 0.67 s per claim) is measured; the cost PER EVENT is not, so it defaults to zero and the
 //     multiplier has no effect until it is. With the defaults the window is the floor.
-//   - the 10x multiplier, the 10 s floor and the 5 min cap are the owner's starting point, not measurements. Tuning them on real workflows is cleat#4187.
+//   - the 10x multiplier, the 10 s floor and the 5 min cap are a starting point, not measurements. Tuning them on real workflows is cleat#4187.
 
 // defaultResidentInstanceBytes is what admitting one held instance of a language is charged against the resident-memory budget. A language absent
 // from this table is REFUSED: there is no figure for it, and "unknown, so probably small" is the wrong way to fail. Java, Rust and JavaScript have no figure.
