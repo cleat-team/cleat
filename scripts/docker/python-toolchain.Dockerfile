@@ -132,8 +132,13 @@ ENV VIRTUAL_ENV=/opt/venv
 RUN python3 -m venv "$VIRTUAL_ENV"
 ENV PATH="$VIRTUAL_ENV/bin:$PATH"
 
+# componentize-py is installed from the ONE file that states its version and the sha256 of every file PyPI publishes for it
+# (cleat#4355), with --require-hashes, exactly as CI does through scripts/install-componentize-py.sh: pip refuses a file whose hash is
+# not listed. The build context is the repository root (see "Build:" above), so the file is there to COPY.
+COPY python-sdk/componentize-py-requirements.txt /tmp/componentize-py-requirements.txt
 RUN pip install --no-cache-dir --upgrade pip \
-    && pip install --no-cache-dir componentize-py==0.25.1
+    && pip install --no-cache-dir --require-hashes --no-deps -r /tmp/componentize-py-requirements.txt \
+    && rm /tmp/componentize-py-requirements.txt
 
 # Fail the build rather than the test run if the toolchain is not actually usable.
 RUN componentize-py --version
