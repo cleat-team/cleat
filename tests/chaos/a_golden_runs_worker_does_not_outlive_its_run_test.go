@@ -11,6 +11,10 @@ import "testing"
 // Falsified by deleting the `if f == nil { first.kill() }` block in execute: the count then stays above its baseline and this fails with the number it stuck at.
 func TestChaosAGoldenRunsWorkerDoesNotOutliveItsRun(t *testing.T) {
 	e := newEnv(t)
+	// The one deliberate long-lived worker (the warm reaper, warm_reaper_test.go) holds a pool of its own; it is up, and reaping, before the baseline, so the baseline contains it and
+	// what is left to count is exactly the golden worker.
+	warmReaper(t, e)
+	awaitWarmReaper(t)
 	before, _, err := connSnapshot(e.db)
 	if err != nil {
 		t.Fatalf("UNMEASURED: the baseline snapshot failed: %v", err)

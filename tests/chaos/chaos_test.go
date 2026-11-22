@@ -156,6 +156,11 @@ func execute(t *testing.T, env *env, sc scenario, f *fault) outcome {
 	queue, run := "chaos-q-"+suffix, "chaos-run-"+suffix
 	deploy(t, env.db, env.wasm, queue)
 	defer forgetSchedules(env.db, run)
+	// The reaper that will reclaim a killed worker's run is a LIVE worker's (see warm_reaper_test.go); start it on the first run of any kind, wait for it before the first fault.
+	warmReaper(t, env)
+	if f != nil {
+		awaitWarmReaper(t)
+	}
 	// What the database holds BEFORE this case starts a worker: a count that grows from case to case is a leak, and one that does not is not.
 	_, before, _ := connSnapshot(env.db)
 	t.Logf("%s (before the case)", before)
