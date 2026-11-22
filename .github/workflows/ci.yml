@@ -2155,7 +2155,7 @@ jobs:
     name: Documented example builds
     needs: [edit-gate]
     runs-on: ubuntu-latest
-    timeout-minutes: 10  # max 2.5m over 56 successful runs (develop push + pull_request samples), 2026-10-27; cleat#3479
+    timeout-minutes: 15  # was 10: max 2.5m over 56 successful runs (develop push + pull_request samples), 2026-10-27; cleat#3479. Raised for the lengthened fetch retry in scripts/build-documented-examples.sh (up to 315s of waiting per example)
     # Every `cleat build` an example README documents is run, and must succeed.
     # cleat#1814.
     #
@@ -2200,6 +2200,14 @@ jobs:
         with:
           distribution: temurin
           java-version: "17"
+          # cleat#4353. A re-run of the SAME pull request restores ~/.gradle (the TeaVM plugin's teavm-core and teavm-tooling are fetched into it) from
+          # an earlier run of this job that passed, so a Maven Central 429 on the re-run has nothing to fetch. setup-java saves the cache only when the job
+          # SUCCEEDED, and a pull request's cache is visible to that pull request alone (its merge ref), so this seeds nothing for any other PR and the
+          # develop push does not run this job. Seen on #4353: the run that passed at 07:17Z would have seeded it for the re-run that failed at 08:07Z.
+          cache: gradle
+          cache-dependency-path: |
+            examples/java-workflow/**/*.gradle*
+            examples/java-workflow/gradle/wrapper/gradle-wrapper.properties
 
       - name: Install Python SDK
         working-directory: python-sdk

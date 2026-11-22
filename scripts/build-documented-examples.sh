@@ -98,10 +98,35 @@ FAIL_LOG_LINES="${BDE_FAIL_LOG_LINES:-400}"
 # passes, and an example that needed a retry is listed in the summary even when it is OK. A run that recovered is not the same as a run that
 # never failed, and the job's output must not say they are.
 #
-# BDE_FETCH_RETRIES is the number of retries after the first attempt (0 disables them); BDE_RETRY_SLEEP is the base wait in seconds, multiplied
-# by the attempt number. Defaults: 2 retries, 30s -- at most 90s of waiting per example, inside the job's 10 minute timeout.
-FETCH_RETRIES="${BDE_FETCH_RETRIES:-2}"
+# BDE_FETCH_RETRIES is the number of retries after the first attempt (0 disables them); BDE_RETRY_SLEEP is the base wait in seconds, DOUBLED
+# per retry and then given jitter (below). Defaults: 3 retries, 30s -- waits of 30, 60 and 120s before jitter, 210s in all and at most 315s
+# with it, per example, inside the job's 15 minute timeout.
+#
+# WHY THE WAIT WAS LENGTHENED, AND WHAT IS NOT KNOWN. cleat#4353, 2026-11-22, one head (a2b1dcab). The `edited` run 44995571470 failed on its
+# attempt 1 (06:59Z) and again on its attempt 2 (08:07Z), 68 minutes apart, each time on all three of this script's own attempts and each time on
+# `Received status code 429 from server: Too Many Requests` for teavm-core and teavm-tooling 0.10.2; its attempt 3 passed (08:27Z). A DIFFERENT run
+# on the same head, the `synchronize` run 44995553068, PASSED at 07:17Z, between the two failures. So each episode ended without help. The record
+# bounds each from both sides and no more: the 30s and 60s waits (90s in all) did not clear it, so it lasted AT LEAST about 1.5 minutes; and nothing
+# fetched between the first one's last failed fetch (07:02Z) and a clean one (07:17Z), or between the second's (08:10Z) and 08:27Z, so it lasted AT
+# MOST about 15 and about 17 minutes. Those are the times to the next observation, not durations. That is n = 2 episodes.
+#
+# WHAT THAT DOES NOT SAY. The waits below total 210s (315s at most, with jitter). Whether that is shorter or longer than either episode is UNKNOWN: both
+# lie between 1.5 minutes and 15 or 17, and so does 210s. No claim is made that this change would have cleared either; it helps if a throttle ends
+# inside the new waits and not if it outlasts them. The RETRY lines print every wait, so the next red run is more evidence. The defence against a
+# long one is the Gradle cache in ci.yml, which a re-run of the same pull request restores after one successful run, and an explained re-run of
+# this one job after a pause.
+#
+# JITTER, because two or more of these jobs start at once on a busy day (every PR, every merge-group entry) and a fixed 30/60/120 would send
+# them back to Maven Central in step: the same shape as scripts/fetch-wasm-tools.sh's backoff_wait (cleat#4347).
+FETCH_RETRIES="${BDE_FETCH_RETRIES:-3}"
 RETRY_SLEEP="${BDE_RETRY_SLEEP:-30}"
+
+# backoff_wait <delay>: sets WAIT_S to <delay> plus a random 0..delay/2 inclusive. A global and not `$(...)`: a command substitution is a
+# subshell and would draw from a copy of $RANDOM's state, so successive calls could repeat. The modulus makes the jitter 0 for a delay of 0,
+# which keeps BDE_RETRY_SLEEP=0 (the self-test) instantaneous.
+backoff_wait() {
+  WAIT_S=$(($1 + RANDOM % ($1 / 2 + 1)))
+}
 TRANSIENT_FETCH='Received status code (429|5[0-9][0-9])|Could not find [^[:space:]]+:[^[:space:]]+:[^[:space:]]+'
 
 examined=0 built=0 failed=0 skipped=0
@@ -142,7 +167,8 @@ while IFS= read -r readme; do
     (cd "$workdir" && eval "$run") >/tmp/bde.log 2>&1 && ok=1 || ok=0
     if (( ok == 1 )); then break; fi
     if (( attempt <= FETCH_RETRIES )) && grep -qE "$TRANSIENT_FETCH" /tmp/bde.log; then
-      wait_s=$((RETRY_SLEEP * attempt))
+      backoff_wait $((RETRY_SLEEP * (1 << (attempt - 1))))
+      wait_s=$WAIT_S
       echo "RETRY $dir (attempt $((attempt + 1)) of $((FETCH_RETRIES + 1)), after ${wait_s}s): the build failed fetching a dependency, which is retried. The failure:"
       grep -E "$TRANSIENT_FETCH" /tmp/bde.log | sed 's/^/      /' | head -4
       sleep "$wait_s"
