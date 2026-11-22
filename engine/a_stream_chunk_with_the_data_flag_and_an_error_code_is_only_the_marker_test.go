@@ -16,7 +16,8 @@ import (
 // That is a claim about the source, and this test is the source scan that keeps it true: a new writer that set both would make a real chunk or failure read as an empty stream.
 //
 // WHAT IT SCANS, and the limit of it: every composite literal in the engine's non-test source that sets BOTH StreamData and StreamErrCode (the only place the two can be written
-// together by construction), and every assignment to either field. Writers are allowed by FUNCTION NAME, not by file: the marker builder, the conversion of a typed event to a record, and the
+// together by construction), matched by its KEYS and whatever its type, in a function body or at package level (including an untyped element of a slice or map literal), and every
+// assignment to either field. Writers are allowed by FUNCTION NAME, not by file: the marker builder, the conversion of a typed event to a record, and the
 // two decoders that copy what a store or a compacted history already held. A way to write a record that is neither a literal nor an assignment (reflection, a copy of another
 // record) is not seen; a copy cannot create the combination, it can only carry one.
 
@@ -44,11 +45,23 @@ func markerWriters(sources map[string]string) (findings []string, err error) {
 			return nil, perr
 		}
 		for _, d := range f.Decls {
-			fd, ok := d.(*ast.FuncDecl)
-			if !ok || fd.Body == nil || markerWriterAllowed[fd.Name.Name] {
+			// A function body is scanned unless the function is an allowed writer; a PACKAGE-LEVEL declaration (a var or const initialiser) is always scanned, under the name
+			// "(package level)": cleat-review3 found `var x = []EventRecord{{StreamData: true, StreamErrCode: 2}}` passed unseen when only function bodies were read.
+			name := "(package level)"
+			var root ast.Node
+			switch x := d.(type) {
+			case *ast.FuncDecl:
+				if x.Body == nil || markerWriterAllowed[x.Name.Name] {
+					continue
+				}
+				name, root = x.Name.Name, x.Body
+			case *ast.GenDecl:
+				root = x
+			default:
 				continue
 			}
-			ast.Inspect(fd.Body, func(node ast.Node) bool {
+			fd := struct{ Name *ast.Ident }{ast.NewIdent(name)}
+			ast.Inspect(root, func(node ast.Node) bool {
 				switch x := node.(type) {
 				case *ast.CompositeLit:
 					keys := map[string]bool{}
@@ -123,13 +136,14 @@ func badLiteral() EventRecord { return EventRecord{StreamData: true, StreamErrCo
 func badAssignData(r *EventRecord) { r.StreamData = true }
 func badAssignCode(r *EventRecord) { r.StreamErrCode = 3 }
 func clean() EventRecord { return EventRecord{StreamData: true} }
+var packageLevel = []EventRecord{{StreamData: true, StreamErrCode: 2}}
 func emptyStreamMarkerRecord() EventRecord { return EventRecord{StreamData: true, StreamErrCode: 2} }
 `
 	findings, err := markerWriters(map[string]string{"x.go": src})
 	if err != nil {
 		t.Fatalf("the synthetic source did not parse: %v", err)
 	}
-	want := map[string]bool{"badLiteral sets": false, "badAssignData assigns StreamData": false, "badAssignCode assigns StreamErrCode": false}
+	want := map[string]bool{"(package level) sets": false, "badLiteral sets": false, "badAssignData assigns StreamData": false, "badAssignCode assigns StreamErrCode": false}
 	for _, f := range findings {
 		for w := range want {
 			if strings.Contains(f, w) {
