@@ -269,6 +269,25 @@ func (s *syncWriter) Write(p []byte) (int, error) {
 // startWorker launches a worker with a 1s heartbeat. The reclaim window cannot be shortened below ~37s (cmd/cleat-worker refuses a
 // --reclaim-timeout under minimumReclaimAfter, whose largest term is a fixed 30s), so a kill is followed by ageLease, which ages the dead
 // worker's heartbeat in the database: the lease EXPIRES the way it would after the wait, without spending the wait on every boundary.
+// residencyOff is what a caller passes when residency being OFF is part of what it measures (a run parked in the store, a control arm): the knob below must not turn it on.
+var residencyOff = []string{"--resident-max-runs", "0"}
+
+// residencyFlags is the harness's residency knob (cleat#4162, PR 3). CLEAT_CHAOS_RESIDENT_MAX_RUNS=N starts every worker with --resident-max-runs N, so the fault suite can
+// run the way 0.6.0 ships; UNSET, it passes nothing and a worker runs at the PRODUCT'S default, whatever that is when the test runs, so the default moves with the product and
+// is not a choice made here. A caller that names --resident-max-runs itself (the held rows, the off arms) is never overridden: opting out is explicit, per scenario.
+func residencyFlags(extra []string) []string {
+	v := os.Getenv("CLEAT_CHAOS_RESIDENT_MAX_RUNS")
+	if v == "" {
+		return nil
+	}
+	for _, a := range extra {
+		if a == "--resident-max-runs" {
+			return nil
+		}
+	}
+	return []string{"--resident-max-runs", v}
+}
+
 func startWorker(t *testing.T, bin, taskQueue, svcURL string, extra ...string) *worker {
 	t.Helper()
 	ownerDB := ownerDSN()
@@ -283,7 +302,7 @@ func startWorker(t *testing.T, bin, taskQueue, svcURL string, extra ...string) *
 		"--heartbeat", "1s",
 		"--migrate-on-start",
 	}
-	cmd := exec.Command(bin, append(args, extra...)...)
+	cmd := exec.Command(bin, append(append(args, residencyFlags(extra)...), extra...)...)
 	cmd.Dir = tree(t)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Stdout = &syncWriter{w: w.log, mu: &w.mu}
