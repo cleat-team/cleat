@@ -860,7 +860,12 @@ jobs:
       # optional: a classifier that said "fine" for every input would pass the real check silently forever.
       #
       # The file list comes from the pull-request files API, not `git diff base...HEAD`: this checkout has no merge base to diff against. The body
-      # goes through the environment, never interpolated into the script (a PR body is attacker-controlled).
+      # is attacker-controlled text and is only ever DATA: a pull_request run takes it from the environment and a merge-queue run fetches it from the
+      # API straight into a file, and neither is interpolated into the script. The queue's event carries no body, but the `changelog-edit:` escape
+      # lives only in the body, so a queue run that did not read it refused every direct CHANGELOG.md edit the pull request had legitimately declared
+      # (cleat#4370, the first PR to use the escape). A fetch that fails is a failed check, exit 2, and never "a PR with no escape". The queue's ref
+      # names no branch, so the release/* and hotfix/* exemption is not available there (--branch ""). scripts/check-changelog-fragments.py
+      # --self-test runs THIS step against a stand-in `gh`, in the three queue cases and a hostile body.
       - name: Changelog fragment guard
         if: always() && (needs.edit-gate.outputs.skip != 'true')
         env:
@@ -879,10 +884,16 @@ jobs:
             printf '%s' "$PR_BODY" > /tmp/pr-body.txt
             python3 scripts/check-changelog-fragments.py --files-file /tmp/changed-files.tsv --body-file /tmp/pr-body.txt --branch "$HEAD_REF" --pr-number "$PR_NUMBER"
           elif [ "$EVENT_NAME" = "merge_group" ] && QN=$(python3 -c 'import sys; sys.path.insert(0, "scripts"); import importlib.util as u; s=u.spec_from_file_location("g", "scripts/check-changelog-fragments.py"); m=u.module_from_spec(s); s.loader.exec_module(m); print(m.pr_number_from_queue_ref(sys.argv[1]) or "")' "$QUEUE_REF") && [ -n "$QN" ]; then
-            # The queue's run has no pull_request payload and no body, but its ref names the PR: read its files the same way and apply rules 1 and 2
-            # (and the grandfather cutoff); rule 3 was checked on the pull request.
+            # The queue's run has no pull_request payload and no body, but its ref names the PR (QN is digits only): read its files AND ITS BODY from
+            # the API, so the guard sees the same text the pull_request run saw (rules 1, 2 and 3, and the grandfather cutoff).
             gh api --paginate "repos/${GITHUB_REPOSITORY}/pulls/${QN}/files?per_page=100" --jq '.[] | [.status, .filename] | @tsv' > /tmp/changed-files.tsv
-            python3 scripts/check-changelog-fragments.py --files-file /tmp/changed-files.tsv --no-body --branch "" --pr-number "$QN"
+            # The body goes into a file by redirection and is never expanded into a command line. A failed fetch must not read as "no escape".
+            rm -f /tmp/pr-body.txt
+            if ! gh api "repos/${GITHUB_REPOSITORY}/pulls/${QN}" --jq '.body // ""' > /tmp/pr-body.txt; then
+              echo "UNMEASURED: could not read the PR body of #${QN} from the API. This is a failure of the check, not a finding about the PR." >&2
+              exit 2
+            fi
+            python3 scripts/check-changelog-fragments.py --files-file /tmp/changed-files.tsv --body-file /tmp/pr-body.txt --branch "" --pr-number "$QN"
           else
             echo "note: no pull request number to read (a push, or a queue ref that did not parse): fragments only"
             python3 scripts/check-changelog-fragments.py --fragments-only
