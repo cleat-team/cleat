@@ -154,6 +154,7 @@ var (
 
 func TestMain(m *testing.M) {
 	code := m.Run()
+	stopWarmReaper()
 	if buildDir != "" {
 		os.RemoveAll(buildDir)
 	}
@@ -290,6 +291,14 @@ func residencyFlags(extra []string) []string {
 // worker's heartbeat in the database: the lease EXPIRES the way it would after the wait, without spending the wait on every boundary.
 func startWorker(t *testing.T, bin, taskQueue, svcURL string, extra ...string) *worker {
 	t.Helper()
+	w := launchWorker(t, bin, taskQueue, svcURL, extra...)
+	t.Cleanup(func() { w.kill() })
+	return w
+}
+
+// launchWorker is startWorker without the cleanup: the caller owns the process and must kill it (the warm reaper, which outlives every test but is killed by TestMain).
+func launchWorker(t *testing.T, bin, taskQueue, svcURL string, extra ...string) *worker {
+	t.Helper()
 	ownerDB := ownerDSN()
 	w := &worker{log: &strings.Builder{}}
 	args := []string{
@@ -316,7 +325,6 @@ func startWorker(t *testing.T, bin, taskQueue, svcURL string, extra ...string) *
 		w.exitErr = cmd.Wait()
 		close(w.exited)
 	}()
-	t.Cleanup(func() { w.kill() })
 	return w
 }
 
