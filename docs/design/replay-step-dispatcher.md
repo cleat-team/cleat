@@ -205,6 +205,25 @@ the dispatcher at all. The list is appendix A's "records" column read backwards:
 **The count of exceptions is the honest cost of this design: nine kinds beyond `Single` (`Multi`, `Stream`, `Wait`, `Sleep`, `Terminal`, `Lookup`, `Live`, `Spawn`, `Poll`), and of 54 methods 19 are `Single`, 4 are `Spawn`.** If a reviewer thinks a kind should dissolve into `Single` plus a flag, that is the argument to have, and section 9
 lists the two I am least sure of.
 
+### A composite call needs no kind: `cleat_wait_for_event` (G3, added 2026-11-22)
+
+`cleat_wait_for_event` (`WaitForEvent`, `engine/wait_for_event.go`) is **not one of the exceptions above, and not a step**. It writes no record of its own and has no replay half. It is a
+loop over two calls that are already on the dispatcher: it claims through `PluginCall`, and when the claim finds nothing it waits through `DurableAwaitSignals`, then claims again. The records it
+leaves are the ones those two write (`plugin_call`, `await_signals`, `signal_received`, `plugin_call`, ...), and the loop never chooses between a fresh and a replayed arm: it calls the thing that
+chooses. So a divergent, compacted, suspended or stopped history behaves, through this call, as it does through those two, and **a spec for it would have nothing to describe**: there is no record to
+declare, no `Decode` to write and no replay code to delete. The G3 plan listed it as the last call to move; there is nothing to move.
+
+Two tests keep that true rather than leaving it a sentence here. `TestWaitForEventStaysComposite` fails if `wait_for_event.go` ever names an `EventType`, takes anything from the session (under whatever name a
+function holds it) beyond the clock, the suspension, the two calls, the failure writer and the one stop guard, hands the session to another function or aliases it, or reads `isReplay` anywhere but
+that guard. It has a known positive for each way of breaking the rule, and the day it fails the right response is to give the new record a spec and move the call. **Its limit is that the allowed
+names are matched by name and the scan reads this file, not the files it calls into**: `s.PluginCall` passes because `PluginCall` is on the list, whatever it does elsewhere. `TestWaitForEventComposesTheCallsThatAreOnTheDispatcher` and
+`TestACompactedHistoryReplaysThroughWaitForEvent` pin what the composition does today, row by row, with the expectations written before the first run.
+
+What that table found, **recorded and not fixed here** (cleat#4368): a divergence inside the call's `plugin_call` is wrapped by the loop as "the output is not claim-shaped" (the dispatcher's
+answer has a call-error code of 0 and an error byte of 1, and the loop tests the first), with the divergence text further inside the message; a divergence at the await is not
+surfaced at all, because the await's answer is neither the stop word nor a suspension and the loop takes it for an expired wait; and a replayed wake logs one `host call output truncated` warning,
+because the loop gives the await zero-capacity scratch buffers.
+
 ---
 
 ## 5. The refusal rule, and what it couples to
