@@ -570,6 +570,15 @@ func (s *ShardedStore) Heartbeat(ctx context.Context, workflowID, workerID strin
 	return shard.Store.Heartbeat(ctx, workflowID, workerID, generation)
 }
 
+// PublishQueryState goes to the shard that owns the run, as Heartbeat does.
+func (s *ShardedStore) PublishQueryState(ctx context.Context, runID, workerID string, generation int64, queryState map[string]string) error {
+	shard := s.getShard(runID)
+	if shard == nil {
+		return fmt.Errorf("publish query state: no shard available -- check shard configuration in CLEAT_SHARD_CONFIG")
+	}
+	return shard.Store.PublishQueryState(ctx, runID, workerID, generation, queryState)
+}
+
 // HeartbeatBatchFenced groups runs by shard -- routed by WorkflowID, as every
 // per-ID method here is -- and issues one batched, fenced heartbeat call per
 // shard rather than one call per run. cleat#2008.

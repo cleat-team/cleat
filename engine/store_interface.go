@@ -207,6 +207,12 @@ type WorkflowStore interface {
 	// are written.
 	FinalizeWorkflowSegment(ctx context.Context, runID, workerID string, generation int64, newEvents []EventRecord, finalStatus string, result string, errorCode string, errorOp string, queryState map[string]string, nextWakeAt time.Time) error
 
+	// PublishQueryState writes a run's query state WITHOUT ending its segment: the run stays running and assigned to workerID, and nothing else about it changes (cleat#4162).
+	// FinalizeWorkflowSegment writes query state too, but only when an execution RETURNS, and a run HELD through a wait does not return, so without this a client reading the state
+	// (GET .../query) sees nothing the run set before its wait for the whole hold. Fenced exactly like finalize: a run this worker no longer holds is ErrFenceLost and nothing is
+	// written. A nil map writes nothing and returns nil (nothing to say, not "clear it"); a non-nil map REPLACES the stored state, as finalize does.
+	PublishQueryState(ctx context.Context, runID, workerID string, generation int64, queryState map[string]string) error
+
 	// RequestCancellation sets the cancellation flag on a workflow.
 	RequestCancellation(ctx context.Context, workflowID, reason string) error
 

@@ -4263,6 +4263,12 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 			EventCount: len(history),
 			// Without this nothing is held (engine.WithResidency): a held run has to be able to prove it still owns its claim before it goes back to the guest.
 			ClaimCheck: func(ctx context.Context) error { return w.claimStillMine(ctx, wf) },
+			// A held run never returns to the worker, and query state is written only when an execution returns, so what the guest set before its wait would be invisible to a
+			// client for the whole hold. This writes it at hold admission, fenced like the finalize it stands in for; a failure refuses the hold and the suspension writes it
+			// (cleat#4162, the AI agent platform scenario).
+			PublishState: func(ctx context.Context, state map[string]string) error {
+				return execStore.PublishQueryState(ctx, wf.ID, w.id, wf.Generation, state)
+			},
 		})))
 	}
 	eng := engine.NewEngine(nil, caller, engineOpts...)

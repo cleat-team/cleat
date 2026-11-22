@@ -335,6 +335,12 @@ type ResidentRunInfo struct {
 	// run was held is otherwise learned only at the next heartbeat, and in the meantime the guest could act: measured on a real worker, a run terminated while
 	// held reached its next outbound call, which a suspended run cannot. REQUIRED: WithResidency installs no wake source for a handle without one.
 	ClaimCheck func(ctx context.Context) error
+	// PublishState writes the run's query state to the store WITHOUT ending its segment, and is called at HOLD ADMISSION (parkOrSuspend), just before the run is held, whenever the
+	// run has query state the store does not yet hold. A held run never returns to the worker, and the worker writes query state only when an execution returns, so without this
+	// a client asking what the run is doing sees nothing it set before its wait, for the whole hold (cleat#4162, the AI agent platform scenario). An error REFUSES the hold: the
+	// run suspends instead, and a suspension writes the state. nil means the handle cannot publish: a run with NO query state is still held (there is nothing to publish), and
+	// a run WITH some is refused, so an omission fails closed and never silent.
+	PublishState func(ctx context.Context, state map[string]string) error
 }
 
 // ResidentRun is one run's handle on the set: it is the engine's wakeSource for that run, and carries what Wait does not receive.
