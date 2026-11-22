@@ -452,6 +452,11 @@ func (s *apiServer) handleStreamWorkflow(w http.ResponseWriter, r *http.Request,
 		if rec.EventType != engine.EventTypePluginCallStreamChunk {
 			continue
 		}
+		// An empty stream's MARKER is a row in event_history and no chunk the plugin produced (cleat#4342): serving it would hand a client a phantom empty chunk that
+		// opens an answer that never finishes. It touches none of the segmentation state, because it is not part of any answer.
+		if engine.IsEmptyStreamMarker(rec) {
+			continue
+		}
 		if !cursor.after(rec.Step) {
 			// Not owed, but it still advances the segmentation state: a gap
 			// must be measured against the last chunk that EXISTS, not the
@@ -632,6 +637,12 @@ func (s *apiServer) followFromHistory(
 			return
 		}
 		for _, rec := range recs {
+			// The marker of an empty stream is no chunk (see the history loop above). It must still advance the cursor: the tail reads rows AFTER lastStep, so a marker
+			// left behind it would be read again on every poll, and a page of them would read as "more behind it" and spin.
+			if engine.IsEmptyStreamMarker(rec) {
+				*lastStep = rec.Step
+				continue
+			}
 			// replay=true and durable=true, both unconditionally, because both
 			// are facts about where the row came from: it was just READ from
 			// event_history.
