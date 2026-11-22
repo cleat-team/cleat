@@ -34,7 +34,7 @@ var stopSiteEvents = map[string]stopEvent{
 	// returns, so the SDKs' existing guard on that call covers it.
 	"freshCallWithRetry":       {typ: EventTypeCall},
 	"DurableCallWithHeartbeat": {typ: EventTypeCall},
-	"freshPluginCall":          {typ: EventTypePluginCall},
+	"PluginCall":               {typ: EventTypePluginCall},
 	"freshPluginCallStreaming": {typ: EventTypePluginCall},
 	"SideEffect":               {typ: EventTypeSideEffect},
 	"Fetch":                    {typ: EventTypeFetch},

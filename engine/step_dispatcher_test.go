@@ -949,7 +949,7 @@ func TestARecordsOneSpecMayRecordNothingOnlyOnAPathItListed(t *testing.T) {
 	// THE PIN: exactly these specs list paths, and each path is written out here LITERALLY and not through the constants the spec uses, so a reason that is
 	// reworded or a path that is added changes this map in the same diff and the reviewer reads it against the call it is for. A spec added to the
 	// registry that lists a path and is not in this map fails here, which is what makes the opt-in visible and not merely available. (Before DurableCall moved
-	// (cleat#4152, G3) this recorded that NO spec listed one; poll_update, cleat#4152 W1, is the second.)
+	// (cleat#4152, G3) this recorded that NO spec listed one; poll_update (cleat#4152 W1) and plugin_call (G3) are the next.)
 	want := map[string][]string{
 		"call": {
 			"the workflow was cancelled: the call is not made and the guest is told so",
@@ -959,6 +959,10 @@ func TestARecordsOneSpecMayRecordNothingOnlyOnAPathItListed(t *testing.T) {
 		},
 		// poll_update records an update_received only when it finds a pending update.
 		"poll_update": {"no update store: nothing to poll", "the pending requests could not be read: the guest is told nothing was found", "no update is pending"},
+		"plugin_call": {
+			"the worker has no plugin registry, which no amount of retrying changes: nothing is recorded and the guest is told so",
+			"a replayed call whose function may be re-invoked on replay runs it again: its event is already in history, so nothing is recorded",
+		},
 	}
 	listing := map[string][]string{}
 	for _, sp := range stepSpecs {

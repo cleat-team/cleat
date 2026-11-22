@@ -90,9 +90,10 @@ var javaCallsTheHostCanRefuse = []sdkRefusableCall{
 	{"cleatCallHeartbeat", "DurableCallWithHeartbeat"},
 	{"childWorkflow", "childWorkflowWithVersion"},
 	{"childWorkflowWithOptions", "childWorkflowWithVersion"},
-	{"pluginCall", "freshPluginCall"},
+	// plugin_call goes through step, so its refusal is the dispatcher's and the host method is the site (cleat#4152, G3).
+	{"pluginCall", "PluginCall"},
 	// A second caller of the same import, so two entries share one host site.
-	{"pluginCallOutcome", "freshPluginCall"},
+	{"pluginCallOutcome", "PluginCall"},
 	{"pluginCallStreaming", "freshPluginCallStreaming"},
 	{"awaitSignalsMs", "DurableAwaitSignals"},
 	// AwaitPromise is a stop site through suspendingAwaitResult rather than

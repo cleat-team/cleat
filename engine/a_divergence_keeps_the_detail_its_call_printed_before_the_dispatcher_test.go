@@ -172,7 +172,7 @@ func TestADivergenceDetailOrAReasonForNoneIsRequired(t *testing.T) {
 // sweep. A spec moved from one list to the other changes this test in the same diff, where a reviewer reads the reason against the old message.
 func TestExactlyTheSpecsThatPrintedDetailBeforeStillHaveIt(t *testing.T) {
 	// call is here since the plain call moved onto the dispatcher (its detail is requestDivergenceDetail, and TestEngineReplayDivergence pins the labels).
-	want := map[string]bool{"call": true, "call_with_retry": true, "call_with_heartbeat": true, "await_child": true, "await_all_children": true, "fetch": true, "schedule_cron": true}
+	want := map[string]bool{"call": true, "plugin_call": true, "call_with_retry": true, "call_with_heartbeat": true, "await_child": true, "await_all_children": true, "fetch": true, "schedule_cron": true}
 	got := map[string]bool{}
 	for _, sp := range stepSpecs {
 		if sp.DivergenceDetail != nil {
