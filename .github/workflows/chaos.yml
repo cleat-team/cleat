@@ -49,7 +49,7 @@ on:
         required: false
         default: "full"
       resident_max_runs:
-        description: "Start every worker with --resident-max-runs N (cleat#4162): the sweep the way 0.6.0 ships. Empty leaves the harness's own default."
+        description: "Start every worker with --resident-max-runs N (cleat#4162), to sweep at a value other than the product default (8 since 0.6.0). Empty passes nothing, so the workers run the product default, which is how 0.6.0 ships."
         required: false
         default: ""
 

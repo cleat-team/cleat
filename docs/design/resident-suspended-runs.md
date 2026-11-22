@@ -123,7 +123,7 @@ Use it as **stage 1** if the owner wants a result sooner: it is independent of P
 
 ## 6. The policy, with options for the owner
 
-The owner's starting point: about 5 minutes by default; refined to about 10x the run's estimated replay time, estimated from its event count; evict under memory pressure or at a count limit, least recently used first.
+A starting point: about 5 minutes by default; refined to about 10x the run's estimated replay time, estimated from its event count; evict under memory pressure or at a count limit, least recently used first.
 
 | option | the window | what it favours | what it risks |
 |---|---|---|---|
@@ -146,7 +146,7 @@ Decisions the owner is asked for:
 
 ## 8. Rollout
 
-Off by default, per worker (`--resident-window 0` is today's behaviour), so a canary worker can run it beside unchanged workers on one database: nothing in the history or the row changes, and a resident run on a worker that dies is recovered by replay on any other. No migration is required by option 4.2a.
+On by default since 0.6.0, per worker (`--resident-max-runs` is 8; `--resident-max-runs 0` is the behaviour before it), so a canary worker can opt OUT with `--resident-max-runs 0` beside workers that hold, on one database. A held run reads `running` with no `next_wake_at` where a suspended one reads `ready` (invariant 4), and otherwise nothing in the history or the row changes, and a resident run on a worker that dies is recovered by replay on any other. No migration is required by option 4.2a.
 
 ## 9. What has to be measured first (items 2 and 4 are measured, section 9a; item 3 is done, cleat#4174; the rest are not yet)
 
