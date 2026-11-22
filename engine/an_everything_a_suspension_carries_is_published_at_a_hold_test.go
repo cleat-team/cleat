@@ -4,6 +4,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"go/types"
 	"os"
 	"path/filepath"
 	"sort"
@@ -234,20 +235,35 @@ func publishForHold() { _ = s.queryState; _ = s.unflushed; s.holdPublishFailures
 // makes the WORKER write things, and those come from the SuspendResult it is handed and from a literal, not from the session: in cmd/cleat-worker/setup.go, under
 // `if suspended != nil`, `finalStatus = "ready"` and `nextWakeAt = suspended.SuspendUntil`. A held run does neither: it stays `running` with no wake time.
 //
-// That is a deliberate choice, option (a) in docs/design/resident-suspended-runs.md section 4.2 ("Stay running"), and it was recorded nowhere a change could trip over it. These two tables
-// are where it is recorded. The test fails when the worker starts to write a new value at a suspension, or SuspendResult gains a field, that is not named here with the reason a
-// hold may leave it out: so the decision is asked about again by whoever adds the next one, and is not a thing a reader has to rediscover.
+// That is a deliberate choice, option (a) in docs/design/resident-suspended-runs.md section 4.2 ("Stay running"), and it was recorded nowhere a change could trip over it. These tables
+// are where it is recorded. The test fails when the worker starts to write a new value at a suspension, or SuspendResult gains a field, that is not named here with the reason a hold
+// may leave it out: so the decision is asked about again by whoever adds the next one, and is not a thing a reader has to rediscover.
+//
+// WHAT COUNTS AS "AT A SUSPENSION", and the shapes this was first written to miss and was corrected for (cleat-review3 found three; the `else` shapes below are a fourth and fifth
+// that the real file has): a block is suspension-conditioned when it is the body of an `if` that has a `suspended != nil` CONJUNCT (so `suspended != nil && ...` counts), or the `else`
+// of an `if` that has a `suspended == nil` conjunct. `finalStatus` is the variable the suspension assigns, so the same holds for it: the body of `finalStatus != "done"` or
+// `finalStatus == "ready"`, and the `else` of `finalStatus == "done"` (which is where the worker logs "workflow suspended"). Inside such a block the guard collects every assignment target by its TEXT (`wf.NextWakeAt` is not `nextWakeAt`, and a selector
+// target is not an identifier), every name a `var` declaration introduces, every `x++`, and every CALL, since a call is how a store is written. The `continue_as_new` branch is a
+// NAMED exclusion (continueAsNewExcluded): it is not a wait and is never held, and the test requires it to still exist so the exclusion cannot go stale.
+//
+// WHAT THIS STILL CANNOT SEE: a write made somewhere that is not conditioned on `suspended` at all (a helper called unconditionally that checks the suspension inside it, or a `switch`
+// over it), and a value that reaches a store through a variable assigned before the block. It is a syntactic scan of the shapes the worker uses today.
 //
 // This reads cmd/cleat-worker/setup.go through "..": `go test` caches on files opened INSIDE the package directory, so a local run after editing setup.go alone can print (cached).
 // CI passes -count=1 to every package, so it is sound there; run with -count=1 locally.
 
-// suspensionAssigns names each variable the worker assigns inside `if suspended != nil` in the function that finalizes a segment, and why a hold leaves it unwritten.
+// suspensionAssigns names each target the worker writes (or call it makes) inside a suspension-conditioned block, and why a hold leaves it unwritten.
 var suspensionAssigns = map[string]string{
 	"finalStatus": "the suspension writes status 'ready' (waiting to be claimed); a held run stays 'running' on this worker (option (a), design doc 4.2), which is the truth for it: it holds a claim, " +
 		"is in w.inflight, and the heartbeat keeps the reaper off it. This is the one user-visible difference a hold makes, and it is why design invariant 4 carries an exception for it",
 	"nextWakeAt": "the suspension writes next_wake_at from SuspendUntil so another worker can claim the run at the wake; a held run has no wake time in the store because it wakes in-process. If its worker " +
 		"dies the reaper recovers it after about 47 s and it replays, as for any running run (design doc 4.2)",
+	"call:w.logger.InfoContext": "the 'workflow suspended' log line, which writes nothing to a store; a held run logs nothing at its hold, and the wake is visible in the held-run counters",
 }
+
+// continueAsNewExcluded is the one named exclusion: a block whose condition has a conjunct `suspended.Reason == "continue_as_new"`. continue_as_new is not a wait, so a hold is never
+// of it (the kind refusal), and what the worker writes there is not a suspension's.
+const continueAsNewReason = "continue_as_new"
 
 // suspendResultFields names each field of SuspendResult and what a hold does about it. A field the worker reads is said to be read.
 var suspendResultFields = map[string]string{
@@ -287,15 +303,103 @@ func suspendResultFieldsOf(t *testing.T, src string) []string {
 	return out
 }
 
-// whatTheWorkerDoesAtASuspension returns the variables assigned inside any `if suspended != nil { ... }` in src, the `suspended.<Field>` selectors read anywhere in src, and how many
-// such if statements it found.
-func whatTheWorkerDoesAtASuspension(t *testing.T, src string) (assigned, read map[string]bool, ifs int) {
+// conjuncts flattens `a && b && c` (through parentheses) into its operands.
+func conjuncts(e ast.Expr) []ast.Expr {
+	switch x := e.(type) {
+	case *ast.ParenExpr:
+		return conjuncts(x.X)
+	case *ast.BinaryExpr:
+		if x.Op == token.LAND {
+			return append(conjuncts(x.X), conjuncts(x.Y)...)
+		}
+	}
+	return []ast.Expr{e}
+}
+
+// isSuspendedNilTest reports whether e is `suspended <op> nil`.
+func isSuspendedNilTest(e ast.Expr, op token.Token) bool {
+	be, ok := e.(*ast.BinaryExpr)
+	if !ok || be.Op != op {
+		return false
+	}
+	l, ok1 := be.X.(*ast.Ident)
+	r, ok2 := be.Y.(*ast.Ident)
+	return ok1 && ok2 && l.Name == "suspended" && r.Name == "nil"
+}
+
+// isFinalStatusTest reports whether e is a comparison of `finalStatus` with a string literal using op, and which literal. finalStatus is the variable the suspension block assigns
+// ("ready"), so a branch on it IS a branch on whether the run suspended: the real file ends in `if finalStatus == "done" {...} else {log "workflow suspended"}`.
+func isFinalStatusTest(e ast.Expr, op token.Token, lit string) bool {
+	be, ok := e.(*ast.BinaryExpr)
+	if !ok || be.Op != op {
+		return false
+	}
+	id, ok1 := be.X.(*ast.Ident)
+	bl, ok2 := be.Y.(*ast.BasicLit)
+	return ok1 && ok2 && id.Name == "finalStatus" && bl.Kind == token.STRING && strings.Trim(bl.Value, "\"`") == lit
+}
+
+// isContinueAsNewTest reports whether e is `suspended.Reason == "continue_as_new"`.
+func isContinueAsNewTest(e ast.Expr) bool {
+	be, ok := e.(*ast.BinaryExpr)
+	if !ok || be.Op != token.EQL {
+		return false
+	}
+	sel, ok := be.X.(*ast.SelectorExpr)
+	lit, ok2 := be.Y.(*ast.BasicLit)
+	if !ok || !ok2 || lit.Kind != token.STRING {
+		return false
+	}
+	id, ok := sel.X.(*ast.Ident)
+	return ok && id.Name == "suspended" && sel.Sel.Name == "Reason" && strings.Trim(lit.Value, "\"`") == continueAsNewReason
+}
+
+// whatTheWorkerDoesAtASuspension returns what the worker writes inside suspension-conditioned blocks of src (see the comment above for which blocks), the `suspended.<Field>`
+// selectors read anywhere in src, how many blocks it examined, and how many it excluded as continue_as_new.
+func whatTheWorkerDoesAtASuspension(t *testing.T, src string) (written, read map[string]bool, blocks, excluded int) {
 	t.Helper()
 	f, err := parser.ParseFile(token.NewFileSet(), "setup.go", src, 0)
 	if err != nil {
 		t.Fatalf("parsing setup.go: %v", err)
 	}
-	assigned, read = map[string]bool{}, map[string]bool{}
+	written, read = map[string]bool{}, map[string]bool{}
+	var collect func(body ast.Node)
+	collect = func(body ast.Node) {
+		ast.Inspect(body, func(m ast.Node) bool {
+			switch x := m.(type) {
+			case *ast.AssignStmt:
+				for _, l := range x.Lhs {
+					if id, ok := l.(*ast.Ident); ok && id.Name == "_" { // `_ = x` assigns nothing anywhere
+						continue
+					}
+					written[types.ExprString(l)] = true
+				}
+			case *ast.IncDecStmt:
+				written[types.ExprString(x.X)] = true
+			case *ast.ValueSpec:
+				for _, nm := range x.Names {
+					if nm.Name != "_" {
+						written[nm.Name] = true
+					}
+				}
+			case *ast.CallExpr:
+				// Only the OUTERMOST call is recorded: a call nested in its arguments (context.Background(), a getter) is not a separate act. A function literal passed as an
+				// argument, or called in place, is still searched, because an assignment can hide in one.
+				written["call:"+types.ExprString(x.Fun)] = true
+				for _, part := range append([]ast.Expr{x.Fun}, x.Args...) {
+					ast.Inspect(part, func(a ast.Node) bool {
+						if fl, ok := a.(*ast.FuncLit); ok {
+							collect(fl.Body)
+							return false
+						}
+						return true
+					})
+				}
+				return false
+			}
+			return true
+		})
+	}
 	ast.Inspect(f, func(n ast.Node) bool {
 		switch x := n.(type) {
 		case *ast.SelectorExpr:
@@ -303,30 +407,29 @@ func whatTheWorkerDoesAtASuspension(t *testing.T, src string) (assigned, read ma
 				read[x.Sel.Name] = true
 			}
 		case *ast.IfStmt:
-			be, ok := x.Cond.(*ast.BinaryExpr)
-			if !ok || be.Op != token.NEQ {
-				return true
+			cs := conjuncts(x.Cond)
+			notNil, isNil, cont := false, false, false
+			for _, c := range cs {
+				notNil = notNil || isSuspendedNilTest(c, token.NEQ) || isFinalStatusTest(c, token.NEQ, "done") || isFinalStatusTest(c, token.EQL, "ready")
+				isNil = isNil || isSuspendedNilTest(c, token.EQL) || isFinalStatusTest(c, token.EQL, "done")
+				cont = cont || isContinueAsNewTest(c)
 			}
-			lhs, ok1 := be.X.(*ast.Ident)
-			rhs, ok2 := be.Y.(*ast.Ident)
-			if !ok1 || !ok2 || lhs.Name != "suspended" || rhs.Name != "nil" {
-				return true
-			}
-			ifs++
-			ast.Inspect(x.Body, func(m ast.Node) bool {
-				if as, ok := m.(*ast.AssignStmt); ok {
-					for _, l := range as.Lhs {
-						if id, ok := l.(*ast.Ident); ok && id.Name != "_" { // `_ = x` assigns nothing anywhere
-							assigned[id.Name] = true
-						}
-					}
+			if notNil {
+				if cont {
+					excluded++
+				} else {
+					blocks++
+					collect(x.Body)
 				}
-				return true
-			})
+			}
+			if isNil && x.Else != nil {
+				blocks++
+				collect(x.Else)
+			}
 		}
 		return true
 	})
-	return assigned, read, ifs
+	return written, read, blocks, excluded
 }
 
 // accountedFor reports what is in `have` but absent from `table` (new, unaccounted), and what is in `table` but absent from `have` or carries no reason (stale).
@@ -355,13 +458,16 @@ func TestEverythingTheWorkerWritesAtASuspensionIsAccountedForAtAHold(t *testing.
 	if err != nil {
 		t.Fatalf("UNMEASURED: reading types.go: %v", err)
 	}
-	assigned, read, ifs := whatTheWorkerDoesAtASuspension(t, string(setup))
-	if ifs == 0 {
-		t.Fatalf("UNMEASURED: found no `if suspended != nil` in setup.go, so the guard read nothing and a pass would mean nothing")
+	written, read, blocks, excluded := whatTheWorkerDoesAtASuspension(t, string(setup))
+	if blocks < 2 {
+		t.Fatalf("UNMEASURED: found %d suspension-conditioned block(s) in setup.go, want at least 2 (the `if suspended != nil` and the `else` of `if suspended == nil`), so the guard read too little and a pass would mean nothing", blocks)
+	}
+	if excluded == 0 {
+		t.Fatalf("UNMEASURED: found no continue_as_new block to exclude: it was renamed or removed, so the named exclusion (continueAsNewReason) is stale and what the worker writes there would be counted as a suspension's")
 	}
 	for _, must := range []string{"finalStatus", "nextWakeAt"} {
-		if !assigned[must] {
-			t.Fatalf("UNMEASURED: the worker no longer assigns %s under `if suspended != nil` (found %v): either it was renamed, which this test's tables must follow, or the scan broke", must, assigned)
+		if !written[must] {
+			t.Fatalf("UNMEASURED: the worker no longer assigns %s in a suspension-conditioned block (found %v): either it was renamed, which this test's tables must follow, or the scan broke", must, written)
 		}
 	}
 	fields := suspendResultFieldsOf(t, string(types))
@@ -369,8 +475,8 @@ func TestEverythingTheWorkerWritesAtASuspensionIsAccountedForAtAHold(t *testing.
 		t.Fatalf("UNMEASURED: read only %d SuspendResult fields from types.go (%v)", len(fields), fields)
 	}
 
-	if un, stale := accountedFor(assigned, suspensionAssigns); len(un) > 0 || len(stale) > 0 {
-		t.Errorf("the worker assigns %v at a suspension that suspensionAssigns does not account for, and suspensionAssigns has stale or reasonless entries %v. A run HELD through a wait never reaches "+
+	if un, stale := accountedFor(written, suspensionAssigns); len(un) > 0 || len(stale) > 0 {
+		t.Errorf("the worker writes %v at a suspension that suspensionAssigns does not account for, and suspensionAssigns has stale or reasonless entries %v. A run HELD through a wait never reaches "+
 			"the suspension, so a value written only there is never written for it. Decide whether a hold must write it, and record the decision in suspensionAssigns.", un, stale)
 	}
 	haveFields := map[string]bool{}
@@ -387,29 +493,66 @@ func TestEverythingTheWorkerWritesAtASuspensionIsAccountedForAtAHold(t *testing.
 	}
 }
 
-// The second guard's known-positives. Without them a guard that read nothing, or whose tables everything fell into, would pass forever.
+// The second guard's known-positives: each of the shapes cleat-review3 showed it missing, the one the real file has that nobody listed, and the controls that must NOT trip it.
+// Without them a guard that read nothing, or whose tables everything fell into, would pass forever.
 func TestTheSuspensionGuardFailsOnAValueItDoesNotAccountFor(t *testing.T) {
-	const worker = `package main
-func finalize() {
-	if suspended != nil {
-		finalStatus = "ready"
-		nextWakeAt = suspended.SuspendUntil
-		retryAt = suspended.Reason
-		_ = suspended.Reason
+	scan := func(body string) (map[string]bool, int, int) {
+		w, _, blocks, excluded := whatTheWorkerDoesAtASuspension(t, "package main\nfunc finalize() {\n"+body+"\n}")
+		return w, blocks, excluded
 	}
-	_ = suspended.NewInput
-}`
-	assigned, read, ifs := whatTheWorkerDoesAtASuspension(t, worker)
-	if ifs != 1 || !assigned["retryAt"] || !assigned["finalStatus"] || !read["Reason"] || !read["NewInput"] {
-		t.Fatalf("PRECONDITION FAILED: the scan of the synthetic worker found %d if(s), assigned=%v read=%v", ifs, assigned, read)
+	for _, c := range []struct {
+		name, body, want string
+	}{
+		{"K1 a selector target", `if suspended != nil { wf.NextWakeAt = suspended.SuspendUntil }`, "wf.NextWakeAt"},
+		{"K3 an && condition", `if suspended != nil && suspended.Reason != "" { retryAt = suspended.Reason }`, "retryAt"},
+		{"K4 a var declaration", `if suspended != nil { var wakeHint = suspended.Reason; _ = wakeHint }`, "wakeHint"},
+		{"K5 an assignment to an existing variable", `if suspended != nil { result = suspended.Reason }`, "result"},
+		{"K6 the else of a nil test", `if suspended == nil { done() } else { execStore.MarkWake(ctx, suspended.SuspendUntil) }`, "call:execStore.MarkWake"},
+		{"K7 an increment", `if suspended != nil { suspensions++ }`, "suspensions"},
+		{"K8 a parenthesised conjunct", `if (suspended != nil) && ok { retryAt = 1 }`, "retryAt"},
+		{"K9 the else of a finalStatus test", `if finalStatus == "done" { notify() } else { execStore.MarkWake(ctx) }`, "call:execStore.MarkWake"},
+		{"K10 the body of a not-done finalStatus test", `if finalStatus != "done" { retryAt = 1 }`, "retryAt"},
+	} {
+		got, blocks, _ := scan(c.body)
+		if blocks != 1 {
+			t.Errorf("%s: examined %d block(s), want 1: the shape was not recognised as a suspension block", c.name, blocks)
+		}
+		if !got[c.want] {
+			t.Errorf("%s: the scan found %v, want it to include %q", c.name, got, c.want)
+			continue
+		}
+		if un, _ := accountedFor(got, suspensionAssigns); !hasName(un, c.want) {
+			t.Errorf("%s: %q was found but accountedFor does not report it unaccounted (%v)", c.name, c.want, un)
+		}
 	}
-	if assigned["_"] {
-		t.Errorf("the blank identifier was counted as a value the worker writes at a suspension")
+
+	// Controls: none of these may be counted as written at a suspension.
+	for _, c := range []struct{ name, body string }{
+		{"a blank assignment", `if suspended != nil { _ = suspended.Reason }`},
+		{"an unrelated if", `if other != nil { x = 1 }`},
+		{"the then of a nil test", `if suspended == nil { done = true }`},
+		{"the then of a done finalStatus test", `if finalStatus == "done" { w.notifyTerminal(wf, finalStatus) }`},
+	} {
+		if got, _, _ := scan(c.body); len(got) != 0 {
+			t.Errorf("control %q: counted %v as written at a suspension, want nothing", c.name, got)
+		}
 	}
-	if un, _ := accountedFor(assigned, suspensionAssigns); len(un) != 1 || un[0] != "retryAt" {
-		t.Errorf("unaccounted = %v, want exactly [retryAt]: a new value written at a suspension was not caught", un)
+	// Only the outermost call counts, and a function literal passed to it is still searched.
+	if got, _, _ := scan(`if suspended != nil { w.logger.InfoContext(context.Background(), "x", "k", getter(suspended.Reason)) }`); len(got) != 1 || !got["call:w.logger.InfoContext"] {
+		t.Errorf("nested calls were counted as separate acts: %v, want only call:w.logger.InfoContext", got)
 	}
-	// A new field on SuspendResult is caught the same way.
+	if got, _, _ := scan(`if suspended != nil { run(func() { hidden = suspended.Reason }) }`); !got["hidden"] || !got["call:run"] {
+		t.Errorf("an assignment inside a function literal passed to a call was missed: %v", got)
+	}
+	// The named exclusion: a continue_as_new branch is excluded, and counted so the real test can require it to still exist; the SAME shape without the reason test is not.
+	if got, blocks, excluded := scan(`if suspended != nil && suspended.Reason == "continue_as_new" { newRunID := 1; _ = newRunID }`); len(got) != 0 || blocks != 0 || excluded != 1 {
+		t.Errorf("continue_as_new block: written=%v blocks=%d excluded=%d, want nothing written, 0 blocks, 1 excluded", got, blocks, excluded)
+	}
+	if got, blocks, excluded := scan(`if suspended != nil && suspended.Reason != "continue_as_new" { newRunID := 1; _ = newRunID }`); !got["newRunID"] || blocks != 1 || excluded != 0 {
+		t.Errorf("a block that is NOT the continue_as_new branch was excluded: written=%v blocks=%d excluded=%d", got, blocks, excluded)
+	}
+
+	// A new SuspendResult field is caught the same way.
 	const types = `package engine
 type SuspendResult struct {
 	History []int
@@ -422,9 +565,8 @@ type SuspendResult struct {
 	NewRunID string
 	WakeHint string
 }`
-	fields := suspendResultFieldsOf(t, types)
 	have := map[string]bool{}
-	for _, f := range fields {
+	for _, f := range suspendResultFieldsOf(t, types) {
 		have[f] = true
 	}
 	if un, _ := accountedFor(have, suspendResultFields); len(un) != 1 || un[0] != "WakeHint" {
@@ -437,8 +579,17 @@ type SuspendResult struct {
 	if _, stale := accountedFor(map[string]bool{"a": true}, map[string]string{"a": "  "}); len(stale) != 1 {
 		t.Errorf("a reasonless entry was accepted: stale = %v", stale)
 	}
-	// And a worker with no `if suspended != nil` at all reports zero, which the real test turns into UNMEASURED rather than a pass.
-	if _, _, n := whatTheWorkerDoesAtASuspension(t, "package main\nfunc f() {}"); n != 0 {
-		t.Errorf("found %d if statements in a source that has none", n)
+	// A source with no suspension block reports zero blocks, which the real test turns into UNMEASURED rather than a pass.
+	if _, _, blocks, _ := whatTheWorkerDoesAtASuspension(t, "package main\nfunc f() {}"); blocks != 0 {
+		t.Errorf("found %d blocks in a source that has none", blocks)
 	}
+}
+
+func hasName(xs []string, x string) bool {
+	for _, v := range xs {
+		if v == x {
+			return true
+		}
+	}
+	return false
 }
