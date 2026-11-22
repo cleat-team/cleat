@@ -32,7 +32,7 @@
 1. **Durability does not change.** Events are recorded per step, a crash recovers by replay, and the history a resident run leaves is byte-for-byte the history a suspended run leaves.
 2. **The fallback is always today's behaviour.** If anything about residency is wrong, evicting must be possible without losing the run.
 3. **A resident run is fenced like a running one.** Another worker must not be able to run it, and this worker must not write for it after it has lost it.
-4. **Nothing user-visible depends on it.** Same results, same events, same timeouts; only latency changes.
+4. **Nothing user-visible depends on it, with the exceptions below.** Same results, same events, same timeouts; only latency changes. The exceptions are what a suspension writes that a hold does not, and they are deliberate (option (a) of 4.2): a held run reads `status = running` where a suspended one reads `ready`, and it has **no `next_wake_at`** where a suspended one has its wake time. A client that lists runs by status, or that reads `next_wake_at` to learn when a run will resume, sees a held run differently for the length of the hold. Everything else a suspension carries is published before the hold (the query state, cleat#4358) or is refused (unflushed events under `--no-per-step-flush`). `TestEverythingASuspensionCarriesIsPublishedAtAHold` and `TestEverythingTheWorkerWritesAtASuspensionIsAccountedForAtAHold` hold both lists, so a new thing a suspension writes has to be accounted for here before it can land.
 
 ## 4. Option PARK (recommended)
 
