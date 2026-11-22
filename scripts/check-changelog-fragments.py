@@ -10,7 +10,9 @@ Refuses (exit 1):
   2. a PR that edits CHANGELOG.md directly, unless it FOLDS (deletes at least one fragment in the same diff) or comes from a release/* or hotfix/* branch;
   3. a PR that changes shipped code and adds no fragment and carries no `no-changelog: <reason>` line in its body.
 Exit 2 (UNMEASURED) when it could not establish what changed: no file list, an unreadable body. A guard that could not look must not say OK.
-`--no-body` (a merge-queue run, where the PR body does not exist) runs rules 1 and 2 and reports rule 3 as `checked on the pull request`.
+`--no-body` runs rules 1 and 2 without a body and reports rule 3 as `checked on the pull request`. It CANNOT see the `changelog-edit:` escape, which lives only in
+the body, so it refuses a direct CHANGELOG.md edit the body would have allowed. CI does not use it: a merge-queue run fetches the PR body from the API and passes
+--body-file (cleat#4370 was dequeued by exactly this). The flag stays for a caller that really has no body, and refuses rather than guesses.
 
 The changed-file list is `status<TAB>path` per line (git's --name-status; the CI step builds it from the pull-request files API, which is exact
 where `git diff base...HEAD` needs a merge base the shallow checkout lacks).
@@ -120,6 +122,105 @@ def changes_from_git(base):
     return [tuple(l.split("\t", 1)) for l in p.stdout.splitlines() if "\t" in l]
 
 
+CI_WORKFLOW = os.environ.get("CHANGELOG_GUARD_CI_YML", ".github/workflows/ci.yml")  # overridable only so the self-test can be run against an old copy
+
+
+def ci_step_script(path):
+    """The `run:` block of the workflow step named `Changelog fragment guard`, dedented, with its two `--self-test` lines removed (the step runs this very
+    self-test, and running it from inside itself would recurse). None when the step cannot be found."""
+    lines = open(path, encoding="utf-8").read().split("\n")
+    try:
+        i = next(n for n, l in enumerate(lines) if l.strip() == "- name: Changelog fragment guard")
+        r = next(n for n in range(i, len(lines)) if lines[n].strip() == "run: |")
+    except StopIteration:
+        return None
+    indent = len(lines[r]) - len(lines[r].lstrip()) + 2
+    body = []
+    for l in lines[r + 1:]:
+        if l.strip() and len(l) - len(l.lstrip()) < indent:
+            break
+        body.append(l[indent:] if l.strip() else "")
+    return "\n".join(l for l in body if "--self-test" not in l).strip() + "\n"
+
+
+def run_ci_step(work, script, root, event, files, body, body_fetch_fails=False, queue_ref="", pr_body=""):
+    """Runs the step's own shell, as the runner does (`bash -e`), with a stand-in `gh` that serves `files` and `body` and nothing else.
+    Returns (failure_recorded, combined_output); the step records a failed guard in LINT_FAILURES_FILE rather than by its exit status. Everything is made under
+    `work`, which the caller removes."""
+    d = tempfile.mkdtemp(dir=work)
+    os.makedirs(os.path.join(d, "bin"))
+    open(os.path.join(d, "files.tsv"), "w").write(files)
+    open(os.path.join(d, "body.txt"), "w").write(body)
+    gh = os.path.join(d, "bin", "gh")
+    open(gh, "w").write('#!/bin/bash\nfor a in "$@"; do case "$a" in */files*) cat "$FAKE_DIR/files.tsv"; exit 0;; esac; done\n'
+                        'if [ -n "$FAKE_BODY_FAILS" ]; then echo "gh: HTTP 502" >&2; exit 1; fi\ncat "$FAKE_DIR/body.txt"\n')
+    os.chmod(gh, 0o755)
+    open(os.path.join(d, "step.sh"), "w").write(script)
+    env = dict(os.environ, PATH=os.path.join(d, "bin") + os.pathsep + os.environ["PATH"], FAKE_DIR=d, GH_TOKEN="x", GITHUB_REPOSITORY="o/r",
+               LINT_FAILURES_FILE=os.path.join(d, "failures.txt"), EVENT_NAME=event, QUEUE_REF=queue_ref, PR_BODY=pr_body, PR_NUMBER="4370" if event == "pull_request" else "",
+               HEAD_REF="docs/x" if event == "pull_request" else "")
+    if body_fetch_fails:
+        env["FAKE_BODY_FAILS"] = "1"
+    else:
+        env.pop("FAKE_BODY_FAILS", None)
+    p = subprocess.run(["bash", "-e", os.path.join(d, "step.sh")], cwd=root, env=env, capture_output=True, text=True)
+    failed = os.path.exists(env["LINT_FAILURES_FILE"]) and os.path.getsize(env["LINT_FAILURES_FILE"]) > 0
+    return failed, p.stdout + p.stderr
+
+
+def queue_path_self_test(bad):
+    """The merge-queue branch of the CI step, run for real. A queue run has no body in its event, so the step fetches it; cleat#4370 was dequeued because it
+    did not, and the escape it declared could not be seen. Every verdict below is read together with the TEXT that explains it, because a fetch that fails
+    and a guard that refuses both leave the failure file non-empty."""
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    script = ci_step_script(os.path.join(root, CI_WORKFLOW) if not os.path.isabs(CI_WORKFLOW) else CI_WORKFLOW)
+    if script is None or "merge_group" not in script:
+        bad.append("the `Changelog fragment guard` step could not be found in %s, so the merge-queue path was not tested" % CI_WORKFLOW)
+        return
+    with tempfile.TemporaryDirectory(prefix="clguard-") as work:
+        _queue_path_cases(bad, work, script, root)
+
+
+def _queue_path_cases(bad, work, script, root):
+    q = "gh-readonly-queue/develop/pr-4370-b6689f55aca525925ff83eb6d6655f733eb05bf2"
+    edit = "M\tCHANGELOG.md\n"
+    code = "M\tengine/x.go\n"
+
+    def case(label, expect_fail, must_have, must_not_have=(), **kw):
+        failed, out = run_ci_step(work, script, root, kw.pop("event", "merge_group"), kw.pop("files", edit), kw.pop("body", ""), queue_ref=kw.pop("queue_ref", q), **kw)
+        if failed != expect_fail:
+            bad.append("queue path, %s: %s (output: %s)" % (label, "refused, want accepted" if failed else "accepted, want refused", " ".join(out.split())[:240]))
+        for t in must_have:
+            if t not in out:
+                bad.append("queue path, %s: the output does not say %r (output: %s)" % (label, t, " ".join(out.split())[:240]))
+        for t in must_not_have:
+            if t in out:
+                bad.append("queue path, %s: the output says %r and must not (output: %s)" % (label, t, " ".join(out.split())[:240]))
+
+    case("a direct CHANGELOG.md edit WITH the escape in the body", False, ["changelog-edit escape: a reason"], body="Refs #1.\nchangelog-edit: a reason\n")
+    case("a direct CHANGELOG.md edit WITHOUT the escape", True, ["edits CHANGELOG.md directly"], body="Refs #1.\n")
+    # "PR body (" is the GUARD's own refusal of a missing body file; if it appears, the step went on to the guard instead of stopping at the failed fetch
+    case("the body cannot be fetched", True, ["could not read the PR body of #4370 from the API"], ["OK: changelog guard", "changelog-edit escape", "PR body ("],
+         body="changelog-edit: a reason\n", body_fetch_fails=True)
+    # A failed `gh` still creates its redirect target, so without an explicit stop the guard would read an EMPTY body. For a change that needs no escape
+    # that passes: this is the case where the explicit failure decides, and the one above (a CHANGELOG edit is refused on an empty body anyway) cannot show it.
+    case("the body cannot be fetched, for a change that needs no body", True, ["could not read the PR body of #4370 from the API"], ["OK: changelog guard", "PR body ("],
+         files="M\tdocs/a.md\n", body="", body_fetch_fails=True)
+    case("shipped code, no fragment, no escape (rule 3 now applies in the queue)", True, ["no-changelog"], files=code, body="Refs #1.\n")
+    case("shipped code with a no-changelog reason", False, ["no-changelog escape: a pure refactor"], files=code, body="no-changelog: a pure refactor\n")
+    case("a queue ref that does not parse falls back to fragments only", False, ["fragments only"], queue_ref="refs/heads/x", body="")
+    # the body is DATA: shell syntax in it must not run, and the escape on the same line must still be read
+    sentinel = os.path.join(work, "ran")
+    # balanced on purpose: a payload with an unbalanced quote makes `eval` fail to PARSE and run nothing, which would let an evaluating step pass
+    hostile = "changelog-edit: ok $(touch %s) `touch %s` \"$(touch %s)\" '$(touch %s)'; touch %s\n" % ((sentinel,) * 5)
+    case("a body made of shell syntax", False, ["changelog-edit escape"], body=hostile)
+    if os.path.exists(sentinel):
+        bad.append("queue path: text in the PR body RAN as shell (the sentinel file exists)")
+    # and the pull_request path still takes its body from the environment
+    case("pull_request run, escape in the environment body", False, ["changelog-edit escape: r"], event="pull_request", pr_body="changelog-edit: r\n")
+    case("pull_request run, no escape", True, ["edits CHANGELOG.md directly"], event="pull_request", pr_body="")
+
+
 def self_test():
     bad = []
 
@@ -184,11 +285,13 @@ def self_test():
         os.chdir(cwd)
         if len(problems) != 1 or "nonsense" not in problems[0]:
             bad.append("a fragment with an unknown section gave %r" % problems)
+    queue_path_self_test(bad)
     if bad:
         print("SELF-TEST FAILED:\n  " + "\n  ".join(bad))
         return 3
     print("OK: check-changelog-fragments self-test (refuses shipped code with no fragment, a direct CHANGELOG.md edit and a reasonless escape; "
-          "accepts a fragment, a fold, a release branch, the escape, and a tests/docs/CI-only change)")
+          "accepts a fragment, a fold, a release branch, the escape, and a tests/docs/CI-only change; and runs the CI step's merge-queue path against "
+          "a stand-in `gh`: the escape is read from the fetched body, a body that cannot be fetched fails closed, and a body of shell syntax stays data)")
     return 0
 
 
