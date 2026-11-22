@@ -739,7 +739,7 @@ See the [Makefile](./Makefile) for details.
 ## Requirements
 
 - **Python 3.10+** -- the SDK uses `typing.get_type_hints` and `inspect.signature` for parameter introspection
-- **componentize-py ==0.25.1** -- required for WASM compilation, pinned to the version CI tests and the standard-library tables were measured on (`pip install componentize-py==0.25.1`); other versions are not measured, and may contain different standard-library modules
+- **componentize-py ==0.25.1** -- required for WASM compilation, pinned to the version CI tests and the standard-library tables were measured on (`pip install componentize-py==0.25.1`); other versions are not measured, and may contain different standard-library modules. `cleat build` prints a warning naming both versions when the installed one differs, and builds anyway
 - **Cleat CLI** (`cleat build`) -- the supported way to build a workflow
 - **WIT files** -- shipped inside the package (`cleat_sdk/wit/`); nothing to copy
 
