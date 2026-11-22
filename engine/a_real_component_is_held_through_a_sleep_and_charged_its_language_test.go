@@ -5,13 +5,16 @@ package engine
 import (
 	"context"
 	"fmt"
+	"net/http/httptest"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/cleat-team/cleat/monitoring/prometheus"
 	"github.com/cleat-team/cleat/wasm"
 )
 
@@ -54,6 +57,44 @@ type heldRun struct {
 	wokeAt, endedAt time.Time
 	// claimChecks is how many times the held run asked whether it still owned its claim (once per wake).
 	claimChecks int32
+	// refusals is what the resident set recorded as REASONS it did not hold a wait, scraped from its own metric after the execution ("none recorded" when it refused nothing, and
+	// when residency was off). A row that fails with "was not held" has only two possible stories, a hold that was refused and one that never reached the set, and this is the
+	// field that tells them apart: without it a once-in-a-while failure under load has to be reproduced to be explained.
+	refusals string
+}
+
+// residentRefusals reads the refusal counter back through the same /metrics handler an operator scrapes, so it is the production counter and not a second record kept for the
+// test. It returns "kind=sleep reason=memory x1" for each recorded (kind, reason), sorted, or "none recorded".
+func residentRefusals(t *testing.T, m *prometheus.Metrics) string {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	m.ServeHTTP().ServeHTTP(rec, httptest.NewRequest("GET", "/metrics", nil))
+	if rec.Code != 200 {
+		return fmt.Sprintf("UNMEASURED: /metrics answered %d", rec.Code)
+	}
+	var found []string
+	for _, line := range strings.Split(rec.Body.String(), "\n") {
+		if !strings.HasPrefix(line, "cleat_resident_refusals_total{") {
+			continue // comment lines mention the name too; only a sample line starts with it
+		}
+		labels := line[strings.Index(line, "{")+1 : strings.LastIndex(line, "}")]
+		count := strings.TrimSpace(line[strings.LastIndex(line, "}")+1:])
+		var kind, reason string
+		for _, kv := range strings.Split(labels, ",") {
+			switch {
+			case strings.HasPrefix(kv, "kind="):
+				kind = strings.Trim(strings.TrimPrefix(kv, "kind="), `"`)
+			case strings.HasPrefix(kv, "reason="):
+				reason = strings.Trim(strings.TrimPrefix(kv, "reason="), `"`)
+			}
+		}
+		found = append(found, fmt.Sprintf("kind=%s reason=%s x%s", kind, reason, count))
+	}
+	if len(found) == 0 {
+		return "none recorded"
+	}
+	sort.Strings(found)
+	return strings.Join(found, "; ")
 }
 
 func executeAComponent(t *testing.T, wasmBytes []byte, backendLangs []string, input string, resident bool, component string) heldRun {
@@ -68,6 +109,13 @@ func executeAComponent(t *testing.T, wasmBytes []byte, backendLangs []string, in
 // tryExecuteAComponent is executeAComponent for a caller that expects the execution to be able to fail (the fence rows), with backend options and a bound on the
 // whole workflow so that a fence that does NOT fire fails the row in seconds instead of hanging it.
 func tryExecuteAComponent(t *testing.T, wasmBytes []byte, backendLangs []string, input string, resident bool, component string, backendOpts []WasmtimeOption, engineOpts ...EngineOption) (heldRun, error) {
+	t.Helper()
+	return tryExecuteAComponentUnder(t, wasmBytes, backendLangs, input, resident, component, backendOpts, nil, engineOpts...)
+}
+
+// tryExecuteAComponentUnder is tryExecuteAComponent with a hook to reshape the residency policy the run is admitted under (nil keeps the default), which is how a row makes the set
+// refuse on purpose and checks that the refusal is the thing reported.
+func tryExecuteAComponentUnder(t *testing.T, wasmBytes []byte, backendLangs []string, input string, resident bool, component string, backendOpts []WasmtimeOption, shape func(*ResidencyConfig), engineOpts ...EngineOption) (heldRun, error) {
 	t.Helper()
 	ctx := context.Background()
 	rt, err := NewRuntime(ctx, 0, 0)
@@ -85,10 +133,19 @@ func tryExecuteAComponent(t *testing.T, wasmBytes []byte, backendLangs []string,
 	var checks atomic.Int32
 	var wokeAt atomic.Int64
 	var set *ResidentSet
+	var refusalMetrics *prometheus.Metrics
 	opts := []EngineOption{WithBackends(backendLangs, wt), WithWorkflowID("wf-held-component-" + component)}
 	if resident {
 		cfg := DefaultResidencyConfig()
 		cfg.MaxRuns = 2
+		refusalMetrics, err = prometheus.New(prometheus.Config{})
+		if err != nil {
+			t.Fatalf("prometheus.New: %v", err)
+		}
+		cfg.Metrics = refusalMetrics
+		if shape != nil {
+			shape(&cfg)
+		}
 		set, err = NewResidentSet(cfg)
 		if err != nil {
 			t.Fatalf("NewResidentSet: %v", err)
@@ -128,7 +185,10 @@ func tryExecuteAComponent(t *testing.T, wasmBytes []byte, backendLangs []string,
 	endedAt := time.Now()
 	close(stop)
 	wg.Wait()
-	out := heldRun{result: res, suspended: susp != nil, ops: operationsCalled(caller.mockCaller), maxCharged: maxCharged.Load(), claimChecks: checks.Load(), endedAt: endedAt}
+	out := heldRun{result: res, suspended: susp != nil, ops: operationsCalled(caller.mockCaller), maxCharged: maxCharged.Load(), claimChecks: checks.Load(), endedAt: endedAt, refusals: "none recorded"}
+	if refusalMetrics != nil {
+		out.refusals = residentRefusals(t, refusalMetrics)
+	}
 	if w := wokeAt.Load(); w != 0 {
 		out.wokeAt = time.Unix(0, w)
 	}
@@ -156,7 +216,7 @@ func requireHeldInPlace(t *testing.T, what string, off, on heldRun) {
 		t.Fatalf("PRECONDITION FAILED (%s, residency off): suspended=%v ops=%v, want a suspension after exactly one call. Without that, a run that completes in place under residency says nothing.", what, off.suspended, off.ops)
 	}
 	if on.suspended || len(on.ops) != 2 {
-		t.Fatalf("%s was not held through its sleep: suspended=%v ops=%v result=%q, want one execution that made both calls", what, on.suspended, on.ops, on.result)
+		t.Fatalf("%s was not held through its sleep: suspended=%v ops=%v result=%q, want one execution that made both calls. The resident set recorded these refusals: %s", what, on.suspended, on.ops, on.result, on.refusals)
 	}
 	if on.claimChecks != 1 {
 		t.Errorf("%s: the claim was checked %d times, want once (a wake)", what, on.claimChecks)
@@ -194,7 +254,7 @@ func TestPythonComponentIsHeldThroughADurableSleepAndChargedAsPython(t *testing.
 	// default is the long one.
 	longOn := executeAComponent(t, b, WasmtimeLanguages, `{"sleep_ms":1500}`, true, "held-sleep@1")
 	if longOn.suspended || len(longOn.ops) != 2 {
-		t.Fatalf("the 1500 ms run was not held in place: suspended=%v ops=%v", longOn.suspended, longOn.ops)
+		t.Fatalf("the 1500 ms run was not held in place: suspended=%v ops=%v. The resident set recorded these refusals: %s", longOn.suspended, longOn.ops, longOn.refusals)
 	}
 	if shortOn.gap < 350*time.Millisecond {
 		t.Errorf("a 400 ms sleep held the run for %s: it did not wait", shortOn.gap)

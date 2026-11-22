@@ -128,7 +128,7 @@ func TestAHeldCSharpRunLongerThanTheFenceIsNotChargedForTheHold(t *testing.T) {
 		t.Fatalf("a C# run held for 400 ms was stopped by a %s fence: the hold was charged to the guest's execution budget: %v", fence, err)
 	}
 	if on.suspended || len(on.ops) != 2 {
-		t.Fatalf("the held run did not finish in place under a %s fence: suspended=%v ops=%v", fence, on.suspended, on.ops)
+		t.Fatalf("the held run did not finish in place under a %s fence: suspended=%v ops=%v. The resident set recorded these refusals: %s", fence, on.suspended, on.ops, on.refusals)
 	}
 	if on.gap < 350*time.Millisecond {
 		t.Errorf("the two calls were %s apart: the run did not hold through the 400 ms sleep, so the fence was never tested against a hold longer than itself", on.gap)
