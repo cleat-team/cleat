@@ -137,19 +137,15 @@ jobs:
       - name: Install the pinned toolchain
         run: packages/cleat-ts/bootstrap.sh
 
-      # componentize-py builds the Python twin of the numbers workflow. Exact version, every file's sha256 listed, and
-      # --require-hashes so pip refuses anything not on that list; the version check below catches a different install.
+      # componentize-py builds the Python twin of the numbers workflow. The version and every file's sha256 live in
+      # python-sdk/componentize-py-requirements.txt, which scripts/install-componentize-py.sh installs with --require-hashes and checks.
       - name: Setup Python
         uses: actions/setup-python@v7
         with:
           python-version: "3.12"
 
       - name: Install the pinned componentize-py
-        run: |
-          python -m pip install --require-hashes --no-deps -r tests/typescript/python-requirements.txt
-          got=$(componentize-py --version)
-          echo "$got"
-          [ "$got" = "componentize-py 0.25.1" ] || { echo "UNMEASURED: expected componentize-py 0.25.1, got '$got'" >&2; exit 2; }
+        run: bash scripts/install-componentize-py.sh
 
       - name: Tests (the TypeScript tests, toolchain declared)
         run: |

@@ -147,7 +147,7 @@ jobs:
       - name: Install componentize-py and the Python SDK
         run: |
           pip install --upgrade pip
-          pip install componentize-py
+          bash scripts/install-componentize-py.sh
           pip install -e python-sdk
       - name: Python guest, kill-and-reclaim and the slow-service call
         run: |

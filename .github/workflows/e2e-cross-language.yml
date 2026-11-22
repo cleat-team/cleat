@@ -400,7 +400,7 @@ jobs:
           WASM_TOOLS_SHA256: "21c036c1740a0552124c79c6e2170cb61c5b016005671a6d5bc06cf642165431"
         run: |
           pip install --upgrade pip
-          pip install componentize-py
+          bash scripts/install-componentize-py.sh
 
           # The prebuilt release binary, not `cargo install wasm-tools`.
           #
