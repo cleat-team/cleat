@@ -507,6 +507,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
+	"strings"
 	"sync"
 	"unsafe"
 
@@ -1687,7 +1689,13 @@ func (b *wasmtimeBackend) ExecuteComponentCGo(
 	// tag, PYTHON ONLY); it goes red when restartFence is neutered and when Execute's registration is removed.
 	wasiConfig := wasmtime.NewWasiConfig()
 	wasiConfig.InheritStderr()
-	wasiConfig.SetEnv([]string{"PYTHONHOME", "PYTHONPATH"}, []string{"/", "/"})
+	envKeys, envVals := []string{"PYTHONHOME", "PYTHONPATH"}, []string{"/", "/"}
+	for _, kv := range strings.Split(os.Getenv("HELDMEM_GUEST_ENV"), ",") { // MEASUREMENT BRANCH ONLY (cleat#4378): extra guest environment, "K=V,K=V"
+		if k, v, ok := strings.Cut(kv, "="); ok && k != "" {
+			envKeys, envVals = append(envKeys, k), append(envVals, v)
+		}
+	}
+	wasiConfig.SetEnv(envKeys, envVals)
 	store.SetWasi(wasiConfig)
 
 	C.wasmtime_component_linker_allow_shadowing(linker, true)

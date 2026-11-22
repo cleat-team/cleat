@@ -31,12 +31,15 @@ func nums(input string) []int {
 // HeldMem is the guest.
 func HeldMem(h cleat.HostCalls, input string) (string, error) {
 	n := nums(input)
-	calls, mb := 0, 0
+	calls, mb, sleepMs := 0, 0, 0
 	if len(n) > 0 {
 		calls = n[0]
 	}
 	if len(n) > 1 {
 		mb = n[1]
+	}
+	if len(n) > 2 {
+		sleepMs = n[2]
 	}
 	for i := 0; i < calls; i++ {
 		if _, err := h.DurableCall("work", "step", `{"stage":"step"}`); err != nil {
@@ -50,9 +53,16 @@ func HeldMem(h cleat.HostCalls, input string) (string, error) {
 		}
 		keep = append(keep, b)
 	}
-	var ms runtime.MemStats
-	runtime.ReadMemStats(&ms)
-	if _, err := h.DurableCall("work", "park", `{"stage":"park","sys":`+strconv.FormatUint(ms.Sys, 10)+`}`); err != nil {
+	if sleepMs > 0 {
+		h.DurableSleepMs(int64(sleepMs))
+	} else {
+		var ms runtime.MemStats
+		runtime.ReadMemStats(&ms)
+		if _, err := h.DurableCall("work", "park", `{"stage":"park","sys":`+strconv.FormatUint(ms.Sys, 10)+`}`); err != nil {
+			return "", err
+		}
+	}
+	if _, err := h.DurableCall("work", "done", `{"stage":"done"}`); err != nil {
 		return "", err
 	}
 	return `{"kept":` + strconv.Itoa(len(keep)) + `}`, nil

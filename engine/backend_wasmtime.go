@@ -11,6 +11,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/bytecodealliance/wasmtime-go/v48"
@@ -211,6 +212,9 @@ func NewWasmtimeBackend(ctx context.Context, opts ...WasmtimeOption) (*wasmtimeB
 
 	cfg := wasmtime.NewConfig()
 	cfg.SetEpochInterruption(true)
+	if os.Getenv("HELDMEM_COW") == "0" { // MEASUREMENT BRANCH ONLY (cleat#4377): is each instance's initial memory shared copy-on-write?
+		cfg.SetMemoryInitCOWSet(false)
+	}
 	if lim.instructionLimit > 0 {
 		cfg.SetConsumeFuel(true)
 	}
@@ -231,6 +235,9 @@ func NewWasmtimeBackend(ctx context.Context, opts ...WasmtimeOption) (*wasmtimeB
 	b.startEpochTicker()
 	return b, nil
 }
+
+// heldMemCoreCompiles counts core-module compilations. MEASUREMENT BRANCH ONLY; not for merge.
+var heldMemCoreCompiles atomic.Int64
 
 // startEpochTicker launches a background goroutine that advances the
 // shared wasmtime engine's epoch every epochTickInterval. Engine.IncrementEpoch
@@ -910,6 +917,7 @@ func (b *wasmtimeBackend) Execute(ctx context.Context, wasmBytes []byte, entryPo
 		} else {
 			var err error
 			module, err = wasmtime.NewModule(b.engine, wasmBytes)
+			heldMemCoreCompiles.Add(1) // MEASUREMENT BRANCH ONLY (cleat#4377): counts core-module compilations
 			if DebugTiming {
 				fmt.Fprintf(os.Stderr, "TIMING: wasmtime compile CACHE MISS elapsed=%dms\n", time.Since(compileStart).Milliseconds())
 			}
