@@ -738,21 +738,45 @@ def _module_level_imports(tree: ast.AST) -> set[str]:
         for i in range(1, len(parts) + 1):
             found.add(".".join(parts[:i]))
 
+    def visit(child: ast.AST) -> None:
+        if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            return
+        if isinstance(child, ast.If):
+            # ``if TYPE_CHECKING:`` is False when the module runs, so its body is never
+            # executed at build time (only the ``else`` is), and ``if not TYPE_CHECKING:``
+            # is the reverse. Without this a type-only import silenced the warning.
+            kind = _type_checking_test(child.test)
+            if kind is not None:
+                for stmt in child.orelse if kind else child.body:
+                    visit(stmt)
+                return
+        if isinstance(child, ast.Import):
+            for alias in child.names:
+                add_path(alias.name)
+        elif isinstance(child, ast.ImportFrom) and child.level == 0 and child.module:
+            add_path(child.module)
+            for alias in child.names:
+                found.add(f"{child.module}.{alias.name}")
+        walk(child)
+
     def walk(node: ast.AST) -> None:
         for child in ast.iter_child_nodes(node):
-            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
-                continue
-            if isinstance(child, ast.Import):
-                for alias in child.names:
-                    add_path(alias.name)
-            elif isinstance(child, ast.ImportFrom) and child.level == 0 and child.module:
-                add_path(child.module)
-                for alias in child.names:
-                    found.add(f"{child.module}.{alias.name}")
-            walk(child)
+            visit(child)
 
     walk(tree)
     return found
+
+
+def _type_checking_test(test: ast.expr) -> bool | None:
+    """``True`` for ``TYPE_CHECKING`` (``typing.TYPE_CHECKING``), ``False`` for ``not`` it, else ``None``."""
+    if isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not):
+        inner = _type_checking_test(test.operand)
+        return None if inner is None else not inner
+    if isinstance(test, ast.Name) and test.id == "TYPE_CHECKING":
+        return True
+    if isinstance(test, ast.Attribute) and test.attr == "TYPE_CHECKING":
+        return True
+    return None
 
 
 def _codec_module(name: str) -> str:

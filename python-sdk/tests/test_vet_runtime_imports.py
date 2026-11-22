@@ -106,6 +106,37 @@ def test_py014_a_module_level_import_inside_try_or_if_counts_as_build_time(tmp_p
     assert _by_code(_analyze(tmp_path, _wrap("import csv", top=top)), "PY014") == []
 
 
+def test_py014_a_type_checking_import_is_not_a_build_time_import(tmp_path) -> None:
+    """KNOWN POSITIVE (cleat-review2 on #4353): `if TYPE_CHECKING:` is False at build time, so it recovers nothing."""
+    for guard in ("TYPE_CHECKING", "typing.TYPE_CHECKING", "t.TYPE_CHECKING"):
+        top = f"import typing\nimport typing as t\nfrom typing import TYPE_CHECKING\nif {guard}:\n    import csv\n"
+        warnings = _by_code(_analyze(tmp_path, _wrap("import csv", top=top)), "PY014")
+        assert len(warnings) == 1, guard
+
+
+def test_py014_the_else_of_a_type_checking_block_is_a_build_time_import(tmp_path) -> None:
+    """NEGATIVE CONTROL: what runs when the module runs still counts, so the fix does not over-correct."""
+    top = "from typing import TYPE_CHECKING\nif TYPE_CHECKING:\n    pass\nelse:\n    import csv\n"
+    assert _by_code(_analyze(tmp_path, _wrap("import csv", top=top)), "PY014") == []
+    top = "from typing import TYPE_CHECKING\nif not TYPE_CHECKING:\n    import csv\n"
+    assert _by_code(_analyze(tmp_path, _wrap("import csv", top=top)), "PY014") == []
+
+
+def test_py015_a_type_checking_import_does_not_silence_a_lazy_call(tmp_path) -> None:
+    top = "from typing import TYPE_CHECKING\nif TYPE_CHECKING:\n    import heapq\nimport collections\n"
+    warnings = _by_code(
+        _analyze(tmp_path, _wrap("collections.Counter('a').most_common(1)", top=top)), "PY015"
+    )
+    assert len(warnings) == 1
+
+
+def test_py014_a_dotted_top_level_import_also_imports_its_parent(tmp_path) -> None:
+    """`import xml.etree.ElementTree` at module level runs `xml` too, so a later in-function `import xml` is harmless."""
+    result = _analyze(tmp_path, _wrap("import xml", top="import xml.etree.ElementTree\n"))
+    assert _by_code(result, "PY014") == []
+    assert len(_by_code(_analyze(tmp_path, _wrap("import xml.etree.ElementTree")), "PY014")) == 1
+
+
 def test_py014_a_pure_helper_outside_the_durable_closure_is_checked_too(tmp_path) -> None:
     """The whole file is checked: a function that runs hits the limit whether or not it calls the host."""
     source = (
