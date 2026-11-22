@@ -131,6 +131,9 @@ jobs:
       CLEAT_CRASH_DB: postgres://cleat:cleat@localhost:5432/cleat?sslmode=disable
       CHAOS_SEED: ${{ github.event.inputs.seed || '1' }}
       CHAOS_MODE: ${{ github.event.inputs.mode || 'full' }}
+      # A COPY of tier1-gate.yml's pin, for the Python component row below. The provenance note and the bump procedure are written there; bump both together.
+      WASM_TOOLS_VERSION: "1.255.0"
+      WASM_TOOLS_SHA256: "a62237f4731c45f665f1115cad39acaeec02963cbc848c9473ab033eed837072"
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
@@ -159,6 +162,22 @@ jobs:
           set -euo pipefail
           CLEAT_CHAOS_SEED="$CHAOS_SEED" CLEAT_CHAOS_MODE="$CHAOS_MODE" CLEAT_CHAOS_SCRIPTS=8 \
             go test -json -tags chaos -count=1 -timeout 180m ./tests/chaos -run 'TestChaosSeeded' 2>&1 | tee chaos-seeded.log
+      # The Python COMPONENT row under "Timing rows" below needs wasm-tools, and nothing here installed it: componentize-py is a pip package and wasm-tools is not. That row
+      # declares CLEAT_REQUIRE_TOOLCHAINS=python so a missing tool fails it, and so it failed on the first nightly that ran it (2026-11-22, run 44981307897: "missing:
+      # wasm-tools") while a comment claimed the toolchain "was installed above". Same fetch as tier1-gate.yml: the retrying, sha256-verified script, not a bare curl.
+      # No actions/cache here: this runs once a night, and the script's own retry window is what protects it. It sits RIGHT BEFORE the row that needs it, and runs even if an earlier
+      # sweep step failed (like that row), so a release-download outage cannot also skip the Python guest and seeded steps above.
+      - name: Install wasm-tools
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          tarball="${RUNNER_TEMP}/wasm-tools.tar.gz"
+          unpacked="${RUNNER_TEMP}/wasm-tools-unpacked"
+          bash scripts/fetch-wasm-tools.sh "${tarball}"
+          mkdir -p "${unpacked}"
+          tar xzf "${tarball}" -C "${unpacked}" --strip-components=1
+          sudo mv "${unpacked}/wasm-tools" /usr/local/bin/wasm-tools
+          wasm-tools --version
       # Timing-dependent rows that must not gate a pull request. They sit behind the `timing` build tag (so the Tier 1 gate, which counts a skip as a failure,
       # never sees them as skipped: they are not compiled there), and they size their work from a measurement on the machine, so a heavily loaded runner can end
       # one PRECONDITION FAILED. That is an honest "this measured nothing", never a pass, and it belongs here and not in a required job. Runs even if an earlier
@@ -166,7 +185,7 @@ jobs:
       - name: Timing rows (build tag timing)
         if: ${{ !cancelled() }}
         env:
-          # The component twin compiles a Python guest, and the toolchain was installed above. Declared so that a missing tool FAILS the row instead of skipping it:
+          # The component twin compiles a Python guest, and its toolchain (componentize-py and wasm-tools) is installed by the two steps above. Declared so that a missing tool FAILS the row instead of skipping it:
           # a skip here would read as a pass.
           CLEAT_REQUIRE_TOOLCHAINS: python
         run: |
