@@ -202,6 +202,28 @@ type CompactionState struct {
 	// Summary is populated when Events exceeds DefaultMaxCompactedEvents and is
 	// truncated. It records the truncation count for observability.
 	Summary *TruncationSummary `json:"summary,omitempty"`
+
+	// StampedFrom is the index in Events of the first event that was captured by a build that carries the drain stamps (InDeferPhase, InDeferSegment) and a signal send's
+	// target (cleat#4310, cleat#4231). Events BEFORE it were compacted by an earlier build and have those fields UNKNOWN, not absent; events from it on have them.
+	// nil means no event in this state is stamped, which is what every state written before this field decodes to, so the old behaviour is the default.
+	//
+	// It is per EVENT RANGE and not per state, because a state is EXTENDED by every compaction: a run first compacted by an old build and compacted again after an
+	// upgrade holds both kinds, and a single version number would either judge the old events by stamps they never had (refusing a healthy drain) or leave the new ones
+	// exempt forever. It is a pointer so that 0 ("every event is stamped") can be told from absent. It is an ADDITIVE field on purpose: a 0.5.x decoder ignores
+	// unknown fields and never reads Version, and when it rewrites the state it drops this field and the per-event stamps TOGETHER, so a rolled-back state degrades to
+	// "none stamped" (the old exempt behaviour), never to a marker that claims stamps a rewrite removed. See unstampedRecords.
+	StampedFrom *int `json:"stamped_from,omitempty"`
+}
+
+// unstampedRecords is how many records at the front of the history this state expands whose drain stamps (and send target) are unknown. A nil state expands nothing.
+func (cs *CompactionState) unstampedRecords() int {
+	if cs == nil {
+		return 0
+	}
+	if cs.StampedFrom == nil {
+		return len(cs.Events)
+	}
+	return min(max(*cs.StampedFrom, 0), len(cs.Events))
 }
 
 // TruncationSummary records how many compacted events were truncated to keep
@@ -536,7 +558,15 @@ func extractCompactionStateFrom(prev *CompactionState, events []EventRecord) (*C
 	openChildren := make(map[string]bool) // runID -> still open
 	childDetails := make(map[string]CompactedChild)
 	prevTruncated := 0
+	// Where the events captured BY THIS BUILD begin in the extended list: after everything the previous state held when it held no stamped events (a state written
+	// by an earlier build), where it said they begin when it did, and at the start for a first compaction.
+	stampedFrom := 0
 	if prev != nil {
+		if prev.StampedFrom == nil {
+			stampedFrom = len(prev.Events)
+		} else {
+			stampedFrom = *prev.StampedFrom
+		}
 		cs.Events = append(cs.Events, prev.Events...)
 		cs.CompactedStep = prev.CompactedStep + len(events)
 		for _, d := range prev.PendingDefers {
@@ -615,6 +645,10 @@ func extractCompactionStateFrom(prev *CompactionState, events []EventRecord) (*C
 			ce.Service = ev.Service
 			ce.Op = ev.Op
 			ce.Response = ev.Response
+			// A send's TARGET (cleat#4231). Compaction dropped it, so the identity check on replay of a compacted send could only compare the signal name: a send to
+			// another workflow with the same name replayed as the recorded one. The store keeps it in the run_id column, and the event checksum does not read it for a
+			// signal, so capturing it changes no hash. Empty for a delivery.
+			ce.RunID = ev.RunID
 		case EventTypeDefer:
 			ce.DeferID = ev.DeferID
 			ce.DeferDesc = ev.DeferDescription
@@ -789,11 +823,13 @@ func extractCompactionStateFrom(prev *CompactionState, events []EventRecord) (*C
 	if len(cs.Events) > DefaultMaxCompactedEvents {
 		truncated := len(cs.Events) - DefaultMaxCompactedEvents
 		cs.Events = cs.Events[truncated:]
+		stampedFrom = max(stampedFrom-truncated, 0) // the oldest events are what is dropped, so the boundary moves up with them
 		cs.CompactedStep -= truncated
 		cs.Summary = &TruncationSummary{TruncatedCount: truncated + prevTruncated}
 	} else if prevTruncated > 0 {
 		cs.Summary = &TruncationSummary{TruncatedCount: prevTruncated}
 	}
+	cs.StampedFrom = &stampedFrom
 
 	return cs, nil
 }
@@ -846,6 +882,7 @@ func buildFullHistoryFromCompaction(tail []EventRecord, cs *CompactionState) []E
 			rec.Service = ce.Service
 			rec.Op = ce.Op
 			rec.Response = ce.Response
+			rec.RunID = ce.RunID
 		case EventCodeDefer:
 			rec.DeferID = ce.DeferID
 			rec.DeferDescription = ce.DeferDesc
