@@ -46,6 +46,11 @@ on:
         default: "1"
       mode:
         description: "sample (bounded) or full (every boundary x every fault) run the Chaos full sweep job; pr-sample runs the Chaos sample job exactly as a pull request does, with `seed` standing in for the PR number"
+        type: choice
+        options:
+          - full
+          - sample
+          - pr-sample
         required: false
         default: "full"
       resident_max_runs:
@@ -111,12 +116,15 @@ jobs:
           CLEAT_CHAOS_MODE: sample
           CLEAT_CHAOS_SAMPLE: "60"
           CLEAT_CHAOS_SCRIPTS: "4"
+          # An input reaches the script only as a variable, never as ${{ }} text inside it: an expression is substituted BEFORE the shell parses the
+          # script, so an input containing a quote or `$(...)` would become shell.
+          RESIDENT_INPUT: ${{ github.event.inputs.resident_max_runs }}
         run: |
           set -euo pipefail
-          echo "chaos-sample config: event=${{ github.event_name }} CLEAT_CHAOS_SEED=${CLEAT_CHAOS_SEED} CLEAT_CHAOS_MODE=${CLEAT_CHAOS_MODE} CLEAT_CHAOS_SAMPLE=${CLEAT_CHAOS_SAMPLE} CLEAT_CHAOS_SCRIPTS=${CLEAT_CHAOS_SCRIPTS} CLEAT_CHAOS_RESIDENT_MAX_RUNS='${CLEAT_CHAOS_RESIDENT_MAX_RUNS:-}'"
+          echo "chaos-sample config: event=${GITHUB_EVENT_NAME} CLEAT_CHAOS_SEED=${CLEAT_CHAOS_SEED} CLEAT_CHAOS_MODE=${CLEAT_CHAOS_MODE} CLEAT_CHAOS_SAMPLE=${CLEAT_CHAOS_SAMPLE} CLEAT_CHAOS_SCRIPTS=${CLEAT_CHAOS_SCRIPTS} CLEAT_CHAOS_RESIDENT_MAX_RUNS='${CLEAT_CHAOS_RESIDENT_MAX_RUNS:-}'"
           # This job does not take the residency input (it runs the product default, which is the point); refuse it rather than ignore it silently.
-          test -z "${{ github.event.inputs.resident_max_runs }}" || { echo "::error::resident_max_runs is not an input of the sample job; leave it empty with mode=pr-sample"; exit 1; }
-          test -n "${CLEAT_CHAOS_SEED}" || { echo "::error::no seed: neither a pull request number nor the seed input"; exit 1; }
+          test -z "${RESIDENT_INPUT}" || { echo "::error::resident_max_runs is not an input of the sample job; leave it empty with mode=pr-sample"; exit 1; }
+          [[ "${CLEAT_CHAOS_SEED}" =~ ^[0-9]+$ ]] || { echo "::error::the seed must be a non-negative integer (a pull request number or the seed input); got '${CLEAT_CHAOS_SEED}'"; exit 1; }
           go test -json -tags chaos -count=1 -timeout 20m ./tests/chaos -run 'TestChaosSeeded' 2>&1 | tee chaos-sample.log
       - uses: actions/upload-artifact@v7
         if: always()
@@ -154,6 +162,15 @@ jobs:
       # Read by tests/chaos startWorker (residencyFlags). Empty means "pass nothing", so a scheduled run is unchanged.
       CLEAT_CHAOS_RESIDENT_MAX_RUNS: ${{ github.event.inputs.resident_max_runs || '' }}
     steps:
+      # Both numeric inputs reach the harness as environment variables; refuse anything but an integer before a 340-minute job spends a minute on it.
+      - name: Validate the dispatch inputs
+        env:
+          SEED_VALUE: ${{ github.event.inputs.seed || '1' }}
+          RESIDENT_VALUE: ${{ github.event.inputs.resident_max_runs }}
+        run: |
+          set -euo pipefail
+          [[ "${SEED_VALUE}" =~ ^[0-9]+$ ]] || { echo "::error::seed must be a non-negative integer; got '${SEED_VALUE}'"; exit 1; }
+          [[ -z "${RESIDENT_VALUE}" || "${RESIDENT_VALUE}" =~ ^[0-9]+$ ]] || { echo "::error::resident_max_runs must be empty or a non-negative integer; got '${RESIDENT_VALUE}'"; exit 1; }
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
