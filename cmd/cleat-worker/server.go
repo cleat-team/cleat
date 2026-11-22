@@ -393,6 +393,45 @@ func (s *apiServer) writeError(w http.ResponseWriter, status int, msg string) {
 	s.writeJSON(w, status, map[string]string{"error": msg})
 }
 
+// signalReplyBody is the body for a signal the store ACCEPTED (cleat#4340). It says "delivered" unless the target is a run that is settled but can be reopened under the same id (failed,
+// terminated, dead_lettered: engine.IsRedrivableStatus): for those the signal is stored and the run reads it only if an operator retries or re-replays it, so claiming "delivered" would be a claim
+// about something that has not happened. Same 200 and the same `status` key, so a client that only checks the code is unaffected; a client that reads `status` is told the truth, and `run_status` names
+// the run's state.
+//
+// The lookup is ADVISORY and never an error: the store has already accepted the signal, so a failed or empty read falls back to the plain body rather than turning a stored signal into a failure. It
+// reports the run's status at the moment of the reply, which can have moved since (a retry in between makes "stored" conservative, never wrong in the other direction).
+func (s *apiServer) signalReplyBody(ctx context.Context, st engine.WorkflowStore, id string) map[string]any {
+	wf, err := st.GetWorkflowByID(ctx, id)
+	if err != nil || wf == nil || !engine.IsRedrivableStatus(wf.Status) {
+		return map[string]any{"status": "delivered"}
+	}
+	return map[string]any{
+		"status":     "stored",
+		"run_status": wf.Status,
+		"detail":     "stored; this run reads it only if it is retried or re-replayed",
+	}
+}
+
+// writeSignalNotOpen answers a signal sent to a run that is no longer open with 409 and says what the caller needs: that it is the run's STATE that refuses, which state, and, for a run that
+// continued as new, which run is the current one (cleat#4340). It reports whether err was that error.
+//
+// 409 and not 404 or 410: the run exists and the caller may see it, so "not found" would be a lie and would be indistinguishable from the foreign-tenant case that must stay one answer; the
+// request is not at fault but the target's state is, which is what Conflict means. The body keeps the `error` key every other error response carries and adds fields a client can switch on.
+// `continued_to` is omitted when the run simply finished, and is the END of the chain as of now when it continued, because a client holding the first run of a long chain would otherwise be
+// refused once per link.
+func (s *apiServer) writeSignalNotOpen(w http.ResponseWriter, err error) bool {
+	var ne *engine.WorkflowNotOpenError
+	if !errors.As(err, &ne) {
+		return false
+	}
+	body := map[string]string{"error": ne.Error(), "detail": "workflow_not_open", "status": ne.Status}
+	if ne.ContinuedTo != "" {
+		body["continued_to"] = ne.ContinuedTo
+	}
+	s.writeJSON(w, http.StatusConflict, body)
+	return true
+}
+
 // bodyTooLargeConfigured and bodyTooLargeFixed write the 413 for an oversized
 // request body, naming the limit that was exceeded and which knob moves it.
 //
@@ -1609,6 +1648,9 @@ func (s *apiServer) handleSignal(w http.ResponseWriter, r *http.Request, id stri
 	if key != "" && canAbsorb {
 		already, err := si.DeliverSignalIdempotent(r.Context(), id, req.SignalName, payload, key)
 		if err != nil {
+			if s.writeSignalNotOpen(w, err) {
+				return
+			}
 			// Same TOCTOU window as the auth check above: callerOwnsTarget
 			// already confirmed this id exists, so ErrWorkflowNotFound here
 			// means it was purged in between -- a genuine not-found, not a
@@ -1630,11 +1672,14 @@ func (s *apiServer) handleSignal(w http.ResponseWriter, r *http.Request, id stri
 		// This path was the CLOSEST to the policy already: right status, right
 		// shape, wrong place for the marker. start and reprocess had to change
 		// their status and their field names as well.
-		s.writeJSON(w, 200, withReplayFlag(map[string]any{"status": "delivered"}, already))
+		s.writeJSON(w, 200, withReplayFlag(s.signalReplyBody(r.Context(), st, id), already))
 		return
 	}
 
 	if err := st.DeliverSignal(r.Context(), id, req.SignalName, payload); err != nil {
+		if s.writeSignalNotOpen(w, err) {
+			return
+		}
 		// Same TOCTOU window as above.
 		if errors.Is(err, engine.ErrWorkflowNotFound) {
 			s.writeError(w, 404, "not found")
@@ -1647,7 +1692,7 @@ func (s *apiServer) handleSignal(w http.ResponseWriter, r *http.Request, id stri
 	// send the same signal deliberately twice. The flag is still present and
 	// false, because "this is not a replay" is an answer and an absent field is
 	// not.
-	s.writeJSON(w, 200, withReplayFlag(map[string]any{"status": "delivered"}, false))
+	s.writeJSON(w, 200, withReplayFlag(s.signalReplyBody(r.Context(), st, id), false))
 }
 
 func (s *apiServer) handleCancel(w http.ResponseWriter, r *http.Request, id string) {

@@ -538,7 +538,7 @@ func (s *MySQLStore) DeliverSignal(ctx context.Context, workflowID, signalName, 
 	}
 	defer tx.Rollback()
 	if err := s.deliverSignalTx(ctx, tx, workflowID, signalName, payload); err != nil {
-		return err
+		return withContinuedTo(ctx, err, s.successorOfRun)
 	}
 	return tx.Commit()
 }
@@ -591,7 +591,8 @@ func (s *MySQLStore) DeliverSignalIdempotent(ctx context.Context, workflowID, si
 	}
 
 	if err := s.deliverSignalTx(ctx, tx, workflowID, signalName, payload); err != nil {
-		return false, err
+		// The idempotency key claimed above rolls back with this transaction, so a refused delivery does not spend the token.
+		return false, withContinuedTo(ctx, err, s.successorOfRun)
 	}
 	return false, tx.Commit()
 }
@@ -626,7 +627,7 @@ func (s *MySQLStore) deliverSignalTx(ctx context.Context, tx *sql.Tx, workflowID
 	res, err := tx.ExecContext(ctx, `
 		INSERT INTO workflow_signals (workflow_id, signal_name, payload, tenant_id)
 		SELECT ?, ?, ?, ?
-		WHERE EXISTS (SELECT 1 FROM workflow_instances WHERE id = ? AND tenant_id = ?)
+		WHERE EXISTS (SELECT 1 FROM workflow_instances WHERE id = ? AND tenant_id = ? AND status NOT IN ('done', 'cancelled'))
 	`, workflowID, signalName, encodeJSONPayload(payload), s.tenantID, workflowID, s.tenantID)
 	if err != nil {
 		if isSignalsWorkflowFKViolation(err) {
@@ -637,7 +638,15 @@ func (s *MySQLStore) deliverSignalTx(ctx context.Context, tx *sql.Tx, workflowID
 	if n, err := res.RowsAffected(); err != nil {
 		return fmt.Errorf("deliver signal: rows affected: %w", err)
 	} else if n == 0 {
-		return ErrWorkflowNotFound
+		// Nothing was written: no run of this tenant by this id, or a SETTLED one (cleat#4340). See signalRefusal.
+		var status string
+		switch err := tx.QueryRowContext(ctx, `SELECT status FROM workflow_instances WHERE id = ? AND tenant_id = ?`, workflowID, s.tenantID).Scan(&status); {
+		case errors.Is(err, sql.ErrNoRows):
+			return ErrWorkflowNotFound
+		case err != nil:
+			return fmt.Errorf("deliver signal: classify refusal: %w", err)
+		}
+		return signalRefusal(workflowID, status, true)
 	}
 	// This UPDATE only runs once the INSERT above has proven the EXISTS
 	// predicate true, under this same tenant, in this same transaction, so

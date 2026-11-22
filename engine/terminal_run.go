@@ -150,6 +150,20 @@ func readChildOutcomeFollowingTheChain(
 	}
 }
 
+// latestRunInChain returns the last run of the chain id belongs to as of now, or "" when id has no successor (it did not continue). It is ADVICE for an error message (cleat#4340): nothing
+// reads a row after it, so there is no walk-then-read here to go stale, and it lives in this file because terminalRunID may not be called anywhere else.
+func latestRunInChain(
+	ctx context.Context,
+	id string,
+	successorOf func(context.Context, string) (string, error),
+) (string, error) {
+	end, err := terminalRunID(ctx, id, successorOf)
+	if err != nil || end == id {
+		return "", err
+	}
+	return end, nil
+}
+
 // terminalRunID walks a ContinueAsNew chain forward and returns the id of its
 // last run, without reading any row but the ones it hops through.
 //

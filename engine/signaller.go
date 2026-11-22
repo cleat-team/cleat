@@ -491,6 +491,11 @@ func (s *execSession) deliverSignal(ctx context.Context, targetRunID, signalName
 		// returns one error for both, and this keeps it one outcome. Do not log the target's existence either way.
 		s.engine.log().WarnContext(ctx, "deliver_signal: target not found", "workflow_id", s.workflowID, "tenant_id", s.tenantID)
 		return signalOutcomeNotFound
+	case errors.Is(err, ErrWorkflowNotOpen):
+		// A target that has SETTLED (cleat#4340): nothing will ever read a signal sent to it, so it is terminal for the sender like a missing one. It reports the existing not-found outcome and not a
+		// new one because the outcome classes are part of the guest ABI every SDK decodes, and a new class is a change in all of them; the log line says which it was.
+		s.engine.log().WarnContext(ctx, "deliver_signal: target is no longer open", "workflow_id", s.workflowID, "tenant_id", s.tenantID, "error", err)
+		return signalOutcomeNotFound
 	default:
 		s.engine.log().ErrorContext(ctx, "deliver_signal failed", "workflow_id", s.workflowID, "tenant_id", s.tenantID, "error", err)
 		return signalOutcomeDeliveryFailed

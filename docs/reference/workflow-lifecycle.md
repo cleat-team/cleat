@@ -61,6 +61,47 @@ to be.
 on a `terminating` row still cuts the defer phase short rather than being refused, exactly as
 before.
 
+**A signal to a run that can never be reopened is refused; one to a run that can be is accepted, and the
+reply says so.** cleat#4340. `done`, `cancelled` and a run that continued as new cannot be reopened, and a
+continuation is a different run with a different id, so a signal sent to one used to be stored under its own id,
+read by no one, and answered `200 {"status":"delivered"}`. It is now refused, in the statement that would have
+stored it, so nothing is written:
+
+```
+POST /api/workflows/<id>/signal  →  409 {"error":"…", "detail":"workflow_not_open",
+                                         "status":"done", "continued_to":"<run>"}
+```
+
+`status` is `done` or `cancelled`. `continued_to` appears only for a run that **continued as new**, and names the
+**last run in its chain as of that moment** (not the next link, which may itself be closed), which is the run to
+send the signal to instead; it is absent for a run that simply finished. The refusal is the same under an
+`Idempotency-Key`, and it does **not** spend the key. A run that does not exist, or belongs to another tenant, is
+still `404`, identically, so this answer reveals nothing about another tenant's runs. Inside a workflow,
+`SignalWorkflow` to such a target returns the existing **not-found** outcome (a new outcome class would be an ABI
+change in every SDK), and a plugin sees `plugin.ErrWorkflowNotFound`, so an awaiter registered for the run is dropped,
+as for a missing one.
+
+**`failed`, `terminated` and `dead_lettered` are different, and are deliberately NOT refused.** An operator can
+reopen them under the **same id** (`re-replay`, and `retry` for `dead_lettered`; see *Redriving a settled run*), and
+the signals already stored for them stay in place, so "signal a dead-lettered run, then retry it" works and the
+signal is read after the retry. That is accepted and stored exactly as before, but the reply no longer claims
+delivery:
+
+```
+POST /api/workflows/<id>/signal  →  200 {"status":"stored", "run_status":"dead_lettered",
+                                         "detail":"stored; this run reads it only if it is retried or re-replayed",
+                                         "idempotent_replay":false}
+```
+
+It is the same `200`, so a client that checks only the code is unaffected; one that reads `status` is told the
+truth. `run_status` is the run's status at the moment of the reply. An open run still answers
+`{"status":"delivered"}`. The set refused is exactly "settled and not redrivable", derived from the engine's own
+`reReplayableStatuses`, not a second list.
+
+Two open questions, both for the owner and neither decided here: whether a signal to a continued run should instead
+be **forwarded** to its successor (cleat#4340), and whether the three redrivable statuses should **refuse** like the
+others (cleat#4345).
+
 Re-derive the written set with:
 
 ```

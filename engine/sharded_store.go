@@ -728,7 +728,8 @@ func (s *ShardedStore) DeliverSignal(ctx context.Context, workflowID, signalName
 	if shard == nil {
 		return fmt.Errorf("deliver_signal: no shard available -- check shard configuration in CLEAT_SHARD_CONFIG")
 	}
-	return shard.Store.DeliverSignal(ctx, workflowID, signalName, payload)
+	// A refusal for a continued run names the end of its chain, and a chain crosses shards routinely, so the shard's own (shard-local) answer is replaced by the cross-shard one (cleat#4340).
+	return withContinuedTo(ctx, shard.Store.DeliverSignal(ctx, workflowID, signalName, payload), s.successorAcrossShards)
 }
 
 // DeliverSignalIdempotent routes to the shard owning the workflow, like its
@@ -747,7 +748,8 @@ func (s *ShardedStore) DeliverSignalIdempotent(ctx context.Context, workflowID, 
 	if !ok {
 		return false, fmt.Errorf("shard %q: %T cannot absorb a duplicate signal", shard.Config.Name, shard.Store)
 	}
-	return si.DeliverSignalIdempotent(ctx, workflowID, signalName, payload, idempotencyKey)
+	replay, err := si.DeliverSignalIdempotent(ctx, workflowID, signalName, payload, idempotencyKey)
+	return replay, withContinuedTo(ctx, err, s.successorAcrossShards)
 }
 
 // ConsumeSignal routes by workflow ID.

@@ -90,6 +90,10 @@ import (
 // a_plugin_start_workflow_is_tenant_scoped_test.go: the defect is in what
 // the STORE does under a foreign tenant's context, which a mock cannot show.
 
+// WHY EVERY START IN THIS FILE CARRIES A UNIQUE KEY (cleat#4340). These tests used a fixed key ("start-"+tenant), and idempotency keys outlive a test run in the shared database, so a second
+// invocation did not start a run: it REPLAYED the run the first one left behind, which that run's cleanup had already terminated. The known-positive controls then signalled a terminated run and
+// passed only because delivering a signal to a settled run was accepted and lost, so they measured nothing about a run that can receive one. A unique key makes every start a fresh, open run.
+
 // TestSignalPluginWorkflow_PostgresScopesToTheTargetsTenant is the
 // PostgreSQL half.
 func TestSignalPluginWorkflow_PostgresScopesToTheTargetsTenant(t *testing.T) {
@@ -129,7 +133,7 @@ func TestSignalPluginWorkflow_PostgresScopesToTheTargetsTenant(t *testing.T) {
 			t.Fatalf("deploy def for %s: %v", tenant, err)
 		}
 		runID, _, err := st.StartNewRun(ctx, "", "signal-2209", 1, json.RawMessage(`{}`),
-			"start-"+tenant, tenant, 0)
+			"start-"+tenant+"-"+uuid.NewString(), tenant, 0)
 		if err != nil {
 			t.Fatalf("start run for %s: %v", tenant, err)
 		}
@@ -323,7 +327,7 @@ func TestSignalPluginWorkflow_PostgresShardedStoreScopesToTheTargetsTenant(t *te
 		// against a different def name, and reusing it here would fail with
 		// ErrIdempotencyKeyDefMismatch instead of exercising the start path.
 		runID, _, err := ss.WithTenant(tenant).StartNewRun(ctx, "", "signal-2209-sharded", 1, json.RawMessage(`{}`),
-			"start-sharded-"+tenant, tenant, 0)
+			"start-sharded-"+tenant+"-"+uuid.NewString(), tenant, 0)
 		if err != nil {
 			t.Fatalf("start run for %s via ShardedStore: %v", tenant, err)
 		}
@@ -499,7 +503,7 @@ func TestSignalPluginWorkflow_MSSQLScopesToTheTargetsTenant(t *testing.T) {
 			t.Fatalf("deploy def for %s: %v", tenant, err)
 		}
 		runID, _, err := st.StartNewRun(ctx, "", "signal-2209-mssql", 1, json.RawMessage(`{}`),
-			"start-"+tenant, tenant, 0)
+			"start-"+tenant+"-"+uuid.NewString(), tenant, 0)
 		if err != nil {
 			t.Fatalf("start run for %s: %v", tenant, err)
 		}

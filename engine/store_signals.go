@@ -243,7 +243,8 @@ func (s *PostgresStore) DeliverSignalIdempotent(ctx context.Context, workflowID,
 		return false, fmt.Errorf("deliver signal: derive tenant key: %w", err)
 	}
 	if err := deliverSignalTx(ctx, tx, s.tenantID, workflowID, signalName, payload, tc); err != nil {
-		return false, err
+		// The idempotency key claimed above is rolled back with this transaction, so a refused delivery does not spend the token.
+		return false, withContinuedTo(ctx, err, s.successorOfRun)
 	}
 	pgNotify(ctx, tx, s.notifyChannel)
 	return false, tx.Commit()
@@ -286,7 +287,7 @@ func (s *PostgresStore) DeliverSignal(ctx context.Context, workflowID, signalNam
 		return fmt.Errorf("deliver signal: derive tenant key: %w", err)
 	}
 	if err := deliverSignalTx(ctx, tx, s.tenantID, workflowID, signalName, payload, tc); err != nil {
-		return err
+		return withContinuedTo(ctx, err, s.successorOfRun)
 	}
 	pgNotify(ctx, tx, s.notifyChannel)
 	return tx.Commit()
@@ -356,6 +357,7 @@ func deliverSignalTx(ctx context.Context, tx *sql.Tx, tenantID, workflowID, sign
 		INSERT INTO workflow_signals (workflow_id, signal_name, payload, tenant_id)
 		SELECT $1, $2, $3, $4
 		WHERE EXISTS (SELECT 1 FROM workflow_instances WHERE id = $1 AND tenant_id = $4)
+		  AND NOT EXISTS (SELECT 1 FROM workflow_leases WHERE id = $1 AND tenant_id = $4 AND status IN ('done', 'cancelled'))
 	`, workflowID, signalName, payload, tenantID)
 	if err != nil {
 		if isSignalsWorkflowFKViolationPG(err) {
@@ -366,7 +368,16 @@ func deliverSignalTx(ctx context.Context, tx *sql.Tx, tenantID, workflowID, sign
 	if n, err := res.RowsAffected(); err != nil {
 		return fmt.Errorf("deliver signal: rows affected: %w", err)
 	} else if n == 0 {
-		return ErrWorkflowNotFound
+		// Nothing was written, and which of two reasons it was decides the error (cleat#4340): no run of the caller's tenant by this id, or a run that is SETTLED and would have stored the signal where
+		// nothing reads it. The lease row holds the status, and a run with no lease row cannot be settled, so it stays NotFound as it was.
+		var status string
+		switch err := tx.QueryRowContext(ctx, `SELECT status FROM workflow_leases WHERE id = $1 AND tenant_id = $2`, workflowID, tenantID).Scan(&status); {
+		case errors.Is(err, sql.ErrNoRows):
+			return ErrWorkflowNotFound
+		case err != nil:
+			return fmt.Errorf("deliver signal: classify refusal: %w", err)
+		}
+		return signalRefusal(workflowID, status, true)
 	}
 	// Two writes, two different windows, and neither replaces the other.
 	//
