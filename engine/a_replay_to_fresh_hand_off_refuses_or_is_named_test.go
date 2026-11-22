@@ -226,8 +226,8 @@ func engineMethodBodies(t *testing.T) map[string]string {
 
 // handOffCanaries are functions that must be seen calling exitReplay(): replay halves of the same kind as the ones that moved, that still leave replay themselves.
 // replaySetScope was a canary until SetScope moved onto the dispatcher (cleat#4211), which now owns that hand-off, replaySideEffect before it (cleat#4152,
-// G1a), replayCallWithHeartbeat, replayCall and replayPluginCall after it (G3). When one of these moves, replace it with another that does, and the failure names which one went.
-var handOffCanaries = []string{"replayPluginCallStreaming", "runDetached"}
+// G1a), replayCallWithHeartbeat, replayCall, replayPluginCall and replayPluginCallStreaming after it (G3). When one of these moves, replace it with another that does, and the failure names which one went.
+var handOffCanaries = []string{"DurableScheduleInvoke", "runDetached"}
 
 // handOffScanProblem says why the hand-off scan cannot be trusted on this tree, or "" when it saw what it is meant to see. It is a function of the scan's
 // OUTPUT so a known positive can hand it a scan that saw nothing (TestTheHandOffScanVacuityCheckRefusesAScanThatSawNothing).
@@ -387,7 +387,7 @@ func TestEveryFrontierAnswerReachesARefusalOrIsNamed(t *testing.T) {
 	unrefused, examined := unrefusedFrontierAnswers(bodies, neverRefusedSpecs(t))
 
 	// Vacuity per thing: the lookup that escaped the first scan, and a function that spells the predicate and DOES refuse.
-	frontierCanaries := []string{"SideEffectRecorded", "replayPluginCallStreaming"}
+	frontierCanaries := []string{"SideEffectRecorded", "SideEffect"}
 	for _, canary := range frontierCanaries {
 		if !answersAtTheFrontier(bodies[canary]) {
 			t.Fatalf("canary %s was not seen answering at the frontier; the scan is reading the wrong thing and would pass whatever the tree said", canary)

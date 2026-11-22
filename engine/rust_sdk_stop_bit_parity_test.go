@@ -101,7 +101,7 @@ var rustCallsTheHostCanRefuse = []sdkRefusableCall{
 	{"child_workflow_with_options", "childWorkflowWithVersion"},
 	// plugin_call goes through step, so its refusal is the dispatcher's and the host method is the site (cleat#4152, G3).
 	{"plugin_call", "PluginCall"},
-	{"plugin_call_streaming", "freshPluginCallStreaming"},
+	{"plugin_call_streaming", "PluginCallStreaming"},
 	{"await_signals_ms", "DurableAwaitSignals"},
 	// AwaitPromise is a stop site through suspendingAwaitResult rather than
 	// stopBeforeNewWork (cleat#3383): a fresh await that has to wait answers with

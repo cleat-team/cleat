@@ -757,27 +757,71 @@ func (s *execSession) writePluginResult(ctx context.Context, m api.Module, inv p
 	return packDurableCallResult(int(written), writeErrorClass(writtenEC), writtenEC)
 }
 
+// pluginCallStreamingStep is plugin_call_streaming (cleat#4152, G3). A streaming call is a MULTI-RECORD step: one plugin_call_stream_chunk record per chunk,
+// each at its own step, the last of them the finished chunk. A stream-level failure (no registry, an unregistered function, a call-guard refusal, a secret-only
+// violation, a function that fails to start) is ONE synthetic finished chunk, marked as not plugin output, carrying the error code the guest was told.
+//
+// WHAT THE DISPATCHER ADDS, each a change to the old replay that cleat#4339's table pinned as it was:
+//
+//   - Identity is the plugin and the function, on EVERY record of the run. The old replay named neither, so a record for another function or plugin was served
+//     as this call's answer; it is a divergence now (the table's two KNOWN_DEFECT rows).
+//   - A run ends at its finished chunk, so two adjacent streams are two answers and not one, and the second no longer reaches the frontier and runs live again
+//     (the table's adjacent-streams rows). EndsWithoutFinal keeps the old reading of a stream that never finished: prefix chunks followed by another call's record
+//     are a complete stream with no final, answered from what was recorded.
+//   - A first record that is not a chunk is a divergence that consumes nothing. The old replay answered SUCCESS with a `null` stream and did not advance.
+//   - The stop and suspension refusals are the dispatcher's, on both ways into Fresh, so a stopping or suspended session refuses a replayed call's frontier as it
+//     refuses any call, and the frontier hand-off is the dispatcher's too.
+//
+// A history that ENDS inside a stream (prefix chunks, then the end of history) is answered from those chunks and not re-run: that is what the old replay did for
+// a stream that never finished, and it cannot tell that from a stream whose worker was lost mid-way, so a lost-mid-stream run is still served as the partial
+// stream it recorded. (It now leaves replay on that call, through the dispatcher, where it stayed in replay before.)
+//
+// An EMPTY stream records nothing and so cannot be told from a call that is not there (cleat#4342); two adjacent streams of the SAME function, the first empty,
+// are still read as one by a replay. That is a limit of the recorded history, not of the dispatcher.
+var pluginCallStreamingStep = stepSpec{
+	Name: "plugin_call_streaming",
+	NoDivergenceDetail: "its old replay never reported a divergence: it read whatever chunk records were there and answered, so there was no message to carry detail; " +
+		divergenceSweepNote,
+	Effect:           effectEffect,
+	Records:          recordsMany,
+	Want:             EventTypePluginCallStreamChunk,
+	Result:           layoutDurableCall,
+	EndsWithoutFinal: true,
+	Identity: func(a stepArgs, rec *EventRecord) string {
+		if rec.PluginName != a.s1 || rec.PluginFunc != a.s2 {
+			return fmt.Sprintf("plugin stream function %s/%s, recorded %s/%s", a.s1, a.s2, rec.PluginName, rec.PluginFunc)
+		}
+		return ""
+	},
+	Role: func(_ stepArgs, rec *EventRecord) recordRole {
+		switch {
+		case rec.EventType != EventTypePluginCallStreamChunk:
+			return roleForeign
+		case rec.StreamFinish:
+			return roleFinal
+		}
+		return rolePrefix
+	},
+	DecodeRun: func(c *stepCtx, run []EventRecord) int64 { return c.s.decodePluginCallStreamingRun(c, run) },
+	Fresh:     func(c *stepCtx) int64 { return c.s.freshPluginCallStreaming(c) },
+}
+
+func init() { registerStepSpec(&pluginCallStreamingStep) }
+
+// PluginCallStreaming is plugin_call_streaming.
 func (s *execSession) PluginCallStreaming(ctx context.Context, m api.Module,
 	pluginName, functionName, inputJSON string,
 	responsePtr, responseMaxLen uint32) int64 {
-	if s.isReplay {
-		return s.replayPluginCallStreaming(ctx, m, pluginName, functionName, inputJSON, responsePtr, responseMaxLen)
-	}
-	return s.freshPluginCallStreaming(ctx, m, pluginName, functionName, inputJSON, responsePtr, responseMaxLen)
+	return s.step(ctx, m, &pluginCallStreamingStep, stepArgs{s1: pluginName, s2: functionName, s3: inputJSON, outPtr: responsePtr, outMaxLen: responseMaxLen})
 }
 
-// recordStreamError records a synthetic stream chunk event representing a
-// stream-level error (e.g. registry not found, call guard rejection). This
-// ensures replayPluginCallStreaming can reproduce the same error result.
+// streamErrorRecord is the synthetic stream chunk that represents a stream-level error (e.g. registry not found, call guard rejection), so that a replay can
+// reproduce the same error result.
 //
-// code is the call error code the guest is about to be told, stored so replay
-// can report the same one instead of deriving it a second time. Prefer
-// streamFailure below, which records and returns together; this stays
-// separate only because the tests that check what gets recorded call it
-// directly.
-func (s *execSession) recordStreamError(pluginName, functionName, inputJSON, errMsg string, code byte) {
-	rec := EventRecord{
-		Step:             s.stepCount,
+// code is the call error code the guest is about to be told, stored so replay can report the same one instead of deriving it a second time.
+func streamErrorRecord(step int, pluginName, functionName, inputJSON, errMsg string, code byte) EventRecord {
+	return EventRecord{
+		Step:             step,
 		EventType:        EventTypePluginCallStreamChunk,
 		PluginName:       pluginName,
 		PluginFunc:       functionName,
@@ -787,96 +831,64 @@ func (s *execSession) recordStreamError(pluginName, functionName, inputJSON, err
 		StreamFinish:     true,
 		StreamErrCode:    int(code),
 	}
-	s.recordEvent(rec)
 }
 
-// streamFailure records a stream-level failure and returns the packed result
-// the guest sees, deriving both from one `code` argument.
+// freshPluginCallStreaming is the spec's Fresh. The refusals (a stopping session, a defer segment, a session that has already suspended) are the dispatcher's,
+// applied before this runs on both ways in, including the replay frontier (cleat#4143).
 //
-// One function for both halves on purpose. The failure this prevents is the
-// one recordedFailureCode's comment describes for the non-streaming path: a
-// fresh run and the replay of it classifying the same step differently. Four
-// call sites each writing a record and then packing a constant is four chances
-// for those to drift apart, and the drift would not show up as a broken test
-// -- it would show up as a workflow that retried on the first run and gave up
-// on the replay.
-func (s *execSession) streamFailure(ctx context.Context, m api.Module,
-	pluginName, functionName, inputJSON, errMsg string, code byte,
-	responsePtr, responseMaxLen uint32) int64 {
-
-	s.recordStreamError(pluginName, functionName, inputJSON, errMsg, code)
-	written, _ := s.writeResult(ctx, m, responsePtr, errMsg, responseMaxLen)
-	return packDurableCallResult(int(written), code, 1)
-}
-
-func (s *execSession) freshPluginCallStreaming(ctx context.Context, m api.Module,
-	pluginName, functionName, inputJSON string,
-	responsePtr, responseMaxLen uint32) int64 {
-	// The refusal lives HERE and not in PluginCallStreaming: this function is reached from the non-replay entry AND from replayPluginCallStreaming at the replay
-	// frontier, and a defer segment over a run that has history starts in replay, so its body's first new call arrives by the second
-	// way. A refusal only in the entry was skipped (cleat#4143, measured on a real worker: a terminate's segment made the body's next
-	// call and never ran the registered cleanup). SetScope's refusal (cleat#4091) and AcquireLock's (cleat#4140) are now the dispatcher's, for both ways in (cleat#4211).
-	if s.stopBeforeNewWork() {
-		return callSuspendSentinel
+// A history that ended INSIDE a stream arrives with c.Prefix, the chunks it recorded; they are the answer (see the spec's comment), and nothing runs.
+func (s *execSession) freshPluginCallStreaming(c *stepCtx) int64 {
+	ctx := c.ctx
+	pluginName, functionName, inputJSON := c.args.s1, c.args.s2, c.args.s3
+	if len(c.Prefix) > 0 {
+		return s.decodePluginCallStreamingRun(c, c.Prefix)
 	}
-	if res, ok := s.refuseIfSuspended("PluginCallStreaming", callSuspendSentinel); ok {
-		return res
+
+	// fail records a stream-level failure and returns the packed result the guest sees, deriving both from the ONE `code` argument, and records the input it is given,
+	// which is inputJSON as called or its redacted form.
+	//
+	// One closure for both halves on purpose. The failure this prevents is the one recordedFailureCode's comment describes for the non-streaming path: a fresh run and
+	// the replay of it classifying the same step differently. Several call sites each writing a record and then packing a constant is several chances for those to drift
+	// apart, and the drift would not show up as a broken test -- it would show up as a workflow that retried on the first run and gave up on the replay. It is a closure
+	// in the Fresh function, and not a method, so that every Record call stays inside what the dispatcher has already refused.
+	fail := func(recordedInput, errMsg string, code byte) int64 {
+		c.Record(streamErrorRecord(s.stepCount, pluginName, functionName, recordedInput, errMsg, code))
+		written, _ := s.writeResult(ctx, c.m, c.args.outPtr, errMsg, c.args.outMaxLen)
+		return packDurableCallResult(int(written), code, 1)
 	}
 
 	// Look up the streaming plugin function.
 	if s.engine.pluginStreamRegistry == nil {
 		errMsg := "plugin_call_streaming: no plugin stream registry configured"
-		// callErrorUnknown, matching the non-streaming path's own answer for
-		// the same condition (freshPluginCallInternal): a worker with no
-		// registry is not a service that might succeed next time.
-		return s.streamFailure(ctx, m, pluginName, functionName, inputJSON, errMsg,
-			callErrorUnknown, responsePtr, responseMaxLen)
+		// callErrorUnknown, matching the non-streaming path's own answer for the same condition: a worker with no registry is not a service that might succeed next
+		// time.
+		return fail(inputJSON, errMsg, callErrorUnknown)
 	}
 
 	fn, secretOnlyFields, ok := s.engine.pluginStreamRegistry.Lookup(pluginName, functionName)
 	if !ok {
 		errMsg := fmt.Sprintf("plugin stream function %s/%s not registered. Check that the plugin is deployed and its version satisfies the workflow's plugin_deps.", pluginName, functionName)
-		// callFailureCode, which is what freshPluginCallInternal reports for an
-		// unregistered function: the lookup failure becomes fnErr there and
-		// fnErr packs callFailureCode. This site used to report
-		// callErrorUnknown, so the same deployment gap was retryable to a
-		// workflow calling the plugin and non-retryable to one streaming from
-		// it. IMPROVEMENT-PLAN 2.35.
-		return s.streamFailure(ctx, m, pluginName, functionName, inputJSON, errMsg,
-			callFailureCode, responsePtr, responseMaxLen)
+		// callFailureCode, which is what the non-streaming path reports for an unregistered function: the same deployment gap was once retryable to a workflow calling
+		// the plugin and non-retryable to one streaming from it (IMPROVEMENT-PLAN 2.35).
+		return fail(inputJSON, errMsg, callFailureCode)
 	}
 
 	// Check plugin call guard for streaming calls too.
 	//
-	// Redact with the ALREADY-LOOKED-UP secretOnlyFields before recording,
-	// not raw inputJSON: this rejection short-circuits BEFORE
-	// checkSecretOnlyFields runs below, so inputJSON has not been validated
-	// yet and may still hold a literal in a declared field. Recording it
-	// unredacted here was reported in review of cleat#2043 (cleat#2329) --
-	// same defect as freshPluginCallInternal's call-guard branch, same fix:
-	// redact on every recorded failure for a function that declares
-	// secret-only fields, not only on the secret-only check's own failure.
+	// Redact with the ALREADY-LOOKED-UP secretOnlyFields before recording, not raw inputJSON: this rejection short-circuits BEFORE checkSecretOnlyFields runs below,
+	// so inputJSON has not been validated yet and may still hold a literal in a declared field. Recording it unredacted here was reported in review of cleat#2043
+	// (cleat#2329): redact on every recorded failure for a function that declares secret-only fields, not only on the secret-only check's own failure.
 	if s.engine.pluginCallGuard != nil && s.callerPluginName != "" {
 		if err := s.engine.pluginCallGuard.Check(s.callerPluginName, pluginName); err != nil {
-			errMsg := err.Error()
-			// callFailureCode, as above: the guard rejection becomes fnErr on
-			// the non-streaming path and packs callFailureCode there.
-			redactedInput := redactSecretOnlyFields(secretOnlyFields, inputJSON)
-			return s.streamFailure(ctx, m, pluginName, functionName, redactedInput, errMsg,
-				callFailureCode, responsePtr, responseMaxLen)
+			// callFailureCode, as above: the guard rejection becomes fnErr on the non-streaming path and packs callFailureCode there.
+			return fail(redactSecretOnlyFields(secretOnlyFields, inputJSON), err.Error(), callFailureCode)
 		}
 	}
 
-	// Secret-only field check (cleat#2043) -- see freshPluginCallInternal's
-	// identical check for the reasoning. streamFailure records via
-	// recordStreamError, which takes inputJSON as a plain argument, so
-	// passing the REDACTED string through it is enough: no new no-record path
-	// needed here, unlike what an earlier draft of this fix assumed.
+	// Secret-only field check (cleat#2043) -- see the non-streaming path's identical check for the reasoning.
 	if violation := checkSecretOnlyFields(secretOnlyFields, inputJSON); violation != "" {
 		errMsg := fmt.Sprintf("plugin stream function %s/%s: %s", pluginName, functionName, violation)
-		redactedInput := redactSecretOnlyFields(secretOnlyFields, inputJSON)
-		return s.streamFailure(ctx, m, pluginName, functionName, redactedInput, errMsg,
-			callFailureCode, responsePtr, responseMaxLen)
+		return fail(redactSecretOnlyFields(secretOnlyFields, inputJSON), errMsg, callFailureCode)
 	}
 
 	callCtx := s.pluginCallContext(ctx, s.stepCount)
@@ -885,25 +897,15 @@ func (s *execSession) freshPluginCallStreaming(ctx context.Context, m api.Module
 	chunkCh, err := fn(callCtx, inputJSON)
 	if err != nil {
 		errMsg := fmt.Sprintf("plugin_call_streaming %s/%s: %v", pluginName, functionName, err)
-		// The stream function itself failed. This is the direct analogue of a
-		// non-streaming plugin call returning an error, which packs
-		// callFailureCode -- so the identical failure was retryable through
-		// PluginCall and non-retryable through PluginCallStreaming. inputJSON
-		// has already passed checkSecretOnlyFields at this point (structurally
-		// safe to record as-is), but redact anyway for the same
-		// belt-and-braces reason freshPluginCallInternal now does on its
-		// fn()-error path: nothing downstream should have to re-derive that
-		// this call was already validated to record it safely.
-		redactedInput := redactSecretOnlyFields(secretOnlyFields, inputJSON)
-		return s.streamFailure(ctx, m, pluginName, functionName, redactedInput, errMsg,
-			callFailureCode, responsePtr, responseMaxLen)
+		// The stream function itself failed: the direct analogue of a non-streaming plugin call returning an error, which packs callFailureCode. inputJSON has already
+		// passed checkSecretOnlyFields at this point, but redact anyway, for the same belt-and-braces reason the non-streaming path does on its fn()-error path.
+		return fail(redactSecretOnlyFields(secretOnlyFields, inputJSON), errMsg, callFailureCode)
 	}
 
 	var collected []plugin.StreamEvent
 	index := 0
-	// Drain the channel on exit to prevent goroutine leak when the context
-	// is cancelled mid-stream. The producer blocks on send until the receiver
-	// reads; draining ensures it can exit.
+	// Drain the channel on exit to prevent goroutine leak when the context is cancelled mid-stream. The producer blocks on send until the receiver reads; draining
+	// ensures it can exit.
 	defer func() {
 		for range chunkCh {
 		}
@@ -931,38 +933,25 @@ func (s *execSession) freshPluginCallStreaming(ctx context.Context, m api.Module
 				StreamFinish:     chunk.Finish,
 				StreamData:       true, // plugin output, never the synthetic failure chunk (cleat#4117)
 			}
-			persistence := s.recordEvent(rec)
+			persistence := c.Record(rec)
 
 			// A CHUNK THE DATABASE REFUSED IS NOT SHOWN TO ANYBODY. cleat#1572.
 			//
-			// recordEvent returns nil-and-silent on a failed write -- the
-			// commonest cause being ErrFenceLost, where another worker has
-			// taken this run, so nothing this worker records is going to be in
-			// the run's history. Publishing anyway would put tokens on a user's
-			// screen that the system does not believe happened, which is the
-			// precise failure the preview decision on this issue set out to
-			// prevent. It is also the case a reader cannot recover from: there
-			// is no row to reconnect to.
+			// recordEvent returns nil-and-silent on a failed write -- the commonest cause being ErrFenceLost, where another worker has taken this run, so nothing this
+			// worker records is going to be in the run's history. Publishing anyway would put tokens on a user's screen that the system does not believe happened, which
+			// is the precise failure the preview decision on this issue set out to prevent. It is also the case a reader cannot recover from: there is no row to
+			// reconnect to.
 			//
-			// eventNotAttempted is DIFFERENT and is published. No database, or
-			// --no-per-step-flush, is a configuration rather than a refusal;
-			// the chunk is carried with Durable false so a reader that cares
-			// can tell, rather than being silently dropped.
+			// eventNotAttempted is DIFFERENT and is published. No database, or --no-per-step-flush, is a configuration rather than a refusal; the chunk is carried
+			// with Durable false so a reader that cares can tell, rather than being silently dropped.
 			if persistence == eventFlushFailed {
 				index++
 				continue
 			}
 
-			// AFTER recordEvent, never before -- so a reader that sees a chunk
-			// live can always find it in event_history afterwards, and never
-			// the other way round.
-			// EVERY FIELD COMES OFF rec, not off the locals it was built
-			// from. They are equal today -- rec is assigned from them three
-			// lines up -- and the point is that they stay equal: the whole
-			// contract with a reader is that a chunk seen live can be found
-			// again in event_history under the SAME (step, index). Reading
-			// the published cursor from anywhere but the recorded row leaves
-			// that agreement to be maintained by hand.
+			// AFTER the record, never before -- so a reader that sees a chunk live can always find it in event_history afterwards, and never the other way round.
+			// EVERY FIELD COMES OFF rec, not off the locals it was built from: the whole contract with a reader is that a chunk seen live can be found again in
+			// event_history under the SAME (step, index).
 			s.engine.streamHub.Publish(s.workflowID, LiveChunk{
 				Step:    rec.Step,
 				Index:   rec.StreamChunkIndex,
@@ -974,97 +963,53 @@ func (s *execSession) freshPluginCallStreaming(ctx context.Context, m api.Module
 		}
 	}
 done:
+	if c.recorded == 0 {
+		// A stream that produced no chunk has nothing to record, and the guest is answered null. A replay cannot tell this call from one that is not there (cleat#4342).
+		c.RecordsNothing("the stream produced no chunk: there is no chunk event to record")
+	}
 	// Return collected chunks as JSON.
 	outJSON, err := json.Marshal(collected)
 	if err != nil {
 		errMsg := fmt.Sprintf("plugin_call_streaming %s/%s: marshal chunks: %v", pluginName, functionName, err)
-		written, _ := s.writeResult(ctx, m, responsePtr, errMsg, responseMaxLen)
+		written, _ := s.writeResult(ctx, c.m, c.args.outPtr, errMsg, c.args.outMaxLen)
 		return packDurableCallResult(int(written), callErrorUnknown, 1)
 	}
 
-	written, writtenEC := s.writeOut(ctx, m, responsePtr, string(outJSON), responseMaxLen)
+	written, writtenEC := s.writeOut(ctx, c.m, c.args.outPtr, string(outJSON), c.args.outMaxLen)
 	return packDurableCallResult(int(written), writeErrorClass(writtenEC), writtenEC)
 }
 
-func (s *execSession) replayPluginCallStreaming(ctx context.Context, m api.Module,
-	pluginName, functionName, inputJSON string,
-	responsePtr, responseMaxLen uint32) int64 {
-
-	// Past recorded history -- switch to fresh execution.
-	//
-	// Without this the loop below reads nothing, `collected` stays nil, and
-	// the function returns SUCCESS with a marshalled `null` for a stream the
-	// plugin was never asked to produce. Every streaming call after a
-	// workflow's first suspension took that path.
-	//
-	// replayPluginCall, in this file, is the shape this should have had: it
-	// ends with exactly this pair of lines under exactly this comment. The
-	// streaming twin was written without them.
-	if s.stepCount >= len(s.history) {
-		s.exitReplay()
-		return s.freshPluginCallStreaming(ctx, m, pluginName, functionName, inputJSON, responsePtr, responseMaxLen)
-	}
-
+// decodePluginCallStreamingRun answers a replayed streaming call from the run of chunk records the dispatcher read (or, for a history that ended inside the
+// stream, from the chunks it had recorded). It touches nothing in the world.
+func (s *execSession) decodePluginCallStreamingRun(c *stepCtx, run []EventRecord) int64 {
+	ctx, m := c.ctx, c.m
+	pluginName, functionName := c.args.s1, c.args.s2
+	responsePtr, responseMaxLen := c.args.outPtr, c.args.outMaxLen
 	var collected []plugin.StreamEvent
 	index := 0
-	// The code recorded alongside the chunk, used only in the single-finished-
-	// chunk case below where there is exactly one record and so no ambiguity
-	// about which one it came from.
-	var recordedErrCode byte
-	// Whether the last chunk read was recorded as plugin output (cleat#4117). Read only in the single-chunk case below, where "the last" is
-	// "the only".
-	var recordedAsData bool
-
-	// Read consecutive stream chunk events from history.
-	for s.stepCount < len(s.history) {
-		rec := s.history[s.stepCount]
-		if rec.EventType != EventTypePluginCallStreamChunk {
-			break
-		}
-		if !s.advanceReplayStep(ctx, &rec) {
-			return 0
-		}
-		recordedErrCode = byte(rec.StreamErrCode)
-		recordedAsData = rec.StreamData
-
-		chunk := plugin.StreamEvent{
-			Index:   rec.StreamChunkIndex,
-			Content: rec.PluginOutput,
-			Finish:  rec.StreamFinish,
-		}
-		if rec.StreamChunkIndex > 0 || (rec.StreamChunkIndex == 0 && rec.StreamFinish) {
-			chunk.Index = rec.StreamChunkIndex
-		} else {
+	for _, rec := range run {
+		chunk := plugin.StreamEvent{Index: rec.StreamChunkIndex, Content: rec.PluginOutput, Finish: rec.StreamFinish}
+		if !(rec.StreamChunkIndex > 0 || (rec.StreamChunkIndex == 0 && rec.StreamFinish)) {
 			chunk.Index = index
 		}
 		collected = append(collected, chunk)
 		index++
 	}
+	last := run[len(run)-1]
 
-	// A single finished chunk with no real chunk content is a stream-level
-	// error recorded by recordStreamError. Return it with error status to
-	// match what freshPluginCallStreaming produced on the error path.
+	// A single finished chunk with no real chunk content is a stream-level error recorded by streamErrorRecord. Return it with error status to match what Fresh
+	// produced on the error path.
 	//
-	// The code comes off the record rather than from a constant here, which is
-	// what lets fresh and replay agree while the fresh classification changes
-	// underneath them. This site used to report callErrorUnknown for all four
-	// causes, because none of them was distinguishable once they arrived as
-	// one synthetic chunk -- and three of the four should have matched the
-	// non-streaming path's callFailureCode. IMPROVEMENT-PLAN 2.35.
+	// The code comes off the record rather than from a constant here, which is what lets fresh and replay agree while the fresh classification changes underneath
+	// them. StreamErrCode is absent on every chunk written before IMPROVEMENT-PLAN 2.35 and so reads back as 0 == callErrorUnknown, which is exactly what those
+	// failures reported when they were fresh: determinism is per recorded step, not across eras.
 	//
-	// StreamErrCode is absent on every chunk written before that change and so
-	// reads back as 0 == callErrorUnknown, which is exactly what those
-	// failures reported when they were fresh: an event recorded then still
-	// replays the way it always did, and only events recorded from now on
-	// carry the corrected code. That is the property 2.35 asks for --
-	// determinism is per recorded step, not across eras.
-	//
-	// BUT only when the chunk is not marked as plugin output. A stream function that sends exactly one final chunk records the same row a
-	// failure does, and reading it back as a failure turned a successful stream into an error on every resume, with the chunk's own text as the
-	// message (cleat#4117). StreamData is what tells them apart; a record without it replays as it always did.
-	if len(collected) == 1 && collected[0].Finish && !recordedAsData {
+	// BUT only when the chunk is not marked as plugin output. A stream function that sends exactly one final chunk records the same row a failure does, and reading
+	// it back as a failure turned a successful stream into an error on every resume, with the chunk's own text as the message (cleat#4117). StreamData is what
+	// tells them apart; a record without it replays as it always did.
+	if len(collected) == 1 && collected[0].Finish && !last.StreamData {
 		written, _ := s.writeResult(ctx, m, responsePtr, collected[0].Content, responseMaxLen)
-		return packDurableCallResult(int(written), recordedErrCode, 1)
+		return packDurableCallResult(int(written), byte(last.StreamErrCode), 1)
 	}
 
 	// Return collected chunks as JSON.
