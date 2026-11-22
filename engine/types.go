@@ -766,6 +766,12 @@ type execSession struct {
 	// claimCheckFailures are the reasons a held run was suspended at its wake instead of resumed: the store no longer had it assigned to this worker, or could not
 	// be asked (park.go, cleat#4162). Test-visible, like parkViolations.
 	claimCheckFailures []string
+	// publishedQueryState is the query state the store was last given by a hold admission (park.go publishForHold), so the next admission writes only if the guest has changed it
+	// since. Nil until the first publish.
+	publishedQueryState map[string]string
+	// holdPublishFailures are the reasons a wait was NOT held because what a suspension would have written could not be written first: the publish failed, the handle cannot
+	// publish, or events are unflushed under noPerStepFlush (park.go, cleat#4162). The run suspended instead, and a suspension writes all of it. Test-visible, like claimCheckFailures.
+	holdPublishFailures []string
 
 	// handlingEventWriteFailure is set while stopAfterFailedEventWrite is acting on a failure, so the continue-as-new it triggers for a
 	// refused quota cannot re-enter it through its own failed write (the quota refuses that event too).

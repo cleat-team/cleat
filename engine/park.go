@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"fmt"
+	"maps"
 	"time"
 )
 
@@ -145,6 +146,10 @@ func (s *execSession) parkOrSuspend(ctx context.Context, req parkRequest) parkOu
 		if s.execCtx != nil {
 			waitCtx = s.execCtx
 		}
+		// Everything a suspension would have written that a hold would not, written BEFORE the hold, or the hold is refused and the run suspends (which writes it).
+		if !s.publishForHold(waitCtx) {
+			return s.suspendFor(req)
+		}
 		switch out := s.engine.wakeSource.Wait(waitCtx, req); out {
 		case parkWoke, parkDeadline:
 			// This is the one place a held run returns to its guest, so it is the one place the claim is revalidated, and no wake source (the timer now, a
@@ -161,6 +166,40 @@ func (s *execSession) parkOrSuspend(ctx context.Context, req parkRequest) parkOu
 		}
 	}
 	return s.suspendFor(req)
+}
+
+// publishForHold writes, before a run is held, what only a SUSPENSION would otherwise have written, and reports whether the hold may go ahead. A run that is held through a wait does
+// not return to the worker, and the worker persists a segment's state only when its execution returns (FinalizeWorkflowSegment, at a suspension or the end), so anything the guest
+// set before the wait would be invisible to every client for the whole hold: the AI agent platform scenario's approval wait polls with 2 s sleeps, each held, and the status it sets
+// once before the first poll was never visible (cleat#4162).
+//
+// What a suspension carries, read from the suspending return in Execute: the events recorded this segment, the guest's query state, and its defer table. The events are already
+// written step by step unless the engine runs with noPerStepFlush; the defer table is rebuilt from events on a replay; that leaves query state, which is published here, and the
+// unflushed events, which are NOT flushed here but REFUSE the hold. Flushing them would write them twice (once now, once by the finalize that appends the segment's events), and I
+// would have to show that idempotent on three dialects; a refusal costs one replay and is the cheap error direction. The structural guard
+// (TestEverythingASuspensionCarriesIsPublishedAtAHold) ties this function to that return statement, so a field added there must be handled here or exempted with a reason.
+//
+// Any failure refuses: a refusal is always safe, because the suspension that follows writes it all.
+func (s *execSession) publishForHold(ctx context.Context) bool {
+	if s.engine != nil && s.engine.noPerStepFlush && len(s.unflushed) > 0 {
+		s.holdPublishFailures = append(s.holdPublishFailures, fmt.Sprintf("%d event(s) are unflushed (per-step flush is off), and a hold would keep them in memory across the wait", len(s.unflushed)))
+		return false
+	}
+	if len(s.queryState) == 0 || maps.Equal(s.queryState, s.publishedQueryState) {
+		return true
+	}
+	if s.engine == nil || s.engine.publishState == nil {
+		s.holdPublishFailures = append(s.holdPublishFailures, "the run has query state and this handle cannot publish it")
+		return false
+	}
+	// A copy: the guest keeps writing to s.queryState, and the next admission compares against exactly what was written.
+	snapshot := maps.Clone(s.queryState)
+	if err := s.engine.publishState(ctx, snapshot); err != nil {
+		s.holdPublishFailures = append(s.holdPublishFailures, "publishing the query state failed: "+err.Error())
+		return false
+	}
+	s.publishedQueryState = snapshot
+	return true
 }
 
 // suspendFor is the suspension a refused wait sets.

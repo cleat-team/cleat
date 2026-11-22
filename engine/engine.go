@@ -130,7 +130,10 @@ type Engine struct {
 	// claimCheck is asked, from parkOrSuspend and nowhere else, every time a held run is about to return to its guest: is this execution still the one the store
 	// has the run assigned to? An error means it is not, OR that the answer could not be had, and the run is suspended instead of resumed. WithResidency sets it
 	// together with wakeSource, and installs neither without it, so a held run cannot exist without a way to revalidate (cleat#4162, PR 2c).
-	claimCheck           func(ctx context.Context) error
+	claimCheck func(ctx context.Context) error
+	// publishState writes the run's query state to the store before the run is HELD, from parkOrSuspend (park.go publishForHold): a held run does not return to the worker, and the
+	// worker writes query state only when an execution returns. nil means this handle cannot publish, so a run WITH query state is refused, not held. WithResidency sets it.
+	publishState         func(ctx context.Context, state map[string]string) error
 	stopAtLastStoppable  bool         // a defer segment over a killed run; see WithStopAtLastStoppable
 	killedWithDefersOwed atomic.Bool  // a component guest was stopped before its wrapper ran its defers; see KilledWithDefersOwed
 	nowFn                func() int64 // wall clock for sleep-deadline decisions; see WithClock
@@ -461,6 +464,7 @@ func WithResidency(r *ResidentRun) EngineOption {
 		if r != nil && r.info.ClaimCheck != nil {
 			e.wakeSource = r
 			e.claimCheck = r.info.ClaimCheck
+			e.publishState = r.info.PublishState
 		}
 	}
 }

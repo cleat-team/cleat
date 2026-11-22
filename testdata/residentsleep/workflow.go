@@ -116,3 +116,15 @@ func AwaitGoThenCall(h cleat.HostCalls, input string) (string, error) {
 	}
 	return `{"status":"signalled","payload":` + r.Payload + `}`, nil
 }
+
+// PublishThenSleep sets query state the way a long-running agent's approval wait does (agentworkflow.awaitApproval writes the status ONCE, before its first poll), then sleeps, then
+// sets it again and finishes (cleat#4162). What a test reads is the state the STORE holds DURING the sleep. A sleep that suspends writes the state at the suspension; a sleep that is
+// HELD does not return to the worker, so unless something publishes it at the hold, a client asking what the run is doing sees nothing for the whole sleep. 8 s is inside the 10 s floor of
+// the hold window and is longer than the 2.8 s the first claim spends compiling the module.
+func PublishThenSleep(h cleat.HostCalls, input string) (string, error) {
+	h.SetQueryState("status", "awaiting_approval")
+	h.SetQueryState("approval_wait", "entered")
+	h.DurableSleepMs(8000)
+	h.SetQueryState("status", "approval_received")
+	return `{"status":"ok"}`, nil
+}

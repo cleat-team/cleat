@@ -663,6 +663,11 @@ func (m *mockStore) FinalizeWorkflowSegment(ctx context.Context, runID, workerID
 	return nil
 }
 
+// PublishQueryState: the test double writes nothing and reports no fence loss (cleat#4162); a test that needs otherwise overrides it on its own type.
+func (m *mockStore) PublishQueryState(ctx context.Context, runID, workerID string, generation int64, queryState map[string]string) error {
+	return nil
+}
+
 // ---- test helpers ----
 
 // newTestWorker creates a Worker with a mock store and cancellable context,

@@ -1401,6 +1401,11 @@ func (s *stubWorkflowStore) FinalizeWorkflowSegment(ctx context.Context, runID, 
 	return nil
 }
 
+// PublishQueryState: the test double writes nothing and reports no fence loss (cleat#4162); a test that needs otherwise overrides it on its own type.
+func (s *stubWorkflowStore) PublishQueryState(ctx context.Context, runID, workerID string, generation int64, queryState map[string]string) error {
+	return nil
+}
+
 func (s *stubWorkflowStore) AdminForceComplete(ctx context.Context, workflowID string, generation int64, result string, operator string) error {
 	return nil
 }
