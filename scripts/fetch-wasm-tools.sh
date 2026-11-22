@@ -2,8 +2,10 @@
 # Put a sha256-verified wasm-tools release tarball at <dest>, from the cache
 # if <dest> is already there and still verifies, from the GitHub release
 # otherwise. Used by tier1-gate.yml's two "Fetch wasm-tools" steps (cleat#3693)
-# and by e2e-cross-language.yml's "Fetch wasm-tools" step (cleat#4346), each of
-# which sits between actions/cache/restore and actions/cache/save.
+# (each of which sits between actions/cache/restore and actions/cache/save), and
+# by e2e-cross-language.yml's "Install Python WASM toolchain" step (cleat#4346),
+# which is deliberately NOT cached: that workflow never runs on a develop push,
+# so no run would save an entry a later merge group could restore.
 #
 # WHY THIS EXISTS. The install used to be one `curl --retry 5 --retry-delay 2`
 # and nothing else. On 2026-11-08 `develop` c67b11f3's `Tier 1 Gate -- rest
@@ -247,7 +249,8 @@ PY
   run_case() {
     local started=$SECONDS limit=$(($3 + 15)) pid timedout=no
     set +e
-    env WASM_TOOLS_VERSION=0.0.0 WASM_TOOLS_SHA256="$good_sha" WASM_TOOLS_URL="$url" \
+    env PATH="${case_path:-$PATH}" SLEEP_LOG="$work/sleeps" \
+      WASM_TOOLS_VERSION=0.0.0 WASM_TOOLS_SHA256="$good_sha" WASM_TOOLS_URL="$url" \
       WASM_TOOLS_FETCH_BUDGET_S="$3" WASM_TOOLS_FETCH_FIRST_DELAY_S="$4" \
       WASM_TOOLS_FETCH_MAX_TIME_S="${5:-60}" \
       bash "$self" "$work/cache/wasm-tools.tar.gz" >"$work/case.out" 2>&1 &
@@ -332,6 +335,40 @@ PY
   expect "two 403s then success is ridden out, backing off 2-3 s then 4-6 s" \
     "$([ $rc -eq 0 ] && [ "$(server_hits)" = 3 ] && [ "$(dest_sha)" = "$good_sha" ] && [ -n "$w1" ] && [ -n "$w2" ] && [ "$w1" -ge 2 ] && [ "$w1" -le 3 ] && [ "$w2" -ge 4 ] && [ "$w2" -le 6 ] && echo 0 || echo 1)" \
     "exit=$rc hits=$(server_hits) waits=${w1:-?},${w2:-?}"
+
+  # 5d. the retry LOOP's use of the jitter. 5c samples the function; this one
+  # watches what the loop actually does with it. A fake `sleep` first on PATH
+  # records its argument and returns at once, so 20 refusals at a first delay of
+  # 8 (waits of 8, 16, 32, then 60 s, each plus up to half) cost no time. Every
+  # recorded sleep must equal the wait the log printed for that attempt, and lie
+  # within its backoff's 0..half; and they must not all equal the bare backoff.
+  # A loop that logs the jittered wait but sleeps the bare delay (the four shards
+  # in lockstep again) passes everything above and fails here.
+  mkdir -p "$work/fakebin"
+  # shellcheck disable=SC2016  # $1 and $SLEEP_LOG are for the fake sleep to expand, not this shell
+  printf '#!/bin/sh\necho "$1" >> "$SLEEP_LOG"\n' >"$work/fakebin/sleep"
+  chmod +x "$work/fakebin/sleep"
+  reset_cache; rm -f "$work/sleeps"; start_server "$work/good.tgz" 20 503
+  case_path="$work/fakebin:$PATH" run_case loopjitter 0 100000 8
+  local logged slept base=8 i=0 mism=0 oob=0 jittered=0 n_logged n_slept s l
+  logged="$(printf '%s\n' "$out" | sed -n 's/.*attempt [0-9]* failed after [0-9]*s; retrying in \([0-9]*\)s.*/\1/p')"
+  slept="$(cat "$work/sleeps" 2>/dev/null || true)"
+  # `|| true`: grep -c prints 0 but exits 1 on no lines, and under set -e that
+  # would abort the whole self-test mid-case with no verdict, when zero logged
+  # waits is exactly the failure this case must be able to report.
+  n_logged="$(printf '%s\n' "$logged" | grep -c . || true)"
+  n_slept="$(printf '%s\n' "$slept" | grep -c . || true)"
+  while read -r l && read -r s <&3; do
+    [ "$l" = "$s" ] || mism=$((mism + 1))
+    [ "$s" -ge "$base" ] && [ "$s" -le $((base + base / 2)) ] || oob=$((oob + 1))
+    [ "$s" -le "$base" ] || jittered=$((jittered + 1))
+    i=$((i + 1))
+    base=$((base * 2))
+    [ "$base" -le 60 ] || base=60
+  done < <(printf '%s\n' "$logged") 3< <(printf '%s\n' "$slept")
+  expect "the loop sleeps the jittered wait it logs, inside its backoff's bounds" \
+    "$([ $rc -eq 0 ] && [ "$(server_hits)" = 21 ] && [ "$n_logged" = 20 ] && [ "$n_slept" = 20 ] && [ "$mism" = 0 ] && [ "$oob" = 0 ] && [ "$jittered" -gt 0 ] && echo 0 || echo 1)" \
+    "exit=$rc hits=$(server_hits) logged=$n_logged slept=$n_slept mismatched=$mism out_of_range=$oob jittered=$jittered"
 
   # 5c. the jitter itself, through the function the retry loop calls. 100 draws
   # at a delay of 8 must all lie in 8..12 and must not all be equal: a script

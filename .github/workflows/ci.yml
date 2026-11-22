@@ -392,8 +392,8 @@ jobs:
       # a bad cache entry, wrong bytes, 504s, 403s and 429s each followed by
       # success, a permanent outage, a stalled server) and asserts the sha256 is
       # checked on every path, the retry window is bounded, and the backoff
-      # jitter stays in its bounds and varies. It needs no network beyond
-      # loopback and took about 35 seconds on 2026-11-22. Exit 2 is "could not run", and
+      # jitter stays in its bounds, varies, and is what the loop actually sleeps. It needs no network beyond
+      # loopback and took about 37 seconds on 2026-11-22 (36.0 s and 38.4 s). Exit 2 is "could not run", and
       # fails this step like exit 1.
       - name: wasm-tools fetch self-test
         if: always() && (needs.edit-gate.outputs.skip != 'true')
