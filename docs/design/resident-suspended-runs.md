@@ -1,6 +1,6 @@
 # Keeping a suspended run resident on its worker (cleat#4162)
 
-**Status: PARTLY BUILT, and OFF by default. The wake source, the admission policy and the flags exist (`engine/resident.go`, the `--resident-*` flags, cleat#4162 PR 1) and hold a Go, Python or C# guest's durable sleep or signal wait (sections 9c and 9d), and only when `--resident-max-runs` is above zero; a held run's wall-clock limits (the ceiling and the workflow deadline) and its execution fence are paused for the hold and restart at their full duration when it ends, as a suspended run's next segment would have fresh ones, and a cancel ends a held run at once (all measured on real wasmtime, see `docs/reference/worker-config.md`); eviction on a lost fence is built (a held run checks its claim before it returns to the guest, section 9b) and a kill while held is run in `tests/chaos`, where it showed every effect once and a delayed wake (40 to 41 s against 9.2 to 9.5 s with residency off, section 9b); the other waits (promises, children and updates) are still to come, and until the series merges nothing here is claimed as supported.** The rest of this document is still the proposal it was: nothing else in it is built, and nothing in it is claimed as supported (`tiers.yaml` is the source of truth for what is). It exists so the owner can choose a policy before any code is written. Written 2026-11-19 by WS-cleat-2. Every line of code it cites was read on develop `1157baf3` (re-derive a citation with `git grep -n '<symbol>' origin/develop`); a fact I could not establish is marked **NOT ESTABLISHED** rather than guessed.
+**Status: BUILT for timers and signal waits, and ON by default (`--resident-max-runs` is 8; 0 turns it off) since 0.6.0. The wake source, the admission policy and the flags exist (`engine/resident.go`, the `--resident-*` flags, cleat#4162 PR 1) and hold a Go, Python or C# guest's durable sleep or signal wait (sections 9c and 9d), and only while `--resident-max-runs` is above zero; a held run's wall-clock limits (the ceiling and the workflow deadline) and its execution fence are paused for the hold and restart at their full duration when it ends, as a suspended run's next segment would have fresh ones, and a cancel ends a held run at once (all measured on real wasmtime, see `docs/reference/worker-config.md`); eviction on a lost fence is built (a held run checks its claim before it returns to the guest, section 9b) and a kill while held is run in `tests/chaos`, where it showed every effect once and a delayed wake (40 to 41 s against 9.2 to 9.5 s with residency off, section 9b); the other waits (promises, children and updates) are still to come, and nothing here is claimed as supported beyond what `tiers.yaml` grants, which says nothing about residency.** The rest of this document is still the proposal it was: nothing else in it is built, and nothing in it is claimed as supported (`tiers.yaml` is the source of truth for what is). It exists so the owner can choose a policy before any code is written. Written 2026-11-19 by WS-cleat-2. Every line of code it cites was read on develop `1157baf3` (re-derive a citation with `git grep -n '<symbol>' origin/develop`); a fact I could not establish is marked **NOT ESTABLISHED** rather than guessed.
 
 ## 1. The short version
 
@@ -123,7 +123,7 @@ Use it as **stage 1** if the owner wants a result sooner: it is independent of P
 
 ## 6. The policy, with options for the owner
 
-The owner's starting point: about 5 minutes by default; refined to about 10x the run's estimated replay time, estimated from its event count; evict under memory pressure or at a count limit, least recently used first.
+A starting point: about 5 minutes by default; refined to about 10x the run's estimated replay time, estimated from its event count; evict under memory pressure or at a count limit, least recently used first.
 
 | option | the window | what it favours | what it risks |
 |---|---|---|---|
@@ -146,7 +146,7 @@ Decisions the owner is asked for:
 
 ## 8. Rollout
 
-Off by default, per worker (`--resident-window 0` is today's behaviour), so a canary worker can run it beside unchanged workers on one database: nothing in the history or the row changes, and a resident run on a worker that dies is recovered by replay on any other. No migration is required by option 4.2a.
+On by default since 0.6.0, per worker (`--resident-max-runs` is 8; `--resident-max-runs 0` is the behaviour before it), so a canary worker can opt OUT with `--resident-max-runs 0` beside workers that hold, on one database. A held run reads `running` with no `next_wake_at` where a suspended one reads `ready` (invariant 4), and otherwise nothing in the history or the row changes, and a resident run on a worker that dies is recovered by replay on any other. No migration is required by option 4.2a.
 
 ## 9. What has to be measured first (items 2 and 4 are measured, section 9a; item 3 is done, cleat#4174; the rest are not yet)
 

@@ -10,15 +10,15 @@ import (
 	"time"
 )
 
-// cleat#4162. Residency is OFF by default and a refusal is always safe, so the failures that matter here are the ones that make a flag do nothing or a
+// cleat#4162. Residency is ON by default (8 runs) and a refusal is always safe, so the failures that matter here are the ones that make a flag do nothing or a
 // drain wait on a sleep, and neither is visible to a test that only reads the policy:
 //
-//  1. the flags, at their stock values, give a policy that is OFF and carries the conservative numbers, and a different flag value DOES change the policy
+//  1. the flags, at their stock values, give a policy that is ON with 8 runs and carries the conservative numbers, and --resident-max-runs 0 turns it OFF, and a different flag value DOES change the policy
 //     (so (1) is not satisfied by a function that ignores the flags);
 //  2. main() calls the function that builds the policy, unconditionally (the shape of cleat#4212's check);
 //  3. the drain paths send held runs back: a held run is in flight, so a drain that waited for it would wait for its wake.
 
-func TestStockFlagsGiveAResidencyPolicyThatIsOff(t *testing.T) {
+func TestStockFlagsGiveAResidencyPolicyThatIsOnWithEightRuns(t *testing.T) {
 	for _, n := range []string{"resident-max-runs", "resident-memory-budget-mb", "resident-window-floor", "resident-window-cap",
 		"resident-replay-multiplier", "resident-replay-fixed", "resident-replay-per-event"} {
 		stockFlag(t, n)
@@ -27,9 +27,20 @@ func TestStockFlagsGiveAResidencyPolicyThatIsOff(t *testing.T) {
 	if err != nil {
 		t.Fatalf("the stock flags are refused: %v", err)
 	}
-	if cfg.MaxRuns != 0 {
-		t.Errorf("a stock worker has residency on: MaxRuns = %d, want 0", cfg.MaxRuns)
+	if cfg.MaxRuns != 8 {
+		t.Errorf("a stock worker holds MaxRuns = %d runs, want 8 (cleat#4162: on by default)", cfg.MaxRuns)
 	}
+	// The CONTROL that makes the row above mean something: the documented way to turn it off must still work, or "on by default" is "on, and you cannot leave".
+	setFlag(t, "resident-max-runs", "0")
+	t.Cleanup(func() { stockFlag(t, "resident-max-runs") })
+	off, err := residencyConfigFromFlags()
+	if err != nil {
+		t.Fatalf("--resident-max-runs 0 is refused: %v", err)
+	}
+	if off.MaxRuns != 0 {
+		t.Errorf("--resident-max-runs 0 gives MaxRuns = %d, want 0 (residency off)", off.MaxRuns)
+	}
+	stockFlag(t, "resident-max-runs")
 	if cfg.WindowFloor != 10*time.Second || cfg.WindowCap != 5*time.Minute || cfg.ReplayMultiplier != 10 ||
 		cfg.ReplayFixed != 500*time.Millisecond || cfg.ReplayPerEvent != 0 || cfg.MemoryBudgetBytes != 0 {
 		t.Errorf("the stock policy is %+v, want floor 10s, cap 5m, multiplier 10, fixed 500ms, per-event 0, budget derived", cfg)
