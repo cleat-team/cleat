@@ -238,6 +238,13 @@ func execute(t *testing.T, env *env, sc scenario, f *fault) outcome {
 	out.Signals = signalRows(env.db, run)
 	out.Schedules = scheduleRows(env.db, run)
 	out.Log = first.output()
+	if f == nil {
+		// A FAULT-FREE (golden) run's worker is done with its run, and it must not outlive it. startWorker registers its kill on the test it is given, and a golden run is
+		// executed by the PARENT test (goldenOf(t, ...)), so until now every golden worker stayed alive, holding its connection pool, until the whole sweep ended: eight scripts
+		// held 8 x 11 = 88 of a CI database's 100 slots for the entire run, which is what left a fault case's own workers a handful and made a different case fail every night
+		// (cleat#4350). The kill is the same SIGKILL the cleanup would have sent, only at the end of the run and not the end of the sweep.
+		first.kill()
+	}
 	if second != nil {
 		out.Log += "\n--- second worker ---\n" + second.output()
 	}
