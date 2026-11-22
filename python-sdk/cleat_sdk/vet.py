@@ -42,6 +42,13 @@ ERROR_NO_THREADING = "PY011"  # HostCalls param missing
 ERROR_ASYNC_FUNC = "PY012"  # async def decorated with @cleat_entry
 ERROR_MULTIPLE_ENTRIES = "PY013"  # multiple @cleat_entry functions
 
+#: WARNING codes (never errors, so they never refuse a build). Both are about the
+#: same documented limit of componentize-py (cleat#4266): the component contains
+#: only the standard-library modules that were imported while it was BUILT, so a
+#: module first imported at run time can be missing (ModuleNotFoundError).
+WARN_FUNCTION_IMPORT = "PY014"  # stdlib module imported inside a function
+WARN_LAZY_IMPORT_CALL = "PY015"  # call that imports a module the first time it runs
+
 #: SDK durable leaf function names --- HostCalls methods that the runtime
 #: journalises (i.e. they create events in the workflow history).
 DURABLE_LEAVES: set[str] = {
@@ -652,6 +659,260 @@ class ForbiddenAPIChecker(ast.NodeVisitor):
             )
 
 
+#: Standard-library modules compiled INTO the component's interpreter. They are
+#: present whenever the component runs, so importing one inside a function is
+#: harmless and PY014 stays quiet about it. Measured 2026-11-22 as the
+#: non-underscore names in the guest's ``sys.builtin_module_names`` (CPython
+#: 3.14.0 for wasi, componentize-py 0.25.1), each also imported at run time in a
+#: minimal guest. It describes one interpreter build and can change with
+#: componentize-py; the cost of it going stale is a missed warning, not a wrong
+#: one, because every other stdlib import still warns.
+INTERPRETER_BUILTIN_MODULES: frozenset[str] = frozenset(
+    {
+        "__future__",
+        "array",
+        "atexit",
+        "binascii",
+        "builtins",
+        "cmath",
+        "errno",
+        "faulthandler",
+        "gc",
+        "itertools",
+        "marshal",
+        "math",
+        "posix",
+        "pyexpat",
+        "select",
+        "sys",
+        "time",
+        "unicodedata",
+        "zlib",
+    }
+)
+
+#: PY015 table, calls that import a module on first use, by METHOD NAME. Each row
+#: was measured (2026-11-22, same guest as above): in a guest that does not
+#: import the module at top level the call raises ModuleNotFoundError, and a
+#: guest whose ONLY extra import is the one named here runs it correctly.
+#: A row is a measured remedy, not a guess; add a row only after measuring it,
+#: and add its test. Name: (modules to import at top level, what the call does).
+LAZY_IMPORT_METHODS: dict[str, tuple[tuple[str, ...], str]] = {
+    "strptime": (
+        ("_strptime",),
+        "datetime.strptime() and time.strptime() import _strptime the first time they run",
+    ),
+    "most_common": (
+        ("heapq",),
+        "Counter.most_common() imports heapq the first time it runs",
+    ),
+}
+
+#: PY015 table, codecs that load a codec module on first use, keyed by the codec's
+#: MODULE name (what ``encodings.aliases`` resolves any spelling to). Codecs not
+#: listed are NOT checked: they are probably the same, but advice that was never
+#: measured is how ``encodings.idna`` alone nearly shipped as the remedy for
+#: "idna" (it also needs ``encodings.punycode``). utf-8, ascii, latin-1, utf-16
+#: and utf-32 need nothing (measured).
+LAZY_IMPORT_CODECS: dict[str, tuple[str, ...]] = {
+    "cp1252": ("encodings.cp1252",),
+    "shift_jis": ("encodings.shift_jis",),
+    "iso8859_15": ("encodings.iso8859_15",),
+    "utf_8_sig": ("encodings.utf_8_sig",),
+    "idna": ("encodings.idna", "encodings.punycode"),
+}
+
+
+def _module_level_imports(tree: ast.AST) -> set[str]:
+    """Every dotted module name imported while the module itself runs.
+
+    That is, at build time: statements at module level, in module-level ``if``/
+    ``try``/``with`` blocks and in class bodies, but NOT inside a function body,
+    which only runs when the workflow does. ``import a.b`` counts for ``a`` and
+    ``a.b``; ``from a import b`` counts for ``a`` and ``a.b``.
+    """
+    found: set[str] = set()
+
+    def add_path(dotted: str) -> None:
+        parts = dotted.split(".")
+        for i in range(1, len(parts) + 1):
+            found.add(".".join(parts[:i]))
+
+    def visit(child: ast.AST) -> None:
+        if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            return
+        if isinstance(child, ast.If):
+            # ``if TYPE_CHECKING:`` is False when the module runs, so its body is never
+            # executed at build time (only the ``else`` is), and ``if not TYPE_CHECKING:``
+            # is the reverse. Without this a type-only import silenced the warning.
+            kind = _type_checking_test(child.test)
+            if kind is not None:
+                for stmt in child.orelse if kind else child.body:
+                    visit(stmt)
+                return
+        if isinstance(child, ast.Import):
+            for alias in child.names:
+                add_path(alias.name)
+        elif isinstance(child, ast.ImportFrom) and child.level == 0 and child.module:
+            add_path(child.module)
+            for alias in child.names:
+                found.add(f"{child.module}.{alias.name}")
+        walk(child)
+
+    def walk(node: ast.AST) -> None:
+        for child in ast.iter_child_nodes(node):
+            visit(child)
+
+    walk(tree)
+    return found
+
+
+def _type_checking_test(test: ast.expr) -> bool | None:
+    """``True`` for ``TYPE_CHECKING`` (``typing.TYPE_CHECKING``), ``False`` for ``not`` it, else ``None``."""
+    if isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not):
+        inner = _type_checking_test(test.operand)
+        return None if inner is None else not inner
+    if isinstance(test, ast.Name) and test.id == "TYPE_CHECKING":
+        return True
+    if isinstance(test, ast.Attribute) and test.attr == "TYPE_CHECKING":
+        return True
+    return None
+
+
+def _codec_module(name: str) -> str:
+    """The ``encodings`` module a codec spelling resolves to (``sjis`` -> ``shift_jis``)."""
+    import encodings
+    import encodings.aliases
+
+    normalised = encodings.normalize_encoding(name).lower()
+    return encodings.aliases.aliases.get(normalised, normalised)
+
+
+class RuntimeImportChecker(ast.NodeVisitor):
+    """Warns about imports that happen only when the workflow RUNS (cleat#4266).
+
+    componentize-py keeps only the standard-library modules that were imported
+    while the component was being built, so anything first imported inside a
+    function can raise ModuleNotFoundError at run time, in production and not
+    at build. Two warnings, both about the file as written:
+
+    - PY014: a standard-library ``import`` inside a function.
+    - PY015: a call that is known to import a module on first use, when that
+      module is not imported at module level (``LAZY_IMPORT_METHODS`` and
+      ``LAZY_IMPORT_CODECS``).
+
+    These are warnings and not errors on purpose. An in-function ``import json``
+    works today because json is already in the component, so refusing the build
+    would break workflows that run; the warning says "may be missing", which is
+    the strongest claim the file alone supports.
+    """
+
+    def __init__(self, filepath: str, tree: ast.AST) -> None:
+        self.filepath = filepath
+        self.warnings: list[dict[str, Any]] = []
+        self._at_module_level = _module_level_imports(tree)
+        self._functions: list[str] = []
+        # Python 3.10+, which is all the SDK imports on (requires-python is >=3.10).
+        self._stdlib: frozenset[str] = sys.stdlib_module_names
+
+    def _warn(self, code: str, node: ast.AST, message: str, suggestion: str) -> None:
+        self.warnings.append(
+            {
+                "code": code,
+                "file": self.filepath,
+                "line": getattr(node, "lineno", 0),
+                "column": getattr(node, "col_offset", 0),
+                "message": message,
+                "suggestion": suggestion,
+            }
+        )
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+        self._functions.append(node.name)
+        self.generic_visit(node)
+        self._functions.pop()
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+        self.visit_FunctionDef(node)  # type: ignore[arg-type]
+
+    def _check_function_import(self, node: ast.AST, dotted: str, shown: str) -> None:
+        if not self._functions:
+            return
+        top = dotted.split(".")[0]
+        if top not in self._stdlib or top in INTERPRETER_BUILTIN_MODULES:
+            return
+        if dotted in self._at_module_level:
+            return
+        self._warn(
+            WARN_FUNCTION_IMPORT,
+            node,
+            f"`{shown}` inside function `{self._functions[-1]}()`: the component only contains "
+            "the standard-library modules that were imported when it was built, so a module "
+            "first imported at run time may be missing (ModuleNotFoundError).",
+            f"Move `{shown}` to the top level of the workflow module.",
+        )
+
+    def visit_Import(self, node: ast.Import) -> None:
+        for alias in node.names:
+            self._check_function_import(node, alias.name, f"import {alias.name}")
+
+    def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
+        if node.level == 0 and node.module:
+            self._check_function_import(node, node.module, f"from {node.module} import ...")
+
+    def _missing(self, modules: tuple[str, ...]) -> list[str]:
+        return [m for m in modules if m not in self._at_module_level]
+
+    def visit_Call(self, node: ast.Call) -> None:
+        if self._functions:
+            func = node.func
+            name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", None)
+            if name in LAZY_IMPORT_METHODS:
+                modules, why = LAZY_IMPORT_METHODS[name]
+                missing = self._missing(modules)
+                if missing:
+                    self._warn(
+                        WARN_LAZY_IMPORT_CALL,
+                        node,
+                        f"`{name}()`: {why}, and `{', '.join(missing)}` is only in the "
+                        "component if it was imported when the component was built.",
+                        "Add "
+                        + " and ".join(f"`import {m}`" for m in missing)
+                        + " at the top level of the workflow module.",
+                    )
+            elif isinstance(func, ast.Attribute) and func.attr in ("encode", "decode"):
+                codec = None
+                if (
+                    node.args
+                    and isinstance(node.args[0], ast.Constant)
+                    and isinstance(node.args[0].value, str)
+                ):
+                    codec = node.args[0].value
+                else:
+                    for kw in node.keywords:
+                        if (
+                            kw.arg == "encoding"
+                            and isinstance(kw.value, ast.Constant)
+                            and isinstance(kw.value.value, str)
+                        ):
+                            codec = kw.value.value
+                if codec is not None:
+                    modules = LAZY_IMPORT_CODECS.get(_codec_module(codec))
+                    missing = self._missing(modules) if modules else []
+                    if missing:
+                        self._warn(
+                            WARN_LAZY_IMPORT_CALL,
+                            node,
+                            f"`.{func.attr}({codec!r})` loads its codec module the first time it is used, "
+                            f"and `{', '.join(missing)}` is only in the component if it was imported "
+                            "when the component was built.",
+                            "Add "
+                            + " and ".join(f"`import {m}`" for m in missing)
+                            + " at the top level of the workflow module.",
+                        )
+        self.generic_visit(node)
+
+
 class ThreadingChecker(ast.NodeVisitor):
     """Verifies HostCalls threading through the durable closure.
 
@@ -939,6 +1200,20 @@ def analyze_file(filepath: str) -> AnalysisResult:
     checker = ForbiddenAPIChecker(filepath, to_check)
     checker.visit(tree)
     result.errors.extend(checker.errors)
+
+    # --- Imports that only happen at run time (warnings; cleat#4266) ---
+    # Over the WHOLE file, not just the determinism scope: any function that
+    # runs hits the limit, whether or not it reaches a host call.
+    runtime_imports = RuntimeImportChecker(filepath, tree)
+    runtime_imports.visit(tree)
+    for warning in runtime_imports.warnings:
+        result.add_warning(
+            warning["code"],
+            warning["line"],
+            warning["message"],
+            warning["suggestion"],
+            warning["column"],
+        )
 
     # Also check imports at module level that might affect closure functions
     # (module-level imports are already caught by the checker visiting the root)
