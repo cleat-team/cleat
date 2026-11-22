@@ -33,7 +33,7 @@ needs, so the CLI finds them in your virtual environment.
 mkdir hello-py && cd hello-py
 python3 -m venv .venv
 . .venv/bin/activate
-pip install cleat-sdk 'componentize-py>=0.12.0'
+pip install cleat-sdk componentize-py==0.25.1
 ```
 
 Both things below are deliberate:
@@ -41,9 +41,9 @@ Both things below are deliberate:
 - **The virtual environment is not optional on a current Linux distribution.**
   Current Debian and Ubuntu releases refuse a global `pip install` with
   `error: externally-managed-environment` (PEP 668).
-- **The quotes around `componentize-py>=0.12.0` are required.** Unquoted, the
-  shell reads `>=0.12.0` as a redirect: it creates a file named `=0.12.0` and
-  installs `componentize-py` with no version constraint.
+- **`componentize-py` is pinned to exactly 0.25.1.** It decides which standard-library
+  modules your workflow contains, and 0.25.1 is the version CI tests and the Python
+  README's compatibility tables were measured on.
 
 Keep this virtual environment active for every command below: `cleat build` runs
 the `python3` it finds on `PATH`, and looks there for `cleat-sdk`.
@@ -182,7 +182,7 @@ a workflow that is sleeping is `ready`, not `running`.
 | `finding repo root: go.mod not found` | `cleat-sdk` 0.5.0, which ships no build script | Upgrade `cleat-sdk`, or build from a clone |
 | `the cleat-sdk installed at … has no build script` | An older `cleat-sdk` is active | `pip install --upgrade cleat-sdk` |
 | `the cleat-sdk package is not installed for the python3 on PATH` | The virtual environment is not active in this shell | `. .venv/bin/activate` |
-| `componentize-py not found` | Not installed in the active environment | `pip install 'componentize-py>=0.12.0'` |
+| `componentize-py not found` | Not installed in the active environment | `pip install componentize-py==0.25.1` |
 | `AttributeError: 'HostCalls' object has no attribute 'cleat_log'` | A workflow written from an old README | Use `h.log`, `h.call`, `h.sleep`, `h.fetch` |
 | `type: want object, got string` | Input sent as a string | `{"input": {"name": "Ada"}}` |
 

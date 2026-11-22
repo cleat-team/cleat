@@ -714,7 +714,7 @@ func locatePythonBuildScript(
 			"package is not installed for the python3 on PATH (%v).\n"+
 			"Install it in the environment you build from, for example:\n"+
 			"    python3 -m venv .venv && . .venv/bin/activate\n"+
-			"    pip install cleat-sdk 'componentize-py>=0.12.0'", checkoutNote, ierr)}
+			"    pip install cleat-sdk componentize-py==0.25.1", checkoutNote, ierr)}
 	}
 	candidate := filepath.Join(pkg, pythonBuildScriptRel)
 	if _, serr := os.Stat(candidate); serr != nil {

@@ -493,7 +493,7 @@ tools-python:
 	@if python3 -c "import componentize" 2>/dev/null; then \
 		echo "[OK] componentize-py"; \
 	else \
-		echo "[MISSING] componentize-py — install with: pip install componentize-py"; \
+		echo "[MISSING] componentize-py — install with: pip install componentize-py==0.25.1"; \
 	fi
 	@cd python-sdk && python3 -c "import cleat_sdk" 2>/dev/null && echo "[OK] cleat_sdk (editable)" || \
 		echo "[MISSING] cleat_sdk — install with: cd python-sdk && pip install -e ."

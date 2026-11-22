@@ -22,11 +22,12 @@ there needs `sudo apt install python3-venv` first.
 ```bash
 python3 -m venv .venv
 . .venv/bin/activate
-pip install cleat-sdk 'componentize-py>=0.12.0'
+pip install cleat-sdk componentize-py==0.25.1
 ```
 
-Quote the requirement. Unquoted, `>=0.12.0` is a shell redirect: it creates a file
-named `=0.12.0` and installs `componentize-py` with no constraint.
+Pin `componentize-py` exactly. Which standard-library modules a component contains is decided by
+`componentize-py` when it builds ([the compatibility tables](#python-standard-library-compatibility)
+were measured on 0.25.1 and on no other version), and it is the version CI tests.
 
 Or from source:
 
@@ -650,8 +651,8 @@ Python 3.10 or newer, in a virtual environment, with both packages installed
 ([Installation](#installation)):
 
 ```bash
-pip install cleat-sdk 'componentize-py>=0.12.0'
-componentize-py --version
+pip install cleat-sdk componentize-py==0.25.1
+componentize-py --version   # componentize-py 0.25.1
 ```
 
 If `componentize-py` is `command not found`, the environment is not active, or
@@ -723,7 +724,7 @@ See the [Makefile](./Makefile) for details.
 
 | Error | Likely Cause | Solution |
 |-------|-------------|----------|
-| `componentize-py: command not found` | Not installed in the active environment | `pip install 'componentize-py>=0.12.0'` in the environment you build from |
+| `componentize-py: command not found` | Not installed in the active environment | `pip install componentize-py==0.25.1` in the environment you build from |
 | `finding repo root: go.mod not found` | `cleat-sdk` 0.5.0, which ships no build script | Upgrade `cleat-sdk`, or build from a checkout |
 | `has no build script` | An older `cleat-sdk` is active | `pip install --upgrade cleat-sdk` |
 | `Error: unexpected argument '--wit-path' found` | A hand-written `componentize-py` command in the pre-0.13 form | Use `cleat build`, or the `-d … -w … componentize <module>` form above |
@@ -738,7 +739,7 @@ See the [Makefile](./Makefile) for details.
 ## Requirements
 
 - **Python 3.10+** -- the SDK uses `typing.get_type_hints` and `inspect.signature` for parameter introspection
-- **componentize-py >= 0.12.0** -- required for WASM compilation (installed via `pip install componentize-py`)
+- **componentize-py ==0.25.1** -- required for WASM compilation, pinned to the version CI tests and the standard-library tables were measured on (`pip install componentize-py==0.25.1`); other versions are not measured, and may contain different standard-library modules
 - **Cleat CLI** (`cleat build`) -- the supported way to build a workflow
 - **WIT files** -- shipped inside the package (`cleat_sdk/wit/`); nothing to copy
 

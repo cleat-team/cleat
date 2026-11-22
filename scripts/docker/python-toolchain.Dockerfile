@@ -133,7 +133,7 @@ RUN python3 -m venv "$VIRTUAL_ENV"
 ENV PATH="$VIRTUAL_ENV/bin:$PATH"
 
 RUN pip install --no-cache-dir --upgrade pip \
-    && pip install --no-cache-dir componentize-py
+    && pip install --no-cache-dir componentize-py==0.25.1
 
 # Fail the build rather than the test run if the toolchain is not actually usable.
 RUN componentize-py --version

@@ -4,10 +4,10 @@
 # then stamps cleat.metadata custom sections via scripts/stamp_metadata.py.
 #
 # Prerequisites:
-#   pip install componentize-py>=0.12.0
+#   pip install componentize-py==0.25.1   (the one CI tests; python-sdk/componentize-py-requirements.txt)
 #   pip install -e python-sdk/
 #
-# Expected componentize-py version: >= 0.12.0
+# Expected componentize-py version: 0.25.1
 # Check with: componentize-py --version
 
 # Paths
@@ -165,7 +165,7 @@ help:
 	@echo "  PLUGIN_DEPS='{"llm":">=1.2.0"}'"
 	@echo ""
 	@echo "Prerequisites:"
-	@echo "  pip install componentize-py>=0.12.0"
+	@echo "  pip install componentize-py==0.25.1"
 	@echo "  pip install -e ."
 	@echo ""
-	@echo "Expected componentize-py version: >= 0.12.0"
+	@echo "Expected componentize-py version: 0.25.1"

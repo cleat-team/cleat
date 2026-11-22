@@ -591,6 +591,19 @@ jobs:
           python3 scripts/check-bare-entry-decorator.py
           LINT_GUARD_EOF
 
+      # cleat#4355. componentize-py decides which standard-library modules a Python component
+      # contains (cleat#4266), so the version users build with has to be the one CI tests: this
+      # fails if anything installs it unpinned, puts a floor on it, names another version, or lets
+      # build_wasm.py's PINNED_COMPONENTIZE_PY drift from python-sdk/componentize-py-requirements.txt.
+      # Exit 2 (UNMEASURED) is also a failure here: a guard that could not look must not say OK.
+      - name: componentize-py pin guard
+        if: always() && (needs.edit-gate.outputs.skip != 'true')
+        run: |
+          bash -e <<'LINT_GUARD_EOF' || echo "componentize-py pin guard" >> "$LINT_FAILURES_FILE"
+          python3 scripts/check-componentize-py-pin.py --self-test
+          python3 scripts/check-componentize-py-pin.py
+          LINT_GUARD_EOF
+
       # cleat#3132. This one is a HELPER, not a guard, and the shape of the step
       # says so: there is no real run to follow the self-test, because the
       # helper's own invocation needs a live job id. That is also why the
@@ -2193,7 +2206,7 @@ jobs:
         run: |
           pip install --upgrade pip
           pip install .
-          pip install "componentize-py>=0.12.0"
+          bash ../scripts/install-componentize-py.sh
 
       - name: Build the cleat CLI
         run: go build -o .bin/cleat ./cmd/cleat
@@ -3877,7 +3890,7 @@ jobs:
           python-version: "3.12"
 
       - name: Install componentize-py
-        run: pip install componentize-py
+        run: bash scripts/install-componentize-py.sh
 
       # THE SELECTOR IS ASSERTED AGAINST THE PACKAGE, not trusted. A renamed
       # test makes a shard's pattern match one fewer name and the run still
@@ -4131,7 +4144,7 @@ jobs:
         run: |
           pip install --upgrade pip
           pip install ".[dev]"
-          pip install "componentize-py>=0.12.0"
+          bash ../scripts/install-componentize-py.sh
 
       - name: Run tests
         if: ${{ needs.edit-gate.outputs.skip != 'true' }}
@@ -4867,7 +4880,7 @@ jobs:
         run: |
           pip install --upgrade pip
           pip install .
-          pip install "componentize-py>=0.12.0"
+          bash ../scripts/install-componentize-py.sh
 
       # cleat#2127. publish-pypi.yml has no TestPyPI rehearsal (the owner
       # skipped it), so the release tag is the first real run against the

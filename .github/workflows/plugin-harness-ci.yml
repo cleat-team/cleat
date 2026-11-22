@@ -319,7 +319,7 @@ jobs:
         if: ${{ needs.edit-gate.outputs.skip != 'true' }}
         run: |
           pip install --upgrade pip
-          pip install componentize-py
+          bash scripts/install-componentize-py.sh
           pip install -e python-sdk
       # TestPluginCalls_Wasm_Java runs a Gradle build of
       # tests/plugin-harness/testdata/javaworkflow, and this job had no Java

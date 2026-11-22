@@ -141,7 +141,7 @@ go test ./engine/ -run TestPythonWasmEndToEnd -v
 
 | Tool | Minimum version | Install command |
 |------|----------------|-----------------|
-| `componentize-py` | >= 0.12.0 | `pip install componentize-py` |
+| `componentize-py` | ==0.25.1 | `pip install componentize-py==0.25.1` |
 | `wasm-tools` | latest | `cargo install wasm-tools` |
 | `python3` | >= 3.10 | system package |
 | `cleat-sdk` | local | `pip install -e python-sdk/` |
@@ -192,7 +192,7 @@ The test correctly skips with a clear message when prerequisites are missing.
 
 1. Install `componentize-py`:
    ```shell
-   pip install componentize-py>=0.12.0
+   pip install componentize-py==0.25.1
    ```
 
 2. Install `wasm-tools`:

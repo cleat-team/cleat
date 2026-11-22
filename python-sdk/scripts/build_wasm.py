@@ -19,6 +19,10 @@ import subprocess
 import sys
 from pathlib import Path
 
+# The componentize-py version CI tests and the standard-library findings in python-sdk/README.md were measured on (cleat#4355). It is
+# stated in python-sdk/componentize-py-requirements.txt; scripts/check-componentize-py-pin.py fails if this constant disagrees with it.
+PINNED_COMPONENTIZE_PY = "0.25.1"
+
 
 def find_sdk_root() -> Path:
     """Find the python-sdk root directory (a checkout's layout only)."""
@@ -162,11 +166,11 @@ def run_componentize_py(
         )
         if result.returncode != 0:
             print("Error: componentize-py not found or not working", file=sys.stderr)
-            print("Install with: pip install componentize-py", file=sys.stderr)
+            print(f"Install with: pip install componentize-py=={PINNED_COMPONENTIZE_PY}", file=sys.stderr)
             return False
     except FileNotFoundError:
         print("Error: componentize-py not found", file=sys.stderr)
-        print("Install with: pip install componentize-py", file=sys.stderr)
+        print(f"Install with: pip install componentize-py=={PINNED_COMPONENTIZE_PY}", file=sys.stderr)
         return False
 
     entry_dir = Path(entry_file).resolve().parent
@@ -397,7 +401,7 @@ def main():
     if not success:
         print("\nBuild FAILED", file=sys.stderr)
         print("\nTroubleshooting tips:", file=sys.stderr)
-        print("  1. Ensure componentize-py is installed: pip install componentize-py",
+        print(f"  1. Ensure componentize-py is installed: pip install componentize-py=={PINNED_COMPONENTIZE_PY}",
               file=sys.stderr)
         print("  2. Ensure PYTHONPATH includes the cleat SDK", file=sys.stderr)
         print("  3. Try with --verbose for detailed error output", file=sys.stderr)
