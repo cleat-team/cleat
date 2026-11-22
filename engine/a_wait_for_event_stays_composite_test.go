@@ -14,7 +14,8 @@ import (
 // writes no record of its own and decides nothing about replay. This test fails the day it does, and says what to do instead (give the new record a spec, which means moving the call).
 //
 // THE RULE, as a whitelist rather than a blacklist, because a list of forbidden names is the limit of the check and a new way to write a record would not be on it: the only things
-// wait_for_event.go may take from the session are the fields and methods named in waitForEventSessionUses, and it may mention no EventType constant at all. `isReplay` may be read in ONE place, the
+// wait_for_event.go may take from the session (held under ANY name: every *execSession receiver or parameter counts) are the fields and methods named in waitForEventSessionUses, it may not
+// hand the session to another function or alias it, and it may mention no EventType constant at all. `isReplay` may be read in ONE place, the
 // guard at the top of WaitForEvent, and nowhere else. A record is written through the session (recordEvent, history, stepCount, ...) or through an EventType, and neither is on the list.
 
 var waitForEventSessionUses = map[string]bool{
@@ -28,6 +29,11 @@ var waitForEventSessionUses = map[string]bool{
 }
 
 // waitForEventCompositeViolations reads Go source and returns what breaks the composite rule, sorted.
+//
+// THE SESSION IS WHATEVER IS TYPED *execSession, not whatever is called `s`: in each function, every receiver or parameter of that type is a session identifier (cleat-review3 found that
+// a helper `func note(x *execSession) { x.history = ... }`, called from WaitForEvent, passed a scan that only looked at `s`). Two things are then refused: a selector on a session identifier
+// that is not on the whitelist, and a session identifier used as a VALUE (passed to a call, assigned, returned), because what a function handed the session does with it is not in this file's
+// text. THE LIMIT: the whitelist is by NAME, so `s.PluginCall` is allowed because PluginCall is on it, whatever it does elsewhere; the scan reads this file, not the files it calls into.
 func waitForEventCompositeViolations(src string) []string {
 	fset := token.NewFileSet()
 	f, err := parser.ParseFile(fset, "wait_for_event.go", src, 0)
@@ -41,28 +47,73 @@ func waitForEventCompositeViolations(src string) []string {
 			own[fd.Name.Name] = true
 		}
 	}
+	isSession := func(e ast.Expr) bool {
+		st, ok := e.(*ast.StarExpr)
+		if !ok {
+			return false
+		}
+		id, ok := st.X.(*ast.Ident)
+		return ok && id.Name == "execSession"
+	}
 	var v []string
 	isReplayUses := 0
-	ast.Inspect(f, func(n ast.Node) bool {
-		switch x := n.(type) {
-		case *ast.Ident:
-			if strings.HasPrefix(x.Name, "EventType") {
-				v = append(v, "mentions "+x.Name+": a record type of its own")
+	for _, d := range f.Decls {
+		fd, ok := d.(*ast.FuncDecl)
+		if !ok || fd.Body == nil {
+			continue
+		}
+		// The session identifiers of this function, and the declaring idents that must not be read as uses.
+		session := map[string]bool{}
+		declaring := map[*ast.Ident]bool{}
+		collect := func(fl *ast.FieldList) {
+			if fl == nil {
+				return
 			}
-		case *ast.SelectorExpr:
-			if id, ok := x.X.(*ast.Ident); ok && id.Name == "s" {
-				if !waitForEventSessionUses[x.Sel.Name] && !own[x.Sel.Name] {
-					v = append(v, "uses s."+x.Sel.Name+": not something a composite call takes from the session")
-				}
-				if x.Sel.Name == "isReplay" {
-					isReplayUses++
+			for _, fld := range fl.List {
+				for _, n := range fld.Names {
+					declaring[n] = true
+					if isSession(fld.Type) {
+						session[n.Name] = true
+					}
 				}
 			}
 		}
-		return true
-	})
+		collect(fd.Recv)
+		collect(fd.Type.Params)
+		// Selector bases are checked below; a bare use of a session identifier is anything else.
+		bases := map[*ast.Ident]bool{}
+		ast.Inspect(fd.Body, func(n ast.Node) bool {
+			if x, ok := n.(*ast.SelectorExpr); ok {
+				if id, ok := x.X.(*ast.Ident); ok {
+					bases[id] = true
+				}
+			}
+			return true
+		})
+		ast.Inspect(fd.Body, func(n ast.Node) bool {
+			switch x := n.(type) {
+			case *ast.Ident:
+				if strings.HasPrefix(x.Name, "EventType") {
+					v = append(v, "mentions "+x.Name+": a record type of its own")
+				}
+				if session[x.Name] && !bases[x] && !declaring[x] {
+					v = append(v, "uses the session as a value ("+x.Name+" in "+fd.Name.Name+"): passed, assigned or returned, so what is done with it is not in this file")
+				}
+			case *ast.SelectorExpr:
+				if id, ok := x.X.(*ast.Ident); ok && session[id.Name] {
+					if !waitForEventSessionUses[x.Sel.Name] && !own[x.Sel.Name] {
+						v = append(v, "uses "+id.Name+"."+x.Sel.Name+": not something a composite call takes from the session")
+					}
+					if x.Sel.Name == "isReplay" {
+						isReplayUses++
+					}
+				}
+			}
+			return true
+		})
+	}
 	if isReplayUses > 1 {
-		v = append(v, "reads s.isReplay more than once: a replay arm of its own")
+		v = append(v, "reads isReplay more than once: a replay arm of its own")
 	}
 	sort.Strings(v)
 	return v
@@ -91,8 +142,13 @@ func TestTheCompositeScanSeesEachWayToBreakTheRule(t *testing.T) {
 		"records an event":         {"\ts.recordEvent(rec)", "uses s.recordEvent"},
 		"reads the history":        {"\t_ = s.history", "uses s.history"},
 		"names an event type":      {"\t_ = EventTypePluginCall", "mentions EventTypePluginCall"},
-		"a second replay decision": {"\tif s.isReplay { return 0 }", "reads s.isReplay more than once"},
+		"a second replay decision": {"\tif s.isReplay { return 0 }", "reads isReplay more than once"},
 		"counts a step":            {"\ts.stepCount++", "uses s.stepCount"},
+		// cleat-review3's case: the write is in a helper whose session parameter is not called s.
+		"a helper with another name": {"\tnoteWaitForEvent(s)\n}\nfunc noteWaitForEvent(x *execSession) {\n\tx.history = append(x.history, EventRecord{})", "uses x.history"},
+		"passes the session on":      {"\tnoteWaitForEvent(s)", "uses the session as a value (s in WaitForEvent)"},
+		"aliases the session":        {"\tt := s\n\t_ = t", "uses the session as a value (s in WaitForEvent)"},
+		"another receiver name":      {"\t_ = 0\n}\nfunc (x *execSession) helper() {\n\tx.recordEvent(EventRecord{})", "uses x.recordEvent"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			got := strings.Join(waitForEventCompositeViolations(head+tc.body+tail), "\n")

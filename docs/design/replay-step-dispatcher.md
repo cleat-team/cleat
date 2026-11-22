@@ -213,9 +213,10 @@ leaves are the ones those two write (`plugin_call`, `await_signals`, `signal_rec
 chooses. So a divergent, compacted, suspended or stopped history behaves, through this call, as it does through those two, and **a spec for it would have nothing to describe**: there is no record to
 declare, no `Decode` to write and no replay code to delete. The G3 plan listed it as the last call to move; there is nothing to move.
 
-Two tests keep that true rather than leaving it a sentence here. `TestWaitForEventStaysComposite` fails if `wait_for_event.go` ever names an `EventType`, takes anything from the session beyond
-the clock, the suspension, the two calls, the failure writer and the one stop guard, or reads `isReplay` anywhere but that guard; it has a known positive for each way of breaking the rule,
-and the day it fails the right response is to give the new record a spec and move the call. `TestWaitForEventComposesTheCallsThatAreOnTheDispatcher` and
+Two tests keep that true rather than leaving it a sentence here. `TestWaitForEventStaysComposite` fails if `wait_for_event.go` ever names an `EventType`, takes anything from the session (under whatever name a
+function holds it) beyond the clock, the suspension, the two calls, the failure writer and the one stop guard, hands the session to another function or aliases it, or reads `isReplay` anywhere but
+that guard. It has a known positive for each way of breaking the rule, and the day it fails the right response is to give the new record a spec and move the call. **Its limit is that the allowed
+names are matched by name and the scan reads this file, not the files it calls into**: `s.PluginCall` passes because `PluginCall` is on the list, whatever it does elsewhere. `TestWaitForEventComposesTheCallsThatAreOnTheDispatcher` and
 `TestACompactedHistoryReplaysThroughWaitForEvent` pin what the composition does today, row by row, with the expectations written before the first run.
 
 What that table found, **recorded and not fixed here** (cleat#4368): a divergence inside the call's `plugin_call` is wrapped by the loop as "the output is not claim-shaped" (the dispatcher's
