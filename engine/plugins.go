@@ -776,8 +776,10 @@ func (s *execSession) writePluginResult(ctx context.Context, m api.Module, inv p
 // a stream that never finished, and it cannot tell that from a stream whose worker was lost mid-way, so a lost-mid-stream run is still served as the partial
 // stream it recorded. (It now leaves replay on that call, through the dispatcher, where it stayed in replay before.)
 //
-// An EMPTY stream records nothing and so cannot be told from a call that is not there (cleat#4342); two adjacent streams of the SAME function, the first empty,
-// are still read as one by a replay. That is a limit of the recorded history, not of the dispatcher.
+// An EMPTY stream records a marker (IsEmptyStreamMarker, cleat#4342), so a replay can tell it from a call that is not there. A history written BEFORE the marker has
+// nothing for an empty stream, and two adjacent streams of the SAME function in such a history, the first empty, are still read as one. And an UNFINISHED stream
+// directly followed by an empty one cannot be told apart either: the marker ends the unfinished stream's run, so the first call is answered that stream's chunks and
+// the empty call reaches the frontier and runs live (a pinned row).
 var pluginCallStreamingStep = stepSpec{
 	Name: "plugin_call_streaming",
 	NoDivergenceDetail: "its old replay never reported a divergence: it read whatever chunk records were there and answered, so there was no message to carry detail; " +
@@ -797,7 +799,8 @@ var pluginCallStreamingStep = stepSpec{
 		switch {
 		case rec.EventType != EventTypePluginCallStreamChunk:
 			return roleForeign
-		case rec.StreamFinish:
+		case IsEmptyStreamMarker(*rec), rec.StreamFinish:
+			// The marker is a whole call by itself: an empty stream, so the run ends at it.
 			return roleFinal
 		}
 		return rolePrefix
@@ -813,6 +816,35 @@ func (s *execSession) PluginCallStreaming(ctx context.Context, m api.Module,
 	pluginName, functionName, inputJSON string,
 	responsePtr, responseMaxLen uint32) int64 {
 	return s.step(ctx, m, &pluginCallStreamingStep, stepArgs{s1: pluginName, s2: functionName, s3: inputJSON, outPtr: responsePtr, outMaxLen: responseMaxLen})
+}
+
+// emptyStreamMarkerCode is the error code the marker below carries. Any non-zero value works (the marker is told by the combination, not by the value); this is the
+// call-failure code only so that the record reads as odd to a human who looks at it.
+const emptyStreamMarkerCode = callFailureCode
+
+// IsEmptyStreamMarker says that a stream chunk record is the marker a streaming call writes when its stream produced NO chunk at all (cleat#4342).
+//
+// Without it an empty stream recorded nothing, so a replay could not tell the call from one that was not there, and [empty A][stream B] of the same function replayed
+// B's chunks to A and ran B live a second time. The marker is an EXISTING record shape, not a new event type: a plugin_call_stream_chunk with StreamData true and a
+// NON-ZERO StreamErrCode. No other writer produces that combination: a chunk the plugin produced sets StreamData and never an error code (freshPluginCallStreaming), and
+// the synthetic failure chunk sets an error code and never StreamData (streamErrorRecord). A history written before 0.6.0 has no StreamData at all, so it cannot hold one.
+// Readers of these records that serve them to a client (the SSE stream) must skip it, as it is not a chunk the plugin produced.
+func IsEmptyStreamMarker(rec EventRecord) bool {
+	return rec.EventType == EventTypePluginCallStreamChunk && rec.StreamData && rec.StreamErrCode != 0
+}
+
+// emptyStreamMarkerRecord is the record of a streaming call whose stream produced no chunk. It is not finished (StreamFinish false) on purpose: a worker that still reads
+// the record as a plain chunk (0.5.x, which does not know the data flag) serves it as a one-element stream and not as a FAILURE, which a lone finished chunk would be.
+func emptyStreamMarkerRecord(step int, pluginName, functionName, inputJSON string) EventRecord {
+	return EventRecord{
+		Step:          step,
+		EventType:     EventTypePluginCallStreamChunk,
+		PluginName:    pluginName,
+		PluginFunc:    functionName,
+		PluginInput:   inputJSON,
+		StreamData:    true,
+		StreamErrCode: int(emptyStreamMarkerCode),
+	}
 }
 
 // streamErrorRecord is the synthetic stream chunk that represents a stream-level error (e.g. registry not found, call guard rejection), so that a replay can
@@ -964,8 +996,9 @@ func (s *execSession) freshPluginCallStreaming(c *stepCtx) int64 {
 	}
 done:
 	if c.recorded == 0 {
-		// A stream that produced no chunk has nothing to record, and the guest is answered null. A replay cannot tell this call from one that is not there (cleat#4342).
-		c.RecordsNothing("the stream produced no chunk: there is no chunk event to record")
+		// A stream that produced no chunk records the marker (cleat#4342), so that a replay can tell this call from one that is not there. The guest is answered null, as it
+		// always was. Nothing is published to a live reader: nothing was produced.
+		c.Record(emptyStreamMarkerRecord(s.stepCount, pluginName, functionName, inputJSON))
 	}
 	// Return collected chunks as JSON.
 	outJSON, err := json.Marshal(collected)
@@ -988,6 +1021,9 @@ func (s *execSession) decodePluginCallStreamingRun(c *stepCtx, run []EventRecord
 	var collected []plugin.StreamEvent
 	index := 0
 	for _, rec := range run {
+		if IsEmptyStreamMarker(rec) {
+			continue // an empty stream's marker is the call's whole record and no chunk: the answer is null
+		}
 		chunk := plugin.StreamEvent{Index: rec.StreamChunkIndex, Content: rec.PluginOutput, Finish: rec.StreamFinish}
 		if !(rec.StreamChunkIndex > 0 || (rec.StreamChunkIndex == 0 && rec.StreamFinish)) {
 			chunk.Index = index

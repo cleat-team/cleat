@@ -21,6 +21,9 @@ func TestACompactedHistoryReplaysTheStreamingPluginCall(t *testing.T) {
 		"replay_two_adjacent_streams_are_two_answers",
 		"replay_two_adjacent_streams_the_second_one_final_chunk",
 		"replay_chunks_then_another_call",
+		"replay_an_empty_stream_with_its_marker",
+		"replay_an_empty_stream_with_its_marker_then_a_stream_of_the_same_function",
+		"replay_a_marker_of_another_function_is_a_divergence",
 	} {
 		name := name
 		t.Run(name, func(t *testing.T) {
