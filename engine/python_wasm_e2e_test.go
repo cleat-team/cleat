@@ -28,7 +28,7 @@ import (
 // TestPythonWasmEndToEnd validates the full Python WASM execution path.
 //
 // Prerequisites (skipped with clear message when not found):
-//   - componentize-py >= 0.12.0   (pip install componentize-py)
+//   - componentize-py ==0.25.1      (pip install componentize-py==0.25.1)
 //   - wasm-tools                   (cargo install wasm-tools)
 //   - Python 3.10+
 //   - cleat-sdk installed          (pip install -e python-sdk/)
@@ -411,7 +411,7 @@ func (h *pythonWasmTestHelper) toolsAvailable() bool {
 
 	// Check componentize-py.
 	if _, err := exec.LookPath("componentize-py"); err != nil {
-		h.missing = append(h.missing, "componentize-py (pip install componentize-py)")
+		h.missing = append(h.missing, "componentize-py (pip install componentize-py==0.25.1)")
 	}
 
 	// Check wasm-tools (needed to decompose component model -> core module).

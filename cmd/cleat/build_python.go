@@ -198,7 +198,7 @@ func runBuildPython(pattern, outDir, runtime, channel string, workflowVersion in
 	// Check for componentize-py on PATH.
 	if _, err := exec.LookPath("componentize-py"); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: componentize-py not found.\n")
-		fmt.Fprintf(os.Stderr, "Install componentize-py: pip install componentize-py\n")
+		fmt.Fprintf(os.Stderr, "Install componentize-py: pip install componentize-py==0.25.1\n")
 		fmt.Fprintf(os.Stderr, "Or follow instructions at: https://github.com/bytecodealliance/componentize-py\n")
 		os.Exit(1)
 	}

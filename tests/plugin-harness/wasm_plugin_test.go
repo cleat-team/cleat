@@ -345,7 +345,7 @@ func buildPythonWorkflowWasm(t *testing.T) []byte {
 	checkCmd := exec.Command("python3", "-c", "import componentize_py; import cleat_sdk")
 	checkCmd.Env = append(os.Environ(), "PYTHONPATH="+filepath.Join(projectRoot, "python-sdk"))
 	if err := checkCmd.Run(); err != nil {
-		t.Skip("componentize-py or cleat_sdk not installed — run: pip install componentize-py && cd python-sdk && pip install -e .")
+		t.Skip("componentize-py or cleat_sdk not installed — run: pip install componentize-py==0.25.1 && cd python-sdk && pip install -e .")
 	}
 	// The importable module and the console script come apart, and it is the
 	// script that matters here: `cleat build --target python` shells out to

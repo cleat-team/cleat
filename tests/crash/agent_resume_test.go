@@ -565,7 +565,7 @@ func missingPythonToolchain(t *testing.T, reason string) {
 	}
 	t.Skipf("componentize-py or a compatible python3 is unavailable, so the Python agent "+
 		"client cannot be built. CI installs both, where this test always runs. To run it "+
-		"locally: `pip install componentize-py` on Python >= 3.10, with its bin directory "+
+		"locally: `pip install componentize-py==0.25.1` on Python >= 3.10, with its bin directory "+
 		"on PATH.\n\n%s", reason)
 }
 

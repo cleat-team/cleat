@@ -24,9 +24,12 @@ import sys
 REQ = "python-sdk/componentize-py-requirements.txt"
 BUILD = "python-sdk/scripts/build_wasm.py"
 # Where a reader is told to install it. History (changelog, the plan, design notes) is not instruction and may name any version.
+# Wide on purpose: a guard whose scope is narrower than "anywhere a user or a job is told to install it" certifies a tree it did not read
+# (cleat-review on #4357 found three such places outside the first version of this pattern: Go that prints the hint, a Dockerfile, a test plan).
 SCOPE = re.compile(
-    r"^(\.github/.*\.(ya?ml|sh|py)|Makefile|python-sdk/Makefile|python-sdk/scripts/.*|python-sdk/README\.md|README\.md|"
-    r"docs/(tutorials|reference|migration)/.*\.md|scripts/.*\.(sh|py|ya?ml))$"
+    r"^(\.github/.*\.(ya?ml|sh|py)|Makefile|python-sdk/Makefile|python-sdk/scripts/.*|python-sdk/.*\.md|README\.md|"
+    r"docs/.*\.md|scripts/.*\.(sh|py|ya?ml)|scripts/.*[Dd]ockerfile.*|(.*/)?[Dd]ockerfile(\..*)?|.*\.[Dd]ockerfile|"
+    r"(cmd|wasm|engine|cleat|internal|tests)/.*\.go|tests/.*\.(sh|py|ya?ml)|.*/(skip|SKIP)[^/]*\.md)$"
 )
 SKIP = {REQ, "scripts/check-componentize-py-pin.py", "scripts/install-componentize-py.sh"}
 NAME = r"(?<![\w/.-])componentize[-_]py(?![\w-])"
@@ -61,7 +64,7 @@ def logical_lines(text):
 def scan(path, text, want):
     findings = []
     for n, line in logical_lines(text):
-        if line.lstrip().startswith("#"):
+        if line.lstrip().startswith("#") and not path.endswith(".md"):  # a Markdown "#" line is a heading, which is read
             continue
         if RANGE.search(line):
             findings.append((path, n, "a range or floor on componentize-py; pin it exactly to %s" % want))
@@ -145,6 +148,7 @@ def self_test():
     expect("comment naming an old floor", scan("a.yml", '      # was pip install "componentize-py>=0.12.0"\n', want), 0)
     expect("install through the hashed file, no name on the line", scan("a.yml", "pip install --require-hashes -r python-sdk/componentize-py-requirements.txt\n", want), 0)
     expect("KNOWN POSITIVE continued install", scan("a.yml", "pip install \\\n  --upgrade \\\n  componentize-py\n", want), 1)
+    expect("KNOWN POSITIVE a Markdown heading is not a comment", scan("a.md", "# pip install componentize-py\n", want), 1)
     expect("a step NAME is not an install", scan("a.yml", "      - name: Install componentize-py\n", want), 0)
     expect("a pip install of something else", scan("a.yml", "pip install wasm-tools\n", want), 0)
     expect("constant agrees", check_constant('PINNED_COMPONENTIZE_PY = "0.25.1"\n', want), 0)
