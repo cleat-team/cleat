@@ -1646,7 +1646,8 @@ func (s *apiServer) handleSignal(w http.ResponseWriter, r *http.Request, id stri
 	key := r.Header.Get("Idempotency-Key")
 	si, canAbsorb := st.(engine.SignalIdempotencyStore)
 	if key != "" && canAbsorb {
-		already, err := si.DeliverSignalIdempotent(r.Context(), id, req.SignalName, payload, key)
+		receipt, err := deliverSignalWithReceipt(r.Context(), st, si, id, req.SignalName, payload, key)
+		already := receipt.Replay
 		if err != nil {
 			if s.writeSignalNotOpen(w, err) {
 				return
@@ -1672,11 +1673,12 @@ func (s *apiServer) handleSignal(w http.ResponseWriter, r *http.Request, id stri
 		// This path was the CLOSEST to the policy already: right status, right
 		// shape, wrong place for the marker. start and reprocess had to change
 		// their status and their field names as well.
-		s.writeJSON(w, 200, withReplayFlag(s.signalReplyBody(r.Context(), st, id), already))
+		s.writeJSON(w, 200, withReplayFlag(s.signalReply(r.Context(), st, id, receipt), already))
 		return
 	}
 
-	if err := st.DeliverSignal(r.Context(), id, req.SignalName, payload); err != nil {
+	receipt, err := deliverSignalWithReceipt(r.Context(), st, nil, id, req.SignalName, payload, "")
+	if err != nil {
 		if s.writeSignalNotOpen(w, err) {
 			return
 		}
@@ -1692,7 +1694,37 @@ func (s *apiServer) handleSignal(w http.ResponseWriter, r *http.Request, id stri
 	// send the same signal deliberately twice. The flag is still present and
 	// false, because "this is not a replay" is an answer and an absent field is
 	// not.
-	s.writeJSON(w, 200, withReplayFlag(s.signalReplyBody(r.Context(), st, id), false))
+	s.writeJSON(w, 200, withReplayFlag(s.signalReply(r.Context(), st, id, receipt), false))
+}
+
+// deliverSignalWithReceipt delivers a signal and says where it went (cleat#4340): to the run it was addressed to, or, when that run had continued as new, to the END of its chain. A store that
+// cannot say (a test double, an older store) is asked the old way and reports the addressed run, which is what it did. si is the store's idempotency interface when the caller already holds it,
+// and may be nil for an unkeyed delivery.
+func deliverSignalWithReceipt(ctx context.Context, st engine.WorkflowStore, si engine.SignalIdempotencyStore, id, name, payload, key string) (engine.SignalReceipt, error) {
+	if rs, ok := st.(engine.SignalReceiptStore); ok {
+		return rs.DeliverSignalReceipt(ctx, id, name, payload, key)
+	}
+	if key != "" && si != nil {
+		already, err := si.DeliverSignalIdempotent(ctx, id, name, payload, key)
+		return engine.SignalReceipt{DeliveredTo: id, Replay: already}, err
+	}
+	return engine.SignalReceipt{DeliveredTo: id}, st.DeliverSignal(ctx, id, name, payload)
+}
+
+// signalReply is the 200 body for a signal the store ACCEPTED. It is signalReplyBody for the run that now holds the signal, plus, when the signal was forwarded, WHICH run that is
+// (`workflow_id`) and which run the caller addressed (`forwarded_from`), so a client holding the first id of a long chain learns where its signals go. Both keys are absent for a signal that went
+// where it was addressed, so a client that does not read them sees exactly what it saw before.
+func (s *apiServer) signalReply(ctx context.Context, st engine.WorkflowStore, addressed string, r engine.SignalReceipt) map[string]any {
+	target := addressed
+	if r.Forwarded && r.DeliveredTo != "" {
+		target = r.DeliveredTo
+	}
+	body := s.signalReplyBody(ctx, st, target)
+	if r.Forwarded && r.DeliveredTo != "" {
+		body["workflow_id"] = r.DeliveredTo
+		body["forwarded_from"] = addressed
+	}
+	return body
 }
 
 func (s *apiServer) handleCancel(w http.ResponseWriter, r *http.Request, id string) {

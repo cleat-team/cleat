@@ -741,6 +741,29 @@ func (s *ShardedStore) DeliverSignal(ctx context.Context, workflowID, signalName
 	return withContinuedTo(ctx, shard.Store.DeliverSignal(ctx, workflowID, signalName, payload), s.successorAcrossShards)
 }
 
+// DeliverSignalReceipt routes by workflow ID like its siblings and says where the signal went (cleat#4340). A run's chain is on the shard that holds the run, because a continue inserts the
+// successor on the shard of the run it continues, so forwarding works for a signal addressed to ANY run that shard holds. What it cannot do is reach a successor by ITS OWN id: getShard hashes that
+// id, which names a shard that need not hold the run. That routing is not new and not about signals; see cleat#4340's sharding note.
+func (s *ShardedStore) DeliverSignalReceipt(ctx context.Context, workflowID, signalName, payload, idempotencyKey string) (SignalReceipt, error) {
+	shard := s.getShard(workflowID)
+	if shard == nil {
+		return SignalReceipt{}, fmt.Errorf("deliver_signal: no shard available -- check shard configuration in CLEAT_SHARD_CONFIG")
+	}
+	if rs, ok := shard.Store.(SignalReceiptStore); ok {
+		r, err := rs.DeliverSignalReceipt(ctx, workflowID, signalName, payload, idempotencyKey)
+		return r, withContinuedTo(ctx, err, s.successorAcrossShards)
+	}
+	if idempotencyKey != "" {
+		si, ok := shard.Store.(SignalIdempotencyStore)
+		if !ok {
+			return SignalReceipt{}, fmt.Errorf("shard %q: %T cannot absorb a duplicate signal", shard.Config.Name, shard.Store)
+		}
+		replay, err := si.DeliverSignalIdempotent(ctx, workflowID, signalName, payload, idempotencyKey)
+		return SignalReceipt{DeliveredTo: workflowID, Replay: replay}, withContinuedTo(ctx, err, s.successorAcrossShards)
+	}
+	return SignalReceipt{DeliveredTo: workflowID}, withContinuedTo(ctx, shard.Store.DeliverSignal(ctx, workflowID, signalName, payload), s.successorAcrossShards)
+}
+
 // DeliverSignalIdempotent routes to the shard owning the workflow, like its
 // non-idempotent sibling.
 //

@@ -61,25 +61,45 @@ to be.
 on a `terminating` row still cuts the defer phase short rather than being refused, exactly as
 before.
 
-**A signal to a run that can never be reopened is refused; one to a run that can be is accepted, and the
-reply says so.** cleat#4340. `done`, `cancelled` and a run that continued as new cannot be reopened, and a
-continuation is a different run with a different id, so a signal sent to one used to be stored under its own id,
-read by no one, and answered `200 {"status":"delivered"}`. It is now refused, in the statement that would have
-stored it, so nothing is written:
+**A signal is addressed to a workflow, and reaches whichever run of it is live; one to a run that can never be reopened
+is refused.** cleat#4340. A workflow that continues as new is the same workflow to its sender, so a signal sent to
+**any run of a continue-as-new chain** is delivered to the **current run** (the end of the chain), exactly once, and the
+`200` says where it went:
+
+```
+POST /api/workflows/<first-run>/signal  →  200 {"status":"delivered", "workflow_id":"<current run>",
+                                                "forwarded_from":"<first-run>", "replay":false}
+```
+
+`workflow_id` and `forwarded_from` are present only when the signal was forwarded. A signal already **stored on a run
+when it continues** (sent but not yet read) is **carried to its successor**, in the same transaction that completes the
+old run, in the order it was sent. A signal that races the continue lands on exactly one run, before the commit (and is
+carried) or after it (and is forwarded): a delivery locks the old run's row (its lease row on PostgreSQL, its instance
+row on MySQL and SQL Server) before it decides, and the continue's own update of that row waits for it, so neither can
+miss the other.
+
+A chain whose **current run** is `done` or `cancelled` has nowhere to deliver, and is refused, in the statement that would
+have stored the signal, so nothing is written:
 
 ```
 POST /api/workflows/<id>/signal  →  409 {"error":"…", "detail":"workflow_not_open",
                                          "status":"done", "continued_to":"<run>"}
 ```
 
-`status` is `done` or `cancelled`. `continued_to` appears only for a run that **continued as new**, and names the
-**last run in its chain as of that moment** (not the next link, which may itself be closed), which is the run to
-send the signal to instead; it is absent for a run that simply finished. The refusal is the same under an
-`Idempotency-Key`, and it does **not** spend the key. A run that does not exist, or belongs to another tenant, is
-still `404`, identically, so this answer reveals nothing about another tenant's runs. Inside a workflow,
-`SignalWorkflow` to such a target returns the existing **not-found** outcome (a new outcome class would be an ABI
-change in every SDK), and a plugin sees `plugin.ErrWorkflowNotFound`, so an awaiter registered for the run is dropped,
-as for a missing one.
+`status` is the state of the run that refused, `done` or `cancelled`. `continued_to` appears only when the run addressed
+had **continued as new** and names the **last run in its chain**, whose state `status` is; it is absent for a run that
+simply finished. The refusal is the same under an `Idempotency-Key`, and it does **not** spend the key; a key that
+already delivered is a replay and delivers nothing, forwarded or not. A run that does not exist, or belongs to another
+tenant, is still `404`, identically, so this answer reveals nothing about another tenant's runs. Inside a workflow,
+`SignalWorkflow` to a target that is closed for good returns the existing **not-found** outcome (a new outcome class would
+be an ABI change in every SDK), and a plugin sees `plugin.ErrWorkflowNotFound`, so an awaiter registered for the run is
+dropped, as for a missing one.
+
+**Sharding (experimental) has a known issue here.** A continue inserts the successor on the shard of the run it
+continues, so forwarding and the carry-over work for a signal addressed to a run that shard holds. But every other
+operation routes a run by the hash of its OWN id, which need not name the shard that holds a continued run, so a signal
+addressed to a successor by ITS id can be routed away from it. That routing predates this change and is not about
+signals; a signal addressed to the first run of a chain is not affected.
 
 **`failed`, `terminated` and `dead_lettered` are different, and are deliberately NOT refused.** An operator can
 reopen them under the **same id** (`re-replay`, and `retry` for `dead_lettered`; see *Redriving a settled run*), and

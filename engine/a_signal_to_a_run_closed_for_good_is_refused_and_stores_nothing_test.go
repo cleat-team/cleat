@@ -125,37 +125,8 @@ func TestASignalToARunThatHasClosedForGoodIsRefusedAndStoresNothing(t *testing.T
 					}
 				})
 			}
-
-			t.Run("a run that continued as new names the END of its chain", func(t *testing.T) {
-				first := settleRunOpen(t, ctx, store, parent)
-				cur := first
-				var all []string
-				for i := 0; i < 3; i++ {
-					wf, err := claimSpecific(t, ctx, store, cur, "w-chain")
-					if err != nil {
-						t.Fatalf("claim: %v", err)
-					}
-					next, err := store.ContinueAsNew(ctx, cur, "w-chain", wf.Generation, "intent-workflow", 1, json.RawMessage(`{}`), nil, "", map[string]string{}, 0)
-					if err != nil {
-						t.Fatalf("ContinueAsNew: %v", err)
-					}
-					all = append(all, next)
-					cur = next
-				}
-				last := all[len(all)-1]
-				err := store.DeliverSignal(ctx, first, "ping", `"x"`)
-				var ne *WorkflowNotOpenError
-				if !errors.As(err, &ne) {
-					t.Fatalf("DeliverSignal to a continued run = %v, want a *WorkflowNotOpenError", err)
-				}
-				if ne.Status != statusDone || ne.ContinuedTo != last {
-					t.Errorf("the refusal names (status %q, continued_to %q), want (done, %q): the chain's END, not %q, which is only the next link and would itself be refused", ne.Status, ne.ContinuedTo, last, all[0])
-				}
-				// And the run the error names accepts the signal, so the advice is usable and not just present.
-				if err := store.DeliverSignal(ctx, ne.ContinuedTo, "ping", `"x"`); err != nil {
-					t.Errorf("DeliverSignal to the run the error named (%s) = %v, want it accepted", ne.ContinuedTo, err)
-				}
-			})
+			// A run that CONTINUED AS NEW used to be refused here, naming the end of its chain. It is no longer refused: a signal addressed to it is delivered to that end (cleat#4340,
+			// TestASignalToARunThatContinuedAsNewIsDeliveredToTheChainsCurrentRun), and a chain whose end is done or cancelled is refused by TestASignalToAChainThatEndedIsRefusedOrStoredByHowItEnded.
 		})
 	}
 }

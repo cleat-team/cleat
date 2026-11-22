@@ -37,7 +37,7 @@ func TestASignalToARunClosedForGoodIs409WithItsSuccessor(t *testing.T) {
 	for _, tc := range []struct {
 		name, status, to string
 	}{
-		{"a run that continued as new", "done", "wf-current"},
+		{"a chain whose current run finished", "done", "wf-current"},
 		{"a run that finished", "done", ""},
 		{"a cancelled run", "cancelled", ""},
 	} {

@@ -195,59 +195,105 @@ func decodeJSONPayload(raw string) string {
 // Ordering it the other way would deliver, then discover the duplicate, and
 // have nothing to undo outside a transaction.
 func (s *PostgresStore) DeliverSignalIdempotent(ctx context.Context, workflowID, signalName, payload, idempotencyKey string) (bool, error) {
-	if idempotencyKey == "" {
-		// No token. Deliver unconditionally and record nothing -- see the
-		// interface doc for why "" is an absence rather than a value.
-		return false, s.DeliverSignal(ctx, workflowID, signalName, payload)
+	r, err := s.DeliverSignalReceipt(ctx, workflowID, signalName, payload, idempotencyKey)
+	return r.Replay, err
+}
+
+// DeliverSignalReceipt implements SignalReceiptStore: a delivery, keyed when idempotencyKey is not empty, that says where the signal went (cleat#4340). An empty key delivers unconditionally and
+// records nothing -- see the interface doc for why "" is an absence rather than a value. The signal goes to the END of the addressed run's chain; see signal_forward.go.
+func (s *PostgresStore) DeliverSignalReceipt(ctx context.Context, workflowID, signalName, payload, idempotencyKey string) (SignalReceipt, error) {
+	// The chain's end as an UNLOCKED read finds it, taken BEFORE the transaction so the second connection it needs is not held while this call holds one. It is only where lockChainEnd starts: the
+	// answer is checked again under the lock.
+	hint, err := latestRunInChain(ctx, workflowID, s.successorOfRun)
+	if err != nil {
+		return SignalReceipt{}, fmt.Errorf("deliver signal: resolve the chain: %w", err)
 	}
 
 	tx, err := s.beginTxWithRLS(ctx)
 	if err != nil {
-		return false, fmt.Errorf("deliver signal: begin: %w", err)
+		return SignalReceipt{}, fmt.Errorf("deliver signal: begin: %w", err)
 	}
 	defer tx.Rollback()
 
 	var inserted bool
-	// expires_at from the CONFIGURED TTL, not the column default.
-	//
-	// idempotency_keys.expires_at defaults to now() + 7 days, and the
-	// store's idempotencyKeyTTL defaults to 720 hours. The start path sets
-	// it explicitly; this one did not when it was added in cleat#1266, so a
-	// SIGNAL token silently stopped working after 7 days while the
-	// configured and documented lifetime was 30 -- a retry on day 8 would
-	// be delivered a second time, which is the whole thing the token exists
-	// to prevent.
-	//
-	// Same shape as cleat#1261, where cleanup deleted at created_at + 7
-	// days against the same 720h default and swept LIVE keys 23 days early:
-	// idempotency that stops working long before it says it does, silently,
-	// because nothing compares the two numbers.
-	err = tx.QueryRowContext(ctx, `
+	if idempotencyKey != "" {
+		// expires_at from the CONFIGURED TTL, not the column default.
+		//
+		// idempotency_keys.expires_at defaults to now() + 7 days, and the
+		// store's idempotencyKeyTTL defaults to 720 hours. The start path sets
+		// it explicitly; this one did not when it was added in cleat#1266, so a
+		// SIGNAL token silently stopped working after 7 days while the
+		// configured and documented lifetime was 30 -- a retry on day 8 would
+		// be delivered a second time, which is the whole thing the token exists
+		// to prevent.
+		//
+		// Same shape as cleat#1261, where cleanup deleted at created_at + 7
+		// days against the same 720h default and swept LIVE keys 23 days early:
+		// idempotency that stops working long before it says it does, silently,
+		// because nothing compares the two numbers.
+		err = tx.QueryRowContext(ctx, `
 		INSERT INTO idempotency_keys (key_hash, workflow_id, expires_at, tenant_id)
 		VALUES ($1, $2, now() + ($3 * INTERVAL '1 second'), $4)
 		ON CONFLICT (key_hash, tenant_id) DO NOTHING
 		RETURNING true
 	`, signalIdempotencyHash(idempotencyKey), workflowID,
-		int(s.idempotencyKeyTTL.Seconds()), s.tenantID).Scan(&inserted)
-	if errors.Is(err, sql.ErrNoRows) {
-		// DO NOTHING returned no row: the token is already spent.
-		return true, tx.Commit()
-	}
-	if err != nil {
-		return false, fmt.Errorf("deliver signal: claim idempotency key: %w", err)
+			int(s.idempotencyKeyTTL.Seconds()), s.tenantID).Scan(&inserted)
+		if errors.Is(err, sql.ErrNoRows) {
+			// DO NOTHING returned no row: the token is already spent.
+			return SignalReceipt{Replay: true}, tx.Commit()
+		}
+		if err != nil {
+			return SignalReceipt{}, fmt.Errorf("deliver signal: claim idempotency key: %w", err)
+		}
 	}
 
 	// cleat#2312: signal payload is sensitive-at-rest.
 	tc, err := s.tenantCipherForWrite()
 	if err != nil {
-		return false, fmt.Errorf("deliver signal: derive tenant key: %w", err)
+		return SignalReceipt{}, fmt.Errorf("deliver signal: derive tenant key: %w", err)
 	}
-	if err := deliverSignalTx(ctx, tx, s.tenantID, workflowID, signalName, payload, tc); err != nil {
+	to, err := s.deliverForwardedTx(ctx, tx, workflowID, hint, signalName, payload, tc)
+	if err != nil {
 		// The idempotency key claimed above is rolled back with this transaction, so a refused delivery does not spend the token.
-		return false, withContinuedTo(ctx, err, s.successorOfRun)
+		return SignalReceipt{}, err
+	}
+	// The key is recorded against the run that HOLDS the signal (cleat#4340). It was claimed above against the addressed run, which for a forwarded signal is a completed run the retention sweep
+	// deletes, and a sweep deletes the keys of the runs it removes: the key would go while the signal still sits on a live run, and a retry under it would deliver the signal a second time.
+	if idempotencyKey != "" && to != workflowID {
+		if _, err := tx.ExecContext(ctx, `UPDATE idempotency_keys SET workflow_id = $1 WHERE key_hash = $2 AND tenant_id = $3`, to, signalIdempotencyHash(idempotencyKey), s.tenantID); err != nil {
+			return SignalReceipt{}, fmt.Errorf("deliver signal: record the key against the run that holds the signal: %w", err)
+		}
 	}
 	pgNotify(ctx, tx, s.notifyChannel)
-	return false, tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return SignalReceipt{}, err
+	}
+	return receiptFor(workflowID, to), nil
+}
+
+// deliverForwardedTx stores a signal on the END of the chain the addressed run belongs to, under the lock that orders it against that run's continue-as-new (cleat#4340).
+func (s *PostgresStore) deliverForwardedTx(ctx context.Context, tx *sql.Tx, workflowID, hint, signalName, payload string, tc *tenantCipher) (string, error) {
+	end, err := lockChainEnd(workflowID, hint,
+		func(run string) (string, bool, error) {
+			var status string
+			switch err := tx.QueryRowContext(ctx, `SELECT status FROM workflow_leases WHERE id = $1 AND tenant_id = $2 FOR UPDATE`, run, s.tenantID).Scan(&status); {
+			case errors.Is(err, sql.ErrNoRows):
+				return "", false, nil
+			case err != nil:
+				return "", false, fmt.Errorf("deliver signal: lock the run: %w", err)
+			}
+			return status, true, nil
+		},
+		func(run string) (string, error) {
+			return successorScan(tx.QueryRowContext(ctx, `SELECT id FROM workflow_leases WHERE continued_from = $1 AND tenant_id = $2`, run, s.tenantID))
+		})
+	if err != nil {
+		return "", err
+	}
+	if err := deliverSignalTx(ctx, tx, s.tenantID, end, signalName, payload, tc); err != nil {
+		return "", refusalFor(err, workflowID, end)
+	}
+	return end, nil
 }
 
 // isSignalsWorkflowFKViolationPG checks for a foreign-key violation
@@ -276,21 +322,8 @@ func isSignalsWorkflowFKViolationPG(err error) bool {
 }
 
 func (s *PostgresStore) DeliverSignal(ctx context.Context, workflowID, signalName, payload string) error {
-	tx, err := s.beginTxWithRLS(ctx)
-	if err != nil {
-		return fmt.Errorf("deliver signal: begin: %w", err)
-	}
-	defer tx.Rollback()
-	// cleat#2312: signal payload is sensitive-at-rest.
-	tc, err := s.tenantCipherForWrite()
-	if err != nil {
-		return fmt.Errorf("deliver signal: derive tenant key: %w", err)
-	}
-	if err := deliverSignalTx(ctx, tx, s.tenantID, workflowID, signalName, payload, tc); err != nil {
-		return withContinuedTo(ctx, err, s.successorOfRun)
-	}
-	pgNotify(ctx, tx, s.notifyChannel)
-	return tx.Commit()
+	_, err := s.DeliverSignalReceipt(ctx, workflowID, signalName, payload, "")
+	return err
 }
 
 // deliverSignalTx is the body of a delivery, inside a caller's transaction.

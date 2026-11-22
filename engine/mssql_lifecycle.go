@@ -1308,6 +1308,11 @@ func (s *MSSQLStore) continueAsNewOnce(ctx context.Context, currentRunID, worker
 		return "", ErrFenceLost
 	}
 
+	// Carry the signals the old run had not consumed to the run that continues the workflow (cleat#4340). After the old run's row was updated above, so every delivery that held it has committed.
+	if _, err := tx.ExecContext(ctx, `UPDATE workflow_signals SET workflow_id = @p1 WHERE workflow_id = @p2 AND tenant_id = @p3`, newRunID, currentRunID, s.tenantID); err != nil {
+		return "", fmt.Errorf("continue as new: carry the pending signals: %w", err)
+	}
+
 	if err := tx.Commit(); err != nil {
 		return "", err
 	}
