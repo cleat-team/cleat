@@ -253,33 +253,58 @@ All Cleat workflows are synchronous. The host handles suspension and resumption 
 
 ## Python Standard Library Compatibility
 
-When compiled to WASM via `componentize-py`, **only a subset of the Python standard library is available**. The following tables document the compatibility status of commonly used modules.
+**The rule: import every standard-library module you use at the top level of the workflow module.**
 
-### Fully available
+What decides whether a standard-library module is there is not which module it is but **when it is first imported**. `componentize-py` keeps only the standard-library modules that were imported while your component was being built; a module first imported inside a function, at run time, is not in the component and raises `ModuleNotFoundError` **in production, not at build time**. This is a documented limit of componentize-py ("the application can only import dependencies during build time, which means any imports used at runtime must be resolved at the top level of the application module"), and Cleat's build adds no trimming of its own.
 
-These modules work without restrictions in WASM:
+```python
+# Fails when the workflow runs: ModuleNotFoundError: No module named 'csv'
+def my_workflow(h, request):
+    import csv
+    ...
 
-| Module | Notes |
-|--------|-------|
-| `json` | JSON encoding/decoding (heavily used by the SDK) |
-| `math` | Mathematical functions |
-| `datetime` | Date and time types (basic usage) |
-| `collections` / `collections.abc` | Container data types |
-| `typing` / `typing_extensions` | Type annotations |
-| `dataclasses` | Data class definitions (preferred for input/output types) |
-| `hashlib` | Cryptographic hash functions |
-| `functools` | Decorators and higher-order functions |
-| `itertools` | Iterator tools |
-| `enum` | Enumerations |
-| `decimal` | Decimal arithmetic |
-| `uuid` | UUID generation |
-| `copy` | Shallow/deep copy |
-| `heapq` | Heap queue algorithm |
-| `bisect` | Array bisection algorithm |
-| `base64` | Base64 encoding/decoding |
-| `struct` | Pack/unpack binary data (limited to basic types) |
-| `abc` | Abstract base classes |
-| `contextlib` | Context manager utilities |
+# Works: csv was imported when the component was built
+import csv
+
+def my_workflow(h, request):
+    ...
+```
+
+Measured 2026-11-22 (cleat#4266) with componentize-py 0.25.1, whose guest is CPython 3.14.0 for wasi, in a minimal workflow that imports only `json`, `dataclasses` and `cleat_sdk`. Of the 297 names in the guest's `sys.stdlib_module_names`, **130 import at run time without being imported first, 167 do not, 119 of those 167 work once imported at the top level, and 42 are not in the component at all.** (Six names were not tried at build time: `antigravity`, `idlelib`, `this`, `tkinter`, `turtle`, `turtledemo`.) Versions of componentize-py other than 0.25.1 were not measured.
+
+### Present without a top-level import
+
+These import at run time even when your workflow never imported them. A module can be here and still lazily import another module when you call it: see the next table.
+
+`abc`, `array`, `ast`, `atexit`, `base64`, `binascii`, `bisect`, `builtins`, `cmath`, `codecs`, `collections`, `contextlib`, `copy`, `copyreg`, `dataclasses`, `datetime`, `dis`, `email`, `encodings`, `enum`, `errno`, `fnmatch`, `functools`, `gc`, `hashlib`, `importlib`, `inspect`, `io`, `ipaddress`, `itertools`, `json`, `keyword`, `linecache`, `marshal`, `math`, `operator`, `os`, `random`, `re`, `reprlib`, `shutil`, `site`, `stat`, `string`, `struct`, `sys`, `tempfile`, `time`, `token`, `tokenize`, `types`, `typing`, `unicodedata`, `uuid`, `warnings`, `weakref`, `zlib`, and a few more (the list is whatever the SDK and the interpreter themselves import, so it can change between SDK versions: re-derive it, below).
+
+### Available once imported at the top level
+
+Every other standard-library module that is not in the next table. Among the ones people reach for, **`decimal`, `fractions`, `statistics`, `heapq`, `csv`, `difflib`, `textwrap`, `pprint`, `argparse`, `pathlib`, `logging`, `traceback`, `queue`, `glob`, `secrets`, `hmac`, `shlex`, `html`, `calendar`, `tomllib`, `gzip`, `zipfile`, `numbers`, `pickle` and `sqlite3`** all fail with `ModuleNotFoundError` if first imported inside a function, and import if imported at the top level. For `decimal`, `fractions`, `statistics`, `heapq`, `csv`, `difflib`, `textwrap`, `pprint`, `logging`, `traceback`, `queue`, `calendar`, `shlex`, `html`, `secrets`, `tomllib`, `gzip` and `hmac`, a basic call was also run and worked. "Imports" is all that was measured for the rest.
+
+### A call that imports a helper the first time it runs
+
+These modules are present, but the call below imports another module on first use, and that one is only in the component if **you** import it at the top level. Each remedy was measured on its own: that one import fixed exactly that call.
+
+| call | import at the top level |
+|---|---|
+| `datetime.strptime()`, `time.strptime()` | `import _strptime` |
+| `Counter.most_common()` | `import heapq` |
+| `.encode()` / `.decode()` with `"cp1252"` | `import encodings.cp1252` |
+| `… "shift_jis"` | `import encodings.shift_jis` |
+| `… "iso-8859-15"` | `import encodings.iso8859_15` |
+| `… "utf-8-sig"` | `import encodings.utf_8_sig` |
+| `… "idna"` | `import encodings.idna` **and** `import encodings.punycode` (the first alone is not enough) |
+
+`utf-8`, `ascii`, `latin-1`, `utf-16` and `utf-32` need nothing. Other codecs and other calls were **not** measured and are probably the same.
+
+### Not in the component at all
+
+These fail with `ModuleNotFoundError` even when imported at the top level (42 names; they are native or operating-system-only modules that the interpreter build does not contain):
+
+`_bz2`, `_ctypes`, `_curses`, `_curses_panel`, `_dbm`, `_gdbm`, `_hashlib`, `_interpchannels`, `_interpqueues`, `_interpreters`, `_lzma`, `_multiprocessing`, `_overlapped`, `_posixshmem`, `_posixsubprocess`, `_remote_debugging`, `_scproxy`, `_ssl`, `_tkinter`, `_uuid`, `_winapi`, `_wmi`, `_zstd`, `bz2`, `ctypes`, `curses`, `fcntl`, `grp`, `lzma`, `mmap`, `msvcrt`, `nt`, `pty`, `pwd`, `readline`, `resource`, `ssl`, `syslog`, `termios`, `tty`, `winreg`, `winsound`.
+
+Two more things are missing from modules that otherwise import: **`hashlib.pbkdf2_hmac` and `hashlib.scrypt`** do not exist (`_hashlib`, the OpenSSL binding, is in the list above; `md5`, `sha1`, `sha2`, `sha3` and `blake2` work), and **`zoneinfo` has no time-zone database**: with every standard-library module imported, `ZoneInfo("UTC")` and `ZoneInfo("Europe/Paris")` both raise `ZoneInfoNotFoundError`.
 
 ### Limited availability
 
@@ -290,33 +315,27 @@ These modules are partially available with documented restrictions:
 | `os` | ⚠️ Limited | `os.environ.get()`, `os.name` work. No file I/O (`os.open`, `os.listdir`), no `os.fork`, no `os.pipe` |
 | `sys` | ⚠️ Limited | `sys.version`, `sys.platform`, `sys.getsizeof()` work. No `sys.stdin`, `sys.stdout`, `sys.stderr` access |
 | `re` | ⚠️ Limited | Basic matching works. Backreferences and lookahead/lookbehind may fail in some builds |
-| `pathlib` | ⚠️ Limited | Path manipulation works. No real filesystem I/O (`read_text`, `write_text`, etc.) |
+| `pathlib` | ⚠️ Limited | Path manipulation works **once `pathlib` is imported at the top level** (it is not in the component otherwise, see the rule above). No real filesystem I/O (`read_text`, `write_text`, etc.) |
 | `random` | ⚠️ Limited | Basic PRNG works. Use `h.random()` for deterministic workflow randomness instead |
 | `json` | ✅ Fully available, see above | |
 | `time` | ⚠️ Limited | `time.time()` works. `time.sleep()` is not available (use `h.sleep()`) |
 
-### Not available
+### Imports, but `cleat vet` refuses it in workflow code
 
-These modules will **fail at import time or runtime** in WASM:
+These **do import** (measured); it is `cleat vet` that rejects them, because they make a workflow non-deterministic or produce effects that cannot be replayed:
 
-| Module | Reason |
-|--------|--------|
-| `asyncio` | Async/await not supported in WASM CPython |
-| `threading` | No thread support in WASM |
-| `multiprocessing` | No process support |
-| `socket` | No raw socket access |
-| `subprocess` | No process spawning |
-| `signal` | No OS signal handling |
-| `select` / `selectors` | No I/O multiplexing |
-| `mmap` | No memory mapping |
-| `ctypes` / `cffi` | No native code interop |
-| `ssl` | No TLS/SSL (use host's `call` instead) |
-| `http.client` / `urllib` | No outbound HTTP (use host calls instead) |
-| `requests` | Third-party HTTP library (use `h.fetch()` instead) |
-| `xml` / `xmlrpc` | XML parsing may be unavailable; avoid |
-| `tkinter` | No GUI support in WASM |
-| `concurrent.futures` | Depends on threading |
-| `asyncio`-based libs | Any library depending on `asyncio` (e.g., `aiohttp`) |
+| Module | Refused as | Reason (from `cleat vet`) |
+|---|---|---|
+| `threading`, `asyncio`, `multiprocessing` | PY008 | Cleat workflows are single-threaded; use child workflows for parallelism |
+| `socket` | PY009 | raw sockets produce non-replayable network side effects |
+| `urllib`, `http.client`, `requests` | PY003 | direct HTTP calls produce non-replayable network effects; use host calls (below) |
+| `subprocess`, most of `os` | PY007 | subprocesses and OS operations cannot be replayed |
+
+`select`, `selectors`, `signal`, `xml`, `xmlrpc` and `concurrent.futures` also **import** (at the top level) and `cleat vet` does not refuse them; whether they do anything useful inside a component was not tested. This section used to say they "fail at import time". A submodule needs its own top-level import: with only `import xml` present, `xml.etree.ElementTree` raised `ModuleNotFoundError`, and `import xml.etree.ElementTree` fixed it.
+
+### Re-deriving all of this
+
+The numbers above are one build's. To re-measure, build a workflow that imports each name in `sys.stdlib_module_names` inside its entry function, record the exception for each, then build it again with the same imports at module level (`importlib.import_module` over the list is enough) and compare. The probe used for the figures here is on cleat#4266.
 
 ### Making HTTP requests
 
@@ -673,7 +692,7 @@ When your workflow is compiled to WASM, `componentize-py` bundles a minimal CPyt
 
 - **Pure-Python imports** -- Pure Python modules on the Python path work normally
 - **C extension modules** -- Native code (`.so`/`.pyd`) does **not** work in WASM
-- **stdlib modules** -- Only pure-Python stdlib modules are available (see [compatibility section](#python-standard-library-compatibility))
+- **stdlib modules** -- Only the standard-library modules imported at the top level of your workflow module (or already present in every component) are there at run time: import what you use at the top level (see [compatibility section](#python-standard-library-compatibility))
 - **Third-party packages** -- Pure-Python packages (e.g., `langchain-core`) can work if they are on the Python path and do not depend on C extensions
 - **Relative imports** -- Use absolute imports within your workflow file; relative imports may not resolve correctly in the WASM context
 
