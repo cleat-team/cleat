@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import atexit
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -146,6 +147,27 @@ def generate_wit_export(wit_dir: Path, func_name: str, module_name: str) -> Path
     return wit_dir / "cleat.wit"
 
 
+def componentize_py_version_warning(version_output: str) -> str | None:
+    """A warning when the installed componentize-py is not the version this SDK was measured on, else ``None`` (cleat#4355).
+
+    componentize-py decides which standard-library modules a component contains, and the README's compatibility tables and
+    ``cleat vet``'s PY015 table were measured on ``PINNED_COMPONENTIZE_PY`` and on no other version. A different version is not known
+    to be broken, only not measured, so this warns and the build goes on; an output it cannot read is reported as unreadable, not
+    as a match.
+    """
+    match = re.match(r"\s*componentize-py\s+(\S+)", version_output)
+    got = match.group(1) if match else None
+    if got == PINNED_COMPONENTIZE_PY:
+        return None
+    installed = f"componentize-py {got}" if got else f"a componentize-py whose version could not be read ({version_output.strip()[:60]!r})"
+    return (
+        f"Warning: {installed} is installed, but this SDK was tested and measured with componentize-py {PINNED_COMPONENTIZE_PY}. "
+        "componentize-py decides which standard-library modules a component contains, so a build with another version may contain "
+        "different ones, and a module can raise ModuleNotFoundError only when the workflow runs. "
+        f"Install the measured version: pip install componentize-py=={PINNED_COMPONENTIZE_PY}"
+    )
+
+
 def run_componentize_py(
     entry_file: str,
     func_name: str,
@@ -168,6 +190,9 @@ def run_componentize_py(
             print("Error: componentize-py not found or not working", file=sys.stderr)
             print(f"Install with: pip install componentize-py=={PINNED_COMPONENTIZE_PY}", file=sys.stderr)
             return False
+        version_warning = componentize_py_version_warning(result.stdout)
+        if version_warning:
+            print(version_warning, file=sys.stderr)
     except FileNotFoundError:
         print("Error: componentize-py not found", file=sys.stderr)
         print(f"Install with: pip install componentize-py=={PINNED_COMPONENTIZE_PY}", file=sys.stderr)
