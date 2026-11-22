@@ -18,9 +18,11 @@ import (
 // THE EXPECTED TEXT BELOW IS WRITTEN OUT LITERALLY, from the removed lines of those commits (07a461f1, 815da588, ff749553, dc8a30ca), and not built by the
 // functions under test. A row that built its expectation with the same function would agree with it whatever it did.
 //
-// The restoration is byte-faithful and nothing more: the same truncation (a body past 4096 bytes is cut and followed by a sha256 of the whole), the same fields.
-// It does NOT redact. The old messages did not, and a store hands back what was stored because replay acts on it; redaction is applied where data leaves the
-// system. Whether a divergence message should redact a request body is a decision for the owner and is not made here.
+// The restoration was byte-faithful when it was written: the same fields, and a body past 4096 bytes cut and followed by a sha256 of the whole. It did not
+// redact, because the old messages did not. cleat#4321 decided that a divergence message must not print a body at all (a store hands back the DECRYPTED payload
+// because replay acts on it, and the message goes on to the guest, the stored run error and the logs), so the fields and the labels below are as they were and
+// each body is named by its size and a short hash; the expected texts here were updated for that and a_divergence_names_its_bodies_and_never_prints_them_test.go
+// pins the redacted form from outside.
 
 // g3fMessage runs a real host call against a replaying session whose history is the given records and returns what it wrote to the guest.
 func g3fMessage(call func(ctx context.Context, s *execSession) int64, history []EventRecord) string {
@@ -50,11 +52,11 @@ func TestEveryRestoredDivergenceKeepsTheDetailItsCallPrintedBefore(t *testing.T)
 		{"the retried call", func(ctx context.Context, s *execSession) int64 {
 			return s.DurableCallWithRetry(ctx, nil, "svc", "op", `{"a":1}`, 3, 1, 100, 1, "", 0, 16384)
 		}, wrongType(EventRecord{Request: "REC-REQ"}),
-			"\n  actual request: {\"a\":1}\n  expected request: REC-REQ" + g3fAdvice},
+			"\n  actual request: [redacted: 7 bytes, sha256=015abd7f5cc57a2d]\n  expected request: [redacted: 7 bytes, sha256=af9a34fce5d51788]" + g3fAdvice},
 		{"the heartbeat call", func(ctx context.Context, s *execSession) int64 {
 			return s.DurableCallWithHeartbeat(ctx, nil, "svc", "op", `{"a":1}`, 1000, 0, 16384)
 		}, wrongType(EventRecord{Request: "REC-REQ"}),
-			"\n  actual request: {\"a\":1}\n  expected request: REC-REQ" + g3fAdvice},
+			"\n  actual request: [redacted: 7 bytes, sha256=015abd7f5cc57a2d]\n  expected request: [redacted: 7 bytes, sha256=af9a34fce5d51788]" + g3fAdvice},
 		{"await_child", func(ctx context.Context, s *execSession) int64 {
 			return s.AwaitChild(ctx, nil, "c1", 0, 16384)
 		}, wrongType(EventRecord{}),
@@ -66,11 +68,11 @@ func TestEveryRestoredDivergenceKeepsTheDetailItsCallPrintedBefore(t *testing.T)
 		{"fetch", func(ctx context.Context, s *execSession) int64 {
 			return s.Fetch(ctx, nil, "GET", "http://x", "{}", "b1", 0, 16384)
 		}, wrongType(EventRecord{FetchMethod: "POST", FetchURL: "http://y", FetchBody: "b2", FetchResponse: "resp"}),
-			"\n  workflow: GET http://x\n  history: POST http://y\n  actual body: b1\n  expected body: b2\n  expected response: resp" + g3fAdvice},
+			"\n  workflow: GET http://x\n  history: POST http://y\n  actual body: [redacted: 2 bytes, sha256=7dc96f776c8423e5]\n  expected body: [redacted: 2 bytes, sha256=4814d92093ac8a0f]\n  expected response: [redacted: 4 bytes, sha256=d30db74ae503504c]" + g3fAdvice},
 		{"schedule_cron", func(ctx context.Context, s *execSession) int64 {
 			return s.ScheduleCron(ctx, nil, "wf", "* * * * *", "UTC", `{}`, 0, 16384)
 		}, wrongType(EventRecord{CronWorkflowName: "other", CronExpr: "0 * * * *", CronTimezone: "EST", CronInput: `{"k":1}`}),
-			"\n  workflow: wf \"* * * * *\" tz=\"UTC\" input={}\n  history:  other \"0 * * * *\" tz=\"EST\" input={\"k\":1}" + g3fAdvice},
+			"\n  workflow: wf \"* * * * *\" tz=\"UTC\" input=[redacted: 2 bytes, sha256=44136fa355b3678a]\n  history:  other \"0 * * * *\" tz=\"EST\" input=[redacted: 7 bytes, sha256=a0da1fce57d0e4f9]" + g3fAdvice},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got := g3fMessage(tc.call, tc.hist)
@@ -84,19 +86,8 @@ func TestEveryRestoredDivergenceKeepsTheDetailItsCallPrintedBefore(t *testing.T)
 	}
 }
 
-// A body past the limit is cut and followed by a sha256 of the whole, as the old messages did (truncateWithHash), for the call family that carries a request.
-func TestARestoredRequestIsTruncatedWithItsHashAsItWasBefore(t *testing.T) {
-	long := strings.Repeat("x", maxPayloadLen+500)
-	got := g3fMessage(func(ctx context.Context, s *execSession) int64 {
-		return s.DurableCallWithHeartbeat(ctx, nil, "svc", "op", long, 1000, 0, 16384)
-	}, []EventRecord{{Step: 0, EventType: EventTypeSideEffect, Request: "short"}})
-	if !strings.Contains(got, "actual request: "+strings.Repeat("x", maxPayloadLen)+"... [sha256=") {
-		t.Errorf("a request longer than %d bytes was not cut and hashed: %.200q", maxPayloadLen, got)
-	}
-	if strings.Contains(got, strings.Repeat("x", maxPayloadLen+1)) {
-		t.Errorf("the message carries more than %d bytes of the request", maxPayloadLen)
-	}
-}
+// (A test here used to pin that a request past 4096 bytes was cut and followed by a sha256 of the whole. A body is no longer printed at all, cut or whole
+// (cleat#4321); TestRedactedBodyIsItsSizeAndAShortHashAndNothingElse pins a 5000-byte body named by its whole size and hash.)
 
 // The dispatcher puts a spec's detail between the step line and the advice for BOTH kinds of divergence (a record of the wrong type, and one that fails the
 // spec's Identity), and a spec with no detail reads exactly as the shared message always has.
@@ -198,6 +189,9 @@ func TestExactlyTheSpecsThatPrintedDetailBeforeStillHaveIt(t *testing.T) {
 	}
 }
 
+// g3fRedactedA is `{"a":1}` as a divergence message names it (cleat#4321); size and hash computed outside Go.
+const g3fRedactedA = "[redacted: 7 bytes, sha256=015abd7f5cc57a2d]"
+
 // The detail is applied at EVERY site the dispatcher reports a divergence from, not only the first record of a run: the first row above reaches the wrong-typed
 // first record, and a divergence reported from the identity check, from the middle of a run or from a foreign record after the prefix is a different line of the
 // dispatcher. Each row names the site it reaches and asserts the marker of the call's detail; without these a mutant that drops the detail at one site stays green.
@@ -224,11 +218,11 @@ func TestRestoredDetailIsAppliedAtEveryDivergenceSite(t *testing.T) {
 		{"single record, the right type naming another URL", fetch, []EventRecord{{Step: 0, EventType: EventTypeFetch, FetchMethod: "GET", FetchURL: "http://y", FetchBody: "b1"}},
 			"step: the Identity check", "history: GET http://y"},
 		{"a run whose first record is foreign", retry, []EventRecord{{Step: 0, EventType: EventTypeSideEffect, Request: "REC-REQ"}},
-			"run: no record of the run at all", "actual request: {\"a\":1}"},
+			"run: no record of the run at all", "actual request: " + g3fRedactedA},
 		{"a run whose record names another operation", retry, []EventRecord{failed("another")},
-			"run: Identity on a record of the run", "actual request: {\"a\":1}"},
+			"run: Identity on a record of the run", "actual request: " + g3fRedactedA},
 		{"a run of attempts followed by a foreign record", retry, []EventRecord{failed("op"), foreign},
-			"run: a foreign record after the prefix", "actual request: {\"a\":1}"},
+			"run: a foreign record after the prefix", "actual request: " + g3fRedactedA},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got := g3fMessage(tc.call, tc.hist)
@@ -250,7 +244,7 @@ func TestTheTroubleshootingDivergenceExampleIsStillWhatTheCallsPrint(t *testing.
 	if err != nil {
 		t.Fatalf("UNMEASURED: cannot read docs/troubleshooting.md: %v", err)
 	}
-	var labels []string
+	var labels, exampleLines []string
 	firstLine := ""
 	inSection := false
 	for _, line := range strings.Split(string(doc), "\n") {
@@ -260,8 +254,10 @@ func TestTheTroubleshootingDivergenceExampleIsStillWhatTheCallsPrint(t *testing.
 		if inSection && firstLine == "" && strings.HasPrefix(line, "replay divergence at step ") {
 			firstLine = line
 		}
-		if t := strings.TrimSpace(line); inSection && strings.HasSuffix(t, "request: { truncated }") {
-			labels = append(labels, strings.TrimSuffix(t, "{ truncated }"))
+		// the two lines of the example, `  actual request: [redacted: ...]` and `  expected request: [redacted: ...]` (cleat#4321: a body is named, never printed)
+		if t := strings.TrimSpace(line); inSection && (strings.HasPrefix(t, "actual request: ") || strings.HasPrefix(t, "expected request: ")) {
+			labels = append(labels, t[:strings.Index(t, "request: ")+len("request: ")])
+			exampleLines = append(exampleLines, "  "+t)
 		}
 	}
 	if len(labels) != 2 {
@@ -269,6 +265,15 @@ func TestTheTroubleshootingDivergenceExampleIsStillWhatTheCallsPrint(t *testing.
 	}
 	if firstLine == "" {
 		t.Fatalf("UNMEASURED: the Replay Divergence section of docs/troubleshooting.md has no line starting `replay divergence at step `")
+	}
+	// The page's example is the plain call meeting a sleep, and its two request lines are what that call prints for the example's two bodies, word for word
+	// (the bodies are the ones the page's prose is about: the same order, a different amount). A page that showed a body, or a format the code no longer
+	// prints, fails here.
+	example := g3fMessage(func(ctx context.Context, s *execSession) int64 {
+		return s.DurableCall(ctx, nil, "svc", "op", `{"order_id":"o-1042","amount":2500}`, 0, 16384)
+	}, []EventRecord{{Step: 0, EventType: EventTypeSleep, Request: `{"order_id":"o-1042","amount":2750}`}})
+	if lines := strings.Split(example, "\n"); len(lines) < 3 || lines[1] != exampleLines[0] || lines[2] != exampleLines[1] {
+		t.Errorf("docs/troubleshooting.md shows %q and the plain call prints %q for the page's example bodies", exampleLines, example)
 	}
 	// The page's own example is the plain call meeting a sleep: its FIRST line must be what the call prints, word for word.
 	plain := g3fMessage(func(ctx context.Context, s *execSession) int64 {

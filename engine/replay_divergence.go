@@ -32,7 +32,7 @@ func (s *execSession) replayDivergenceAt(ctx context.Context, m api.Module, got 
 }
 
 // divergenceMessageWith is the one text of a type divergence, the step and both event types, with a spec's detail between the step line and the advice: what the call asked and what was recorded, in the
-// lines `docs/troubleshooting.md` shows (`  actual request: ...`). detail is "" or starts with a newline and indents each line by two spaces, so a spec that
+// lines `docs/troubleshooting.md` shows (`  actual request: ...`, each body named by its size and a short hash, never printed: cleat#4321). detail is "" or starts with a newline and indents each line by two spaces, so a spec that
 // has none reads exactly as it always has (cleat#4152, G3).
 func divergenceMessageWith(got *EventRecord, expected EventType, detail string) string {
 	return fmt.Sprintf("replay divergence at step %d: expected %s, got %s.%s\nRun 'cleat vet' on your workflow code to check for common non-determinism issues (time.Now(), random values, map iteration, goroutines).",

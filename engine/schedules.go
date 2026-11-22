@@ -77,8 +77,8 @@ var scheduleCronStep = stepSpec{
 	Name: "schedule_cron",
 	DivergenceDetail: func(a stepArgs, rec *EventRecord) string {
 		return fmt.Sprintf("\n  workflow: %s %q tz=%q input=%s\n  history:  %s %q tz=%q input=%s",
-			a.s1, a.s2, a.s3, truncateWithHash(a.s4, maxPayloadLen),
-			rec.CronWorkflowName, rec.CronExpr, rec.CronTimezone, truncateWithHash(rec.CronInput, maxPayloadLen))
+			a.s1, a.s2, a.s3, redactedBody(a.s4),
+			rec.CronWorkflowName, rec.CronExpr, rec.CronTimezone, redactedBody(rec.CronInput))
 	},
 	Result:  layoutSimple,
 	Effect:  effectEffect,
@@ -87,8 +87,8 @@ var scheduleCronStep = stepSpec{
 	Identity: func(a stepArgs, rec *EventRecord) string {
 		if rec.CronWorkflowName != a.s1 || rec.CronExpr != a.s2 || rec.CronTimezone != a.s3 || rec.CronInput != a.s4 {
 			return fmt.Sprintf("schedule %q %q tz=%q input=%s, recorded %q %q tz=%q input=%s",
-				a.s1, a.s2, a.s3, truncateWithHash(a.s4, maxPayloadLen),
-				rec.CronWorkflowName, rec.CronExpr, rec.CronTimezone, truncateWithHash(rec.CronInput, maxPayloadLen))
+				a.s1, a.s2, a.s3, redactedBody(a.s4),
+				rec.CronWorkflowName, rec.CronExpr, rec.CronTimezone, redactedBody(rec.CronInput))
 		}
 		return ""
 	},

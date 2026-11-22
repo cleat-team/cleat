@@ -598,7 +598,7 @@ var fetchStep = stepSpec{
 	DivergenceDetail: func(a stepArgs, rec *EventRecord) string {
 		return fmt.Sprintf("\n  workflow: %s %s\n  history: %s %s\n  actual body: %s\n  expected body: %s\n  expected response: %s",
 			a.s1, a.s2, rec.FetchMethod, rec.FetchURL,
-			truncateWithHash(a.s4, maxPayloadLen), truncateWithHash(rec.FetchBody, maxPayloadLen), truncateWithHash(rec.FetchResponse, maxPayloadLen))
+			redactedBody(a.s4), redactedBody(rec.FetchBody), redactedBody(rec.FetchResponse))
 	},
 	Result:  layoutSimple,
 	Effect:  effectEffect,
@@ -609,7 +609,7 @@ var fetchStep = stepSpec{
 			return fmt.Sprintf("%s %s, recorded %s %s", a.s1, a.s2, rec.FetchMethod, rec.FetchURL)
 		}
 		if rec.FetchBody != a.s4 {
-			return fmt.Sprintf("%s %s with a different body: %q, recorded %q", a.s1, a.s2, truncateWithHash(a.s4, maxPayloadLen), truncateWithHash(rec.FetchBody, maxPayloadLen))
+			return fmt.Sprintf("%s %s with a different body: %s, recorded %s", a.s1, a.s2, redactedBody(a.s4), redactedBody(rec.FetchBody))
 		}
 		return ""
 	},

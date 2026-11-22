@@ -197,13 +197,21 @@ func (s *execSession) WaitForEvent(ctx context.Context, m api.Module,
 					pluginName, functionName, written))
 		}
 
+		// What the message may show of `out` (cleat#4321). A call that SUCCEEDED returns what the awaited function produced, which can be a webhook's payload: named by
+		// its size and hash, never printed. A call that returned an error code (a replay divergence returns one, with a zero call-error byte, so it reaches this
+		// check) wrote its own message into the buffer; that is text the engine built, which redacts its own bodies, and it is the only thing that says what
+		// went wrong, so it is shown. Hiding it behind a hash would leave a divergence in a wait with no diagnosis.
+		shownOut := redactedBody(out)
+		if byte(res) != 0 {
+			shownOut = out
+		}
 		found, wellFormed := waitForEventClaimFound(out)
 		if !wellFormed {
 			return s.waitForEventFailure(ctx, m, outPtr, outMaxLen,
 				fmt.Sprintf("wait_for_event: %s/%s output has no boolean \"found\" field, so this "+
 					"call cannot tell a claimed event from an unclaimed one. The awaited function must be "+
 					"claim-shaped -- see WaitForEvent's doc comment. Output was: %s",
-					pluginName, functionName, truncateWithHash(out, maxPayloadLen)))
+					pluginName, functionName, shownOut))
 		}
 		if found {
 			// Claimed. outPtr holds the event, and res carries the length the
