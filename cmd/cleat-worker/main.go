@@ -366,12 +366,22 @@ func signalPluginWorkflow(ctx context.Context, store engine.WorkflowStore, workf
 		scoped = scopeToTenant(store, tid.String())
 	}
 	if err := scoped.DeliverSignal(ctx, workflowID, signalName, payload); err != nil {
-		if errors.Is(err, engine.ErrWorkflowNotFound) {
-			return plugin.ErrWorkflowNotFound
-		}
-		return err
+		return translateSignalDeliveryError(err)
 	}
 	return nil
+}
+
+// translateSignalDeliveryError maps a store's refusal to the plugin vocabulary. A run that is no longer open (cleat#4340) is TERMINAL for a plugin exactly as a missing one is: nothing will ever
+// read a signal sent to it, so a retry cannot succeed and an awaiter registered for it must be dropped (plugins/eventtriggers unregisters on plugin.ErrWorkflowNotFound and retries anything
+// else). It therefore wraps plugin.ErrWorkflowNotFound, and keeps the store's own error in the chain so the message still says which state refused.
+func translateSignalDeliveryError(err error) error {
+	switch {
+	case errors.Is(err, engine.ErrWorkflowNotFound):
+		return plugin.ErrWorkflowNotFound
+	case errors.Is(err, engine.ErrWorkflowNotOpen):
+		return fmt.Errorf("%w: %w", plugin.ErrWorkflowNotFound, err)
+	}
+	return err
 }
 
 // signalPluginWorkflowWithAuth is signalPluginWorkflow plus the
@@ -412,10 +422,7 @@ func signalPluginWorkflowWithAuth(ctx context.Context, store engine.WorkflowStor
 		return fmt.Errorf("signal auth denied: %s not in allowed_signals of %s: %w", pluginName, workflowID, plugin.ErrSignalNotAllowed)
 	}
 	if err := scoped.DeliverSignal(ctx, workflowID, signalName, payload); err != nil {
-		if errors.Is(err, engine.ErrWorkflowNotFound) {
-			return plugin.ErrWorkflowNotFound
-		}
-		return err
+		return translateSignalDeliveryError(err)
 	}
 	return nil
 }
