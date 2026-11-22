@@ -94,7 +94,7 @@ var javaCallsTheHostCanRefuse = []sdkRefusableCall{
 	{"pluginCall", "PluginCall"},
 	// A second caller of the same import, so two entries share one host site.
 	{"pluginCallOutcome", "PluginCall"},
-	{"pluginCallStreaming", "freshPluginCallStreaming"},
+	{"pluginCallStreaming", "PluginCallStreaming"},
 	{"awaitSignalsMs", "DurableAwaitSignals"},
 	// AwaitPromise is a stop site through suspendingAwaitResult rather than
 	// stopBeforeNewWork (cleat#3383): a fresh await that has to wait answers with

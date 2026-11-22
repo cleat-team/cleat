@@ -3165,9 +3165,9 @@ func TestPluginCallStreamingReplay_MultipleChunks(t *testing.T) {
 	s := newTestExecSession()
 	s.isReplay = true
 	s.history = []EventRecord{
-		{Step: 0, EventType: EventTypePluginCallStreamChunk,
+		{Step: 0, EventType: EventTypePluginCallStreamChunk, PluginName: "test-plugin", PluginFunc: "Echo",
 			PluginOutput: "chunk1", StreamChunkIndex: 0},
-		{Step: 1, EventType: EventTypePluginCallStreamChunk,
+		{Step: 1, EventType: EventTypePluginCallStreamChunk, PluginName: "test-plugin", PluginFunc: "Echo",
 			PluginOutput: "chunk2", StreamChunkIndex: 1, StreamFinish: true},
 	}
 	result := s.PluginCallStreaming(context.Background(), nil, "test-plugin", "Echo", `{}`, 0, 0)
@@ -3196,6 +3196,8 @@ func TestPluginCallStreamingReplay_StreamError(t *testing.T) {
 	s.history = []EventRecord{{
 		Step:             0,
 		EventType:        EventTypePluginCallStreamChunk,
+		PluginName:       "test-plugin",
+		PluginFunc:       "Echo",
 		PluginOutput:     "plugin_call_streaming: boom",
 		StreamChunkIndex: 0,
 		StreamFinish:     true,

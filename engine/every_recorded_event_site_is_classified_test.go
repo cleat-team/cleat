@@ -26,8 +26,7 @@ import (
 // the replay-to-fresh hand-off that reaches these without the check is cleat#4143 and cleat#4157, not this guard's subject. (cleat#4150 moved the
 // check INSIDE freshCall, freshCallWithHeartbeat, freshSideEffect (since moved onto step, cleat#4152) and freshPluginCallStreaming, and this list failed until their entries were removed.)
 var recordedEventSitesWithoutOwnStopCheck = map[string]string{
-	"step_dispatcher.go:Record":    "DISPATCHER: reached only from a spec's Fresh, which step runs after it has applied stopBeforeNewWork to every effectEffect step; the one spec that is never refused, ReleaseLock (`Refuse: neverRefuse`), says why where neverRefuse is declared",
-	"plugins.go:recordStreamError": "TERMINAL: records the failure that ends a streaming call",
+	"step_dispatcher.go:Record": "DISPATCHER: reached only from a spec's Fresh, which step runs after it has applied stopBeforeNewWork to every effectEffect step; the one spec that is never refused, ReleaseLock (`Refuse: neverRefuse`), says why where neverRefuse is declared",
 }
 
 func TestEveryRecordedEventSiteIsClassified(t *testing.T) {

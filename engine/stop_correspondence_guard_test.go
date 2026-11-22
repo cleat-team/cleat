@@ -257,7 +257,8 @@ var stopSurfaces = map[string]stopSurface{
 		adapters: []string{"PluginCall"},
 		wit:      []string{"plugin-call"},
 	},
-	"freshPluginCallStreaming": {
+	// Keyed by PluginCallStreaming, the method that goes through step: the refusal is the dispatcher's (cleat#4152, G3).
+	"PluginCallStreaming": {
 		adapters: []string{"PluginCallStreaming"},
 		wit:      []string{"plugin-call-streaming"},
 	},

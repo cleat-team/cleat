@@ -35,7 +35,11 @@ var stopSiteEvents = map[string]stopEvent{
 	"freshCallWithRetry":       {typ: EventTypeCall},
 	"DurableCallWithHeartbeat": {typ: EventTypeCall},
 	"PluginCall":               {typ: EventTypePluginCall},
-	"freshPluginCallStreaming": {typ: EventTypePluginCall},
+	// Keyed by PluginCallStreaming, the method that goes through step (cleat#4152, G3). The type is plugin_call, as it has been since cleat#4143, and NOT the
+	// plugin_call_stream_chunk this call records: that type is not in stoppableFirstEvents, so a killed run whose last effect was a streaming call stops earlier
+	// than the chunk it recorded. Whether a stream's chunk should be a stop point changes where a defer segment cuts, which a move onto the dispatcher does not
+	// decide; the entry is left as it was.
+	"PluginCallStreaming":      {typ: EventTypePluginCall},
 	"SideEffect":               {typ: EventTypeSideEffect},
 	"Fetch":                    {typ: EventTypeFetch},
 	"DurableDefer":             {typ: EventTypeDefer},
