@@ -320,6 +320,8 @@ func TestCompactionCarriesEveryFieldAStepIdentityReads(t *testing.T) {
 	source := identitySourceReads(t)
 	type found struct {
 		spec, field string
+		// types is the record types the field was tried on: the ones the Identity names, plus the one the spec records.
+		types string
 	}
 	var checked, bad []found
 	var unmeasured, refused, probeOnly []string
@@ -401,9 +403,14 @@ func TestCompactionCarriesEveryFieldAStepIdentityReads(t *testing.T) {
 				unmeasured = append(unmeasured, fmt.Sprintf("%s: no record type it names could be compacted with %s set", sp.Name, name))
 				continue
 			}
-			checked = append(checked, found{sp.Name, name})
+			tried := make([]string, 0, len(types))
+			for et := range types {
+				tried = append(tried, string(et))
+			}
+			sort.Strings(tried)
+			checked = append(checked, found{sp.Name, name, ""})
 			if !survived {
-				bad = append(bad, found{sp.Name, name})
+				bad = append(bad, found{sp.Name, name, strings.Join(tried, ", ")})
 			}
 		}
 	}
@@ -413,9 +420,9 @@ func TestCompactionCarriesEveryFieldAStepIdentityReads(t *testing.T) {
 	sort.Strings(refused)
 	sort.Strings(probeOnly)
 	for _, b := range bad {
-		t.Errorf("spec %s: its Identity reads EventRecord.%s and a %s record does not keep it through compaction, so every replay of a compacted record that carried it "+
+		t.Errorf("spec %s: its Identity reads EventRecord.%s and none of the record types it names (%s) keeps it through compaction, so every replay of a compacted record that carried it "+
 			"is read as another call's and diverges (cleat#4325 was await_all_children's Request, cleat#4231 signal_workflow's RunID). Carry the field in compaction.go (capture and expansion).",
-			b.spec, b.field, "recorded")
+			b.spec, b.field, b.types)
 	}
 	for _, u := range unmeasured {
 		t.Errorf("UNMEASURED (this is a failure of the test, not a finding about compaction): %s", u)
@@ -423,6 +430,10 @@ func TestCompactionCarriesEveryFieldAStepIdentityReads(t *testing.T) {
 	for _, p := range probeOnly {
 		t.Errorf("the PROBE saw %s read and the SOURCE reading did not: one of the two readings is wrong about it (the source reading is meant to over-match, never under-match)", p)
 	}
-	t.Logf("%d specs with an Identity; %d (spec, field) pairs round-tripped; %d refused-type specs not compacted: [%s]; %d carry nothing", specs, len(checked), len(refused),
-		strings.Join(refused, " "), len(bad))
+	lostIn := map[string]bool{}
+	for _, b := range bad {
+		lostIn[b.spec] = true
+	}
+	t.Logf("%d specs with an Identity; %d (spec, field) pairs round-tripped; %d refused-type specs not compacted: [%s]; %d pair(s) not carried, in %d spec(s)", specs, len(checked), len(refused),
+		strings.Join(refused, " "), len(bad), len(lostIn))
 }
