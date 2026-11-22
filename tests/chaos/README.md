@@ -36,6 +36,10 @@ left it in; the reaper's own timing is not exercised.
     CLEAT_CRASH_DB='postgres://cleat:cleat@localhost:55432/cleat?sslmode=disable' \
       go test -tags chaos ./tests/chaos -count=1 -timeout 60m -v
 
+**Residency.** `CLEAT_CHAOS_RESIDENT_MAX_RUNS=N` starts every worker with `--resident-max-runs N`, so the whole fault suite can run the way 0.6.0 ships (cleat#4162, PR 3); a `workflow_dispatch` of the Chaos workflow takes it as the `resident_max_runs` input. Unset, the harness passes nothing and a worker runs at the product's own default. A row that is *about* residency being off (the kill-while-held control, the held-vs-off `off` arm, the parked-run executor) says so with an explicit `--resident-max-runs 0` (`residencyOff`) and is never overridden by the knob; a caller's own flag always wins. `TestChaosTheResidencyKnobPassesOnlyWhatItWasGivenAndNeverOverridesACaller` and `TestChaosAWorkerIsStartedWithTheResidencyTheKnobAndTheCallerSay` pin that.
+
+**The guest is read from the bytes.** `CLEAT_CHAOS_GUEST=python` builds a component and every row that deploys `env.wasm` runs it (the kill-while-held row included: both its arms pass on the Python guest, the held arm reading `cleat_resident_runs=1`). `TestChaosTheDeployedScriptGuestIsTheLanguageThatWasAskedFor` checks the deployed binary's version word (core module `01 00 00 00`, component `0d 00 01 00`), and the nightly's Python step runs the held row and that check, each required to report a pass.
+
 One case: `-run 'Reclaim/retry/sigkill@before:R#1'` with `CLEAT_CHAOS_SCENARIO=retry`. A failure prints the scenario, the fault, the request order,
 and the worker log. Against another commit: `CLEAT_CHAOS_TREE=<checkout>` (copy `testdata/chaosscript` into it).
 

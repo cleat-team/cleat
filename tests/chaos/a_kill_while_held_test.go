@@ -100,6 +100,8 @@ func executeKilledWhileHeld(t *testing.T, env *env, residency bool) heldOutcome 
 	flags := []string{"--api-addr", addr}
 	if residency {
 		flags = append(flags, "--resident-max-runs", "2")
+	} else {
+		flags = append(flags, residencyOff...) // the control: residency off is what it measures, whatever CLEAT_CHAOS_RESIDENT_MAX_RUNS says
 	}
 	first := startWorker(t, env.bin, queue, env.svc.srv.URL, flags...)
 	startRun(t, env.db, run, scriptInput(run, heldScenario), queue)
@@ -144,7 +146,7 @@ func executeKilledWhileHeld(t *testing.T, env *env, residency bool) heldOutcome 
 	first.kill()
 	ageLease(t, env.db, run)
 
-	second := startWorker(t, env.bin, queue, env.svc.srv.URL)
+	second := startWorker(t, env.bin, queue, env.svc.srv.URL, residencyOff...) // residency off: the second half is the ordinary reclaim, not a second variable
 	wantTerminal := func(s string) bool { return s != "ready" && s != "running" }
 	status, msg, result, ok := awaitStatus(env.db, run, runBudget, wantTerminal)
 	out.Status, out.ErrMsg, out.Result = status, msg, result

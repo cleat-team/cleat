@@ -48,6 +48,10 @@ on:
         description: "sample (bounded) or full (every boundary x every fault)"
         required: false
         default: "full"
+      resident_max_runs:
+        description: "Start every worker with --resident-max-runs N (cleat#4162): the sweep the way 0.6.0 ships. Empty leaves the harness's own default."
+        required: false
+        default: ""
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && (github.event.action == 'edited' && !github.event.changes.base && github.run_id || github.ref) || github.run_id }}
@@ -134,6 +138,8 @@ jobs:
       # A COPY of tier1-gate.yml's pin, for the Python component row below. The provenance note and the bump procedure are written there; bump both together.
       WASM_TOOLS_VERSION: "1.255.0"
       WASM_TOOLS_SHA256: "a62237f4731c45f665f1115cad39acaeec02963cbc848c9473ab033eed837072"
+      # Read by tests/chaos startWorker (residencyFlags). Empty means "pass nothing", so a scheduled run is unchanged.
+      CLEAT_CHAOS_RESIDENT_MAX_RUNS: ${{ github.event.inputs.resident_max_runs || '' }}
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
@@ -156,7 +162,12 @@ jobs:
         run: |
           set -euo pipefail
           CLEAT_CHAOS_GUEST=python CLEAT_CHAOS_SCENARIO=calls go test -json -tags chaos -count=1 -timeout 60m ./tests/chaos \
-            -run 'TestChaosSigkillThenReclaimAtEveryBoundary|TestChaosASlowServiceCallIsNotKilledByTheInstanceTimeout' 2>&1 | tee chaos-python.log
+            -run 'TestChaosSigkillThenReclaimAtEveryBoundary|TestChaosASlowServiceCallIsNotKilledByTheInstanceTimeout|TestChaosSigkillWhileAHeldRunSleepsThenReclaim|TestChaosTheDeployedScriptGuestIsTheLanguageThatWasAskedFor' 2>&1 | tee chaos-python.log
+          # `go test -run` that selects nothing exits 0, so a renamed row would leave this step green having run nothing. Require the pass event of the two rows added for the Python arm.
+          for row in TestChaosSigkillWhileAHeldRunSleepsThenReclaim TestChaosTheDeployedScriptGuestIsTheLanguageThatWasAskedFor; do
+            grep -E "\"Action\":\"pass\",\"Package\":\"[^\"]*\",\"Test\":\"${row}\"" chaos-python.log > /dev/null \
+              || { echo "::error::the Python row ${row} reported no pass: the -run pattern selected nothing, it failed, or it never finished"; exit 1; }
+          done
       - name: Seeded scripts
         run: |
           set -euo pipefail

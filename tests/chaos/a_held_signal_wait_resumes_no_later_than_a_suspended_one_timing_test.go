@@ -121,7 +121,7 @@ func TestAHeldSignalWaitResumesNoLaterThanASuspendedOneOnPostgres(t *testing.T) 
 	arms := []*timingArm{
 		// --poll 500ms is the PRODUCTION default; the harness's own 100ms would let the held arm's tick alone keep up with a suspended run, and the row could not tell the nudge from it.
 		{name: "held", held: true, flags: []string{"--resident-max-runs", "8", "--poll", timingPoll.String()}},
-		{name: "off", held: false, flags: []string{"--poll", timingPoll.String()}},
+		{name: "off", held: false, flags: []string{"--resident-max-runs", "0", "--poll", timingPoll.String()}},
 		{name: "control", held: true, flags: []string{"--resident-max-runs", "8", "--notify-channel", "", "--poll", timingCtlPoll.String()}},
 	}
 	for _, a := range arms {

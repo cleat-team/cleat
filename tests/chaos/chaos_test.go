@@ -780,7 +780,7 @@ func executeParked(t *testing.T, env *env, sc scenario, events int, terminateIt 
 	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
 	queue, run := "chaos-q-"+suffix, "chaos-run-"+suffix
 	deploy(t, env.db, env.wasm, queue)
-	w := startWorker(t, env.bin, queue, env.svc.srv.URL)
+	w := startWorker(t, env.bin, queue, env.svc.srv.URL, residencyOff...) // the run must be PARKED in the store (parkedNow); a held run is not parked
 	startRun(t, env.db, run, scriptInput(run, sc), queue)
 	if terminateIt {
 		deadline := time.Now().Add(runBudget)
