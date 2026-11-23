@@ -1,0 +1,140 @@
+2026/11/23 15:51:06 INFO residency memory budget bytes=429496729 mib=409 percent=20 of_bytes=2147483648 of_mib=2048 source="cgroup v2 memory.max"
+{"time":"2026-11-23T15:51:06.543458932Z","level":"INFO","msg":"starting worker","worker_id":"ec62526e5fc8f2fb0972d662202900b5","concurrency":10}
+{"time":"2026-11-23T15:51:06.543544105Z","level":"INFO","msg":"checksum verification enabled","worker_id":"ec62526e5fc8f2fb0972d662202900b5"}
+{"time":"2026-11-23T15:51:06.60054857Z","level":"INFO","msg":"plugin DB pool configured","worker_id":"ec62526e5fc8f2fb0972d662202900b5","max_connections":10}
+{"time":"2026-11-23T15:51:06.609510704Z","level":"INFO","msg":"heartbeat DB pool configured","worker_id":"ec62526e5fc8f2fb0972d662202900b5","max_connections":3}
+{"time":"2026-11-23T15:51:06.609618879Z","level":"INFO","msg":"sensitive-payload encryption is off: no --encryption-key-file, workflow data is stored in plaintext","worker_id":"ec62526e5fc8f2fb0972d662202900b5"}
+2026/11/23 15:51:06 [migration] applying 001_schema.sql
+2026/11/23 15:51:09 [migration] applied 001_schema.sql
+2026/11/23 15:51:09 [migration] applying 002_defaults.sql
+2026/11/23 15:51:09 [migration] applied 002_defaults.sql
+2026/11/23 15:51:09 [migration] applying 003_procedures.sql
+2026/11/23 15:51:09 [migration] applied 003_procedures.sql
+2026/11/23 15:51:09 [migration] applying 004_operator_key_scopes.sql
+2026/11/23 15:51:09 [migration] applied 004_operator_key_scopes.sql
+2026/11/23 15:51:09 [migration] applying 005_workflow_libraries.sql
+2026/11/23 15:51:09 [migration] applied 005_workflow_libraries.sql
+2026/11/23 15:51:09 [migration] applying 006_a_tenant_records_who_created_it.sql
+2026/11/23 15:51:09 [migration] applied 006_a_tenant_records_who_created_it.sql
+2026/11/23 15:51:09 [migration] applying 007_a_dropped_tenant_leaves_a_tombstone.sql
+2026/11/23 15:51:09 [migration] applied 007_a_dropped_tenant_leaves_a_tombstone.sql
+2026/11/23 15:51:09 [migration] applying 008_registered_plugins.sql
+2026/11/23 15:51:09 [migration] applied 008_registered_plugins.sql
+2026/11/23 15:51:09 [migration] applying 009_library_prefix_lookup.sql
+2026/11/23 15:51:09 [migration] applied 009_library_prefix_lookup.sql
+2026/11/23 15:51:09 [migration] applying 010_library_clashing_names.sql
+2026/11/23 15:51:09 [migration] applied 010_library_clashing_names.sql
+2026/11/23 15:51:09 [migration] applying 011_a_tombstone_cannot_be_rewritten.sql
+2026/11/23 15:51:09 [migration] applied 011_a_tombstone_cannot_be_rewritten.sql
+{"time":"2026-11-23T15:51:11.001329874Z","level":"INFO","msg":"registered in the worker registry","worker_id":"ec62526e5fc8f2fb0972d662202900b5","secret_key_versions":null}
+{"time":"2026-11-23T15:51:11.00445486Z","level":"INFO","msg":"row-level security is enforced on this connection","worker_id":"ec62526e5fc8f2fb0972d662202900b5"}
+2026/11/23 15:51:11 INFO audit-log: initialized retention_days=90
+2026/11/23 15:51:11 INFO blobstore: initialized backend=memory
+2026/11/23 15:51:11 INFO dag plugin initialized
+2026/11/23 15:51:11 INFO datadog-export: initialized
+{"time":"2026-11-23T15:51:11.006561602Z","level":"INFO","msg":"plugin not configured, disabled","worker_id":"ec62526e5fc8f2fb0972d662202900b5","plugin":"email-notify"}
+2026/11/23 15:51:11 INFO event-triggers: initialized
+2026/11/23 15:51:11 INFO eventstore: initialized max_event_size=1048576
+2026/11/23 15:51:11 INFO feature-flags: initialized default_rollout=0
+2026/11/23 15:51:11 INFO jobqueue: initialized
+2026/11/23 15:51:11 INFO kvstore: initialized max_value_size=1048576
+2026/11/23 15:51:11 INFO llm: initialized providers=0
+2026/11/23 15:51:11 INFO notifications: initialized
+2026/11/23 15:51:11 INFO oauth-provider: initialized
+2026/11/23 15:51:11 INFO pagerduty-alert: initialized
+2026/11/23 15:51:11 INFO rate-limiter: initialized mode=memory
+2026/11/23 15:51:11 INFO scheduledbackup: initialized dump_dir=/tmp/cleat-backups
+2026/11/23 15:51:11 INFO scheduler: initialized
+2026/11/23 15:51:11 INFO slack-notify: initialized
+2026/11/23 15:51:11 INFO tenant-lifecycle: initialized
+2026/11/23 15:51:11 INFO tenant-quota: initialized
+2026/11/23 15:51:11 INFO kafka-connect: initialized rest_proxy=""
+2026/11/23 15:51:11 INFO webhook-ingest: initialized
+{"time":"2026-11-23T15:51:11.008112635Z","level":"INFO","msg":"component precompile in a child process is ON","parallel_compilation":true,"why":"auto: the memory limit is 2048 MiB, at least 1 GiB","child":"/out/slot-after"}
+{"time":"2026-11-23T15:51:11.009031621Z","level":"INFO","msg":"wasmtime backend registered for Go WASM","worker_id":"ec62526e5fc8f2fb0972d662202900b5","instance_timeout":30000000000,"wall_clock_ceiling":300000000000,"instruction_limit":0,"memory_limit_bytes":268435456,"defer_budget":5000000000}
+{"time":"2026-11-23T15:51:11.01556053Z","level":"INFO","msg":"adaptive flusher registry enabled","worker_id":"ec62526e5fc8f2fb0972d662202900b5","max_wait_ms":8,"max_batch":200,"enter_rate":500,"exit_rate":250}
+{"time":"2026-11-23T15:51:11.015613159Z","level":"INFO","msg":"database connection budget","worker_id":"ec62526e5fc8f2fb0972d662202900b5","pools":"core=15 + plugin=10 + flusher=50 + migrate=2 + heartbeat=3 = 80 fixed; plus 25 per tenant pool","configured_budget":0,"tenant_pools_that_fit":0}
+{"time":"2026-11-23T15:51:11.019220223Z","level":"INFO","msg":"server connection limit","worker_id":"ec62526e5fc8f2fb0972d662202900b5","usable":197,"detail":"max_connections=200 superuser_reserved=3 reserved=0","this_worker_needs":80}
+{"time":"2026-11-23T15:51:11.019473159Z","level":"INFO","msg":"memory monitor","source":"cgroupv2","total_mib":2048,"used_mib":43,"soft_limit":0.8,"hard_limit":0.95}
+2026/11/23 15:51:11 INFO jobqueue: worker started, poll interval=5s, reaper interval=60s
+2026/11/23 15:51:11 INFO oauth-provider: background loop started interval=5m0s
+2026/11/23 15:51:11 INFO notifications: delivery retry loop started interval=30s
+2026/11/23 15:51:11 INFO event-triggers: background retry worker started interval=30s reconcile_interval=30s reconcile_grace=15s
+2026/11/23 15:51:11 INFO blobstore: TTL cleanup started interval=1h0m0s
+2026/11/23 15:51:11 INFO scheduledbackup: background loop started, interval=60s
+2026/11/23 15:51:11 INFO scheduler: background loop started, interval=60s
+2026/11/23 15:51:11 INFO audit-log: background started retention=1h workers=4 buffer=1000 enqueue_wait=1s retry_deadline=1m0s
+2026/11/23 15:51:11 INFO rate-limiter: background reload started, interval=30s
+2026/11/23 15:51:11 INFO tenant-lifecycle: trial-expiry sweep started interval=1m0s
+2026/11/23 15:51:11 INFO kafka-connect: consumer loop started, interval=5s
+{"time":"2026-11-23T15:51:11.027593521Z","level":"INFO","msg":"cross-tenant workflow claim is available by tenant rotation; no database grant is required","worker_id":"ec62526e5fc8f2fb0972d662202900b5","tenant_id":"00000000-0000-0000-0000-000000000000","tenants_per_tick":16}
+{"time":"2026-11-23T15:51:11.027615189Z","level":"INFO","msg":"cross-tenant due-schedule read is available by tenant rotation; no database grant is required","worker_id":"ec62526e5fc8f2fb0972d662202900b5","tenant_id":"00000000-0000-0000-0000-000000000000"}
+{"time":"2026-11-23T15:51:11.027665318Z","level":"INFO","msg":"running","worker_id":"ec62526e5fc8f2fb0972d662202900b5"}
+2026/11/23 15:51:11 INFO eventstore: cleanup started interval=1h0m0s
+2026/11/23 15:51:11 INFO jobqueue: initial reaper cycle completed plugin=jobqueue jobs_reset=0
+2026/11/23 15:51:11 INFO scheduler: work cycle completed plugin=scheduler duration_ms=17 schedules_due=0 workflows_started=0 workflows_failed=0
+2026/11/23 15:51:11 INFO rate-limiter: work cycle completed plugin=rate-limiter duration_ms=19 configs_reloaded=0
+2026/11/23 15:51:11 INFO jobqueue: initial abandonment sweep completed plugin=jobqueue jobs_abandoned=0
+2026/11/23 15:51:11 INFO datadog-export: metric export started, interval=60s
+2026/11/23 15:51:16 INFO jobqueue: work cycle completed plugin=jobqueue duration_ms=3 jobs_claimed=0 jobs_dispatched=0 jobs_failed=0
+2026/11/23 15:51:21 INFO jobqueue: work cycle completed plugin=jobqueue duration_ms=1 jobs_claimed=0 jobs_dispatched=0 jobs_failed=0
+{"time":"2026-11-23T15:51:21.028474304Z","level":"INFO","msg":"Reaper: a new worker waits out its start-up grace period before reclaiming stale runs; nothing is wrong","worker_id":"ec62526e5fc8f2fb0972d662202900b5","reclaim_after":42000000000}
+{"time":"2026-11-23T15:51:24.318732004Z","level":"WARN","msg":"component precompile in a child failed; compiling in this process, one component at a time. Every such compile costs this worker the memory a compile retains (about 250 to 300 MiB per distinct Python component). The cause is in error: a timeout means --component-precompile-timeout (default 5m0s) or a loaded node, an exit or an artifact error means the child could not run or write (is the system temp directory writable and not full?), and the worker's own binary is the child, so a binary replaced under a running worker does it. Counted on cleat_component_precompile_fallbacks_total{reason}. To compile in this process on purpose, set --component-precompile=false","reason":"timeout","fallbacks_total":1,"error":"child: timed out after 1s: signal: killed"}
+2026/11/23 15:51:26 INFO jobqueue: work cycle completed plugin=jobqueue duration_ms=46 jobs_claimed=0 jobs_dispatched=0 jobs_failed=0
+{"time":"2026-11-23T15:51:30.577285794Z","level":"INFO","msg":"component compile waited for another compile to finish","waited":7283000000}
+{"time":"2026-11-23T15:51:31.034012688Z","level":"INFO","msg":"Reaper: a new worker waits out its start-up grace period before reclaiming stale runs; nothing is wrong","worker_id":"ec62526e5fc8f2fb0972d662202900b5","reclaim_after":42000000000}
+2026/11/23 15:51:31 INFO jobqueue: work cycle completed plugin=jobqueue duration_ms=9 jobs_claimed=0 jobs_dispatched=0 jobs_failed=0
+{"time":"2026-11-23T15:51:31.635491621Z","level":"WARN","msg":"component precompile in a child failed; compiling in this process, one component at a time. Every such compile costs this worker the memory a compile retains (about 250 to 300 MiB per distinct Python component). The cause is in error: a timeout means --component-precompile-timeout (default 5m0s) or a loaded node, an exit or an artifact error means the child could not run or write (is the system temp directory writable and not full?), and the worker's own binary is the child, so a binary replaced under a running worker does it. Counted on cleat_component_precompile_fallbacks_total{reason}. To compile in this process on purpose, set --component-precompile=false","reason":"timeout","fallbacks_total":2,"error":"child: timed out after 1s: signal: killed"}
+{"time":"2026-11-23T15:51:35.561478044Z","level":"INFO","msg":"component compile waited for another compile to finish","waited":12240000000}
+2026/11/23 15:51:36 INFO jobqueue: work cycle completed plugin=jobqueue duration_ms=8 jobs_claimed=0 jobs_dispatched=0 jobs_failed=0
+{"time":"2026-11-23T15:51:36.739048621Z","level":"WARN","msg":"component precompile in a child failed; compiling in this process, one component at a time. Every such compile costs this worker the memory a compile retains (about 250 to 300 MiB per distinct Python component). The cause is in error: a timeout means --component-precompile-timeout (default 5m0s) or a loaded node, an exit or an artifact error means the child could not run or write (is the system temp directory writable and not full?), and the worker's own binary is the child, so a binary replaced under a running worker does it. Counted on cleat_component_precompile_fallbacks_total{reason}. To compile in this process on purpose, set --component-precompile=false","reason":"timeout","fallbacks_total":3,"error":"child: timed out after 1s: signal: killed"}
+{"time":"2026-11-23T15:51:40.805055934Z","level":"INFO","msg":"component compile waited for another compile to finish","waited":17467000000}
+2026/11/23 15:51:41 INFO jobqueue: work cycle completed plugin=jobqueue duration_ms=1 jobs_claimed=0 jobs_dispatched=0 jobs_failed=0
+{"time":"2026-11-23T15:51:41.032381282Z","level":"INFO","msg":"Reaper: a new worker waits out its start-up grace period before reclaiming stale runs; nothing is wrong","worker_id":"ec62526e5fc8f2fb0972d662202900b5","reclaim_after":42000000000}
+2026/11/23 15:51:41 INFO event-triggers: retry cycle completed duration_ms=11
+2026/11/23 15:51:41 INFO rate-limiter: work cycle completed plugin=rate-limiter duration_ms=31 configs_reloaded=0
+{"time":"2026-11-23T15:51:41.846567503Z","level":"WARN","msg":"component precompile in a child failed; compiling in this process, one component at a time. Every such compile costs this worker the memory a compile retains (about 250 to 300 MiB per distinct Python component). The cause is in error: a timeout means --component-precompile-timeout (default 5m0s) or a loaded node, an exit or an artifact error means the child could not run or write (is the system temp directory writable and not full?), and the worker's own binary is the child, so a binary replaced under a running worker does it. Counted on cleat_component_precompile_fallbacks_total{reason}. To compile in this process on purpose, set --component-precompile=false","reason":"timeout","fallbacks_total":4,"error":"child: timed out after 1s: signal: killed"}
+{"time":"2026-11-23T15:51:45.864660078Z","level":"INFO","msg":"component compile waited for another compile to finish","waited":22519000000}
+2026/11/23 15:51:46 INFO jobqueue: work cycle completed plugin=jobqueue duration_ms=25 jobs_claimed=0 jobs_dispatched=0 jobs_failed=0
+{"time":"2026-11-23T15:51:46.898654538Z","level":"WARN","msg":"component precompile in a child failed; compiling in this process, one component at a time. Every such compile costs this worker the memory a compile retains (about 250 to 300 MiB per distinct Python component). The cause is in error: a timeout means --component-precompile-timeout (default 5m0s) or a loaded node, an exit or an artifact error means the child could not run or write (is the system temp directory writable and not full?), and the worker's own binary is the child, so a binary replaced under a running worker does it. Counted on cleat_component_precompile_fallbacks_total{reason}. To compile in this process on purpose, set --component-precompile=false","reason":"timeout","fallbacks_total":5,"error":"child: timed out after 1s: signal: killed"}
+{"time":"2026-11-23T15:51:49.648960194Z","level":"WARN","msg":"execution fenced out: run superseded by a later generation","worker_id":"ec62526e5fc8f2fb0972d662202900b5","workflow_id":"hold-2","def_name":"hm4","sent_generation":1,"generation":1}
+{"time":"2026-11-23T15:51:49.649277634Z","level":"WARN","msg":"execution fenced out: run superseded by a later generation","worker_id":"ec62526e5fc8f2fb0972d662202900b5","workflow_id":"hold-0","def_name":"hm2","sent_generation":1,"generation":1}
+{"time":"2026-11-23T15:51:49.65485143Z","level":"WARN","msg":"execution fenced out: run superseded by a later generation","worker_id":"ec62526e5fc8f2fb0972d662202900b5","workflow_id":"hold-2","def_name":"hm4","sent_generation":1,"generation":1}
+{"time":"2026-11-23T15:51:49.655060029Z","level":"WARN","msg":"execution fenced out: run superseded by a later generation","worker_id":"ec62526e5fc8f2fb0972d662202900b5","workflow_id":"hold-0","def_name":"hm2","sent_generation":1,"generation":1}
+{"time":"2026-11-23T15:51:49.673113431Z","level":"WARN","msg":"execution fenced out: run superseded by a later generation","worker_id":"ec62526e5fc8f2fb0972d662202900b5","workflow_id":"hold-2","def_name":"hm4","sent_generation":1,"generation":1}
+{"time":"2026-11-23T15:51:49.673184562Z","level":"WARN","msg":"execution fenced out: run superseded by a later generation","worker_id":"ec62526e5fc8f2fb0972d662202900b5","workflow_id":"hold-0","def_name":"hm2","sent_generation":1,"generation":1}
+{"time":"2026-11-23T15:51:49.701727756Z","level":"INFO","msg":"workflow completed","worker_id":"ec62526e5fc8f2fb0972d662202900b5","workflow_id":"hold-0","tenant_id":"00000000-0000-0000-0000-000000000000","duration":26722173471,"replay_ms":26290,"finalize_ms":109}
+{"time":"2026-11-23T15:51:49.705115844Z","level":"INFO","msg":"workflow completed","worker_id":"ec62526e5fc8f2fb0972d662202900b5","workflow_id":"hold-2","tenant_id":"00000000-0000-0000-0000-000000000000","duration":26726040721,"replay_ms":26320,"finalize_ms":107}
+{"time":"2026-11-23T15:51:49.744232085Z","level":"WARN","msg":"execution fenced out: run superseded by a later generation","worker_id":"ec62526e5fc8f2fb0972d662202900b5","workflow_id":"hold-6","def_name":"hm2","sent_generation":1,"generation":1}
+{"time":"2026-11-23T15:51:49.744327092Z","level":"WARN","msg":"execution fenced out: run superseded by a later generation","worker_id":"ec62526e5fc8f2fb0972d662202900b5","workflow_id":"hold-1","def_name":"hm3","sent_generation":1,"generation":1}
+{"time":"2026-11-23T15:51:49.744369471Z","level":"WARN","msg":"execution fenced out: run superseded by a later generation","worker_id":"ec62526e5fc8f2fb0972d662202900b5","workflow_id":"hold-4","def_name":"hm6","sent_generation":1,"generation":1}
+{"time":"2026-11-23T15:51:49.75512674Z","level":"INFO","msg":"workflow completed","worker_id":"ec62526e5fc8f2fb0972d662202900b5","workflow_id":"hold-4","tenant_id":"00000000-0000-0000-0000-000000000000","duration":26776218838,"replay_ms":26433,"finalize_ms":65}
+{"time":"2026-11-23T15:51:49.778960829Z","level":"WARN","msg":"execution fenced out: run superseded by a later generation","worker_id":"ec62526e5fc8f2fb0972d662202900b5","workflow_id":"hold-7","def_name":"hm3","sent_generation":1,"generation":1}
+{"time":"2026-11-23T15:51:49.779365734Z","level":"WARN","msg":"execution fenced out: run superseded by a later generation","worker_id":"ec62526e5fc8f2fb0972d662202900b5","workflow_id":"hold-6","def_name":"hm2","sent_generation":1,"generation":1}
+{"time":"2026-11-23T15:51:49.779438948Z","level":"WARN","msg":"execution fenced out: run superseded by a later generation","worker_id":"ec62526e5fc8f2fb0972d662202900b5","workflow_id":"hold-1","def_name":"hm3","sent_generation":1,"generation":1}
+{"time":"2026-11-23T15:51:49.79375036Z","level":"INFO","msg":"workflow completed","worker_id":"ec62526e5fc8f2fb0972d662202900b5","workflow_id":"hold-6","tenant_id":"00000000-0000-0000-0000-000000000000","duration":26814009812,"replay_ms":26357,"finalize_ms":113}
+{"time":"2026-11-23T15:51:49.799117473Z","level":"INFO","msg":"workflow completed","worker_id":"ec62526e5fc8f2fb0972d662202900b5","workflow_id":"hold-1","tenant_id":"00000000-0000-0000-0000-000000000000","duration":26818279217,"replay_ms":26404,"finalize_ms":134}
+{"time":"2026-11-23T15:51:49.816434071Z","level":"INFO","msg":"workflow completed","worker_id":"ec62526e5fc8f2fb0972d662202900b5","workflow_id":"hold-7","tenant_id":"00000000-0000-0000-0000-000000000000","duration":26836625768,"replay_ms":26450,"finalize_ms":68}
+{"time":"2026-11-23T15:51:49.847780184Z","level":"INFO","msg":"workflow completed","worker_id":"ec62526e5fc8f2fb0972d662202900b5","workflow_id":"hold-8","tenant_id":"00000000-0000-0000-0000-000000000000","duration":26867954088,"replay_ms":26496,"finalize_ms":51}
+{"time":"2026-11-23T15:51:50.381073976Z","level":"INFO","msg":"workflow completed","worker_id":"ec62526e5fc8f2fb0972d662202900b5","workflow_id":"hold-12","tenant_id":"00000000-0000-0000-0000-000000000000","duration":411507193,"replay_ms":28,"finalize_ms":37}
+{"time":"2026-11-23T15:51:50.431979647Z","level":"INFO","msg":"workflow completed","worker_id":"ec62526e5fc8f2fb0972d662202900b5","workflow_id":"hold-10","tenant_id":"00000000-0000-0000-0000-000000000000","duration":465326917,"replay_ms":34,"finalize_ms":47}
+{"time":"2026-11-23T15:51:50.562592287Z","level":"INFO","msg":"workflow completed","worker_id":"ec62526e5fc8f2fb0972d662202900b5","workflow_id":"hold-13","tenant_id":"00000000-0000-0000-0000-000000000000","duration":147648049,"replay_ms":27,"finalize_ms":27}
+{"time":"2026-11-23T15:51:50.728434707Z","level":"INFO","msg":"workflow completed","worker_id":"ec62526e5fc8f2fb0972d662202900b5","workflow_id":"hold-14","tenant_id":"00000000-0000-0000-0000-000000000000","duration":187099398,"replay_ms":27,"finalize_ms":26}
+{"time":"2026-11-23T15:51:50.844916406Z","level":"INFO","msg":"workflow completed","worker_id":"ec62526e5fc8f2fb0972d662202900b5","workflow_id":"hold-16","tenant_id":"00000000-0000-0000-0000-000000000000","duration":53870562,"replay_ms":18,"finalize_ms":21}
+2026/11/23 15:51:51 INFO jobqueue: work cycle completed plugin=jobqueue duration_ms=1 jobs_claimed=0 jobs_dispatched=0 jobs_failed=0
+{"time":"2026-11-23T15:51:51.029911605Z","level":"INFO","msg":"Reaper: a new worker waits out its start-up grace period before reclaiming stale runs; nothing is wrong","worker_id":"ec62526e5fc8f2fb0972d662202900b5","reclaim_after":42000000000}
+{"time":"2026-11-23T15:51:51.745947841Z","level":"INFO","msg":"component compile waited for another compile to finish","waited":28361000000}
+{"time":"2026-11-23T15:51:52.045593559Z","level":"WARN","msg":"execution fenced out: run superseded by a later generation","worker_id":"ec62526e5fc8f2fb0972d662202900b5","workflow_id":"hold-15","def_name":"hm5","sent_generation":1,"generation":1}
+{"time":"2026-11-23T15:51:52.045714193Z","level":"WARN","msg":"execution fenced out: run superseded by a later generation","worker_id":"ec62526e5fc8f2fb0972d662202900b5","workflow_id":"hold-3","def_name":"hm5","sent_generation":1,"generation":1}
+{"time":"2026-11-23T15:51:52.045735236Z","level":"WARN","msg":"execution fenced out: run superseded by a later generation","worker_id":"ec62526e5fc8f2fb0972d662202900b5","workflow_id":"hold-9","def_name":"hm5","sent_generation":1,"generation":1}
+{"time":"2026-11-23T15:51:52.064790506Z","level":"INFO","msg":"workflow completed","worker_id":"ec62526e5fc8f2fb0972d662202900b5","workflow_id":"hold-3","tenant_id":"00000000-0000-0000-0000-000000000000","duration":29085788680,"replay_ms":28482,"finalize_ms":278}
+{"time":"2026-11-23T15:51:52.071687484Z","level":"INFO","msg":"workflow completed","worker_id":"ec62526e5fc8f2fb0972d662202900b5","workflow_id":"hold-9","tenant_id":"00000000-0000-0000-0000-000000000000","duration":29087220121,"replay_ms":28466,"finalize_ms":279}
+{"time":"2026-11-23T15:51:52.086431013Z","level":"INFO","msg":"workflow completed","worker_id":"ec62526e5fc8f2fb0972d662202900b5","workflow_id":"hold-15","tenant_id":"00000000-0000-0000-0000-000000000000","duration":1419088828,"replay_ms":1026,"finalize_ms":299}
+{"time":"2026-11-23T15:51:52.802736978Z","level":"WARN","msg":"component precompile in a child failed; compiling in this process, one component at a time. Every such compile costs this worker the memory a compile retains (about 250 to 300 MiB per distinct Python component). The cause is in error: a timeout means --component-precompile-timeout (default 5m0s) or a loaded node, an exit or an artifact error means the child could not run or write (is the system temp directory writable and not full?), and the worker's own binary is the child, so a binary replaced under a running worker does it. Counted on cleat_component_precompile_fallbacks_total{reason}. To compile in this process on purpose, set --component-precompile=false","reason":"timeout","fallbacks_total":6,"error":"child: timed out after 1s: signal: killed"}
+2026/11/23 15:51:56 INFO jobqueue: work cycle completed plugin=jobqueue duration_ms=2 jobs_claimed=0 jobs_dispatched=0 jobs_failed=0
+{"time":"2026-11-23T15:51:56.218610065Z","level":"INFO","msg":"workflow completed","worker_id":"ec62526e5fc8f2fb0972d662202900b5","workflow_id":"hold-5","tenant_id":"00000000-0000-0000-0000-000000000000","duration":33238697088,"replay_ms":32837,"finalize_ms":35}
+{"time":"2026-11-23T15:51:56.222918057Z","level":"INFO","msg":"workflow completed","worker_id":"ec62526e5fc8f2fb0972d662202900b5","workflow_id":"hold-17","tenant_id":"00000000-0000-0000-0000-000000000000","duration":5306978753,"replay_ms":5251,"finalize_ms":35}
+{"time":"2026-11-23T15:51:56.227663706Z","level":"INFO","msg":"workflow completed","worker_id":"ec62526e5fc8f2fb0972d662202900b5","workflow_id":"hold-11","tenant_id":"00000000-0000-0000-0000-000000000000","duration":6258901317,"replay_ms":5855,"finalize_ms":40}
+{"time":"2026-11-23T15:51:56.434872329Z","level":"INFO","msg":"workflow completed","worker_id":"ec62526e5fc8f2fb0972d662202900b5","workflow_id":"hold-18","tenant_id":"00000000-0000-0000-0000-000000000000","duration":157716017,"replay_ms":24,"finalize_ms":16}
+{"time":"2026-11-23T15:51:56.653975432Z","level":"INFO","msg":"workflow completed","worker_id":"ec62526e5fc8f2fb0972d662202900b5","workflow_id":"hold-19","tenant_id":"00000000-0000-0000-0000-000000000000","duration":156355205,"replay_ms":29,"finalize_ms":23}
+{"time":"2026-11-23T15:51:58.179383818Z","level":"WARN","msg":"component precompile in a child failed; compiling in this process, one component at a time. Every such compile costs this worker the memory a compile retains (about 250 to 300 MiB per distinct Python component). The cause is in error: a timeout means --component-precompile-timeout (default 5m0s) or a loaded node, an exit or an artifact error means the child could not run or write (is the system temp directory writable and not full?), and the worker's own binary is the child, so a binary replaced under a running worker does it. Counted on cleat_component_precompile_fallbacks_total{reason}. To compile in this process on purpose, set --component-precompile=false","reason":"timeout","fallbacks_total":7,"error":"child: timed out after 1s: signal: killed"}

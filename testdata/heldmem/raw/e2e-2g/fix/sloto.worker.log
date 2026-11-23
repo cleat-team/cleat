@@ -1,0 +1,93 @@
+2026/11/23 15:35:55 INFO residency memory budget bytes=429496729 mib=409 percent=20 of_bytes=2147483648 of_mib=2048 source="cgroup v2 memory.max"
+{"time":"2026-11-23T15:35:55.939809344Z","level":"INFO","msg":"starting worker","worker_id":"dc80ef889c48c9dfd8f0d0e226abe7eb","concurrency":10}
+{"time":"2026-11-23T15:35:55.939910879Z","level":"INFO","msg":"checksum verification enabled","worker_id":"dc80ef889c48c9dfd8f0d0e226abe7eb"}
+{"time":"2026-11-23T15:35:56.006998928Z","level":"INFO","msg":"plugin DB pool configured","worker_id":"dc80ef889c48c9dfd8f0d0e226abe7eb","max_connections":10}
+{"time":"2026-11-23T15:35:56.017271929Z","level":"INFO","msg":"heartbeat DB pool configured","worker_id":"dc80ef889c48c9dfd8f0d0e226abe7eb","max_connections":3}
+{"time":"2026-11-23T15:35:56.017352007Z","level":"INFO","msg":"sensitive-payload encryption is off: no --encryption-key-file, workflow data is stored in plaintext","worker_id":"dc80ef889c48c9dfd8f0d0e226abe7eb"}
+2026/11/23 15:35:56 [migration] applying 001_schema.sql
+2026/11/23 15:36:05 [migration] applied 001_schema.sql
+2026/11/23 15:36:05 [migration] applying 002_defaults.sql
+2026/11/23 15:36:05 [migration] applied 002_defaults.sql
+2026/11/23 15:36:05 [migration] applying 003_procedures.sql
+2026/11/23 15:36:05 [migration] applied 003_procedures.sql
+2026/11/23 15:36:05 [migration] applying 004_operator_key_scopes.sql
+2026/11/23 15:36:05 [migration] applied 004_operator_key_scopes.sql
+2026/11/23 15:36:05 [migration] applying 005_workflow_libraries.sql
+2026/11/23 15:36:05 [migration] applied 005_workflow_libraries.sql
+2026/11/23 15:36:05 [migration] applying 006_a_tenant_records_who_created_it.sql
+2026/11/23 15:36:05 [migration] applied 006_a_tenant_records_who_created_it.sql
+2026/11/23 15:36:05 [migration] applying 007_a_dropped_tenant_leaves_a_tombstone.sql
+2026/11/23 15:36:05 [migration] applied 007_a_dropped_tenant_leaves_a_tombstone.sql
+2026/11/23 15:36:05 [migration] applying 008_registered_plugins.sql
+2026/11/23 15:36:05 [migration] applied 008_registered_plugins.sql
+2026/11/23 15:36:05 [migration] applying 009_library_prefix_lookup.sql
+2026/11/23 15:36:05 [migration] applied 009_library_prefix_lookup.sql
+2026/11/23 15:36:05 [migration] applying 010_library_clashing_names.sql
+2026/11/23 15:36:05 [migration] applied 010_library_clashing_names.sql
+2026/11/23 15:36:05 [migration] applying 011_a_tombstone_cannot_be_rewritten.sql
+2026/11/23 15:36:05 [migration] applied 011_a_tombstone_cannot_be_rewritten.sql
+{"time":"2026-11-23T15:36:06.82988883Z","level":"INFO","msg":"registered in the worker registry","worker_id":"dc80ef889c48c9dfd8f0d0e226abe7eb","secret_key_versions":null}
+{"time":"2026-11-23T15:36:06.837396686Z","level":"INFO","msg":"row-level security is enforced on this connection","worker_id":"dc80ef889c48c9dfd8f0d0e226abe7eb"}
+2026/11/23 15:36:06 INFO audit-log: initialized retention_days=90
+2026/11/23 15:36:06 INFO blobstore: initialized backend=memory
+2026/11/23 15:36:06 INFO dag plugin initialized
+2026/11/23 15:36:06 INFO datadog-export: initialized
+{"time":"2026-11-23T15:36:06.839249265Z","level":"INFO","msg":"plugin not configured, disabled","worker_id":"dc80ef889c48c9dfd8f0d0e226abe7eb","plugin":"email-notify"}
+2026/11/23 15:36:06 INFO event-triggers: initialized
+2026/11/23 15:36:06 INFO eventstore: initialized max_event_size=1048576
+2026/11/23 15:36:06 INFO feature-flags: initialized default_rollout=0
+2026/11/23 15:36:06 INFO jobqueue: initialized
+2026/11/23 15:36:06 INFO kvstore: initialized max_value_size=1048576
+2026/11/23 15:36:06 INFO llm: initialized providers=0
+2026/11/23 15:36:06 INFO notifications: initialized
+2026/11/23 15:36:06 INFO oauth-provider: initialized
+2026/11/23 15:36:06 INFO pagerduty-alert: initialized
+2026/11/23 15:36:06 INFO rate-limiter: initialized mode=memory
+2026/11/23 15:36:06 INFO scheduledbackup: initialized dump_dir=/tmp/cleat-backups
+2026/11/23 15:36:06 INFO scheduler: initialized
+2026/11/23 15:36:06 INFO slack-notify: initialized
+2026/11/23 15:36:06 INFO tenant-lifecycle: initialized
+2026/11/23 15:36:06 INFO tenant-quota: initialized
+2026/11/23 15:36:06 INFO kafka-connect: initialized rest_proxy=""
+2026/11/23 15:36:06 INFO webhook-ingest: initialized
+{"time":"2026-11-23T15:36:06.841216594Z","level":"INFO","msg":"wasmtime backend registered for Go WASM","worker_id":"dc80ef889c48c9dfd8f0d0e226abe7eb","instance_timeout":30000000000,"wall_clock_ceiling":300000000000,"instruction_limit":0,"memory_limit_bytes":268435456,"defer_budget":5000000000}
+{"time":"2026-11-23T15:36:06.853983437Z","level":"INFO","msg":"adaptive flusher registry enabled","worker_id":"dc80ef889c48c9dfd8f0d0e226abe7eb","max_wait_ms":8,"max_batch":200,"enter_rate":500,"exit_rate":250}
+{"time":"2026-11-23T15:36:06.854083687Z","level":"INFO","msg":"database connection budget","worker_id":"dc80ef889c48c9dfd8f0d0e226abe7eb","pools":"core=15 + plugin=10 + flusher=50 + migrate=2 + heartbeat=3 = 80 fixed; plus 25 per tenant pool","configured_budget":0,"tenant_pools_that_fit":0}
+{"time":"2026-11-23T15:36:06.858430009Z","level":"INFO","msg":"server connection limit","worker_id":"dc80ef889c48c9dfd8f0d0e226abe7eb","usable":197,"detail":"max_connections=200 superuser_reserved=3 reserved=0","this_worker_needs":80}
+{"time":"2026-11-23T15:36:06.858700425Z","level":"INFO","msg":"memory monitor","source":"cgroupv2","total_mib":2048,"used_mib":39,"soft_limit":0.8,"hard_limit":0.95}
+2026/11/23 15:36:06 INFO scheduledbackup: background loop started, interval=60s
+2026/11/23 15:36:06 INFO eventstore: cleanup started interval=1h0m0s
+2026/11/23 15:36:06 INFO jobqueue: worker started, poll interval=5s, reaper interval=60s
+2026/11/23 15:36:06 INFO scheduler: background loop started, interval=60s
+2026/11/23 15:36:06 INFO tenant-lifecycle: trial-expiry sweep started interval=1m0s
+2026/11/23 15:36:06 INFO kafka-connect: consumer loop started, interval=5s
+{"time":"2026-11-23T15:36:06.863471413Z","level":"INFO","msg":"cross-tenant workflow claim is available by tenant rotation; no database grant is required","worker_id":"dc80ef889c48c9dfd8f0d0e226abe7eb","tenant_id":"00000000-0000-0000-0000-000000000000","tenants_per_tick":16}
+{"time":"2026-11-23T15:36:06.863491246Z","level":"INFO","msg":"cross-tenant due-schedule read is available by tenant rotation; no database grant is required","worker_id":"dc80ef889c48c9dfd8f0d0e226abe7eb","tenant_id":"00000000-0000-0000-0000-000000000000"}
+{"time":"2026-11-23T15:36:06.863518246Z","level":"INFO","msg":"running","worker_id":"dc80ef889c48c9dfd8f0d0e226abe7eb"}
+2026/11/23 15:36:06 INFO oauth-provider: background loop started interval=5m0s
+2026/11/23 15:36:06 INFO rate-limiter: background reload started, interval=30s
+2026/11/23 15:36:06 INFO notifications: delivery retry loop started interval=30s
+2026/11/23 15:36:06 INFO audit-log: background started retention=1h workers=4 buffer=1000 enqueue_wait=1s retry_deadline=1m0s
+2026/11/23 15:36:06 INFO event-triggers: background retry worker started interval=30s reconcile_interval=30s reconcile_grace=15s
+2026/11/23 15:36:06 INFO blobstore: TTL cleanup started interval=1h0m0s
+2026/11/23 15:36:06 INFO scheduler: work cycle completed plugin=scheduler duration_ms=19 schedules_due=0 workflows_started=0 workflows_failed=0
+2026/11/23 15:36:06 INFO rate-limiter: work cycle completed plugin=rate-limiter duration_ms=33 configs_reloaded=0
+2026/11/23 15:36:06 INFO datadog-export: metric export started, interval=60s
+2026/11/23 15:36:06 INFO jobqueue: initial reaper cycle completed plugin=jobqueue jobs_reset=0
+2026/11/23 15:36:06 INFO jobqueue: initial abandonment sweep completed plugin=jobqueue jobs_abandoned=0
+2026/11/23 15:36:11 INFO jobqueue: work cycle completed plugin=jobqueue duration_ms=4 jobs_claimed=0 jobs_dispatched=0 jobs_failed=0
+{"time":"2026-11-23T15:36:16.869298498Z","level":"INFO","msg":"Reaper: a new worker waits out its start-up grace period before reclaiming stale runs; nothing is wrong","worker_id":"dc80ef889c48c9dfd8f0d0e226abe7eb","reclaim_after":42000000000}
+2026/11/23 15:36:16 INFO jobqueue: work cycle completed plugin=jobqueue duration_ms=9 jobs_claimed=0 jobs_dispatched=0 jobs_failed=0
+2026/11/23 15:36:21 INFO jobqueue: work cycle completed plugin=jobqueue duration_ms=3 jobs_claimed=0 jobs_dispatched=0 jobs_failed=0
+{"time":"2026-11-23T15:36:27.323790258Z","level":"INFO","msg":"Reaper: a new worker waits out its start-up grace period before reclaiming stale runs; nothing is wrong","worker_id":"dc80ef889c48c9dfd8f0d0e226abe7eb","reclaim_after":42000000000}
+2026/11/23 15:36:28 INFO jobqueue: work cycle completed plugin=jobqueue duration_ms=647 jobs_claimed=0 jobs_dispatched=0 jobs_failed=0
+2026/11/23 15:36:31 INFO jobqueue: work cycle completed plugin=jobqueue duration_ms=5 jobs_claimed=0 jobs_dispatched=0 jobs_failed=0
+{"time":"2026-11-23T15:36:36.888235358Z","level":"INFO","msg":"Reaper: a new worker waits out its start-up grace period before reclaiming stale runs; nothing is wrong","worker_id":"dc80ef889c48c9dfd8f0d0e226abe7eb","reclaim_after":42000000000}
+2026/11/23 15:36:36 INFO rate-limiter: work cycle completed plugin=rate-limiter duration_ms=32 configs_reloaded=0
+2026/11/23 15:36:36 INFO jobqueue: work cycle completed plugin=jobqueue duration_ms=36 jobs_claimed=0 jobs_dispatched=0 jobs_failed=0
+2026/11/23 15:36:36 INFO event-triggers: retry cycle completed duration_ms=51
+2026/11/23 15:36:41 INFO jobqueue: work cycle completed plugin=jobqueue duration_ms=117 jobs_claimed=0 jobs_dispatched=0 jobs_failed=0
+{"time":"2026-11-23T15:36:46.881736099Z","level":"INFO","msg":"Reaper: a new worker waits out its start-up grace period before reclaiming stale runs; nothing is wrong","worker_id":"dc80ef889c48c9dfd8f0d0e226abe7eb","reclaim_after":42000000000}
+2026/11/23 15:36:46 INFO jobqueue: work cycle completed plugin=jobqueue duration_ms=20 jobs_claimed=0 jobs_dispatched=0 jobs_failed=0
+2026/11/23 15:36:51 INFO jobqueue: work cycle completed plugin=jobqueue duration_ms=122 jobs_claimed=0 jobs_dispatched=0 jobs_failed=0
+2026/11/23 15:36:56 INFO jobqueue: work cycle completed plugin=jobqueue duration_ms=12 jobs_claimed=0 jobs_dispatched=0 jobs_failed=0

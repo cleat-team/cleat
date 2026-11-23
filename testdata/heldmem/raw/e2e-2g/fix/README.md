@@ -1,0 +1,4 @@
+Evidence for the one-at-a-time / headroom / default-ON change (cleat#4397). Same 2 GiB container, cold start: 20 runs on 6 distinct Python components claimed at once, then a 7th distinct compile (hm8).
+arms_before_and_commit1.out : arm 1 (develop, stock = OFF) and arm 3 (develop, forced child timeout) are the RED runs (OOMKilled); arms 2/4 there are commit 1 only (serialise): OFF survived at the limit, forced fallback killed on the 7th.
+arms_commit2_precompile_default_off.out : commit 2's binary, where the default is still OFF, so its "stock" arms are OFF arms; NOT the intended arms (kept because they show the headroom refusal with precompile off).
+arms_final.out : the final commit (default ON). fa2 = --component-precompile=false, fa4 = forced fallback, fa5 = stock cold start, fa6 = stock 9-component worst case.

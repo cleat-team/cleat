@@ -1,0 +1,190 @@
+2026/11/23 16:56:54 INFO residency memory budget bytes=429496729 mib=409 percent=20 of_bytes=2147483648 of_mib=2048 source="cgroup v2 memory.max"
+{"time":"2026-11-23T16:56:54.515742934Z","level":"INFO","msg":"starting worker","worker_id":"ac0de0303690584f5696d00709c4350b","concurrency":10}
+{"time":"2026-11-23T16:56:54.51577031Z","level":"INFO","msg":"checksum verification enabled","worker_id":"ac0de0303690584f5696d00709c4350b"}
+{"time":"2026-11-23T16:56:54.551657372Z","level":"INFO","msg":"plugin DB pool configured","worker_id":"ac0de0303690584f5696d00709c4350b","max_connections":10}
+{"time":"2026-11-23T16:56:54.555579484Z","level":"INFO","msg":"heartbeat DB pool configured","worker_id":"ac0de0303690584f5696d00709c4350b","max_connections":3}
+{"time":"2026-11-23T16:56:54.555642486Z","level":"INFO","msg":"sensitive-payload encryption is off: no --encryption-key-file, workflow data is stored in plaintext","worker_id":"ac0de0303690584f5696d00709c4350b"}
+2026/11/23 16:56:54 [migration] applying 001_schema.sql
+2026/11/23 16:56:55 [migration] applied 001_schema.sql
+2026/11/23 16:56:55 [migration] applying 002_defaults.sql
+2026/11/23 16:56:55 [migration] applied 002_defaults.sql
+2026/11/23 16:56:55 [migration] applying 003_procedures.sql
+2026/11/23 16:56:55 [migration] applied 003_procedures.sql
+2026/11/23 16:56:55 [migration] applying 004_operator_key_scopes.sql
+2026/11/23 16:56:55 [migration] applied 004_operator_key_scopes.sql
+2026/11/23 16:56:55 [migration] applying 005_workflow_libraries.sql
+2026/11/23 16:56:55 [migration] applied 005_workflow_libraries.sql
+2026/11/23 16:56:55 [migration] applying 006_a_tenant_records_who_created_it.sql
+2026/11/23 16:56:55 [migration] applied 006_a_tenant_records_who_created_it.sql
+2026/11/23 16:56:55 [migration] applying 007_a_dropped_tenant_leaves_a_tombstone.sql
+2026/11/23 16:56:55 [migration] applied 007_a_dropped_tenant_leaves_a_tombstone.sql
+2026/11/23 16:56:55 [migration] applying 008_registered_plugins.sql
+2026/11/23 16:56:55 [migration] applied 008_registered_plugins.sql
+2026/11/23 16:56:55 [migration] applying 009_library_prefix_lookup.sql
+2026/11/23 16:56:55 [migration] applied 009_library_prefix_lookup.sql
+2026/11/23 16:56:55 [migration] applying 010_library_clashing_names.sql
+2026/11/23 16:56:55 [migration] applied 010_library_clashing_names.sql
+2026/11/23 16:56:55 [migration] applying 011_a_tombstone_cannot_be_rewritten.sql
+2026/11/23 16:56:55 [migration] applied 011_a_tombstone_cannot_be_rewritten.sql
+{"time":"2026-11-23T16:56:56.007600996Z","level":"INFO","msg":"registered in the worker registry","worker_id":"ac0de0303690584f5696d00709c4350b","secret_key_versions":null}
+{"time":"2026-11-23T16:56:56.009418177Z","level":"INFO","msg":"row-level security is enforced on this connection","worker_id":"ac0de0303690584f5696d00709c4350b"}
+2026/11/23 16:56:56 INFO audit-log: initialized retention_days=90
+2026/11/23 16:56:56 INFO blobstore: initialized backend=memory
+2026/11/23 16:56:56 INFO dag plugin initialized
+2026/11/23 16:56:56 INFO datadog-export: initialized
+{"time":"2026-11-23T16:56:56.01004939Z","level":"INFO","msg":"plugin not configured, disabled","worker_id":"ac0de0303690584f5696d00709c4350b","plugin":"email-notify"}
+2026/11/23 16:56:56 INFO event-triggers: initialized
+2026/11/23 16:56:56 INFO eventstore: initialized max_event_size=1048576
+2026/11/23 16:56:56 INFO feature-flags: initialized default_rollout=0
+2026/11/23 16:56:56 INFO jobqueue: initialized
+2026/11/23 16:56:56 INFO kvstore: initialized max_value_size=1048576
+2026/11/23 16:56:56 INFO llm: initialized providers=0
+2026/11/23 16:56:56 INFO notifications: initialized
+2026/11/23 16:56:56 INFO oauth-provider: initialized
+2026/11/23 16:56:56 INFO pagerduty-alert: initialized
+2026/11/23 16:56:56 INFO rate-limiter: initialized mode=memory
+2026/11/23 16:56:56 INFO scheduledbackup: initialized dump_dir=/tmp/cleat-backups
+2026/11/23 16:56:56 INFO scheduler: initialized
+2026/11/23 16:56:56 INFO slack-notify: initialized
+2026/11/23 16:56:56 INFO tenant-lifecycle: initialized
+2026/11/23 16:56:56 INFO tenant-quota: initialized
+2026/11/23 16:56:56 INFO kafka-connect: initialized rest_proxy=""
+2026/11/23 16:56:56 INFO webhook-ingest: initialized
+{"time":"2026-11-23T16:56:56.010922272Z","level":"INFO","msg":"component precompile in a child process is ON","parallel_compilation":true,"why":"auto: the memory limit is 2048 MiB, at least 1 GiB","child":"/out/slot-after"}
+{"time":"2026-11-23T16:56:56.011045481Z","level":"INFO","msg":"in-process component compiles are refused when the memory left is under the minimum","min_headroom_mib":800,"source":"cgroupv2","total_mib":2048,"available_mib":2038}
+{"time":"2026-11-23T16:56:56.011263358Z","level":"INFO","msg":"wasmtime backend registered for Go WASM","worker_id":"ac0de0303690584f5696d00709c4350b","instance_timeout":30000000000,"wall_clock_ceiling":300000000000,"instruction_limit":0,"memory_limit_bytes":268435456,"defer_budget":5000000000}
+{"time":"2026-11-23T16:56:56.014544258Z","level":"INFO","msg":"adaptive flusher registry enabled","worker_id":"ac0de0303690584f5696d00709c4350b","max_wait_ms":8,"max_batch":200,"enter_rate":500,"exit_rate":250}
+{"time":"2026-11-23T16:56:56.014571466Z","level":"INFO","msg":"database connection budget","worker_id":"ac0de0303690584f5696d00709c4350b","pools":"core=15 + plugin=10 + flusher=50 + migrate=2 + heartbeat=3 = 80 fixed; plus 25 per tenant pool","configured_budget":0,"tenant_pools_that_fit":0}
+{"time":"2026-11-23T16:56:56.017909534Z","level":"INFO","msg":"server connection limit","worker_id":"ac0de0303690584f5696d00709c4350b","usable":197,"detail":"max_connections=200 superuser_reserved=3 reserved=0","this_worker_needs":80}
+{"time":"2026-11-23T16:56:56.018037493Z","level":"INFO","msg":"memory monitor","source":"cgroupv2","total_mib":2048,"used_mib":9,"soft_limit":0.8,"hard_limit":0.95}
+2026/11/23 16:56:56 INFO audit-log: background started retention=1h workers=4 buffer=1000 enqueue_wait=1s retry_deadline=1m0s
+2026/11/23 16:56:56 INFO rate-limiter: background reload started, interval=30s
+2026/11/23 16:56:56 INFO blobstore: TTL cleanup started interval=1h0m0s
+2026/11/23 16:56:56 INFO event-triggers: background retry worker started interval=30s reconcile_interval=30s reconcile_grace=15s
+2026/11/23 16:56:56 INFO eventstore: cleanup started interval=1h0m0s
+2026/11/23 16:56:56 INFO jobqueue: worker started, poll interval=5s, reaper interval=60s
+2026/11/23 16:56:56 INFO notifications: delivery retry loop started interval=30s
+2026/11/23 16:56:56 INFO oauth-provider: background loop started interval=5m0s
+2026/11/23 16:56:56 INFO kafka-connect: consumer loop started, interval=5s
+2026/11/23 16:56:56 INFO scheduledbackup: background loop started, interval=60s
+2026/11/23 16:56:56 INFO scheduler: background loop started, interval=60s
+2026/11/23 16:56:56 INFO tenant-lifecycle: trial-expiry sweep started interval=1m0s
+{"time":"2026-11-23T16:56:56.019259128Z","level":"INFO","msg":"cross-tenant workflow claim is available by tenant rotation; no database grant is required","worker_id":"ac0de0303690584f5696d00709c4350b","tenant_id":"00000000-0000-0000-0000-000000000000","tenants_per_tick":16}
+{"time":"2026-11-23T16:56:56.021205434Z","level":"INFO","msg":"cross-tenant due-schedule read is available by tenant rotation; no database grant is required","worker_id":"ac0de0303690584f5696d00709c4350b","tenant_id":"00000000-0000-0000-0000-000000000000"}
+{"time":"2026-11-23T16:56:56.021228685Z","level":"INFO","msg":"running","worker_id":"ac0de0303690584f5696d00709c4350b"}
+2026/11/23 16:56:56 INFO scheduler: work cycle completed plugin=scheduler duration_ms=9 schedules_due=0 workflows_started=0 workflows_failed=0
+2026/11/23 16:56:56 INFO rate-limiter: work cycle completed plugin=rate-limiter duration_ms=10 configs_reloaded=0
+2026/11/23 16:56:56 INFO datadog-export: metric export started, interval=60s
+2026/11/23 16:56:56 INFO jobqueue: initial reaper cycle completed plugin=jobqueue jobs_reset=0
+2026/11/23 16:56:56 INFO jobqueue: initial abandonment sweep completed plugin=jobqueue jobs_abandoned=0
+2026/11/23 16:57:01 INFO jobqueue: work cycle completed plugin=jobqueue duration_ms=51 jobs_claimed=0 jobs_dispatched=0 jobs_failed=0
+{"time":"2026-11-23T16:57:06.019976972Z","level":"INFO","msg":"Reaper: a new worker waits out its start-up grace period before reclaiming stale runs; nothing is wrong","worker_id":"ac0de0303690584f5696d00709c4350b","reclaim_after":42000000000}
+2026/11/23 16:57:06 INFO jobqueue: work cycle completed plugin=jobqueue duration_ms=2 jobs_claimed=0 jobs_dispatched=0 jobs_failed=0
+2026/11/23 16:57:11 INFO jobqueue: work cycle completed plugin=jobqueue duration_ms=7 jobs_claimed=0 jobs_dispatched=0 jobs_failed=0
+{"time":"2026-11-23T16:57:16.027610702Z","level":"INFO","msg":"Reaper: a new worker waits out its start-up grace period before reclaiming stale runs; nothing is wrong","worker_id":"ac0de0303690584f5696d00709c4350b","reclaim_after":42000000000}
+2026/11/23 16:57:16 INFO jobqueue: work cycle completed plugin=jobqueue duration_ms=51 jobs_claimed=0 jobs_dispatched=0 jobs_failed=0
+{"time":"2026-11-23T16:57:16.963228014Z","level":"INFO","msg":"component compiled in a child process","child_pid":79,"compile_ms":6579,"artifact_bytes":45324192,"child_max_rss_kib":596820,"parallel_compilation":true}
+{"time":"2026-11-23T16:57:17.066253643Z","level":"INFO","msg":"workflow completed","worker_id":"ac0de0303690584f5696d00709c4350b","workflow_id":"fill-0","tenant_id":"00000000-0000-0000-0000-000000000000","duration":7023599345,"replay_ms":6854,"finalize_ms":76}
+2026/11/23 16:57:21 INFO jobqueue: work cycle completed plugin=jobqueue duration_ms=4 jobs_claimed=0 jobs_dispatched=0 jobs_failed=0
+{"time":"2026-11-23T16:57:21.682954726Z","level":"INFO","msg":"component compiled in a child process","child_pid":126,"compile_ms":3896,"artifact_bytes":45455264,"child_max_rss_kib":556376,"parallel_compilation":true}
+{"time":"2026-11-23T16:57:21.70939293Z","level":"INFO","msg":"workflow completed","worker_id":"ac0de0303690584f5696d00709c4350b","workflow_id":"fill-1","tenant_id":"00000000-0000-0000-0000-000000000000","duration":4324839162,"replay_ms":4119,"finalize_ms":20}
+{"time":"2026-11-23T16:57:24.871551276Z","level":"INFO","msg":"component compiled in a child process","child_pid":160,"compile_ms":2486,"artifact_bytes":45324192,"child_max_rss_kib":592596,"parallel_compilation":true}
+{"time":"2026-11-23T16:57:24.899086655Z","level":"INFO","msg":"workflow completed","worker_id":"ac0de0303690584f5696d00709c4350b","workflow_id":"fill-2","tenant_id":"00000000-0000-0000-0000-000000000000","duration":2878911574,"replay_ms":2769,"finalize_ms":21}
+{"time":"2026-11-23T16:57:26.019895523Z","level":"INFO","msg":"Reaper: a new worker waits out its start-up grace period before reclaiming stale runs; nothing is wrong","worker_id":"ac0de0303690584f5696d00709c4350b","reclaim_after":42000000000}
+2026/11/23 16:57:26 INFO jobqueue: work cycle completed plugin=jobqueue duration_ms=1 jobs_claimed=0 jobs_dispatched=0 jobs_failed=0
+2026/11/23 16:57:26 INFO rate-limiter: work cycle completed plugin=rate-limiter duration_ms=2 configs_reloaded=0
+2026/11/23 16:57:26 INFO event-triggers: retry cycle completed duration_ms=13
+{"time":"2026-11-23T16:57:28.224691681Z","level":"INFO","msg":"component compiled in a child process","child_pid":192,"compile_ms":2912,"artifact_bytes":45324192,"child_max_rss_kib":564744,"parallel_compilation":true}
+{"time":"2026-11-23T16:57:28.334169943Z","level":"INFO","msg":"workflow completed","worker_id":"ac0de0303690584f5696d00709c4350b","workflow_id":"fill-3","tenant_id":"00000000-0000-0000-0000-000000000000","duration":3325040396,"replay_ms":3140,"finalize_ms":72}
+2026/11/23 16:57:31 INFO jobqueue: work cycle completed plugin=jobqueue duration_ms=2 jobs_claimed=0 jobs_dispatched=0 jobs_failed=0
+{"time":"2026-11-23T16:57:31.861755571Z","level":"INFO","msg":"component compiled in a child process","child_pid":216,"compile_ms":2905,"artifact_bytes":45389728,"child_max_rss_kib":555428,"parallel_compilation":true}
+{"time":"2026-11-23T16:57:31.890518126Z","level":"INFO","msg":"workflow completed","worker_id":"ac0de0303690584f5696d00709c4350b","workflow_id":"fill-4","tenant_id":"00000000-0000-0000-0000-000000000000","duration":3244750484,"replay_ms":3112,"finalize_ms":23}
+{"time":"2026-11-23T16:57:34.992237213Z","level":"INFO","msg":"component compiled in a child process","child_pid":249,"compile_ms":2499,"artifact_bytes":45389728,"child_max_rss_kib":599364,"parallel_compilation":true}
+{"time":"2026-11-23T16:57:35.029015706Z","level":"INFO","msg":"workflow completed","worker_id":"ac0de0303690584f5696d00709c4350b","workflow_id":"fill-5","tenant_id":"00000000-0000-0000-0000-000000000000","duration":2823699732,"replay_ms":2704,"finalize_ms":32}
+{"time":"2026-11-23T16:57:36.035566065Z","level":"INFO","msg":"Reaper: a new worker waits out its start-up grace period before reclaiming stale runs; nothing is wrong","worker_id":"ac0de0303690584f5696d00709c4350b","reclaim_after":42000000000}
+2026/11/23 16:57:36 INFO jobqueue: work cycle completed plugin=jobqueue duration_ms=4 jobs_claimed=0 jobs_dispatched=0 jobs_failed=0
+{"time":"2026-11-23T16:57:38.999375087Z","level":"INFO","msg":"component compiled in a child process","child_pid":281,"compile_ms":3424,"artifact_bytes":45389728,"child_max_rss_kib":602012,"parallel_compilation":true}
+{"time":"2026-11-23T16:57:39.066014977Z","level":"INFO","msg":"workflow completed","worker_id":"ac0de0303690584f5696d00709c4350b","workflow_id":"fill-6","tenant_id":"00000000-0000-0000-0000-000000000000","duration":3929366773,"replay_ms":3793,"finalize_ms":47}
+2026/11/23 16:57:41 INFO jobqueue: work cycle completed plugin=jobqueue duration_ms=0 jobs_claimed=0 jobs_dispatched=0 jobs_failed=0
+{"time":"2026-11-23T16:57:42.757858498Z","level":"INFO","msg":"component compiled in a child process","child_pid":315,"compile_ms":3106,"artifact_bytes":45324192,"child_max_rss_kib":547512,"parallel_compilation":true}
+{"time":"2026-11-23T16:57:42.802382842Z","level":"INFO","msg":"workflow completed","worker_id":"ac0de0303690584f5696d00709c4350b","workflow_id":"fill-7","tenant_id":"00000000-0000-0000-0000-000000000000","duration":3630089419,"replay_ms":3473,"finalize_ms":33}
+2026/11/23 16:57:46 INFO jobqueue: work cycle completed plugin=jobqueue duration_ms=1 jobs_claimed=0 jobs_dispatched=0 jobs_failed=0
+2026/11/23 16:57:51 INFO jobqueue: work cycle completed plugin=jobqueue duration_ms=2 jobs_claimed=0 jobs_dispatched=0 jobs_failed=0
+2026/11/23 16:57:56 INFO scheduler: work cycle completed plugin=scheduler duration_ms=58 schedules_due=0 workflows_started=0 workflows_failed=0
+2026/11/23 16:57:56 INFO jobqueue: work cycle completed plugin=jobqueue duration_ms=72 jobs_claimed=0 jobs_dispatched=0 jobs_failed=0
+2026/11/23 16:57:56 INFO rate-limiter: work cycle completed plugin=rate-limiter duration_ms=94 configs_reloaded=0
+2026/11/23 16:57:56 INFO jobqueue: reaper cycle completed plugin=jobqueue duration_ms=15 jobs_reset=0
+2026/11/23 16:57:56 INFO event-triggers: retry cycle completed duration_ms=105
+2026/11/23 16:57:56 INFO jobqueue: abandonment sweep completed plugin=jobqueue duration_ms=40 jobs_abandoned=0
+2026/11/23 16:58:01 INFO jobqueue: work cycle completed plugin=jobqueue duration_ms=9 jobs_claimed=0 jobs_dispatched=0 jobs_failed=0
+2026/11/23 16:58:06 INFO jobqueue: work cycle completed plugin=jobqueue duration_ms=21 jobs_claimed=0 jobs_dispatched=0 jobs_failed=0
+2026/11/23 16:58:11 INFO jobqueue: work cycle completed plugin=jobqueue duration_ms=79 jobs_claimed=0 jobs_dispatched=0 jobs_failed=0
+2026/11/23 16:58:16 INFO jobqueue: work cycle completed plugin=jobqueue duration_ms=147 jobs_claimed=0 jobs_dispatched=0 jobs_failed=0
+2026/11/23 16:58:21 INFO jobqueue: work cycle completed plugin=jobqueue duration_ms=1 jobs_claimed=0 jobs_dispatched=0 jobs_failed=0
+2026/11/23 16:58:26 INFO jobqueue: work cycle completed plugin=jobqueue duration_ms=3 jobs_claimed=0 jobs_dispatched=0 jobs_failed=0
+2026/11/23 16:58:26 INFO rate-limiter: work cycle completed plugin=rate-limiter duration_ms=11 configs_reloaded=0
+2026/11/23 16:58:26 INFO event-triggers: retry cycle completed duration_ms=24
+2026/11/23 16:58:31 INFO jobqueue: work cycle completed plugin=jobqueue duration_ms=3 jobs_claimed=0 jobs_dispatched=0 jobs_failed=0
+2026/11/23 16:58:36 INFO jobqueue: work cycle completed plugin=jobqueue duration_ms=7 jobs_claimed=0 jobs_dispatched=0 jobs_failed=0
+2026/11/23 16:58:41 INFO jobqueue: work cycle completed plugin=jobqueue duration_ms=1 jobs_claimed=0 jobs_dispatched=0 jobs_failed=0
+2026/11/23 16:58:46 INFO jobqueue: work cycle completed plugin=jobqueue duration_ms=0 jobs_claimed=0 jobs_dispatched=0 jobs_failed=0
+2026/11/23 16:58:51 INFO jobqueue: work cycle completed plugin=jobqueue duration_ms=1 jobs_claimed=0 jobs_dispatched=0 jobs_failed=0
+2026/11/23 16:58:56 INFO event-triggers: retry cycle completed duration_ms=4
+2026/11/23 16:58:56 INFO scheduler: work cycle completed plugin=scheduler duration_ms=5 schedules_due=0 workflows_started=0 workflows_failed=0
+2026/11/23 16:58:56 INFO rate-limiter: work cycle completed plugin=rate-limiter duration_ms=11 configs_reloaded=0
+2026/11/23 16:58:56 INFO jobqueue: work cycle completed plugin=jobqueue duration_ms=11 jobs_claimed=0 jobs_dispatched=0 jobs_failed=0
+2026/11/23 16:58:56 INFO jobqueue: reaper cycle completed plugin=jobqueue duration_ms=1 jobs_reset=0
+2026/11/23 16:58:56 INFO jobqueue: abandonment sweep completed plugin=jobqueue duration_ms=2 jobs_abandoned=0
+2026/11/23 16:59:01 INFO jobqueue: work cycle completed plugin=jobqueue duration_ms=2 jobs_claimed=0 jobs_dispatched=0 jobs_failed=0
+2026/11/23 16:59:06 INFO jobqueue: work cycle completed plugin=jobqueue duration_ms=2 jobs_claimed=0 jobs_dispatched=0 jobs_failed=0
+2026/11/23 16:59:11 INFO jobqueue: work cycle completed plugin=jobqueue duration_ms=2 jobs_claimed=0 jobs_dispatched=0 jobs_failed=0
+2026/11/23 16:59:16 INFO jobqueue: work cycle completed plugin=jobqueue duration_ms=4 jobs_claimed=0 jobs_dispatched=0 jobs_failed=0
+2026/11/23 16:59:21 INFO jobqueue: work cycle completed plugin=jobqueue duration_ms=1 jobs_claimed=0 jobs_dispatched=0 jobs_failed=0
+2026/11/23 16:59:26 INFO rate-limiter: work cycle completed plugin=rate-limiter duration_ms=2 configs_reloaded=0
+2026/11/23 16:59:26 INFO event-triggers: retry cycle completed duration_ms=2
+2026/11/23 16:59:26 INFO jobqueue: work cycle completed plugin=jobqueue duration_ms=3 jobs_claimed=0 jobs_dispatched=0 jobs_failed=0
+2026/11/23 16:59:31 INFO jobqueue: work cycle completed plugin=jobqueue duration_ms=7 jobs_claimed=0 jobs_dispatched=0 jobs_failed=0
+{"time":"2026-11-23T16:59:31.387111828Z","level":"WARN","msg":"execution fenced out: run superseded by a later generation","worker_id":"ac0de0303690584f5696d00709c4350b","workflow_id":"hold-6","def_name":"hm2","sent_generation":1,"generation":1}
+{"time":"2026-11-23T16:59:31.398023472Z","level":"WARN","msg":"execution fenced out: run superseded by a later generation","worker_id":"ac0de0303690584f5696d00709c4350b","workflow_id":"hold-0","def_name":"hm2","sent_generation":1,"generation":1}
+{"time":"2026-11-23T16:59:31.430077846Z","level":"WARN","msg":"execution fenced out: run superseded by a later generation","worker_id":"ac0de0303690584f5696d00709c4350b","workflow_id":"hold-6","def_name":"hm2","sent_generation":1,"generation":1}
+{"time":"2026-11-23T16:59:31.430263881Z","level":"WARN","msg":"execution fenced out: run superseded by a later generation","worker_id":"ac0de0303690584f5696d00709c4350b","workflow_id":"hold-0","def_name":"hm2","sent_generation":1,"generation":1}
+{"time":"2026-11-23T16:59:31.58323689Z","level":"INFO","msg":"workflow completed","worker_id":"ac0de0303690584f5696d00709c4350b","workflow_id":"hold-6","tenant_id":"00000000-0000-0000-0000-000000000000","duration":108151512154,"replay_ms":107655,"finalize_ms":332}
+{"time":"2026-11-23T16:59:31.589778902Z","level":"INFO","msg":"workflow completed","worker_id":"ac0de0303690584f5696d00709c4350b","workflow_id":"hold-0","tenant_id":"00000000-0000-0000-0000-000000000000","duration":108138366173,"replay_ms":107649,"finalize_ms":357}
+{"time":"2026-11-23T16:59:31.607862868Z","level":"WARN","msg":"execution fenced out: run superseded by a later generation","worker_id":"ac0de0303690584f5696d00709c4350b","workflow_id":"hold-1","def_name":"hm3","sent_generation":1,"generation":1}
+{"time":"2026-11-23T16:59:32.684018322Z","level":"INFO","msg":"workflow completed","worker_id":"ac0de0303690584f5696d00709c4350b","workflow_id":"hold-1","tenant_id":"00000000-0000-0000-0000-000000000000","duration":109252563919,"replay_ms":107808,"finalize_ms":1087}
+{"time":"2026-11-23T16:59:32.789694222Z","level":"INFO","msg":"workflow completed","worker_id":"ac0de0303690584f5696d00709c4350b","workflow_id":"hold-5","tenant_id":"00000000-0000-0000-0000-000000000000","duration":109357502981,"replay_ms":108122,"finalize_ms":1151}
+{"time":"2026-11-23T16:59:32.791585028Z","level":"INFO","msg":"workflow completed","worker_id":"ac0de0303690584f5696d00709c4350b","workflow_id":"hold-2","tenant_id":"00000000-0000-0000-0000-000000000000","duration":109359284154,"replay_ms":108072,"finalize_ms":1154}
+{"time":"2026-11-23T16:59:32.857557874Z","level":"WARN","msg":"execution fenced out: run superseded by a later generation","worker_id":"ac0de0303690584f5696d00709c4350b","workflow_id":"hold-9","def_name":"hm5","sent_generation":1,"generation":1}
+{"time":"2026-11-23T16:59:32.857773741Z","level":"WARN","msg":"execution fenced out: run superseded by a later generation","worker_id":"ac0de0303690584f5696d00709c4350b","workflow_id":"hold-7","def_name":"hm3","sent_generation":1,"generation":1}
+{"time":"2026-11-23T16:59:32.857836864Z","level":"WARN","msg":"execution fenced out: run superseded by a later generation","worker_id":"ac0de0303690584f5696d00709c4350b","workflow_id":"hold-8","def_name":"hm4","sent_generation":1,"generation":1}
+{"time":"2026-11-23T16:59:32.85787907Z","level":"WARN","msg":"execution fenced out: run superseded by a later generation","worker_id":"ac0de0303690584f5696d00709c4350b","workflow_id":"hold-3","def_name":"hm5","sent_generation":1,"generation":1}
+{"time":"2026-11-23T16:59:32.857901611Z","level":"WARN","msg":"execution fenced out: run superseded by a later generation","worker_id":"ac0de0303690584f5696d00709c4350b","workflow_id":"hold-4","def_name":"hm6","sent_generation":1,"generation":1}
+{"time":"2026-11-23T16:59:32.93698198Z","level":"INFO","msg":"workflow completed","worker_id":"ac0de0303690584f5696d00709c4350b","workflow_id":"hold-7","tenant_id":"00000000-0000-0000-0000-000000000000","duration":109505238945,"replay_ms":107914,"finalize_ms":1454}
+{"time":"2026-11-23T16:59:32.947980037Z","level":"INFO","msg":"workflow completed","worker_id":"ac0de0303690584f5696d00709c4350b","workflow_id":"hold-3","tenant_id":"00000000-0000-0000-0000-000000000000","duration":109516497297,"replay_ms":107973,"finalize_ms":1372}
+{"time":"2026-11-23T16:59:32.973219493Z","level":"INFO","msg":"workflow completed","worker_id":"ac0de0303690584f5696d00709c4350b","workflow_id":"hold-8","tenant_id":"00000000-0000-0000-0000-000000000000","duration":109541369918,"replay_ms":107967,"finalize_ms":1431}
+{"time":"2026-11-23T16:59:32.97970509Z","level":"INFO","msg":"workflow completed","worker_id":"ac0de0303690584f5696d00709c4350b","workflow_id":"hold-9","tenant_id":"00000000-0000-0000-0000-000000000000","duration":109547572301,"replay_ms":107961,"finalize_ms":1456}
+{"time":"2026-11-23T16:59:33.045085749Z","level":"INFO","msg":"workflow completed","worker_id":"ac0de0303690584f5696d00709c4350b","workflow_id":"hold-4","tenant_id":"00000000-0000-0000-0000-000000000000","duration":109613588882,"replay_ms":108379,"finalize_ms":1086}
+{"time":"2026-11-23T16:59:34.049501526Z","level":"INFO","msg":"workflow completed","worker_id":"ac0de0303690584f5696d00709c4350b","workflow_id":"hold-11","tenant_id":"00000000-0000-0000-0000-000000000000","duration":1353728965,"replay_ms":487,"finalize_ms":274}
+{"time":"2026-11-23T16:59:34.073248786Z","level":"INFO","msg":"workflow completed","worker_id":"ac0de0303690584f5696d00709c4350b","workflow_id":"hold-17","tenant_id":"00000000-0000-0000-0000-000000000000","duration":962912581,"replay_ms":349,"finalize_ms":306}
+{"time":"2026-11-23T16:59:34.186420995Z","level":"INFO","msg":"workflow completed","worker_id":"ac0de0303690584f5696d00709c4350b","workflow_id":"hold-13","tenant_id":"00000000-0000-0000-0000-000000000000","duration":1256260434,"replay_ms":106,"finalize_ms":276}
+{"time":"2026-11-23T16:59:34.223218196Z","level":"INFO","msg":"workflow completed","worker_id":"ac0de0303690584f5696d00709c4350b","workflow_id":"hold-14","tenant_id":"00000000-0000-0000-0000-000000000000","duration":1298290861,"replay_ms":181,"finalize_ms":289}
+{"time":"2026-11-23T16:59:34.233432699Z","level":"INFO","msg":"workflow completed","worker_id":"ac0de0303690584f5696d00709c4350b","workflow_id":"hold-18","tenant_id":"00000000-0000-0000-0000-000000000000","duration":1121560925,"replay_ms":74,"finalize_ms":345}
+{"time":"2026-11-23T16:59:34.483620999Z","level":"WARN","msg":"execution fenced out: run superseded by a later generation","worker_id":"ac0de0303690584f5696d00709c4350b","workflow_id":"hold-19","def_name":"hm3","sent_generation":1,"generation":1}
+{"time":"2026-11-23T16:59:34.483822242Z","level":"WARN","msg":"execution fenced out: run superseded by a later generation","worker_id":"ac0de0303690584f5696d00709c4350b","workflow_id":"hold-16","def_name":"hm6","sent_generation":1,"generation":1}
+{"time":"2026-11-23T16:59:34.48387499Z","level":"WARN","msg":"execution fenced out: run superseded by a later generation","worker_id":"ac0de0303690584f5696d00709c4350b","workflow_id":"hold-12","def_name":"hm2","sent_generation":1,"generation":1}
+{"time":"2026-11-23T16:59:34.483903156Z","level":"WARN","msg":"execution fenced out: run superseded by a later generation","worker_id":"ac0de0303690584f5696d00709c4350b","workflow_id":"hold-10","def_name":"hm6","sent_generation":1,"generation":1}
+{"time":"2026-11-23T16:59:34.528047506Z","level":"INFO","msg":"workflow completed","worker_id":"ac0de0303690584f5696d00709c4350b","workflow_id":"hold-10","tenant_id":"00000000-0000-0000-0000-000000000000","duration":1913213829,"replay_ms":165,"finalize_ms":532}
+{"time":"2026-11-23T16:59:34.552131086Z","level":"INFO","msg":"workflow completed","worker_id":"ac0de0303690584f5696d00709c4350b","workflow_id":"hold-12","tenant_id":"00000000-0000-0000-0000-000000000000","duration":1700698572,"replay_ms":83,"finalize_ms":733}
+{"time":"2026-11-23T16:59:34.574227781Z","level":"INFO","msg":"workflow completed","worker_id":"ac0de0303690584f5696d00709c4350b","workflow_id":"hold-19","tenant_id":"00000000-0000-0000-0000-000000000000","duration":1463761790,"replay_ms":103,"finalize_ms":522}
+{"time":"2026-11-23T16:59:34.589556681Z","level":"INFO","msg":"workflow completed","worker_id":"ac0de0303690584f5696d00709c4350b","workflow_id":"hold-16","tenant_id":"00000000-0000-0000-0000-000000000000","duration":1479906326,"replay_ms":102,"finalize_ms":621}
+{"time":"2026-11-23T16:59:34.640912018Z","level":"INFO","msg":"workflow completed","worker_id":"ac0de0303690584f5696d00709c4350b","workflow_id":"hold-15","tenant_id":"00000000-0000-0000-0000-000000000000","duration":1530756223,"replay_ms":140,"finalize_ms":573}
+{"time":"2026-11-23T16:59:34.64437985Z","level":"INFO","msg":"workflow completed","worker_id":"ac0de0303690584f5696d00709c4350b","workflow_id":"hold-21","tenant_id":"00000000-0000-0000-0000-000000000000","duration":391865013,"replay_ms":93,"finalize_ms":64}
+{"time":"2026-11-23T16:59:34.657313962Z","level":"INFO","msg":"workflow completed","worker_id":"ac0de0303690584f5696d00709c4350b","workflow_id":"hold-20","tenant_id":"00000000-0000-0000-0000-000000000000","duration":404203856,"replay_ms":69,"finalize_ms":77}
+{"time":"2026-11-23T16:59:34.705001516Z","level":"INFO","msg":"workflow completed","worker_id":"ac0de0303690584f5696d00709c4350b","workflow_id":"hold-22","tenant_id":"00000000-0000-0000-0000-000000000000","duration":210649408,"replay_ms":68,"finalize_ms":55}
+{"time":"2026-11-23T16:59:34.724584719Z","level":"INFO","msg":"workflow completed","worker_id":"ac0de0303690584f5696d00709c4350b","workflow_id":"hold-23","tenant_id":"00000000-0000-0000-0000-000000000000","duration":230149406,"replay_ms":52,"finalize_ms":73}
+{"time":"2026-11-23T16:59:34.743327328Z","level":"INFO","msg":"workflow completed","worker_id":"ac0de0303690584f5696d00709c4350b","workflow_id":"hold-24","tenant_id":"00000000-0000-0000-0000-000000000000","duration":251214138,"replay_ms":83,"finalize_ms":73}
+{"time":"2026-11-23T16:59:34.804906001Z","level":"INFO","msg":"workflow completed","worker_id":"ac0de0303690584f5696d00709c4350b","workflow_id":"hold-26","tenant_id":"00000000-0000-0000-0000-000000000000","duration":150116113,"replay_ms":29,"finalize_ms":77}
+{"time":"2026-11-23T16:59:34.827173814Z","level":"INFO","msg":"workflow completed","worker_id":"ac0de0303690584f5696d00709c4350b","workflow_id":"hold-28","tenant_id":"00000000-0000-0000-0000-000000000000","duration":172089146,"replay_ms":55,"finalize_ms":78}
+{"time":"2026-11-23T16:59:34.843833541Z","level":"INFO","msg":"workflow completed","worker_id":"ac0de0303690584f5696d00709c4350b","workflow_id":"hold-27","tenant_id":"00000000-0000-0000-0000-000000000000","duration":188501756,"replay_ms":45,"finalize_ms":78}
+{"time":"2026-11-23T16:59:34.891008488Z","level":"INFO","msg":"workflow completed","worker_id":"ac0de0303690584f5696d00709c4350b","workflow_id":"hold-25","tenant_id":"00000000-0000-0000-0000-000000000000","duration":236069565,"replay_ms":64,"finalize_ms":98}
+{"time":"2026-11-23T16:59:35.078889018Z","level":"INFO","msg":"workflow completed","worker_id":"ac0de0303690584f5696d00709c4350b","workflow_id":"hold-30","tenant_id":"00000000-0000-0000-0000-000000000000","duration":396274686,"replay_ms":62,"fin
