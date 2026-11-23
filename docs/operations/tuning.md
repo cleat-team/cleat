@@ -236,7 +236,7 @@ container limit (1.6 GiB of 2Gi at the default 0.80), and the residency budget d
 per-run charge (472 MiB, because C# is charged 59 MiB).
 
 **Why the autoscaler does not scale on memory by default.** The HPA's memory metric is a percentage of the *request*,
-and per-pod memory does not fall as replicas are added: it is dominated by the compiled-component cache, held runs
+and per-pod memory does not fall as replicas are added: it is dominated by the compiled-module cache, held runs
 and allocator retention, which grow by design. With the old 128Mi request an 80% target was 102 MiB, below a warmed
 Go worker's 207 MiB, so the HPA computed `ceil(2 x 162/80)` = 5 replicas (207 MiB is 162% of a 128Mi request) and kept climbing to `maxReplicas`. (From
 the HPA's documented formula and the measured baselines; not from a cluster run.) Set `autoscaling.targetMemory` if
