@@ -6,7 +6,8 @@ interface and its ``subscribe-instant`` / ``subscribe-duration`` return pollable
 ``time.sleep(0.5)``) and a ``while monotonic() - t0 < 0.5`` loop ran 41 then 42 iterations. The owner decided to keep the clock real and say so, so what
 changes is this warning.
 
-- **PY016** (a WARNING, never an error) ``time.monotonic``, ``time.monotonic_ns``, ``time.perf_counter``, ``time.perf_counter_ns``, and a
+- **PY016** (a WARNING, never an error) ``time.monotonic``, ``time.monotonic_ns``, ``time.perf_counter``, ``time.perf_counter_ns``,
+  ``time.process_time``, ``time.process_time_ns``, and a
   ``time.sleep`` written through an alias. A ``time.sleep`` written as ``time.sleep`` is the existing PY004 ERROR and is not reported twice.
 
 What these tests pin is the RULE: which spellings are flagged, where, and what the message tells the author. The measurements are in the issue.
@@ -18,9 +19,10 @@ import textwrap
 
 import pytest
 
-from cleat_sdk.vet import MONOTONIC_CLOCK_CALLS, analyze_file
+from cleat_sdk.vet import MONOTONIC_CLOCK_CALLS, PROCESS_TIME_CALLS, analyze_file
 
 MONOTONIC = ["monotonic", "monotonic_ns", "perf_counter", "perf_counter_ns"]
+PROCESS_TIME = ["process_time", "process_time_ns"]
 
 
 def _analyze(tmp_path, source: str):
@@ -266,3 +268,49 @@ def test_py016_a_module_level_reference_to_an_unrelated_object_is_not_an_alias(t
     """``tick = meter.monotonic`` is a method of a name that is not the ``time`` module. Calling ``tick()`` reads whatever that object reads."""
     top = "class Meter:\n    def monotonic(self):\n        return 0\n\nmeter = Meter()\ntick = meter.monotonic\n"
     assert _by_code(_analyze(tmp_path, _wrap("tick()", top=top)), "PY016") == []
+
+
+# ---------------------------------------------------------------------------
+# time.process_time / time.process_time_ns
+# ---------------------------------------------------------------------------
+
+
+def test_py016_the_process_time_table_is_exactly_the_two_calls() -> None:
+    assert sorted(PROCESS_TIME_CALLS) == sorted(PROCESS_TIME)
+
+
+@pytest.mark.parametrize("name", PROCESS_TIME)
+def test_py016_flags_each_process_time_call(tmp_path, name) -> None:
+    """KNOWN POSITIVE. Measured 2026-11-23: two runs of one workflow id read -2.0412 and -2.0397 seconds (negative on both), so the value differs
+    between a run and its replay. It is PY016, a warning, with the same remedy as the monotonic reads."""
+    result = _analyze(tmp_path, _wrap(f"cpu = time.{name}()", top="import time\n"))
+    warnings = _by_code(result, "PY016")
+    assert len(warnings) == 1, result.warnings
+    assert f"time.{name}()" in warnings[0]["message"]
+    assert "h.now()" in warnings[0]["suggestion"]
+    assert "PY016" not in _codes(result.errors), "a warning must never refuse a build"
+
+
+@pytest.mark.parametrize("name", PROCESS_TIME)
+def test_py016_the_process_time_message_says_what_it_reads_not_what_the_monotonic_reads_do(
+    tmp_path, name
+) -> None:
+    """``process_time`` is not the monotonic clock, and the message must not call it that."""
+    message = _by_code(_analyze(tmp_path, _wrap(f"time.{name}()", top="import time\n")), "PY016")[
+        0
+    ]["message"]
+    assert "process-time clock" in message and "monotonic" not in message
+    assert "differs between a run and its replay" in message
+
+
+@pytest.mark.parametrize("name", PROCESS_TIME)
+def test_py016_process_time_through_an_import_and_an_alias(tmp_path, name) -> None:
+    for top, body in (
+        (f"from time import {name}\n", f"{name}()"),
+        (f"from time import {name} as cpu\n", "cpu()"),
+        ("import time as t\n", f"t.{name}()"),
+        (f"import time\nclock = time.{name}\n", "clock()"),
+    ):
+        warnings = _by_code(_analyze(tmp_path, _wrap(body, top=top)), "PY016")
+        assert len(warnings) == 1, (top, body, warnings)
+        assert f"time.{name}()" in warnings[0]["message"]

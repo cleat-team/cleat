@@ -144,7 +144,7 @@ monotonic deadline.
 
 | language | refused or flagged |
 |---|---|
-| Python | `time.sleep` (PY004, error); `time.time` (PY005, error); **`time.monotonic`, `monotonic_ns`, `perf_counter`, `perf_counter_ns` and `time.sleep` through an alias (PY016, warning)** |
+| Python | `time.sleep` (PY004, error); `time.time` (PY005, error); **`time.monotonic`, `monotonic_ns`, `perf_counter`, `perf_counter_ns`, `process_time`, `process_time_ns` and `time.sleep` through an alias (PY016, warning)** |
 | C# | `Stopwatch` (CV006), `Environment.TickCount` and `TickCount64` (CV007), `Thread.Sleep` (CV005) |
 | Go | `time.Now` (E003), `time.Sleep` (E004), `time.After`, `NewTicker`, `NewTimer` (E014) |
 | Rust | `std::time::Instant::now` (R005) |
@@ -156,7 +156,7 @@ PY016 is a warning, not an error, so it never refuses a build that runs today. I
 twice). A module-level *reference*, `clock = time.perf_counter`, is flagged where it is called, because that reads the real clock at run time (measured,
 `0.0199` then `0.0109`). Python's `time.sleep` also blocks its execution for its whole duration and
 the instance timeout does not interrupt it (cleat#4403, measured: a 0.5 s sleep under a 150 ms timeout ran its full 524 ms and failed only after it
-returned). **Not measured:** the monotonic clock in Rust, Java and TypeScript guests, and what a blocking sleep does to other workflows on the same worker.
+returned. `time.process_time()` is not a monotonic clock but is flagged for the same reason: two runs read `-2.0412` and `-2.0397` seconds, negative on both. **Not measured:** the monotonic clock in Rust, Java and TypeScript guests, and what a blocking sleep does to other workflows on the same worker.
 
 ## Why there is no `isReplaying()`
 
