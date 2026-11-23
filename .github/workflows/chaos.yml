@@ -11,7 +11,18 @@
 #
 # NOT A REQUIRED CHECK: Chaos sample
 # Not required yet. Making `Chaos sample` required is a branch-protection change, which is the owner's to make (tiers.yaml's required_contexts
-# block). It runs on every matching PR so its record exists before anyone is asked to depend on it.
+# block). It runs on every PR that touches the replay machinery so its record exists before anyone is asked to depend on it.
+#
+# READY TO BE REQUIRED, which it was not before this change. A required check must REPORT on every pull request and on every merge-queue entry, and a
+# workflow-level `on.pull_request.paths` filter means the workflow does not run at all for a PR that touches none of those paths, so the check would
+# be pending forever on a docs-only PR. Now:
+#   pull_request   `Chaos sample` ALWAYS reports. The `changes` job reads the PR's diff (scripts/chaos-sample-relevant.sh holds the path list, the old
+#                  `paths:` list unchanged); when nothing relevant changed the sample is SKIPPED, which a required check accepts. A diff that cannot
+#                  be read, or an empty one, runs the sample.
+#   merge_group    `Chaos sample` is SKIPPED, and that is a decision, not an oversight: the pull-request run already gated this content, and a
+#                  seven-minute sample per queue entry would serialize behind each other. What the skip does NOT cover is the interaction between
+#                  entries in one merge group, which the sample therefore does not test. `Chaos full sweep` never runs on merge_group (87 minutes).
+#   schedule, workflow_dispatch   unchanged.
 #
 # A failure prints the seed, the script and the fault, and a one-line command that replays exactly that case.
 # ---------------------------------------------------------------------------
@@ -25,16 +36,11 @@ on:
     branches: [main, develop, "release/**"]
     # `edited` is required: it is the activity type a BASE CHANGE fires (scripts/check-workflow-pr-triggers.sh).
     types: [opened, synchronize, reopened, edited]
-    paths:
-      - "engine/**"
-      - "wasm/**"
-      - "cmd/cleat-worker/**"
-      - "migrations/**"
-      - "crates/cleat-sdk/**"
-      - "python-sdk/**"
-      - "tests/chaos/**"
-      - "testdata/chaosscript*/**"
-      - ".github/workflows/chaos.yml"
+    # NO `paths:` FILTER, deliberately: see the READY TO BE REQUIRED block above. The path list lives in scripts/chaos-sample-relevant.sh.
+  # Reports `Chaos sample` as skipped on the merge-queue commit; see the block above for why that is the decision. `types` is the default,
+  # spelled out so a reader sees it is the one a merge queue sends.
+  merge_group:
+    types: [checks_requested]
   schedule:
     # Every night at 03:30 UTC.
     - cron: "30 3 * * *"
@@ -66,12 +72,44 @@ permissions:
   contents: read
 
 jobs:
+  # Does this pull request touch the replay machinery? Only a pull request has a diff to read. Its output feeds `Chaos sample`'s `if`, and EVERY way this job
+  # can fail to answer leaves that output empty, which `Chaos sample` reads as "run it": a detector that broke must never turn the sample off.
+  changes:
+    name: Chaos sample relevance
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      relevant: ${{ steps.diff.outputs.relevant }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # A pull request is checked out as its MERGE commit: parent 1 is the base's tip, parent 2 the PR head. Two commits is enough to see both.
+          fetch-depth: 2
+      - name: The detector's own known positives and negatives
+        run: bash scripts/chaos-sample-relevant.sh --self-test
+      - name: Does the diff touch what the sample guards?
+        id: diff
+        run: |
+          set -euo pipefail
+          # `--no-renames`: a file moved OUT of a relevant directory is a change to it, so both the old and the new path are listed.
+          git diff --name-only --no-renames HEAD^1 HEAD > changed-files.txt
+          echo "changed files: $(wc -l < changed-files.txt)"
+          relevant=$(bash scripts/chaos-sample-relevant.sh < changed-files.txt)
+          echo "relevant=${relevant}" >> "$GITHUB_OUTPUT"
+          echo "relevant=${relevant}"
+
   chaos-sample:
     name: Chaos sample
-    # A pull request, or a dispatch with mode=pr-sample: the SAME job, the same command line, runner image and service container, with the seed taken from
-    # the `seed` input where there is no PR number. It exists so the sample can be run at a seed of our choosing (cleat#4169's stability window counts
-    # distinct seeds, and a seed is a PR number, so re-pushing one PR adds none). No other mode reaches this job.
-    if: github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && github.event.inputs.mode == 'pr-sample')
+    needs: changes
+    # A pull request whose diff is not known to be irrelevant, or a dispatch with mode=pr-sample: the SAME job, the same command line, runner image and
+    # service container, with the seed taken from the `seed` input where there is no PR number. It exists so the sample can be run at a seed of our choosing
+    # (cleat#4169's stability window counts distinct seeds, and a seed is a PR number, so re-pushing one PR adds none). No other event reaches the steps:
+    # a merge_group entry, or a pull request that changed nothing relevant, reports this job SKIPPED.
+    #
+    # `!cancelled()` is load-bearing: `changes` is skipped on a dispatch, and a job that `needs` a skipped job is skipped too unless its condition names a
+    # status function (measured on cleat#3959, see ci.yml's edit-gate). `!= 'false'` and not `== 'true'`: an empty output (the detector failed) runs the sample.
+    if: ${{ !cancelled() && ((github.event_name == 'pull_request' && needs.changes.outputs.relevant != 'false') || (github.event_name == 'workflow_dispatch' && github.event.inputs.mode == 'pr-sample')) }}
     runs-on: ubuntu-latest
     # The sample is sized to finish in about seven minutes (measured: 24 runs took 3m05s in the first CI run, cleat#4188; 60 is ~7 min); the step's own go test -timeout is 20m, so a hung worker reaches its goroutine dump
     # before this cap.
@@ -135,7 +173,9 @@ jobs:
 
   chaos-full:
     name: Chaos full sweep
-    if: github.event_name != 'pull_request' && !(github.event_name == 'workflow_dispatch' && github.event.inputs.mode == 'pr-sample')
+    # POSITIVE: exactly the two events that mean "run the sweep". This used to be written as a negation (`!= pull_request` and not a pr-sample dispatch),
+    # which would have started an 87-minute sweep on every merge-queue entry the moment `merge_group` was added to `on:`.
+    if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.event.inputs.mode != 'pr-sample')
     runs-on: ubuntu-latest
     timeout-minutes: 340
     services:
