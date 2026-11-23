@@ -217,10 +217,11 @@ func TestMeasureHeldInstanceMemory(t *testing.T) {
 		sleepMs = holdMs
 	}
 	churn := atoi("HELDMEM_CHURN", 0)            // MiB allocated and DROPPED in 1 MiB blocks (large objects), before the guest parks (Python and C# only)
+	churnBig := atoi("HELDMEM_CHURN_BIG", 0)     // the old stage-0 probe's pattern: 4 MiB chunks, page-touched, kept in a static until replaced
 	churnSmall := atoi("HELDMEM_CHURN_SMALL", 0) // the same, in 16 KiB blocks (ordinary garbage)
 	input := func(sleep int) string {
-		if churn > 0 || churnSmall > 0 {
-			return fmt.Sprintf(`{"calls":%d,"mb":%d,"sleep_ms":%d,"churn_mb":%d,"churn_small_mb":%d}`, calls, mb, sleep, churn, churnSmall)
+		if churn > 0 || churnSmall > 0 || churnBig > 0 {
+			return fmt.Sprintf(`{"calls":%d,"mb":%d,"sleep_ms":%d,"churn_mb":%d,"churn_small_mb":%d,"churn_big_mb":%d}`, calls, mb, sleep, churn, churnSmall, churnBig)
 		}
 		return fmt.Sprintf(`{"calls":%d,"mb":%d,"sleep_ms":%d}`, calls, mb, sleep)
 	}
@@ -275,7 +276,7 @@ func TestMeasureHeldInstanceMemory(t *testing.T) {
 		}
 		wasmBytes, entry = b, "run"
 		mkInput = func(sleep int) string {
-			return fmt.Sprintf(`{"mode":"heldmem","calls":"%d","mb":"%d","sleep_ms":"%d","churn_mb":"%d","churn_small_mb":"%d"}`, calls, mb, sleep, churn, churnSmall)
+			return fmt.Sprintf(`{"mode":"heldmem","calls":"%d","mb":"%d","sleep_ms":"%d","churn_mb":"%d","churn_small_mb":"%d","churn_big_mb":"%d"}`, calls, mb, sleep, churn, churnSmall, churnBig)
 		}
 	default:
 		t.Fatalf("unknown HELDMEM_LANG %q", lang)
@@ -408,7 +409,7 @@ func TestMeasureHeldInstanceMemory(t *testing.T) {
 	}
 
 	out := map[string]any{
-		"lang": lang, "mode": mode, "n": n, "calls": calls, "mb": mb, "churn_mb": churn, "churn_small_mb": churnSmall, "wasm_bytes": len(wasmBytes),
+		"lang": lang, "mode": mode, "n": n, "calls": calls, "mb": mb, "churn_mb": churn, "churn_small_mb": churnSmall, "churn_big_mb": churnBig, "wasm_bytes": len(wasmBytes),
 		"held_check": heldCheck, "pre": pre, "base": base, "held": held,
 		"compiles_component": compilesOf(wt), "compiles_component_before_hold": compBase, "compiles_core": heldMemCoreCompiles.Load(),
 		"guest_sys_kib_sum": c.guestSys.Load() / 1024, "ms_to_held": msToHeld, "guest_info": c.info.Load(), "guest_info2": c.info2.Load(),

@@ -8,6 +8,7 @@ sealed class SuspendException : Exception { }
 
 public class CleatWorkflowWorldExportsImpl : ICleatWorkflowWorldExports
 {
+    static byte[]? BigSink;
     static readonly List<byte[]> Keep = new();
     static volatile bool Stop;
     static bool SkipPhase;
@@ -115,6 +116,15 @@ public class CleatWorkflowWorldExportsImpl : ICleatWorkflowWorldExports
                         for (int j = 0; j < junk.Length; j += 4096) junk[j] = 1;
                         if (junk[0] == 2) Console.Error.WriteLine("unreachable");
                     }
+                    // THE OLD PROBE'S CHURN (stage-0 GroupZChurn): 4 MiB chunks, one byte per 4 KiB page, each kept in a static until replaced, then dropped.
+                    var churnBigMb = int.Parse(Field(args, "churn_big_mb", "0"));
+                    for (int i = 0; i < churnBigMb / 4; i++)
+                    {
+                        var big = new byte[4 << 20];
+                        for (int j = 0; j < big.Length; j += 4096) big[j] = 1;
+                        BigSink = big;
+                    }
+                    BigSink = null;
                     // SMALL-OBJECT CHURN: the same total, in 16 KiB blocks (gen0 objects, below the large-object threshold), which is what ordinary garbage looks like.
                     var churnSmallMb = int.Parse(Field(args, "churn_small_mb", "0"));
                     for (int i = 0; i < churnSmallMb * 64; i++)
