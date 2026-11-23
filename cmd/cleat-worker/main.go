@@ -29,6 +29,7 @@ import (
 	_ "net/http/pprof" //nolint:gosec // G108: registers /debug/pprof on DefaultServeMux, which this worker never serves. The API listener builds its own http.NewServeMux; pprof gets a separate opt-in listener behind --pprof-addr, empty by default. See the comment at the pprof server below.
 	"os"
 	"os/signal"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -444,6 +445,12 @@ func payloadKeyVersionsFromFlags() payloadKeyVersions {
 }
 
 func main() {
+	// The precompile child. Matched on os.Args[1] BEFORE flag parsing and before anything else main does, so no flag, workflow, HTTP route or environment reaches it: only an exec of this binary with
+	// exactly this first argument does, and the parent that does it is a worker with --component-precompile (see engine.ComponentPrecompile).
+	if len(os.Args) > 1 && os.Args[1] == engine.SerializeComponentArg {
+		os.Exit(engine.RunSerializeComponentChild(os.Args[2:], os.Stdout, os.Stderr))
+	}
+
 	flag.Parse()
 
 	// The residency policy, validated where an operator reads it. On by default (--resident-max-runs is 8; 0 turns it off), and a nonsense policy is refused either way.
@@ -3194,7 +3201,7 @@ func applyEngineGlobalsFromFlags() {
 // and StoreLimits (memory/table/instance ceilings), plus optional fuel-based instruction metering when --wasm-instruction-limit is set.
 // The memory limit is the flag's value, or the engine's default (256 MiB) for 0: see wasmtimeMemoryLimitBytes.
 func wasmtimeOptionsFromFlags(logger *slog.Logger) []engine.WasmtimeOption {
-	return []engine.WasmtimeOption{
+	return append(componentPrecompileOptionFromFlags(logger), []engine.WasmtimeOption{
 		engine.WithWasmtimeExecutionTimeout(*wasmInstanceTimeout),
 		engine.WithWasmtimeInstructionLimit(uint64(*wasmInstructionLimit)),
 		engine.WithWasmtimeMemoryLimits(wasmtimeMemoryLimitBytes(*wasmMemoryMaxMB), 0, 0),
@@ -3205,7 +3212,65 @@ func wasmtimeOptionsFromFlags(logger *slog.Logger) []engine.WasmtimeOption {
 		// configured handler never sees the one record that says whether a
 		// KILLED workflow's defers ran. See WithWasmtimeLogger.
 		engine.WithWasmtimeLogger(logger),
+	}...)
+}
+
+// componentPrecompileOptionFromFlags enables compiling components in a child process when --component-precompile is set (EXPERIMENTAL, off by default). The child is THIS binary, found with
+// os.Executable and resolved once, here, to an absolute path: never a PATH lookup, so it is guaranteed to be the same build and the same engine-config code. If the path cannot be resolved the
+// feature is left off and says so; the worker compiles in-process, as it always did.
+func componentPrecompileOptionFromFlags(logger *slog.Logger) []engine.WasmtimeOption {
+	if !*componentPrecompile {
+		return nil
 	}
+	exe, err := os.Executable()
+	if err == nil {
+		exe, err = filepath.EvalSymlinks(exe)
+	}
+	if err != nil || !filepath.IsAbs(exe) {
+		logger.Warn("--component-precompile is set but the worker's own executable could not be resolved to an absolute path; compiling in-process", "error", err)
+		return nil
+	}
+	var total uint64
+	if mi := NewMemoryMonitor(*memoryCheckInterval).Read(); mi.Source != "" {
+		total = mi.TotalBytes
+	}
+	parallel, reason, err := resolvePrecompileParallel(*componentPrecompileParallel, total)
+	if err != nil {
+		logger.Warn("--component-precompile is set but its parallel setting is not usable; compiling in-process", "error", err)
+		return nil
+	}
+	logger.Info("component precompile in a child process is ON", "parallel_compilation", parallel, "why", reason, "child", exe)
+	return []engine.WasmtimeOption{engine.WithWasmtimeComponentPrecompile(engine.ComponentPrecompile{
+		Executable:          exe,
+		Timeout:             *componentPrecompileTimeout,
+		ParallelCompilation: parallel,
+	})}
+}
+
+// precompileParallelFloorBytes is the memory limit under which the precompile child compiles with parallel_compilation off. Measured on one machine (cleat-77,
+// component-compile-config-2026-11-23): the Python compile's high-water was +490 MiB parallel and +265 MiB not, so under 1 GiB the parallel peak plus the worker's
+// baseline leaves little headroom. It is a default for a judgement, not a measured threshold; --component-precompile-parallel overrides it.
+const precompileParallelFloorBytes = 1 << 30
+
+// resolvePrecompileParallel turns --component-precompile-parallel into the child's setting and says why, so the log names the reason. totalBytes is the worker's memory limit as the
+// memory monitor reads it (the cgroup limit, else the host's), 0 if it could not be read.
+func resolvePrecompileParallel(mode string, totalBytes uint64) (parallel bool, why string, err error) {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "true":
+		return true, "set by --component-precompile-parallel=true", nil
+	case "false":
+		return false, "set by --component-precompile-parallel=false", nil
+	case "auto", "":
+		switch {
+		case totalBytes == 0:
+			return true, "auto: the memory limit could not be read, so the default (parallel) applies", nil
+		case totalBytes < precompileParallelFloorBytes:
+			return false, fmt.Sprintf("auto: the memory limit is %d MiB, under 1 GiB, so the child compiles without parallelism to lower its peak", totalBytes>>20), nil
+		default:
+			return true, fmt.Sprintf("auto: the memory limit is %d MiB, at least 1 GiB", totalBytes>>20), nil
+		}
+	}
+	return false, "", fmt.Errorf("--component-precompile-parallel=%q: want auto, true or false", mode)
 }
 
 // wasmtimeMemoryLimitBytes is the per-store memory limit to hand the wasmtime backend, in bytes: the flag's value, or the engine's own default

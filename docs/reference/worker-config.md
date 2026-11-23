@@ -1100,6 +1100,88 @@ on every call.
 
 ---
 
+### --component-precompile
+
+| Type | Default | Description |
+|------|---------|-------------|
+| bool | `false` | **EXPERIMENTAL (0.6.0).** Compile a Component Model component (a Python or C# workflow) in a short-lived child process of this binary, and load the serialized result |
+
+**What it is for.** The first compile of a Python workflow raises the worker's
+resident memory by about 490 MiB, and most of it stays resident for the life of
+the process. With this flag the compile happens in a child that exits, which
+returns its scratch memory to the OS, and the worker loads the serialized
+artifact for about 27 MiB.
+
+**What it does NOT do: it does not lower the compile peak.** The child runs in
+the worker's container, under the same memory limit, so the peak is the
+worker's own memory *plus* the child's, at once. It lowers the *steady state*
+after the compile, not the high-water during it.
+
+Measured 2026-11-23 on one machine (arm64 Linux container on an Apple M4 host, a
+19.5 MB Python component, a worker with the stock flags, three runs each, swap
+off, **host load averaging 14 to 16 on 10 CPUs, so the times below are not
+idle-machine times**). x86-64 is not measured.
+
+| container limit | flag | result | container peak | worker anon after |
+|---|---|---|---|---|
+| 512 MiB | off | **killed by the kernel's OOM killer, 3 of 3** | at the limit | — |
+| 512 MiB | on (`auto`: no parallel) | completes, 3 of 3 | 464 to 512 MiB | 68 MiB |
+| 512 MiB | on, `--component-precompile-parallel=true` | the child is killed; the run **fails with an error naming the memory limit**, the worker stays up, 3 of 3 | 512 MiB | 65 MiB |
+| 2 GiB | off | completes | 559 to 601 MiB | 529 to 558 MiB |
+| 2 GiB | on (`auto`: parallel) | completes | 661 to 679 MiB | 67 MiB |
+| 2 GiB | on, `--component-precompile-parallel=false` | completes | 476 to 511 MiB | 68 MiB |
+
+**At 512 MiB it fits, and barely.** The child's own peak is about 384 MiB and
+the worker about 68 MiB, so the compile uses roughly 450 MiB of anonymous memory
+against a 512 MiB limit. The container's recorded peak reads 512 MiB because it
+includes file cache the kernel can reclaim; no run was OOM-killed. A worker
+under this limit that is also holding other runs has less room than this test did.
+
+The child compile took 3 to 6 s with parallel compilation and 7 to 30 s without
+it, on a loaded host; cleat-77 measured 1.3 s and 5.7 s in the same harness
+configuration. The difference was not isolated.
+
+**A child that is killed does not fall back to compiling in the worker.** The
+child asks the kernel to kill it first when memory runs out
+(`oom_score_adj` 1000). If it dies of SIGKILL, the execution fails with
+`component precompile: the compile child was killed ... most likely by this
+container's memory limit`, because compiling in the worker needs more memory than
+the child did and kills the worker and every run it holds (measured: 531 MiB
+worker, container killed). Every *other* child failure (cannot start, times out,
+exits non-zero, writes an artifact the worker will not accept) is logged and falls back to the
+in-process compile.
+
+**The artifact is native code.** wasmtime documents that loading one is unsafe for
+arbitrary input, so the worker loads only a file its own child just wrote, into a
+directory it created mode 0700, after checking the size and SHA-256 the child
+reported. The child runs with an empty environment (the worker's holds database
+credentials), and a worker with `--wasm-instruction-limit` set compiles the
+child's artifact with fuel to match: fuel binds the artifact, and a mismatch is
+refused, not loaded. The directory is in the system temp directory; if that is
+a memory-backed filesystem the 46 MB artifact counts against the limit while it exists.
+
+The child is this binary, found with `os.Executable` and resolved once at start-up.
+
+### --component-precompile-parallel
+
+| Type | Default | Description |
+|------|---------|-------------|
+| string | `auto` | `auto`, `true` or `false`: wasmtime's `parallel_compilation` in the precompile child |
+
+`auto` is parallel unless the worker's memory limit (the cgroup limit, else the
+host's) is under 1 GiB, where it is off. Off lowers the child's peak (about 384
+MiB against about 565 MiB) and lengthens the compile. It does not change what
+the worker can load. The worker logs which it chose and why. The 1 GiB threshold is a
+judgement, not a measured boundary.
+
+### --component-precompile-timeout
+
+| Type | Default | Description |
+|------|---------|-------------|
+| duration | `5m` | Bound on one precompile child; over it, the child is killed and the worker compiles in-process |
+
+---
+
 ### --wasm-memory-max-mb
 
 | Type | Default | Description |

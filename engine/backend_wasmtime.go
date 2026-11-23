@@ -124,7 +124,10 @@ type wasmtimeBackend struct {
 	moduleCache  *moduleLRU
 	components   *componentCache // compiled components, in moduleCache's LRU (cleat#3748); PerExecution must copy it
 	compileLocks *sync.Map       // per-key *sync.Mutex to serialize compilation
-	metaCache    *sync.Map       // per-key *wasmMeta (envNeeded, hasWasi, language)
+
+	// precompiler, when non-nil, compiles components in a child process (WithWasmtimeComponentPrecompile). Shared by every PerExecution copy; the root backend owns its directory.
+	precompiler *componentPrecompiler
+	metaCache   *sync.Map // per-key *wasmMeta (envNeeded, hasWasi, language)
 
 	// envNeeded is the set of "env" module imports the WASM module requests.
 	// nil means "register everything" (conservative fallback on parse error).
@@ -209,12 +212,8 @@ func NewWasmtimeBackend(ctx context.Context, opts ...WasmtimeOption) (*wasmtimeB
 		lim.interruptMargin = lim.instructionLimit / 10
 	}
 
-	cfg := wasmtime.NewConfig()
-	cfg.SetEpochInterruption(true)
-	if lim.instructionLimit > 0 {
-		cfg.SetConsumeFuel(true)
-	}
-	eng := wasmtime.NewEngineWithConfig(cfg)
+	// The engine config is built by newWasmtimeEngine, which the precompile child also calls: an artifact is accepted only by an engine configured the same way.
+	eng := newWasmtimeEngine(lim.instructionLimit > 0, true)
 
 	moduleCache := newModuleLRU(bcfg.moduleCacheMaxEntries, bcfg.moduleCacheMaxBytes)
 	b := &wasmtimeBackend{
@@ -227,6 +226,14 @@ func NewWasmtimeBackend(ctx context.Context, opts ...WasmtimeOption) (*wasmtimeB
 		logger:       bcfg.logger,
 		epochStop:    make(chan struct{}),
 		epochDone:    make(chan struct{}),
+	}
+	if bcfg.componentPrecompile != nil {
+		// Off unless configured. A failure to set it up leaves the in-process compile, which is what the worker always did.
+		if pc, err := newComponentPrecompiler(*bcfg.componentPrecompile, lim.instructionLimit, bcfg.logger); err != nil {
+			b.log().Warn("component precompile disabled", "error", err)
+		} else {
+			b.precompiler = pc
+		}
 	}
 	b.startEpochTicker()
 	return b, nil
@@ -291,6 +298,10 @@ func (b *wasmtimeBackend) Close(ctx context.Context) error {
 	// The cached components first: each is a reference into the engine's compiled
 	// code, and a held reference is a C allocation nothing else will free.
 	b.components.close()
+	if b.epochStop != nil {
+		// Only the root backend owns the precompiler's private directory; a PerExecution copy shares it.
+		b.precompiler.close()
+	}
 	b.engine.Close()
 	return nil
 }
@@ -320,6 +331,7 @@ func (b *wasmtimeBackend) PerExecution(tenantInstanceTimeout time.Duration) Wasm
 		moduleCache:  b.moduleCache,
 		components:   b.components,
 		compileLocks: b.compileLocks,
+		precompiler:  b.precompiler,
 		metaCache:    b.metaCache,
 		limits:       lim,
 		// Copied, like limits. A PerExecution copy that dropped the logger

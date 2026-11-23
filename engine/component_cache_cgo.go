@@ -132,13 +132,16 @@ func (b *wasmtimeBackend) acquireComponent(wasmBytes []byte) (*C.wasmtime_compon
 		return held.(*C.wasmtime_component_t), nil
 	}
 
-	compiled, err := componentCompile(b.engine, wasmBytes)
+	compiled, inProcess, err := b.compileComponentMiss(wasmBytes)
 	if err != nil {
 		// A failed compile is not cached: the next call compiles again and gets
 		// the same error, rather than a stale refusal outliving a fixed engine.
 		return nil, err
 	}
-	cc.compiles.Add(1)
+	if inProcess {
+		// compiles counts compiles IN THIS PROCESS. A component a child process compiled is counted by the precompiler, so a test that asserts on both can tell "served from a child" from "compiled here".
+		cc.compiles.Add(1)
+	}
 
 	// The caller's reference is taken BEFORE the cache is given the compiled
 	// one: once stored, the cache may evict and release it at any moment, and

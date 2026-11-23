@@ -174,6 +174,46 @@ type wasmtimeConfig struct {
 	// 0 means DefaultModuleCacheMaxBytes. Both bounds apply; see moduleLRU
 	// for why a count alone could not say what a hundred entries cost.
 	moduleCacheMaxBytes int64
+
+	// componentPrecompile, when non-nil, makes a component compile happen in a short-lived child process (see ComponentPrecompile).
+	componentPrecompile *ComponentPrecompile
+}
+
+// ComponentPrecompile turns on compiling a Component Model component in a CHILD process instead of in the worker (cleat-internal/component-precompile-design-2026-11-23.md, Option A).
+//
+// A component compile raises a process's resident memory by ~490 MiB (Python) of Cranelift scratch, most of which the allocator keeps after the compile, and the engine retains ~145 MiB of the
+// result for the life of the process. A child that compiles, serializes and exits returns all of it to the OS, and the worker loads the serialized artifact for ~27 MiB. EXPERIMENTAL, off by
+// default, and it does not remove the compile PEAK: the child shares the worker's cgroup, so the peak is the worker's baseline plus the child's.
+//
+// Every failure (the child cannot start, times out, exits nonzero, writes an artifact the worker will not accept) is logged and falls back to the in-process compile; it never fails a workflow.
+type ComponentPrecompile struct {
+	// Executable is the worker's own binary, resolved once at start-up to an absolute path. It is never looked up on PATH, so the child is the same build and runs the same config code.
+	// Empty disables the feature (the in-process compile is used and nothing is logged as a failure).
+	Executable string
+	// Timeout bounds one child. <= 0 takes DefaultComponentPrecompileTimeout.
+	Timeout time.Duration
+	// ParallelCompilation is wasmtime's parallel_compilation in the CHILD only. false lowers the compile's memory high-water and lengthens it; it does not bind the artifact. This is the Go zero value, so a caller that sets nothing gets the LOW-memory compile; the worker passes the value --component-precompile-parallel resolved (parallel unless its memory limit is under 1 GiB).
+	ParallelCompilation bool
+}
+
+// SerializeComponentArg is the argument that makes the worker binary act as the precompile child. It is matched against os.Args[1] BEFORE flag parsing, so no flag, workflow, HTTP route or
+// environment can reach it; only an exec of the binary with this exact first argument does. Declared here, untagged, because the worker's main reads it in every build.
+const SerializeComponentArg = "--serialize-component"
+
+// DefaultComponentPrecompileTimeout is the bound on one precompile child when none is set: the slowest measured Python compile with parallel_compilation off was 5.7 s on a loaded host, so this is
+// generous, and a child that exceeds it is killed and the worker compiles in-process.
+const DefaultComponentPrecompileTimeout = 5 * time.Minute
+
+// WithWasmtimeComponentPrecompile enables compiling components in a child process. See ComponentPrecompile. A zero Executable keeps the in-process compile.
+func WithWasmtimeComponentPrecompile(p ComponentPrecompile) WasmtimeOption {
+	return func(c *wasmtimeConfig) {
+		if p.Executable == "" {
+			c.componentPrecompile = nil
+			return
+		}
+		cp := p
+		c.componentPrecompile = &cp
+	}
 }
 
 // WasmtimeOption configures a wasmtimeBackend, applied at construction time
