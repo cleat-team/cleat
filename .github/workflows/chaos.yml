@@ -184,7 +184,7 @@ jobs:
               } >> chaos-sample-resources.log 2>&1 || true
               sleep 30
             done
-          ) &
+          ) >/dev/null 2>&1 &
           sampler=$!
           # The loop's own `sleep` is a child that outlives a kill of the loop; stop it too.
           trap 'pkill -P "${sampler}" 2>/dev/null || true; kill "${sampler}" 2>/dev/null || true' EXIT

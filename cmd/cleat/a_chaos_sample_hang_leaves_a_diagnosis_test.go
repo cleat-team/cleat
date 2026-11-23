@@ -77,6 +77,9 @@ func chaosSampleProblems(j chaosJob) []string {
 	if !strings.Contains(s.Run, "chaos-sample-resources.log") {
 		problems = append(problems, "the Seeded sample step no longer writes the resource samples (chaos-sample-resources.log)")
 	}
+	if !strings.Contains(s.Run, ") >/dev/null 2>&1 &") {
+		problems = append(problems, "the sampler's subshell is not detached from the step's output pipe (`) >/dev/null 2>&1 &`): measured, after a SIGKILL of the step (so its trap cannot run) the sampler and its sleep still hold the pipe and a reader of the step's output never sees EOF; with the redirect it does")
+	}
 	if !strings.Contains(s.Run, "pkill -P") {
 		problems = append(problems, "the sampler is not stopped with its child `sleep` (measured: without `pkill -P` one stray sleep outlives the step)")
 	}
@@ -187,6 +190,9 @@ func TestTheChaosSampleDiagnosisGuardNamesEachWayOfLosingIt(t *testing.T) {
 		{"the sampler removed", func(j *chaosJob) {
 			seeded(j).Run = strings.ReplaceAll(seeded(j).Run, "chaos-sample-resources.log", "x.log")
 		}, "no longer writes the resource samples"},
+		{"the sampler's subshell not detached from the step's output", func(j *chaosJob) {
+			seeded(j).Run = strings.ReplaceAll(seeded(j).Run, ") >/dev/null 2>&1 &", ") &")
+		}, "not detached from the step's output pipe"},
 		{"the sampler's child not stopped", func(j *chaosJob) { seeded(j).Run = strings.ReplaceAll(seeded(j).Run, "pkill -P", "echo") }, "child `sleep`"},
 		{"the diagnose step removed", func(j *chaosJob) { diagnose(j).If = "" }, "no step after the sample runs on"},
 		{"the diagnose step ignoring a cancel", func(j *chaosJob) { diagnose(j).If = "${{ failure() }}" }, "no step after the sample runs on"},
