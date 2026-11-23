@@ -59,6 +59,39 @@ func pythonStampEnv(workflowName string, workflowVersion int, entryPoints, chann
 	return env
 }
 
+// pythonBuildFailureMessage is what `cleat build --target python` tells the reader when the build script did not produce a component. It is a function of the
+// error so the choice between its three messages can be tested without a Python toolchain, and the choice is the point: each failure is something else.
+//
+//   - No build script anywhere is an environment problem, and its own message says how to fix it.
+//   - A build the script REFUSED, because the installed componentize-py is not the measured version (cleat#4383), has already said what to do on stderr,
+//     with the pip command and the override. Nothing was compiled, so the advice below is wrong for it and would send the reader to their own source.
+//   - Anything else is a compile that ran and failed, and the advice is about the workflow file.
+func pythonBuildFailureMessage(err error) string {
+	switch {
+	case wasm.IsPythonBuildScriptNotFound(err):
+		return fmt.Sprintf("Error: %v\n", err)
+	case wasm.IsPythonComponentizeVersionRefused(err):
+		return "Error: cleat build refused to compile with this componentize-py (see above); nothing was built.\n"
+	default:
+		return fmt.Sprintf("Error: componentize-py failed: %v\n", err) +
+			"Make sure the Python file has a @cleat_entry decorated function.\n" +
+			"Check that (1) the Python file has valid syntax, (2) the @cleat_entry function exists and is not async, (3) all imports are available.\n"
+	}
+}
+
+// applyAllowUnmeasuredComponentizePy turns --allow-unmeasured-componentize-py into the environment variable build_wasm.py reads, and refuses the flag on a
+// target it does not apply to rather than ignoring it: a flag that is accepted and does nothing reads as a build that was checked (cleat#4383). It is a
+// function of its inputs and sets the variable only when asked, so a variable the caller already exported is left as they set it.
+func applyAllowUnmeasuredComponentizePy(allow bool, target string) error {
+	if !allow {
+		return nil
+	}
+	if target != wasm.PythonTarget {
+		return fmt.Errorf("--allow-unmeasured-componentize-py applies only to --target python, not --target %s", target)
+	}
+	return os.Setenv(wasm.AllowUnmeasuredComponentizePyEnv, "1")
+}
+
 // runBuildPython compiles a Python workflow to WASM using componentize-py
 // via the python-sdk/scripts/build_wasm.py helper.
 //
@@ -275,15 +308,7 @@ func runBuildPython(pattern, outDir, runtime, channel string, workflowVersion in
 	}
 
 	if err := wasm.BuildPythonWasmWithRuntime(entry, wasmOutput, runtime, false); err != nil {
-		// No build script anywhere is an environment problem, and its own message
-		// says how to fix it. The advice below is about a compile that ran and failed.
-		if wasm.IsPythonBuildScriptNotFound(err) {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			os.Exit(1)
-		}
-		fmt.Fprintf(os.Stderr, "Error: componentize-py failed: %v\n", err)
-		fmt.Fprintf(os.Stderr, "Make sure the Python file has a @cleat_entry decorated function.\n")
-		fmt.Fprintf(os.Stderr, "Check that (1) the Python file has valid syntax, (2) the @cleat_entry function exists and is not async, (3) all imports are available.\n")
+		fmt.Fprint(os.Stderr, pythonBuildFailureMessage(err))
 		os.Exit(1)
 	}
 

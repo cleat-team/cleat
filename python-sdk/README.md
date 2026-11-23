@@ -725,6 +725,7 @@ See the [Makefile](./Makefile) for details.
 | Error | Likely Cause | Solution |
 |-------|-------------|----------|
 | `componentize-py: command not found` | Not installed in the active environment | `pip install componentize-py==0.25.1` in the environment you build from |
+| `componentize-py 0.x.y is installed, but this SDK was tested and measured with componentize-py 0.25.1` / `Refusing to build` | The installed `componentize-py` is not the measured version, and `cleat build` stops before it compiles anything | `pip install componentize-py==0.25.1` in the environment you build from; to build with the version you have anyway, see below |
 | `finding repo root: go.mod not found` | `cleat-sdk` 0.5.0, which ships no build script | Upgrade `cleat-sdk`, or build from a checkout |
 | `has no build script` | An older `cleat-sdk` is active | `pip install --upgrade cleat-sdk` |
 | `Error: unexpected argument '--wit-path' found` | A hand-written `componentize-py` command in the pre-0.13 form | Use `cleat build`, or the `-d … -w … componentize <module>` form above |
@@ -736,10 +737,16 @@ See the [Makefile](./Makefile) for details.
 | WASM binary > 50 MB | Large or unnecessary imports | Check that imported modules are genuinely needed at runtime |
 | `ImportError: ...` at WASM runtime | Module not bundled | Only pure-Python modules are available; C extensions will not work |
 
+To build with a `componentize-py` that is not the measured version anyway, say so explicitly. A standard-library module that is missing from such a build raises `ModuleNotFoundError` only when the workflow runs, so test it:
+
+```bash
+cleat build --target python --allow-unmeasured-componentize-py --entry my_workflow.py:my_entry
+```
+
 ## Requirements
 
 - **Python 3.10+** -- the SDK uses `typing.get_type_hints` and `inspect.signature` for parameter introspection
-- **componentize-py ==0.25.1** -- required for WASM compilation, pinned to the version CI tests and the standard-library tables were measured on (`pip install componentize-py==0.25.1`); other versions are not measured, and may contain different standard-library modules. `cleat build` prints a warning naming both versions when the installed one differs, and builds anyway
+- **componentize-py ==0.25.1** -- required for WASM compilation, pinned to the version CI tests and the standard-library tables were measured on (`pip install componentize-py==0.25.1`); other versions are not measured, and may contain different standard-library modules. `cleat build --target python` therefore **refuses** to build when the installed one differs (or its version cannot be read), naming both versions and the `pip install` that fixes it; `--allow-unmeasured-componentize-py` (or `CLEAT_ALLOW_UNMEASURED_COMPONENTIZE_PY=1`) builds anyway, with a warning
 - **Cleat CLI** (`cleat build`) -- the supported way to build a workflow
 - **WIT files** -- shipped inside the package (`cleat_sdk/wit/`); nothing to copy
 

@@ -130,6 +130,7 @@ func main() {
 		var runtime string
 		var buildChannel string
 		var workflowVersion int
+		var allowUnmeasuredComponentizePy bool
 		fs.StringVar(&outDir, "o", "", "output directory for generated files")
 
 		fs.IntVar(&workflowVersion, "version", 1, "workflow version number embedded in WASM metadata")
@@ -137,6 +138,7 @@ func main() {
 		fs.StringVar(&entry, "entry", "", "entry point in 'file.py:func_name' format (for Python target) or 'file.ts:entry_name[,entry_name]' (for the ts target)")
 		fs.StringVar(&runtime, "runtime", "", "WASM runtime: wasmtime, wazero (default: the component, as for wasmtime)")
 		fs.StringVar(&buildChannel, "channel", "", "child version resolution channel: stable, latest, canary, or custom tag name")
+		fs.BoolVar(&allowUnmeasuredComponentizePy, "allow-unmeasured-componentize-py", false, "python target only: build even when the installed componentize-py is not 0.25.1, the version the Python SDK was measured on (a build with another version is refused, because a standard-library module can be missing only when the workflow runs); CLEAT_ALLOW_UNMEASURED_COMPONENTIZE_PY=1 does the same")
 		fs.BoolVar(&jsonOut, "json", false, "output diagnostics as JSON")
 		fs.BoolVar(&diffOut, "diff", false, "output unified diff of each file before and after transformation")
 		fs.BoolVar(&sizeReport, "size-report", false, "output WASM binary size breakdown by package")
@@ -147,6 +149,10 @@ func main() {
 		}
 		if !isValidTarget(target) {
 			fmt.Fprintf(os.Stderr, "Error: unknown target %q. Valid targets: go, rust, java, python, ts, csharp\n", target)
+			os.Exit(1)
+		}
+		if err := applyAllowUnmeasuredComponentizePy(allowUnmeasuredComponentizePy, target); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
 		}
 		// Default channel: when --db is provided, default to "stable".

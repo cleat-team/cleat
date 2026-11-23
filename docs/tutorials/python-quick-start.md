@@ -43,7 +43,9 @@ Both things below are deliberate:
   `error: externally-managed-environment` (PEP 668).
 - **`componentize-py` is pinned to exactly 0.25.1.** It decides which standard-library
   modules your workflow contains, and 0.25.1 is the version CI tests and the Python
-  README's compatibility tables were measured on.
+  README's compatibility tables were measured on. `cleat build --target python` refuses to
+  build with any other version, and says how to install this one; `--allow-unmeasured-componentize-py`
+  builds anyway, at the risk that a standard-library module is missing only when the workflow runs.
 
 Keep this virtual environment active for every command below: `cleat build` runs
 the `python3` it finds on `PATH`, and looks there for `cleat-sdk`.

@@ -24,6 +24,13 @@ from pathlib import Path
 # stated in python-sdk/componentize-py-requirements.txt; scripts/check-componentize-py-pin.py fails if this constant disagrees with it.
 PINNED_COMPONENTIZE_PY = "0.25.1"
 
+# A build refused because the installed componentize-py is not the measured version (cleat#4383) exits with this status and not with 1. 1 means a build that
+# RAN and failed, and a caller that sees it tells the reader to look at their own source; a refusal is a problem with the environment, and says so. cmd/cleat
+# and wasm/build.go read it as PythonBuildExitUnmeasuredComponentizePy, and a Go test fails if the two stop being equal.
+EXIT_UNMEASURED_COMPONENTIZE_PY = 3
+ALLOW_UNMEASURED_FLAG = "--allow-unmeasured-componentize-py"
+ALLOW_UNMEASURED_ENV = "CLEAT_ALLOW_UNMEASURED_COMPONENTIZE_PY"
+
 
 def find_sdk_root() -> Path:
     """Find the python-sdk root directory (a checkout's layout only)."""
@@ -147,13 +154,14 @@ def generate_wit_export(wit_dir: Path, func_name: str, module_name: str) -> Path
     return wit_dir / "cleat.wit"
 
 
-def componentize_py_version_warning(version_output: str) -> str | None:
-    """A warning when the installed componentize-py is not the version this SDK was measured on, else ``None`` (cleat#4355).
+def componentize_py_version_problem(version_output: str) -> str | None:
+    """What is wrong when the installed componentize-py is not the version this SDK was measured on, else ``None`` (cleat#4355, #4383).
 
     componentize-py decides which standard-library modules a component contains, and the README's compatibility tables and
     ``cleat vet``'s PY015 table were measured on ``PINNED_COMPONENTIZE_PY`` and on no other version. A different version is not known
-    to be broken, only not measured, so this warns and the build goes on; an output it cannot read is reported as unreadable, not
-    as a match.
+    to be broken, only not measured, and that is enough to stop: a module that is missing raises ModuleNotFoundError only when the
+    workflow RUNS. An output it cannot read is reported as unreadable and is a problem too, because a check that could not look must
+    not say it matched.
     """
     match = re.match(r"\s*componentize-py\s+(\S+)", version_output)
     got = match.group(1) if match else None
@@ -161,11 +169,32 @@ def componentize_py_version_warning(version_output: str) -> str | None:
         return None
     installed = f"componentize-py {got}" if got else f"a componentize-py whose version could not be read ({version_output.strip()[:60]!r})"
     return (
-        f"Warning: {installed} is installed, but this SDK was tested and measured with componentize-py {PINNED_COMPONENTIZE_PY}. "
+        f"{installed} is installed, but this SDK was tested and measured with componentize-py {PINNED_COMPONENTIZE_PY}. "
         "componentize-py decides which standard-library modules a component contains, so a build with another version may contain "
-        "different ones, and a module can raise ModuleNotFoundError only when the workflow runs. "
-        f"Install the measured version: pip install componentize-py=={PINNED_COMPONENTIZE_PY}"
+        "different ones, and a module can raise ModuleNotFoundError only when the workflow runs."
     )
+
+
+def componentize_py_refusal(problem: str) -> str:
+    """The message of a build refused for ``problem``: what is wrong, the fix, and the explicit way to go on."""
+    return (
+        f"Error: {problem}\n"
+        "Refusing to build. Install the measured version:\n"
+        f"    pip install componentize-py=={PINNED_COMPONENTIZE_PY}\n"
+        "or, if you know what you are doing, build with the version you have anyway:\n"
+        f"    cleat build --target python {ALLOW_UNMEASURED_FLAG} ...\n"
+        f"(this script takes the same {ALLOW_UNMEASURED_FLAG}, and both read {ALLOW_UNMEASURED_ENV}=1)."
+    )
+
+
+def componentize_py_override_warning(problem: str) -> str:
+    """The warning printed when the build goes on past ``problem`` because the override was given."""
+    return f"Warning: {problem} Building anyway, because {ALLOW_UNMEASURED_FLAG} (or {ALLOW_UNMEASURED_ENV}=1) was given."
+
+
+def unmeasured_componentize_py_allowed(flag: bool, environ) -> bool:
+    """Whether the override was asked for, by the flag or by ``CLEAT_ALLOW_UNMEASURED_COMPONENTIZE_PY=1``. Only the value ``1`` counts: ``0``, ``false`` and the empty string do not."""
+    return bool(flag) or environ.get(ALLOW_UNMEASURED_ENV) == "1"
 
 
 def run_componentize_py(
@@ -175,10 +204,12 @@ def run_componentize_py(
     wit_dir: Path,
     sdk_root: Path,
     verbose: bool = False,
+    allow_unmeasured: bool = False,
 ) -> bool:
     """Run componentize-py to compile the workflow to WASM.
 
-    Returns True on success, False on failure.
+    Returns True on success, False on failure. A componentize-py that is not the measured version is neither: it exits the process
+    with ``EXIT_UNMEASURED_COMPONENTIZE_PY`` before compiling anything, unless ``allow_unmeasured`` (cleat#4383).
     """
     # Check if componentize-py is available
     try:
@@ -190,9 +221,12 @@ def run_componentize_py(
             print("Error: componentize-py not found or not working", file=sys.stderr)
             print(f"Install with: pip install componentize-py=={PINNED_COMPONENTIZE_PY}", file=sys.stderr)
             return False
-        version_warning = componentize_py_version_warning(result.stdout)
-        if version_warning:
-            print(version_warning, file=sys.stderr)
+        problem = componentize_py_version_problem(result.stdout)
+        if problem:
+            if not allow_unmeasured:
+                print(componentize_py_refusal(problem), file=sys.stderr)
+                sys.exit(EXIT_UNMEASURED_COMPONENTIZE_PY)
+            print(componentize_py_override_warning(problem), file=sys.stderr)
     except FileNotFoundError:
         print("Error: componentize-py not found", file=sys.stderr)
         print(f"Install with: pip install componentize-py=={PINNED_COMPONENTIZE_PY}", file=sys.stderr)
@@ -323,6 +357,14 @@ def main():
         help="Min compatible version (or CLEAT_MIN_COMPATIBLE_VERSION env var)",
     )
     parser.add_argument(
+        ALLOW_UNMEASURED_FLAG,
+        action="store_true",
+        dest="allow_unmeasured_componentize_py",
+        help=f"Build even when the installed componentize-py is not {PINNED_COMPONENTIZE_PY}, the version this SDK was measured on "
+             f"(or set {ALLOW_UNMEASURED_ENV}=1). Without it such a build is refused, exit {EXIT_UNMEASURED_COMPONENTIZE_PY}, "
+             "because a standard-library module can be missing only when the workflow runs.",
+    )
+    parser.add_argument(
         "--abi-version",
         type=int,
         default=None,
@@ -420,7 +462,8 @@ def main():
     print()
 
     success = run_componentize_py(
-        entry_file, func_name, output, wit_dir, layout.python_path, args.verbose
+        entry_file, func_name, output, wit_dir, layout.python_path, args.verbose,
+        allow_unmeasured=unmeasured_componentize_py_allowed(args.allow_unmeasured_componentize_py, os.environ),
     )
 
     if not success:

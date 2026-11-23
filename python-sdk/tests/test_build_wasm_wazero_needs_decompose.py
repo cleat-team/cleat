@@ -15,6 +15,7 @@ compile, which does not read the file.
 from __future__ import annotations
 
 import os
+import re
 import stat
 import subprocess
 import sys
@@ -23,9 +24,22 @@ from pathlib import Path
 SDK = Path(__file__).resolve().parent.parent
 SCRIPT = SDK / "scripts" / "build_wasm.py"
 
+
+def _pinned_componentize_py() -> str:
+    """The componentize-py version the build script accepts, read from the script (cleat#4383).
+
+    The stand-in below must answer ``--version`` with it: the script REFUSES a componentize-py that is not the measured version before it
+    reaches the decompose decision this file is about, so a stand-in that reported its own made-up version (it said ``0.0.0``) turned every
+    test here into a test of the refusal. Read from the script and not typed here, so that moving the pin cannot make these tests start
+    failing for a reason that is not about wazero."""
+    match = re.search(r'(?m)^PINNED_COMPONENTIZE_PY = "([^"]+)"\s*$', SCRIPT.read_text())
+    assert match, f"UNMEASURED: {SCRIPT} no longer declares PINNED_COMPONENTIZE_PY as a plain module-level assignment"
+    return match.group(1)
+
+
 COMPONENTIZE_PY = """#!/bin/sh
 # A componentize-py that writes a file with the component header where -o says.
-if [ "$1" = "--version" ]; then echo "componentize-py 0.0.0 (stand-in)"; exit 0; fi
+if [ "$1" = "--version" ]; then echo "componentize-py @@PINNED_VERSION@@"; exit 0; fi
 while [ $# -gt 0 ]; do
   if [ "$1" = "-o" ]; then out="$2"; fi
   shift
@@ -51,7 +65,7 @@ def _stub(directory: Path, name: str, body: str) -> None:
 def _build(tmp_path: Path, runtime: str, wasm_tools: str | None) -> subprocess.CompletedProcess[str]:
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
-    _stub(bin_dir, "componentize-py", COMPONENTIZE_PY)
+    _stub(bin_dir, "componentize-py", COMPONENTIZE_PY.replace("@@PINNED_VERSION@@", _pinned_componentize_py()))
     if wasm_tools is not None:
         _stub(bin_dir, "wasm-tools", wasm_tools)
     entry = tmp_path / "wf.py"
