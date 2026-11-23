@@ -280,8 +280,10 @@ type stepSpec struct {
 	// printed the request (`  actual request: ...` / `  expected request: ...`), a run's IDs, a Fetch's URL and bodies, a schedule's four arguments; the shared
 	// message names only the step and both event types, and the moves that went onto it lost the rest silently, including text docs/troubleshooting.md shows to
 	// users and TestEngineReplayDivergence pins. a is the call's arguments and rec the record that diverged (a record of the wrong TYPE or one that failed Identity);
-	// it returns "" or text that starts with a newline and indents each line by two spaces, and it must not touch the world. Use truncateWithHash on any body, as
-	// the old messages did. Exactly one of this and NoDivergenceDetail is set (validate()), so a call that has detail cannot lose it by being moved without saying so.
+	// it returns "" or text that starts with a newline and indents each line by two spaces, and it must not touch the world. Name any BODY (a request, a response, a payload, a fetch's or a schedule's input) with redactedBody and never print it
+	// (cleat#4321): the old messages truncated a body at 4096 bytes and printed it whole under that, which put a decrypted payload into a guest-visible error, a stored
+	// run error and the logs, and egress redaction cannot reach text that merely contains a document. An identifier (a service, an operation, a run ID) is not a body.
+	// TestNoDivergenceTextPrintsARecordedBody fails for a spec that prints a recorded data field. Exactly one of this and NoDivergenceDetail is set (validate()), so a call that has detail cannot lose it by being moved without saying so.
 	DivergenceDetail func(a stepArgs, rec *EventRecord) string
 	// NoDivergenceDetail says why a call has nothing to add to a divergence message, when it has nothing: the reason is for the reader of the spec and must say what the
 	// call's old message carried, so a move that dropped detail cannot hide behind it (cleat#4152, G3).

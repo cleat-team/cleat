@@ -181,7 +181,7 @@ func wfeCases() []wfeCase {
 var wfeGolden = map[string]wfeWant{
 	"replay_found_first":               {results: []string{`ok:{"found":true,"payload":"X"}`}},
 	"replay_claim_sequence":            {results: []string{"ok:" + wfeFoundPaid}},
-	"replay_malformed_recorded_output": {results: []string{wfeWrapped("nz")}, contains: []string{`no boolean "found" field`, "Output was: {}"}},
+	"replay_malformed_recorded_output": {results: []string{wfeWrapped("nz")}, contains: []string{`no boolean "found" field`, "Output was: [redacted: 2 bytes, sha256=44136fa355b3678a]"}},
 	// A recorded plugin error: the call answers with a non-zero callErr and the message is the recorded error, returned as it stands (the loop does not wrap it).
 	"replay_recorded_plugin_error": {results: []string{"fail(callErr=nz,errCode=1):boom"}, contains: []string{"boom"}},
 	// The recorded miss, then the frontier: the wait registers (records await_signals) and suspends; no claim is run.

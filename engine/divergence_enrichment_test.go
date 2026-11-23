@@ -68,8 +68,9 @@ func TestDivergencePayloadEnrichment(t *testing.T) {
 		})
 	}
 
-	// Truncation, through the real call: a request longer than the limit is cut and followed by a hash of the whole, and the message does not carry it all.
-	t.Run("truncation_applied_to_all_payloads", func(t *testing.T) {
+	// A long request, through the real call: it is named by its WHOLE size and a hash, and none of it is printed, cut or whole (cleat#4321; it was cut at the
+	// limit and followed by a hash before).
+	t.Run("a_long_payload_is_named_and_not_printed", func(t *testing.T) {
 		big := strings.Repeat("x", maxPayloadLen+100)
 		msg := g3fMessage(func(ctx context.Context, s *execSession) int64 {
 			return s.DurableCall(ctx, nil, "svc", "op", big, 0, 16384)
@@ -77,11 +78,11 @@ func TestDivergencePayloadEnrichment(t *testing.T) {
 		if !strings.HasPrefix(msg, "replay divergence at step 0: ") {
 			t.Fatalf("PRECONDITION FAILED: the call did not report a divergence: %.120q", msg)
 		}
-		if !strings.Contains(msg, "[sha256=") {
-			t.Error("the divergence did not add a hash for an oversized payload")
+		if !strings.Contains(msg, "actual request: [redacted: 4196 bytes, sha256=") {
+			t.Errorf("the divergence does not name the %d-byte payload by its whole size and a hash: %.200q", len(big), msg)
 		}
-		if strings.Contains(msg, big) {
-			t.Errorf("the divergence carries the whole %d-byte payload", len(big))
+		if strings.Contains(msg, strings.Repeat("x", 100)) {
+			t.Errorf("the divergence prints part of the %d-byte payload", len(big))
 		}
 	})
 }

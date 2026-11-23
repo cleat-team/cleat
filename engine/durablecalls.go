@@ -165,10 +165,11 @@ func (s *execSession) DurableCall(ctx context.Context, m api.Module, service, op
 	return s.step(ctx, m, &callStep, stepArgs{s1: service, s2: operation, s3: requestJSON, outPtr: responsePtr, outMaxLen: responseMaxLen})
 }
 
-// requestDivergenceDetail is the detail of a call that carries a request body: the plain call, the retried call and the heartbeat call all printed these two lines
-// when they diverged, and docs/troubleshooting.md shows them. The bodies are truncated with a hash, as the old messages truncated them (cleat#4152, G3).
+// requestDivergenceDetail is the detail of a call that carries a request body: the plain call, the retried call and the heartbeat call all print these two lines
+// when they diverged, and docs/troubleshooting.md shows them. The bodies are named by their size and a short hash and never printed (redactedBody, cleat#4321); they were
+// truncated at 4096 bytes and printed whole under it, and the labels are the same.
 func requestDivergenceDetail(a stepArgs, rec *EventRecord) string {
-	return fmt.Sprintf("\n  actual request: %s\n  expected request: %s", truncateWithHash(a.s3, maxPayloadLen), truncateWithHash(rec.Request, maxPayloadLen))
+	return fmt.Sprintf("\n  actual request: %s\n  expected request: %s", redactedBody(a.s3), redactedBody(rec.Request))
 }
 
 // atEventCap reports whether this session has recorded as many durable events as --max-quota-events allows.

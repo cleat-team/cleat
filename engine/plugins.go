@@ -497,7 +497,7 @@ var pluginCallStep = stepSpec{
 	// the session is replaying, the only time a divergence can arise), and what the record cached.
 	DivergenceDetail: func(a stepArgs, rec *EventRecord) string {
 		return fmt.Sprintf("\n  actual input: %s\n  expected (cached) input: %s\n  expected (cached) output: %s",
-			truncateWithHash(a.s4, maxPayloadLen), truncateWithHash(rec.PluginInput, maxPayloadLen), truncateWithHash(rec.PluginOutput, maxPayloadLen))
+			redactedBody(a.s4), redactedBody(rec.PluginInput), redactedBody(rec.PluginOutput))
 	},
 	Decode: func(c *stepCtx, rec *EventRecord) int64 { return c.s.answerRecordedPluginCall(c, rec) },
 	Fresh:  func(c *stepCtx) int64 { return c.s.freshPluginCall(c) },
@@ -510,7 +510,8 @@ func (s *execSession) PluginCall(ctx context.Context, m api.Module,
 	responsePtr, responseMaxLen uint32) int64 {
 	args := stepArgs{s1: pluginName, s2: functionName, s3: inputJSON, outPtr: responsePtr, outMaxLen: responseMaxLen}
 	if s.isReplay {
-		// Only a replay can report a divergence, and a divergence prints the live input with the function's secret-only fields redacted (see redactedLiveInput).
+		// Only a replay can report a divergence, and a divergence names the live input by its size and a hash (redactedBody, cleat#4321), taken over the input with the
+		// function's secret-only fields redacted (see redactedLiveInput), so that it compares with the recorded input, which was recorded redacted the same way.
 		// s3 stays the input as the guest passed it: a call that reaches the frontier runs fresh with it.
 		args.s4 = s.redactedLiveInput(pluginName, functionName, inputJSON)
 	}
