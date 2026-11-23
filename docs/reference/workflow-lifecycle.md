@@ -61,6 +61,27 @@ to be.
 on a `terminating` row still cuts the defer phase short rather than being refused, exactly as
 before.
 
+**A cancel or a terminate is addressed to a workflow too, and acts on whichever run of it is live.** cleat#4340. A
+pre-emptive `POST /api/workflows/<id>/cancel`, a cooperative one (no `"preemptive"`), and
+`POST /api/dead-letters/<id>/terminate` sent to **any run of a continue-as-new chain** act on the **current run** (the end
+of the chain), once, and the `200` says where, as a signal's does:
+
+```
+POST /api/workflows/<first-run>/cancel  {"preemptive":true}  →  200 {"status":"cancelled",
+                                                                    "workflow_id":"<current run>", "forwarded_from":"<first-run>"}
+```
+
+`workflow_id` and `forwarded_from` are present only when the verb was forwarded. The runs that already continued are left
+as they were (`done`). A verb and a continue-as-new cannot miss each other: each locks the old run's row first (its lease
+row on PostgreSQL, its instance row on MySQL and SQL Server), so either the cancel wins, settles the old run and **no
+successor is created**, or the continue commits first and the verb walks to the successor and settles that. A cooperative
+cancel **already requested on a run when it continues** is **carried to its successor**, with its reason, in the transaction
+that completes the old run; before this a successor was created un-cancelled and the request was lost to a guest that had
+never looked at it. A chain whose **current run** is already settled refuses as before (409 `state_conflict`), and the
+message now names the run that refused: `workflow A: continued as new, and its current run B is already settled
+(status=done); ...`. A `dead_lettered` current run is still taken off the queue by terminate. The same sharding issue as
+for signals applies, and is not about these verbs.
+
 **A signal is addressed to a workflow, and reaches whichever run of it is live; one to a run that can never be reopened
 is refused.** cleat#4340. A workflow that continues as new is the same workflow to its sender, so a signal sent to
 **any run of a continue-as-new chain** is delivered to the **current run** (the end of the chain), exactly once, and the

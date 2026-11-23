@@ -1767,7 +1767,10 @@ func (s *apiServer) handleCancel(w http.ResponseWriter, r *http.Request, id stri
 	}
 
 	if req.Preemptive {
-		if err := st.CancelWorkflow(r.Context(), id, req.Reason); err != nil {
+		rec, err := settleWithReceipt(st, func(rs engine.SettleReceiptStore) (engine.SettleReceipt, error) {
+			return rs.CancelWorkflowReceipt(r.Context(), id, req.Reason)
+		}, func() error { return st.CancelWorkflow(r.Context(), id, req.Reason) }, id)
+		if err != nil {
 			// Same shape as terminate: callerOwnsTarget has already answered
 			// 404 for an id this tenant does not own, so reaching here means
 			// the row went away in between.
@@ -1788,15 +1791,39 @@ func (s *apiServer) handleCancel(w http.ResponseWriter, r *http.Request, id stri
 		// the same promise: this is what the run will end as. A caller that
 		// needs to know it has finished polls the status, as tiers.yaml's
 		// decision D6 already requires for terminate.
-		s.writeJSON(w, 200, map[string]string{"status": "cancelled"})
+		s.writeJSON(w, 200, settleReply("cancelled", id, rec))
 		return
 	}
 
-	if err := st.RequestCancellation(r.Context(), id, req.Reason); err != nil {
+	rec, err := settleWithReceipt(st, func(rs engine.SettleReceiptStore) (engine.SettleReceipt, error) {
+		return rs.RequestCancellationReceipt(r.Context(), id, req.Reason)
+	}, func() error { return st.RequestCancellation(r.Context(), id, req.Reason) }, id)
+	if err != nil {
 		s.writeStoreError(w, r, err)
 		return
 	}
-	s.writeJSON(w, 200, map[string]string{"status": "cancellation_requested"})
+	s.writeJSON(w, 200, settleReply("cancellation_requested", id, rec))
+}
+
+// settleWithReceipt runs a cancel or a terminate through the store's receipt form when it has one, and through the plain verb when it does not (a test double, an older store), whose
+// receipt says the addressed run was acted on, which is what it did (cleat#4340).
+func settleWithReceipt(st engine.WorkflowStore, withReceipt func(engine.SettleReceiptStore) (engine.SettleReceipt, error), plain func() error, addressed string) (engine.SettleReceipt, error) {
+	if rs, ok := st.(engine.SettleReceiptStore); ok {
+		return withReceipt(rs)
+	}
+	return engine.SettleReceipt{SettledRun: addressed}, plain()
+}
+
+// settleReply is the 200 body for a cancel or a terminate the store ACCEPTED: {"status": ...}, plus, when the verb was forwarded, WHICH run it acted on (`workflow_id`) and which run
+// the caller addressed (`forwarded_from`), as a forwarded signal's reply does. Both keys are absent when it acted where it was addressed, so a client that does not read them sees
+// exactly what it saw before.
+func settleReply(status, addressed string, r engine.SettleReceipt) map[string]string {
+	body := map[string]string{"status": status}
+	if r.Forwarded && r.SettledRun != "" {
+		body["workflow_id"] = r.SettledRun
+		body["forwarded_from"] = addressed
+	}
+	return body
 }
 
 // runExists reports whether id names a workflow the caller can see, writing the

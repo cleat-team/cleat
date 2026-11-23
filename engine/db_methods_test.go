@@ -4065,8 +4065,10 @@ func TestPostgresStore_RequestCancellation_BeginError(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error from begin failure")
 	}
-	if !strings.Contains(err.Error(), "request cancellation: begin") {
-		t.Errorf("expected 'request cancellation: begin' error, got: %v", err)
+	// The first database access is now the chain lookup (cleat#4340: the flag goes on the END of a continue-as-new chain), which opens its own transaction, so the injected begin
+	// failure meets it first. What this test protects is unchanged: a failure to begin is reported with the verb's name and the cause, not swallowed.
+	if !strings.Contains(err.Error(), "request cancellation:") || !strings.Contains(err.Error(), "begin failed") {
+		t.Errorf("expected a 'request cancellation: ...' error carrying the begin failure, got: %v", err)
 	}
 }
 

@@ -1579,11 +1579,29 @@ func (s *MySQLStore) CancelWorkflow(ctx context.Context, workflowID, reason stri
 }
 
 func (s *MySQLStore) preemptivelySettle(ctx context.Context, workflowID, reason, finalStatus string) error {
+	return s.preemptivelySettleTo(ctx, workflowID, reason, finalStatus, nil)
+}
+
+// preemptivelySettleTo is preemptivelySettle that also says which run it acted on, through settled when it is not nil: a cancel or a terminate addressed to a run that has continued
+// as new acts on the END of its chain (cleat#4340). See PostgresStore.preemptivelySettleTo.
+func (s *MySQLStore) preemptivelySettleTo(ctx context.Context, workflowID, reason, finalStatus string, settled *string) error {
+	hint, err := latestRunInChain(ctx, workflowID, s.successorOfRun)
+	if err != nil {
+		return fmt.Errorf("%s workflow: resolve the chain: %w", finalStatus, err)
+	}
 	tx, err := s.beginTx(ctx)
 	if err != nil {
 		return fmt.Errorf("%s workflow: begin: %w", finalStatus, err)
 	}
 	defer tx.Rollback()
+	addressed := workflowID
+	workflowID, err = s.lockChainEndTx(ctx, tx, addressed, hint)
+	if err != nil {
+		return fmt.Errorf("%s workflow: lock: %w", finalStatus, err)
+	}
+	if settled != nil {
+		*settled = workflowID
+	}
 
 	// Does this workflow owe a defer phase? See deferPhaseOwed. FOR UPDATE
 	// holds the row for the UPDATE that follows, so the status this reads is
@@ -1614,9 +1632,7 @@ func (s *MySQLStore) preemptivelySettle(ctx context.Context, workflowID, reason,
 	// cleat#1975 (D3): settled is final. See PostgresStore's twin for the
 	// dead-letter exception.
 	if isSettledStatus(curStatus) && !(finalStatus == statusTerminated && curStatus == statusDeadLettered) {
-		return adminErrorf(ErrAdminStateConflict,
-			"workflow %s: already settled (status=%s); refusing to write %s over it",
-			workflowID, curStatus, finalStatus)
+		return settledRefusal(addressed, workflowID, curStatus, finalStatus)
 	}
 
 	if deferPhaseOwed(curStatus, hasDefers, compacted) {
@@ -2086,4 +2102,41 @@ func (s *MySQLStore) ClaimDueSchedule(ctx context.Context, name string, expected
 		return false, fmt.Errorf("ClaimDueSchedule: rows affected: %w", err)
 	}
 	return n == 1, nil
+}
+
+// lockChainEndTx locks the END of addressed's continue-as-new chain in tx and returns its id, walking from hint (cleat#4340). See PostgresStore.lockChainEndTx.
+func (s *MySQLStore) lockChainEndTx(ctx context.Context, tx *sql.Tx, addressed, hint string) (string, error) {
+	return lockChainEnd(addressed, hint,
+		func(run string) (string, bool, error) {
+			var status string
+			switch err := tx.QueryRowContext(ctx, `SELECT status FROM workflow_instances WHERE id = ? AND tenant_id = ? FOR UPDATE`, run, s.tenantID).Scan(&status); {
+			case errors.Is(err, sql.ErrNoRows):
+				return "", false, nil
+			case err != nil:
+				return "", false, err
+			}
+			return status, true, nil
+		},
+		func(run string) (string, error) {
+			return successorScan(tx.QueryRowContext(ctx, `SELECT id FROM workflow_instances WHERE continued_from = ? AND tenant_id = ? FOR SHARE`, run, s.tenantID))
+		})
+}
+
+// CancelWorkflowReceipt, TerminateWorkflowReceipt and RequestCancellationReceipt implement SettleReceiptStore: the same verbs, saying which run they acted on (cleat#4340).
+func (s *MySQLStore) CancelWorkflowReceipt(ctx context.Context, workflowID, reason string) (SettleReceipt, error) {
+	var acted string
+	err := s.preemptivelySettleTo(ctx, workflowID, reason, statusCancelled, &acted)
+	return settleReceiptFor(workflowID, acted), err
+}
+
+func (s *MySQLStore) TerminateWorkflowReceipt(ctx context.Context, workflowID, reason string) (SettleReceipt, error) {
+	var acted string
+	err := s.preemptivelySettleTo(ctx, workflowID, reason, statusTerminated, &acted)
+	return settleReceiptFor(workflowID, acted), err
+}
+
+func (s *MySQLStore) RequestCancellationReceipt(ctx context.Context, workflowID, reason string) (SettleReceipt, error) {
+	var acted string
+	err := s.requestCancellationTo(ctx, workflowID, reason, &acted)
+	return settleReceiptFor(workflowID, acted), err
 }

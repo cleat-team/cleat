@@ -935,6 +935,16 @@ func (s *MySQLStore) ContinueAsNew(ctx context.Context, currentRunID, workerID s
 	if _, err := tx.ExecContext(ctx, `UPDATE workflow_signals SET workflow_id = ? WHERE workflow_id = ? AND tenant_id = ?`, newRunID, currentRunID, s.tenantID); err != nil {
 		return "", fmt.Errorf("continue as new: carry the pending signals: %w", err)
 	}
+	// A cooperative cancel requested on the old run and not yet seen belongs to the WORKFLOW too (cleat#4340); see PostgresStore.ContinueAsNew. Read after the old run's row was updated
+	// above, which holds it, so a RequestCancellation (which locks that row first) cannot change it before this commits.
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE workflow_instances n
+		JOIN workflow_instances o ON o.id = ? AND o.tenant_id = ?
+		SET n.cancellation_requested = true, n.cancellation_reason = o.cancellation_reason
+		WHERE n.id = ? AND n.tenant_id = ? AND o.cancellation_requested
+	`, currentRunID, s.tenantID, newRunID, s.tenantID); err != nil {
+		return "", fmt.Errorf("continue as new: carry the cancellation request: %w", err)
+	}
 
 	if err := tx.Commit(); err != nil {
 		return "", err

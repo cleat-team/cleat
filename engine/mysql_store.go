@@ -302,11 +302,29 @@ func (s *MySQLStore) taskQueueClause() (string, []any) {
 
 // RequestCancellation sets the cancellation flag on a workflow.
 func (s *MySQLStore) RequestCancellation(ctx context.Context, workflowID, reason string) error {
+	return s.requestCancellationTo(ctx, workflowID, reason, nil)
+}
+
+// requestCancellationTo sets the flag on the END of workflowID's continue-as-new chain, under the lock that orders it against that run's continue (cleat#4340). A flag set on a run
+// that then continues is carried to its successor by ContinueAsNew.
+func (s *MySQLStore) requestCancellationTo(ctx context.Context, workflowID, reason string, settled *string) error {
+	hint, err := latestRunInChain(ctx, workflowID, s.successorOfRun)
+	if err != nil {
+		return fmt.Errorf("request cancellation: resolve the chain: %w", err)
+	}
 	tx, err := s.beginTx(ctx)
 	if err != nil {
 		return fmt.Errorf("request cancellation: begin: %w", err)
 	}
 	defer tx.Rollback()
+	end, err := s.lockChainEndTx(ctx, tx, workflowID, hint)
+	if err != nil {
+		return fmt.Errorf("request cancellation: lock: %w", err)
+	}
+	if settled != nil {
+		*settled = end
+	}
+	workflowID = end
 
 	_, err = tx.ExecContext(ctx, `
 		UPDATE workflow_instances

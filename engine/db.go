@@ -2100,6 +2100,18 @@ func pgRunStateUnderLock(ctx context.Context, tx *sql.Tx, workflowID string) (st
 // validating it against any list, on all three dialects. That is why adding an
 // outcome here needs no change there.
 func (s *PostgresStore) preemptivelySettle(ctx context.Context, workflowID, reason, finalStatus string) error {
+	return s.preemptivelySettleTo(ctx, workflowID, reason, finalStatus, nil)
+}
+
+// preemptivelySettleTo is preemptivelySettle that also says which run it acted on, through settled when it is not nil. A cancel or a terminate addressed to a run that has
+// continued as new acts on the END of its chain (cleat#4340): the chain is walked under the lease lock the verb needs anyway, see lockChainEnd.
+func (s *PostgresStore) preemptivelySettleTo(ctx context.Context, workflowID, reason, finalStatus string, settled *string) error {
+	// The end of the chain as an UNLOCKED read finds it, taken before the transaction so the second connection it needs is not held while this call holds one. It is only where
+	// the locked walk starts: every run on it is checked again under its lock.
+	hint, err := latestRunInChain(ctx, workflowID, s.successorOfRun)
+	if err != nil {
+		return fmt.Errorf("%s workflow: resolve the chain: %w", finalStatus, err)
+	}
 	tx, err := s.beginTxWithRLS(ctx)
 	if err != nil {
 		return fmt.Errorf("%s workflow: begin: %w", finalStatus, err)
@@ -2113,15 +2125,13 @@ func (s *PostgresStore) preemptivelySettle(ctx context.Context, workflowID, reas
 	// in its own statement; see pgRunStateUnderLock for why. Since cleat#3245
 	// B3c this locks the lease row, not the instance row: every write below
 	// lands on workflow_leases or workflow_payloads.
-	var locked string
-	err = tx.QueryRowContext(ctx, `
-		SELECT id FROM workflow_leases WHERE id = $1 FOR UPDATE
-	`, workflowID).Scan(&locked)
-	if errors.Is(err, sql.ErrNoRows) {
-		return ErrWorkflowNotFound
-	}
+	addressed := workflowID
+	workflowID, err = s.lockChainEndTx(ctx, tx, addressed, hint)
 	if err != nil {
 		return fmt.Errorf("%s workflow: lock: %w", finalStatus, err)
+	}
+	if settled != nil {
+		*settled = workflowID
 	}
 	curStatus, hasDefers, compacted, err := pgRunStateUnderLock(ctx, tx, workflowID)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -2138,9 +2148,7 @@ func (s *PostgresStore) preemptivelySettle(ctx context.Context, workflowID, reas
 	// and every path through CancelWorkflow (finalStatus is never
 	// statusTerminated there), is refused.
 	if isSettledStatus(curStatus) && !(finalStatus == statusTerminated && curStatus == statusDeadLettered) {
-		return adminErrorf(ErrAdminStateConflict,
-			"workflow %s: already settled (status=%s); refusing to write %s over it",
-			workflowID, curStatus, finalStatus)
+		return settledRefusal(addressed, workflowID, curStatus, finalStatus)
 	}
 
 	if deferPhaseOwed(curStatus, hasDefers, compacted) {
@@ -2765,4 +2773,36 @@ func (s *PostgresStore) ClaimDueSchedule(ctx context.Context, name string, expec
 		return false, err
 	}
 	return n == 1, nil
+}
+
+// lockChainEndTx locks the lease of the END of addressed's continue-as-new chain in tx and returns its id, walking from hint (cleat#4340). A run the caller's tenant does not have
+// is returned as it was given, and the caller's own read of it reports it as not found.
+func (s *PostgresStore) lockChainEndTx(ctx context.Context, tx *sql.Tx, addressed, hint string) (string, error) {
+	return lockChainEnd(addressed, hint,
+		func(run string) (string, bool, error) {
+			var status string
+			switch err := tx.QueryRowContext(ctx, `SELECT status FROM workflow_leases WHERE id = $1 AND tenant_id = $2 FOR UPDATE`, run, s.tenantID).Scan(&status); {
+			case errors.Is(err, sql.ErrNoRows):
+				return "", false, nil
+			case err != nil:
+				return "", false, err
+			}
+			return status, true, nil
+		},
+		func(run string) (string, error) {
+			return successorScan(tx.QueryRowContext(ctx, `SELECT id FROM workflow_leases WHERE continued_from = $1 AND tenant_id = $2`, run, s.tenantID))
+		})
+}
+
+// CancelWorkflowReceipt, TerminateWorkflowReceipt and RequestCancellationReceipt implement SettleReceiptStore: the same verbs, saying which run they acted on (cleat#4340).
+func (s *PostgresStore) CancelWorkflowReceipt(ctx context.Context, workflowID, reason string) (SettleReceipt, error) {
+	var acted string
+	err := s.preemptivelySettleTo(ctx, workflowID, reason, statusCancelled, &acted)
+	return settleReceiptFor(workflowID, acted), err
+}
+
+func (s *PostgresStore) TerminateWorkflowReceipt(ctx context.Context, workflowID, reason string) (SettleReceipt, error) {
+	var acted string
+	err := s.preemptivelySettleTo(ctx, workflowID, reason, statusTerminated, &acted)
+	return settleReceiptFor(workflowID, acted), err
 }

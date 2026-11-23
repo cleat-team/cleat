@@ -390,7 +390,10 @@ func (s *apiServer) handleDeadLetterTerminate(w http.ResponseWriter, r *http.Req
 			return
 		}
 	}
-	if err := st.TerminateWorkflow(r.Context(), id, req.Reason); err != nil {
+	rec, err := settleWithReceipt(st, func(rs engine.SettleReceiptStore) (engine.SettleReceipt, error) {
+		return rs.TerminateWorkflowReceipt(r.Context(), id, req.Reason)
+	}, func() error { return st.TerminateWorkflow(r.Context(), id, req.Reason) }, id)
+	if err != nil {
 		// 3.92: the store now reports a terminate that matched nothing rather
 		// than returning nil. callerOwnsTarget above has already answered 404
 		// for an id this tenant does not own, so reaching here means the row
@@ -407,7 +410,7 @@ func (s *apiServer) handleDeadLetterTerminate(w http.ResponseWriter, r *http.Req
 		s.handleAdminOpError(w, r, err)
 		return
 	}
-	s.writeJSON(w, 200, map[string]string{"status": "terminated"})
+	s.writeJSON(w, 200, settleReply("terminated", id, rec))
 }
 
 func (s *apiServer) handleWorkflowRetry(w http.ResponseWriter, r *http.Request, id string) {

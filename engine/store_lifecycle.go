@@ -867,6 +867,17 @@ func (s *PostgresStore) ContinueAsNew(ctx context.Context, currentRunID, workerI
 	if _, err := tx.ExecContext(ctx, `UPDATE workflow_signals SET workflow_id = $1 WHERE workflow_id = $2 AND tenant_id = $3`, newRunID, currentRunID, s.tenantID); err != nil {
 		return "", fmt.Errorf("continue as new: carry the pending signals: %w", err)
 	}
+	// A cooperative cancel requested on the old run and not yet seen belongs to the WORKFLOW too (cleat#4340): a successor created without it is a cancel that was lost. It is
+	// read here, after the old run's completion update holds its lease row, so a RequestCancellation (which locks that row first) cannot change it before this commits. The reason
+	// is copied as it is stored: same tenant, same key.
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE workflow_leases n
+		SET cancellation_requested = true, cancellation_reason = o.cancellation_reason
+		FROM workflow_leases o
+		WHERE n.id = $1 AND o.id = $2 AND n.tenant_id = $3 AND o.tenant_id = $3 AND o.cancellation_requested
+	`, newRunID, currentRunID, s.tenantID); err != nil {
+		return "", fmt.Errorf("continue as new: carry the cancellation request: %w", err)
+	}
 
 	if err := tx.Commit(); err != nil {
 		return "", err

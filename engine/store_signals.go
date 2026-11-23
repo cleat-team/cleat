@@ -13,11 +13,36 @@ import (
 )
 
 func (s *PostgresStore) RequestCancellation(ctx context.Context, workflowID, reason string) error {
+	return s.requestCancellationTo(ctx, workflowID, reason, nil)
+}
+
+// RequestCancellationReceipt implements SettleReceiptStore (cleat#4340).
+func (s *PostgresStore) RequestCancellationReceipt(ctx context.Context, workflowID, reason string) (SettleReceipt, error) {
+	var acted string
+	err := s.requestCancellationTo(ctx, workflowID, reason, &acted)
+	return settleReceiptFor(workflowID, acted), err
+}
+
+// requestCancellationTo sets the cancellation flag on the END of workflowID's continue-as-new chain, under the lease lock that orders it against that run's continue (cleat#4340).
+// A flag set on a run that then continues is carried to its successor by ContinueAsNew, so it is not lost to a guest that never looked at it.
+func (s *PostgresStore) requestCancellationTo(ctx context.Context, workflowID, reason string, settled *string) error {
+	hint, err := latestRunInChain(ctx, workflowID, s.successorOfRun)
+	if err != nil {
+		return fmt.Errorf("request cancellation: resolve the chain: %w", err)
+	}
 	tx, err := s.beginTxWithRLS(ctx)
 	if err != nil {
 		return fmt.Errorf("request cancellation: begin: %w", err)
 	}
 	defer tx.Rollback()
+	end, err := s.lockChainEndTx(ctx, tx, workflowID, hint)
+	if err != nil {
+		return fmt.Errorf("request cancellation: lock: %w", err)
+	}
+	if settled != nil {
+		*settled = end
+	}
+	workflowID = end
 
 	// cleat#2312: cancellation_reason is sensitive-at-rest.
 	tc, err := s.tenantCipherForWrite()
