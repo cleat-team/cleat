@@ -18,7 +18,7 @@ import (
 //
 // A REAL Python workflow built with the pinned componentize-py and run on wasmtime, because what is being tested is what the component CONTAINS,
 // and nothing short of a built component can see that. The fixture does not import any of the modules itself.
-func TestAPythonWorkflowCanCallTheStdlibFunctionsThatImportLate(t *testing.T) {
+func TestPythonWorkflowCanCallTheStdlibFunctionsThatImportLate(t *testing.T) {
 	h := newPythonWasmTestHelper(t)
 	if !h.toolsAvailable() {
 		if toolchainRequired("python") {
