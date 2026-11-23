@@ -213,3 +213,38 @@ func TestTheRawManifestsSpreadWorkersAndBudgetThemTheSameWay(t *testing.T) {
 		t.Errorf("k8s/pdb.yaml maxUnavailable = %v, but charts/cleat/values.yaml podDisruptionBudget.maxUnavailable = %v", b["maxUnavailable"], budget["maxUnavailable"])
 	}
 }
+
+// The migrate Job's pod carries the same selector labels as a worker plus app.kubernetes.io/component=migrate (migrate-job.yaml), so a selector that is only
+// cleat.selectorLabels also selects it. Measured on kind (2026-11-23) with a Job pod labelled that way next to the two workers: the budget went from
+// disruptionsAllowed=1 to 0 and evicting a worker was refused ("would violate the pod's disruption budget"), and the spread counted three pods, not two. It
+// lasts as long as the migrate pod EXISTS, not as long as it runs: a Completed pod did the same (measured, allowed=0), and hook-delete-policy is
+// before-hook-creation,hook-succeeded, so a failed migration's Job and pod stay until the next upgrade attempt, refusing every voluntary eviction of a worker for
+// that whole time. The fix excludes the component by a matchExpressions NotIn, and
+// not by a new label on the workers: a worker label would change the pod template, restarting every worker on upgrade, and the Deployment's own selector is
+// immutable. What this pins is that every selector excludes the value the migrate template ACTUALLY sets, read from that file.
+func TestTheChartsSpreadAndBudgetLeaveTheMigrateJobsPodAlone(t *testing.T) {
+	migrate := readFile(t, "../../charts/cleat/templates/migrate-job.yaml")
+	m := regexp.MustCompile(`(?m)^\s*app\.kubernetes\.io/component:\s*(\S+)\s*$`).FindStringSubmatch(migrate)
+	if m == nil {
+		t.Fatal("migrate-job.yaml sets no app.kubernetes.io/component label: nothing distinguishes its pod from a worker's, so the exclusion below has nothing to exclude")
+	}
+	component := m[1]
+	if !strings.Contains(migrate, `include "cleat.selectorLabels"`) {
+		t.Log("migrate-job.yaml no longer uses cleat.selectorLabels; the exclusion may now be unnecessary, but it is harmless")
+	}
+
+	want := regexp.MustCompile(`key:\s*app\.kubernetes\.io/component\s+operator:\s*NotIn\s+values:\s*\[` + regexp.QuoteMeta(component) + `\]`)
+	dep := renderDeployment(t, readFile(t, deploymentPath), map[string]any{"topologySpread.zoneKey": "topology.kubernetes.io/zone"})
+	block := constraintBlock(dep)
+	constraints := len(reSkew.FindAllString(block, -1))
+	if got := len(want.FindAllString(squashSpace(block), -1)); constraints != 2 || got != constraints {
+		t.Errorf("%d of %d topology constraints exclude component %q", got, constraints, component)
+	}
+	pdb := renderDeployment(t, readFile(t, pdbTemplatePath), nil)
+	if !want.MatchString(squashSpace(pdb)) {
+		t.Errorf("the PodDisruptionBudget does not exclude component %q, so the migrate Job's pod counts against it:\n%s", component, pdb)
+	}
+}
+
+// squashSpace collapses runs of whitespace so a match does not depend on how a block was indented or wrapped.
+func squashSpace(s string) string { return strings.Join(strings.Fields(s), " ") }

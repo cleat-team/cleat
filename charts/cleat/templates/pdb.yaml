@@ -12,4 +12,10 @@ spec:
   selector:
     matchLabels:
       {{- include "cleat.selectorLabels" . | nindent 6 }}
+    # Not the migrate Job's pod, which carries the same selector labels plus component=migrate (migrate-job.yaml): counted
+    # here, it takes the budget to zero allowed disruptions while a migration runs, and a drain stalls.
+    matchExpressions:
+      - key: app.kubernetes.io/component
+        operator: NotIn
+        values: [migrate]
 {{- end }}

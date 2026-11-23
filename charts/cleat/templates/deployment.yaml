@@ -150,6 +150,12 @@ spec:
           labelSelector:
             matchLabels:
               {{- include "cleat.selectorLabels" . | nindent 14 }}
+            # The migrate Job's pod carries the same selector labels plus component=migrate (migrate-job.yaml), and
+            # would otherwise be counted here (cleat#4439).
+            matchExpressions:
+              - key: app.kubernetes.io/component
+                operator: NotIn
+                values: [migrate]
         {{- if .Values.topologySpread.zoneKey }}
         - maxSkew: {{ .Values.topologySpread.maxSkew }}
           topologyKey: {{ .Values.topologySpread.zoneKey }}
@@ -157,5 +163,11 @@ spec:
           labelSelector:
             matchLabels:
               {{- include "cleat.selectorLabels" . | nindent 14 }}
+            # The migrate Job's pod carries the same selector labels plus component=migrate (migrate-job.yaml), and
+            # would otherwise be counted here (cleat#4439).
+            matchExpressions:
+              - key: app.kubernetes.io/component
+                operator: NotIn
+                values: [migrate]
         {{- end }}
       {{- end }}

@@ -291,7 +291,9 @@ affinity: {}
 # Measured on kind (2026-11-23), two workers and one of two nodes cordoned: DoNotSchedule leaves the second
 # worker Pending, and ScheduleAnyway starts it on the same node as the first. On a one-node cluster both
 # values start both workers (a single node is a single topology domain). On two healthy nodes the
-# scheduler's own spreading separates them with or without this; see docs/operations/zero-downtime-deploy.md.
+# scheduler's own spreading separates them with or without this (kube-scheduler's built-in default spread
+# constraints apply to a ReplicaSet's pods that carry none of their own; read, not measured here); the new
+# behaviour is DoNotSchedule and the budget. See docs/operations/zero-downtime-deploy.md.
 #
 # It is topology spread rather than pod anti-affinity so the autoscaler can still go past the node count:
 # with maxSkew 1, three workers on two nodes (2 + 1) is allowed, where required anti-affinity would leave the

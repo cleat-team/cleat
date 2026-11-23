@@ -491,7 +491,10 @@ eviction are the scheduler's and API server's and do not depend on what the cont
 
 Read the first row for what it is: on a healthy cluster the scheduler's own default spreading already
 separates two workers, and it did with the constraint off in 15 of 15 installs (10 of them with a filler pod
-making one node look fuller, up to 96% of its memory requested), and with it on in 15 of 15. The constraint does not change that outcome. It makes the requirement
+making one node look fuller, up to 96% of its memory requested), and with it on in 15 of 15. The constraint does not change that outcome. The likely reason, read from the scheduler's documentation and not
+measured here, is that kube-scheduler applies its own default spread constraints (hostname with `maxSkew: 3`, zone
+with `maxSkew: 5`, both soft) to the pods of a ReplicaSet that carry none of their own, so the soft default here
+largely repeats what is already in force; the new behaviour is strict mode and the budget. It makes the requirement
 explicit, it keeps working as the autoscaler adds pods, and strict mode is what turns "usually" into
 "never". The last row is also the case people expect to go the other way: a single node is a single
 topology domain, so strict mode has nothing to be uneven against and starts both workers. Strict mode
@@ -503,7 +506,13 @@ Ready before it evicts the next. Measured with the Eviction API, two workers bot
 back to back: with the budget the second eviction was refused (`TooManyRequests: Cannot evict pod as it
 would violate the pod's disruption budget`), without it both were accepted. A budget limits voluntary
 disruptions only (a drain, a node-pool upgrade); a node that fails takes its pods regardless. With a
-single replica, `maxUnavailable: 1` does not block the drain.
+single replica, `maxUnavailable: 1` does not block the drain. The budget and the spread constraint select
+the workers and leave out the migrate Job's pod (`app.kubernetes.io/component=migrate`), which carries the same
+selector labels: measured with a Job pod labelled that way running next to two workers, a budget that did not
+exclude it went to zero allowed disruptions and refused to evict a worker (a pod that had finished did the same),
+and one that does exclude it allowed the eviction. A migration that fails leaves its Job and pod in place until the
+next upgrade attempt (`hook-delete-policy: before-hook-creation,hook-succeeded`), so without the exclusion a failed
+migration would refuse every voluntary eviction of a worker until then.
 
 ### Service routing
 
