@@ -154,7 +154,7 @@ func wfeCases() []wfeCase {
 		{name: "replay_found_first", history: []EventRecord{pluginClaimRecord(0, `{"found":true,"payload":"X"}`)}, replaying: true},
 		{name: "replay_claim_sequence", history: recordedClaimSequence(), replaying: true},
 		{name: "replay_malformed_recorded_output", history: []EventRecord{pluginClaimRecord(0, `{}`)}, replaying: true},
-		{name: "replay_recorded_plugin_error", history: []EventRecord{{Step: 0, EventType: EventTypePluginCall, PluginName: "webhook-ingest", PluginFunc: "await_webhook", PluginError: "boom"}}, replaying: true},
+		{name: "replay_recorded_plugin_error", history: []EventRecord{{Step: 0, EventType: EventTypePluginCall, PluginName: "webhook-ingest", PluginFunc: "await_webhook", PluginInput: "{}", PluginError: "boom"}}, replaying: true},
 		{name: "replay_miss_at_the_frontier", history: wfeSeq(1), replaying: true},
 		{name: "replay_wake_then_a_fresh_claim_finds_it", history: wfeSeq(3), replaying: true, outputs: []string{`{"found":true,"payload":"Y"}`}},
 		{name: "replay_wake_then_a_fresh_claim_misses", history: wfeSeq(3), replaying: true},

@@ -184,7 +184,7 @@ func g3hCases() map[string]g3hCase {
 	hb := func(step int) EventRecord {
 		return EventRecord{Step: step, EventType: EventTypeHeartbeat, Service: "svc", Op: "op"}
 	}
-	plain := EventRecord{Step: 0, EventType: EventTypeCall, Service: "svc", Op: "before", Response: `{"ok":true}`}
+	plain := EventRecord{Step: 0, EventType: EventTypeCall, Service: "svc", Op: "before", Request: `{}`, Response: `{"ok":true}`}
 	call := func(step int) EventRecord {
 		return EventRecord{Step: step, EventType: EventTypeCall, Service: "svc", Op: "op", Request: `{}`, Response: `{"ok":true}`}
 	}
