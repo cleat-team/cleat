@@ -67,8 +67,10 @@ not take. The fault-free run asserts it unconditionally, so an op that did not d
 `done` after a fault asserts it too. The scenario `promises` (call, resolve, reject, create, call) puts the kill boundaries on the calls AROUND the three ops,
 so a kill after them and before the last call forces a replay of all three.
 
-**What this cannot reach, stated so it is not discovered later:** a fault INSIDE one of the three calls (between its event being recorded and its store
-write). The boundaries are service requests, and these calls make none. A mutant where a replayed `CreatePromise` runs fresh was caught here, but by the
+**What this cannot reach, stated so it is not discovered later:** a fault INSIDE one of the three calls (since cleat#4335, between its store write and its
+event being recorded; until then, between the event and the write, the other way round). The boundaries are service requests, and these calls make none. A fault there now
+leaves a promise row with no event, so the replay runs the call again and the row check above would read it as a create that ran twice: that is the crash window the change moved
+it to on purpose, and a `dbwrite` row for it needs a boundary that is not a service request, which this harness does not have. A mutant where a replayed `CreatePromise` runs fresh was caught here, but by the
 final-status check (a replay divergence), not by the row check; the row check's two branches were each proven by a guest mutant (a resolve that never happens;
 a create made twice).
 

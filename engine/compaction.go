@@ -693,11 +693,14 @@ func extractCompactionStateFrom(prev *CompactionState, events []EventRecord) (*C
 		case EventTypeCreatePromise:
 			ce.PromiseName = ev.PromiseName
 			ce.PromiseID = ev.PromiseID
+			// A store write that failed (cleat#4335): replay answers the call from it, so a compacted region that dropped it would answer success.
+			ce.Error = ev.Err
 		case EventTypeAwaitPromise:
 			ce.PromiseID = ev.PromiseID
 		case EventTypePromiseResolved:
 			ce.PromiseID = ev.PromiseID
 			ce.PromiseResult = ev.PromiseResult
+			ce.Error = ev.Err // see EventTypeCreatePromise above (cleat#4335)
 			// Service and Op are what tell a resolve_promise CALL from an await of a promise that was already settled, which records
 			// this same event type (cleat#4079): a killed run's stop point is chosen by them (isStoppableEvent). A compacted region
 			// that dropped them would make every settlement in it a non-stop-point, so the cleanup of exactly the oldest runs would
@@ -708,6 +711,7 @@ func extractCompactionStateFrom(prev *CompactionState, events []EventRecord) (*C
 		case EventTypePromiseRejected:
 			ce.PromiseID = ev.PromiseID
 			ce.PromiseError = ev.PromiseError
+			ce.Error = ev.Err // see EventTypeCreatePromise above (cleat#4335)
 			ce.Service = ev.Service
 			ce.Op = ev.Op
 		case EventTypeUpdateHandler:
@@ -914,16 +918,19 @@ func buildFullHistoryFromCompaction(tail []EventRecord, cs *CompactionState) []E
 		case EventCodeCreatePromise:
 			rec.PromiseName = ce.PromiseName
 			rec.PromiseID = ce.PromiseID
+			rec.Err = ce.Error
 		case EventCodeAwaitPromise:
 			rec.PromiseID = ce.PromiseID
 		case EventCodePromiseResolved:
 			rec.PromiseID = ce.PromiseID
 			rec.PromiseResult = ce.PromiseResult
+			rec.Err = ce.Error
 			rec.Service = ce.Service
 			rec.Op = ce.Op
 		case EventCodePromiseRejected:
 			rec.PromiseID = ce.PromiseID
 			rec.PromiseError = ce.PromiseError
+			rec.Err = ce.Error
 			rec.Service = ce.Service
 			rec.Op = ce.Op
 		case EventCodeUpdateHandler:
