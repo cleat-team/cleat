@@ -21,6 +21,17 @@ spec:
       # this is what makes each pod resolvable as <pod-name>.cleat-worker-headless,
       # rather than just reachable through the load-balanced ClusterIP above.
       subdomain: cleat-worker-headless
+      # Keeps two workers off one node (cleat#4439), the same default as charts/cleat/values.yaml's topologySpread.
+      # A PREFERENCE, not a refusal: ScheduleAnyway lets a one-node cluster, or one whose other nodes are full or
+      # cordoned, still start every worker. For a Pending pod instead of two workers on one node, change it to
+      # DoNotSchedule. It is spread rather than anti-affinity so the autoscaler can go past the node count.
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: cleat-worker
       containers:
         - name: worker
           image: cleat-worker:latest

@@ -275,5 +275,52 @@ nodeSelector: {}
 # -- Pod tolerations.
 tolerations: []
 
-# -- Pod affinity rules.
+# -- Pod affinity rules. Left to you: the chart sets none, and what keeps the workers on different nodes is
+# topologySpread below, not this. If you set podAntiAffinity here as well, a cluster with fewer nodes than
+# replicas will leave the extra pods Pending when the rule is "required", which topologySpread does not do.
 affinity: {}
+
+# -- Spread the worker pods across nodes, so two workers do not share one machine (cleat#4439). The owner's
+# requirement is that the two workers the autoscaler keeps as a floor are on separate hardware, which needs
+# at least TWO schedulable nodes: on a one-node cluster both workers run on it, whatever this is set to.
+#
+# THE DEFAULT SPREADS BUT DOES NOT REFUSE. `whenUnsatisfiable: ScheduleAnyway` makes this a preference the
+# scheduler weighs heavily, not a rule: on a one-node cluster, or when the other node is full, cordoned or
+# tainted, the pods still start, together. That is deliberate, so the chart installs and runs everywhere. If
+# you would rather have a Pending pod than two workers on one node, set whenUnsatisfiable to DoNotSchedule.
+# Measured on kind (2026-11-23), two workers and one of two nodes cordoned: DoNotSchedule leaves the second
+# worker Pending, and ScheduleAnyway starts it on the same node as the first. On a one-node cluster both
+# values start both workers (a single node is a single topology domain). On two healthy nodes the
+# scheduler's own spreading separates them with or without this (kube-scheduler's built-in default spread
+# constraints apply to a ReplicaSet's pods that carry none of their own; read, not measured here); the new
+# behaviour is DoNotSchedule and the budget. See docs/operations/zero-downtime-deploy.md.
+#
+# It is topology spread rather than pod anti-affinity so the autoscaler can still go past the node count:
+# with maxSkew 1, three workers on two nodes (2 + 1) is allowed, where required anti-affinity would leave the
+# third Pending.
+topologySpread:
+  # -- Render the constraint. false renders none and leaves placement to the scheduler's own spreading.
+  enabled: true
+  # -- The largest allowed difference in pod count between any two nodes.
+  maxSkew: 1
+  # -- The node label that defines "separate hardware". kubernetes.io/hostname is one domain per node.
+  topologyKey: kubernetes.io/hostname
+  # -- ScheduleAnyway (prefer, never refuse; the default) or DoNotSchedule (refuse: a pod that cannot be
+  # placed within maxSkew stays Pending). Anything else is rejected by the API server when applied.
+  whenUnsatisfiable: ScheduleAnyway
+  # -- Also spread across zones, by this node label (for example topology.kubernetes.io/zone). Empty adds no
+  # second constraint. Uses the same maxSkew, with its own whenUnsatisfiable below.
+  zoneKey: ""
+  # -- whenUnsatisfiable for the zone constraint. Defaults to a preference: a cluster with one zone, or
+  # nodes that carry no zone label, still schedules.
+  zoneWhenUnsatisfiable: ScheduleAnyway
+
+# -- A PodDisruptionBudget for the workers (cleat#4439), so a node drain evicts one worker at a time and
+# cannot take both of the autoscaler's floor of two. With one replica it allows the drain, because
+# maxUnavailable 1 of 1 is not a block.
+podDisruptionBudget:
+  # -- Render the budget. false renders none, and a drain may evict every worker at once.
+  enabled: true
+  # -- How many workers a voluntary disruption (a drain, an upgrade of the node pool) may take down at once.
+  # An integer, or a percentage string such as "25%".
+  maxUnavailable: 1
