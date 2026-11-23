@@ -89,3 +89,35 @@ func CompiledSizeEstimate(wasmLen int) int64 {
 	}
 	return int64(wasmLen) * CompiledSizeEstimateMultiplier
 }
+
+// CompiledComponentSizeEstimate returns the estimated resident cost of one cached COMPILED COMPONENT, from the length of its serialized artifact
+// (wasmtime_component_serialize), at 3.5 times that length.
+//
+// WHY NOT CompiledSizeEstimate. That estimate is 4x the wasm length, from a table of core modules where the compiled artifact is the wasm's own code
+// (2.1x to 3.1x it). A component's wasm is mostly NOT code: the CPython component carries a 10.6 MiB memory snapshot and, since cleat#4382, 11.6 MiB
+// of zero-filled gaps, none of which is compiled. So the wasm length does not predict the compiled cost: measured 2026-11-23 (arm64 Linux, wasmtime 48,
+// entries 2 to 5 of five distinct components compiled into one engine, RssAnon after malloc_trim, two repetitions):
+//
+//	component                       wasm      est 4x   serialized   live per entry (mean)   live / serialized
+//	Python (componentize-py)      17.6 MiB    70.5 MiB   31.9 MiB        95.3 MiB              3.0x
+//	Python (harness fixture)      18.4 MiB    73.6 MiB   43.7 MiB       110.9 MiB              2.5x
+//	Python (densified, #4382)     28.7 MiB   114.6 MiB   42.5 MiB       102.6 MiB              2.4x
+//	C# (defer_order)               1.0 MiB     4.0 MiB    3.1 MiB         8.9 MiB              2.9x
+//	C# (conformance)               2.8 MiB    11.3 MiB    8.5 MiB        16.7 MiB              2.0x
+//
+// The old estimate UNDER-counted the three Python components by 1.35 to 1.5x and the C# ones by 1.5 to 2.2x, and the densified component, 1.6x the wasm
+// length of the others and the SAME live cost, is over-counted instead. The serialized length tracks the live cost within 2.0x to 3.0x for all five, so
+// 3.5x clears the largest measured ratio by about 17%: the same rule as CompiledSizeEstimateMultiplier, that an estimate which under-counts is the failure
+// this bound cannot tolerate. The live figures are noisy (a single entry read from 34 to 147 MiB for one component, the allocator retaining and returning
+// scratch), which is why this is a ratio over means and not a per-entry guarantee; the first component an engine compiles costs far more again (about
+// 200 MiB live, 480 MiB at its high-water mark), and that is the engine and the compile scratch, which no per-entry bound covers.
+//
+// The serialization this needs costs a transient allocation the size of the artifact (33 to 46 MiB for Python), once per compile, under the compile lock,
+// next to a compile that already peaks near 500 MiB. Where it fails, the caller falls back to CompiledSizeEstimate over the wasm, which is what it charged
+// before.
+func CompiledComponentSizeEstimate(serializedLen int) int64 {
+	if serializedLen <= 0 {
+		return 0
+	}
+	return int64(serializedLen) * 7 / 2
+}

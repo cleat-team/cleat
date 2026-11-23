@@ -155,14 +155,15 @@ func TestConcurrentFirstCallsOfOneComponentCompileItOnce(t *testing.T) {
 // running A, B, C evicts A, and running A again must work and must compile again.
 func TestComponentsAreEvictedByTheByteBoundAndStillRunAfterwards(t *testing.T) {
 	a, bb, c := distinctComponent(t, 0), distinctComponent(t, 1), distinctComponent(t, 2)
-	maxLen := len(a)
-	for _, w := range [][]byte{bb, c} {
-		if len(w) > maxLen {
-			maxLen = len(w)
+	// What each is CHARGED is 3.5x its serialized artifact (cleat#4389), so the bound is sized from what these components really cost, not from their wasm.
+	charge := int64(0)
+	for _, w := range [][]byte{a, bb, c} {
+		if est := componentChargeOf(t, w); est > charge {
+			charge = est
 		}
 	}
 	// Room for two estimates, not three.
-	bound := CompiledSizeEstimate(maxLen)*2 + CompiledSizeEstimate(maxLen)/2
+	bound := charge*2 + charge/2
 	b := newComponentBackend(t, WithWasmtimeModuleCacheMaxBytes(bound))
 	t.Cleanup(func() { _ = b.Close(context.Background()) })
 
@@ -392,10 +393,19 @@ func TestTheCheckedInPythonComponentIsCompiledOnce(t *testing.T) {
 	if got := compilesOf(b); got != 1 {
 		t.Fatalf("three calls on the Python component compiled it %d time(s), want 1", got)
 	}
-	// It is resident, and costed as a Python component is: 4x the wasm, 77 MB, which
-	// is inside the default 512 MB bound with room for others.
-	if got, want := b.moduleCache.estimatedBytes(), CompiledSizeEstimate(len(wasm)); got != want {
-		t.Fatalf("cache estimates %d bytes for the Python component, want %d", got, want)
+	// It is resident, and costed as a COMPONENT is: 3.5x its serialized artifact (CompiledComponentSizeEstimate), not 4x its wasm, which measured
+	// 1.35 to 1.5x under the live cost of a Python component (cleat#4389). It must still fit the default 512 MB bound with room for another.
+	held, err := b.acquireComponent(wasm)
+	if err != nil {
+		t.Fatalf("acquiring the cached component: %v", err)
+	}
+	serialized, ok := componentSerializedLen(held)
+	cgotestReleaseComponent(held)
+	if !ok {
+		t.Fatal("UNMEASURED: the cached component would not serialize")
+	}
+	if got, want := b.moduleCache.estimatedBytes(), CompiledComponentSizeEstimate(serialized); got != want {
+		t.Fatalf("cache estimates %d bytes for the Python component, want %d (3.5x its %d-byte serialized artifact)", got, want, serialized)
 	}
 	if b.moduleCache.estimatedBytes() > DefaultModuleCacheMaxBytes {
 		t.Fatalf("one Python component alone exceeds the default byte bound (%d > %d)",
@@ -449,4 +459,22 @@ func TestACacheHitStillRefusesAnAlreadySpentDeadline(t *testing.T) {
 	if got := compilesOf(b); got != 1 {
 		t.Fatalf("the spent-deadline call compiled again (%d compiles total): it was not a cache hit", got)
 	}
+}
+
+// componentChargeOf is what the cache charges for wasm once compiled: CompiledComponentSizeEstimate over its serialized artifact. It compiles on a
+// backend of its own so the measurement leaves nothing in the cache under test.
+func componentChargeOf(t *testing.T, wasm []byte) int64 {
+	t.Helper()
+	b := newComponentBackend(t)
+	defer func() { _ = b.Close(context.Background()) }()
+	c, err := b.acquireComponent(wasm)
+	if err != nil {
+		t.Fatalf("UNMEASURED: compiling the component to learn its charge: %v", err)
+	}
+	n, ok := componentSerializedLen(c)
+	cgotestReleaseComponent(c)
+	if !ok || n <= 0 {
+		t.Fatalf("UNMEASURED: the compiled component would not serialize (%d, %v)", n, ok)
+	}
+	return CompiledComponentSizeEstimate(n)
 }

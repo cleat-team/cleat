@@ -51,10 +51,10 @@ func TestAReleaseRunsAfterTheCacheLockIsDropped(t *testing.T) {
 		_ = c.len() // takes c.mu: deadlocks if the lock is still held
 		first.release()
 		close(done)
-	}, 100)
+	}, CompiledSizeEstimate(100))
 
 	if !finishesWithin(5*time.Second, func() {
-		c.storeHeld("b", &fakeHeld{id: 2}, func() {}, 100) // evicts "a"
+		c.storeHeld("b", &fakeHeld{id: 2}, func() {}, CompiledSizeEstimate(100)) // evicts "a"
 	}) {
 		t.Fatal("storeHeld did not return: the release of an evicted entry is being run under the cache's lock")
 	}
@@ -67,8 +67,8 @@ func TestAReleaseRunsAfterTheCacheLockIsDropped(t *testing.T) {
 func TestLoadHeldTakesTheCallersReferenceAndMarksTheEntryRecentlyUsed(t *testing.T) {
 	c := newModuleLRU(2, 1<<30)
 	a, b := &fakeHeld{id: 1}, &fakeHeld{id: 2}
-	c.storeHeld("a", a, a.release, 100)
-	c.storeHeld("b", b, b.release, 100)
+	c.storeHeld("a", a, a.release, CompiledSizeEstimate(100))
+	c.storeHeld("b", b, b.release, CompiledSizeEstimate(100))
 
 	var acquired atomic.Int32
 	got, ok := c.loadHeld("a", func(h any) any { acquired.Add(1); return h })
@@ -80,7 +80,7 @@ func TestLoadHeldTakesTheCallersReferenceAndMarksTheEntryRecentlyUsed(t *testing
 	}
 
 	// "a" was just used, so inserting a third evicts "b", not "a".
-	c.storeHeld("c", &fakeHeld{id: 3}, func() {}, 100)
+	c.storeHeld("c", &fakeHeld{id: 3}, func() {}, CompiledSizeEstimate(100))
 	if a.released.Load() != 0 {
 		t.Fatal("the entry that was just loaded was evicted instead of the least recently used one")
 	}
@@ -95,8 +95,8 @@ func TestLoadHeldTakesTheCallersReferenceAndMarksTheEntryRecentlyUsed(t *testing
 func TestReplacingAHeldEntryReleasesTheOldReference(t *testing.T) {
 	c := newModuleLRU(10, 1<<30)
 	old, fresh := &fakeHeld{id: 1}, &fakeHeld{id: 2}
-	c.storeHeld("k", old, old.release, 100)
-	c.storeHeld("k", fresh, fresh.release, 100)
+	c.storeHeld("k", old, old.release, CompiledSizeEstimate(100))
+	c.storeHeld("k", fresh, fresh.release, CompiledSizeEstimate(100))
 
 	if old.released.Load() != 1 {
 		t.Fatalf("the replaced reference was released %d time(s), want 1; otherwise it leaks", old.released.Load())
@@ -115,8 +115,8 @@ func TestReplacingAHeldEntryReleasesTheOldReference(t *testing.T) {
 func TestDrainReleasesHeldEntriesAndLeavesModulesAlone(t *testing.T) {
 	c := newModuleLRU(10, 1<<30)
 	h1, h2 := &fakeHeld{id: 1}, &fakeHeld{id: 2}
-	c.storeHeld("h1", h1, h1.release, 100)
-	c.storeHeld("h2", h2, h2.release, 100)
+	c.storeHeld("h1", h1, h1.release, CompiledSizeEstimate(100))
+	c.storeHeld("h2", h2, h2.release, CompiledSizeEstimate(100))
 	// A module entry, stored the way the core path stores one: no held artifact.
 	c.store("m", nil, 100)
 
@@ -142,7 +142,7 @@ func TestDrainReleasesHeldEntriesAndLeavesModulesAlone(t *testing.T) {
 func TestHeldEntriesAndModulesAreBoundedTogether(t *testing.T) {
 	c := newModuleLRU(100, CompiledSizeEstimate(100)*2+10)
 	h := &fakeHeld{id: 1}
-	c.storeHeld("h", h, h.release, 100)
+	c.storeHeld("h", h, h.release, CompiledSizeEstimate(100))
 	c.store("m1", nil, 100)
 	c.store("m2", nil, 100) // three entries' estimates against room for two
 
@@ -165,7 +165,7 @@ func TestAReleaseTriggeredByAModuleInsertRunsAfterTheCacheLockIsDropped(t *testi
 	c.storeHeld("held", &fakeHeld{id: 1}, func() {
 		_ = c.len()
 		close(done)
-	}, 100)
+	}, CompiledSizeEstimate(100))
 
 	if !finishesWithin(5*time.Second, func() {
 		c.store("module", nil, 100) // evicts the held entry through store, not storeHeld
@@ -181,7 +181,7 @@ func TestAReleaseTriggeredByADrainRunsAfterTheCacheLockIsDropped(t *testing.T) {
 	c.storeHeld("held", &fakeHeld{id: 1}, func() {
 		_ = c.len()
 		close(done)
-	}, 100)
+	}, CompiledSizeEstimate(100))
 
 	if !finishesWithin(5*time.Second, c.drainHeld) {
 		t.Fatal("drainHeld did not return: a release it triggered is being run under the cache's lock")
@@ -197,10 +197,10 @@ func TestAReleaseTriggeredByAReplaceRunsAfterTheCacheLockIsDropped(t *testing.T)
 	c.storeHeld("k", &fakeHeld{id: 1}, func() {
 		_ = c.len()
 		close(done)
-	}, 100)
+	}, CompiledSizeEstimate(100))
 
 	if !finishesWithin(5*time.Second, func() {
-		c.storeHeld("k", &fakeHeld{id: 2}, func() {}, 100)
+		c.storeHeld("k", &fakeHeld{id: 2}, func() {}, CompiledSizeEstimate(100))
 	}) {
 		t.Fatal("storeHeld did not return: the release of a replaced entry is being run under the cache's lock")
 	}

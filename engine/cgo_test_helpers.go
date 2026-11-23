@@ -605,3 +605,6 @@ func (b *wasmtimeBackend) cgotestDispatchPayload(name, answers string, args ...a
 	}
 	return out, nil
 }
+
+// cgotestReleaseComponent deletes the reference a test took with acquireComponent.
+func cgotestReleaseComponent(c *C.wasmtime_component_t) { C.wasmtime_component_delete(c) }

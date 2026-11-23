@@ -1140,6 +1140,35 @@ Both outliers fail safely: tiny modules (that row was one) run high but cost ten
 of kilobytes, and debug builds run low so the estimate over-counts them
 further. Over-counting shrinks the cache; it cannot overrun the bound.
 
+**Components are costed differently, from 2026-11-23 (cleat#4389).** A Python or C# component
+is costed at **3.5× its serialized compiled artifact**, not 4× its wasm. A component's wasm is
+mostly a memory snapshot (and, for Python since cleat#4382, zero-filled gaps), none of which
+compiles to anything, so its length does not predict what the cache holds. Measured on
+2026-11-23 (arm64 Linux, wasmtime 48; entries 2 to 5 of five distinct components compiled into
+one engine, RssAnon after `malloc_trim`, two repetitions):
+
+| component | wasm | old charge (4× wasm) | serialized | live per entry | live ÷ serialized | new charge |
+|---|---|---|---|---|---|---|
+| Python (componentize-py) | 17.6 MiB | 70.5 MiB | 31.9 MiB | 95 MiB | 3.0× | 111.5 MiB |
+| Python (plugin-harness fixture) | 18.4 MiB | 73.6 MiB | 43.7 MiB | 111 MiB | 2.5× | 152.9 MiB |
+| Python (densified, cleat#4382) | 28.7 MiB | 114.6 MiB | 42.5 MiB | 103 MiB | 2.4× | 148.8 MiB |
+| C# (defer_order) | 1.0 MiB | 4.0 MiB | 3.1 MiB | 8.9 MiB | 2.9× | 10.7 MiB |
+| C# (conformance) | 2.8 MiB | 11.3 MiB | 8.5 MiB | 16.7 MiB | 2.0× | 29.6 MiB |
+
+The old charge under-counted every component that was not densified (Python by 1.35 to 1.5×,
+C# by 1.5 to 2.2×), which is the direction this bound cannot tolerate. The live figures are
+noisy (a single entry read from 34 to 147 MiB for one Python component), so the ratio is over
+means, not a per-entry guarantee. **The first component an engine compiles costs far more
+than any later one** (about 200 MiB live and about 480 MiB at its high-water mark for Python:
+the engine and the compile scratch), and no per-entry bound covers that.
+
+**What this means for a deployment:** at the default 512 MB a worker now holds about **three**
+distinct Python components, not six, and a fourth evicts the least recently used and recompiles
+it (about 1.5 s and a transient of several hundred MB). That is what holding them costs, now
+stated. A deployment that runs more than three distinct Python workflows should raise
+`--wasm-module-cache-max-mb`, and should size the container for the live figure above, about
+100 MiB per entry plus the first compile's high-water mark.
+
 Observe it with `cleat_wasm_compiled_module_cache_bytes`, beside the entries
 gauge.
 

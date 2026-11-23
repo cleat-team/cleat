@@ -367,6 +367,7 @@ var (
 			"AssemblyScript artifacts (high ratio, negligible bytes) and debug builds (low ratio, so the "+
 			"estimate over-counts and the cache merely holds fewer). Over-counting shrinks the cache; it "+
 			"cannot overrun this bound. See engine.CompiledSizeEstimateMultiplier for the measurements.\n"+
+			"A COMPONENT (Python, C#) is costed differently: at 3.5x its serialized compiled artifact, because most of a component's wasm is a memory snapshot rather than code, so its length does not predict the cost (a Python component counts about 150 MB). See engine.CompiledComponentSizeEstimate.\n"+
 			"Observe with cleat_wasm_compiled_module_cache_bytes. cleat#1907.")
 	schemaName                       = flag.String("schema", "public", "PostgreSQL schema for cleat tables (default \"public\"). Sets search_path on connections; CREATE SCHEMA IF NOT EXISTS on startup.")
 	disableChecksumVerification      = flag.Bool("disable-checksum-verification", false, "Disable event history checksum verification on replay (default: enabled)")
