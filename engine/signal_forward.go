@@ -13,8 +13,10 @@ import (
 //   - a signal already stored on a run when it continues is CARRIED to the successor, in the continue's own transaction;
 //   - the two cannot miss each other, because a delivery and a continue are ordered by ONE row, the old run's lease: a delivery locks it before it decides, and the continue's completion UPDATE of the
 //     same row waits for any delivery that holds it (see lockChainEnd and each store's ContinueAsNew). Removing the delivery's lock lets signals strand, which the race test shows. A lock taken by the
-//     continue BEFORE its other writes was tried and removed: no test needed it, and the argument for it (a deadlock against a delivery reading the chain) does not hold, because a delivery reads a
-//     successor only from a run that is already `done`, whose continue has committed.
+//     continue BEFORE its other writes was tried and removed because no test needed it. THAT DOES NOT SHOW A DEADLOCK IS IMPOSSIBLE, and an earlier version of this comment said it was: CI
+//     chose one SQL Server delivery as a deadlock victim in 96 (cleat#4340), at the statement that locks the run, and the cause was never found (not reproduced in about 100 local runs, including
+//     under CPU starvation). So the SQL Server delivery is retried as a whole when it is the victim (MSSQLStore.DeliverSignalReceipt); whether the continue's lock-first would have prevented that
+//     deadlock is not known, and nothing here claims it.
 //
 // Until #4343 a signal to a continued run was accepted and read by no one; #4343 refused it and named the successor. This is the answer the original design gave.
 

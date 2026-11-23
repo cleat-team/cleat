@@ -30,6 +30,26 @@ func (s *MSSQLStore) DeliverSignalIdempotent(ctx context.Context, workflowID, si
 // DeliverSignalReceipt implements SignalReceiptStore: a delivery, keyed when idempotencyKey is not empty, that says where the signal went (cleat#4340). The signal goes to the END of the
 // addressed run's chain; see signal_forward.go and PostgresStore.DeliverSignalReceipt.
 func (s *MSSQLStore) DeliverSignalReceipt(ctx context.Context, workflowID, signalName, payload, idempotencyKey string) (SignalReceipt, error) {
+	// A delivery is ONE transaction, so a deadlock victim (1205) is retried as a whole: SQL Server has rolled the victim back entirely, the idempotency key claimed inside it with it, so a replay
+	// is exactly-once safe (withRollbackGuaranteedRetry retries only errors the server guarantees it undid). It is bounded, mssqlTxRetries retries with a doubling delay, and a delivery that
+	// is still a victim after that returns the error as it always would have: the loop ends because the budget does, not because the deadlock stops.
+	//
+	// This exists because one delivery in 96 was chosen as a victim in CI's race test (cleat#4340) and the cause was never found: it did not reproduce in about 100 local runs, so the locking
+	// argument that said it could not happen was wrong in a way nobody has seen the inside of.
+	var receipt SignalReceipt
+	err := withRollbackGuaranteedRetry(ctx, "deliver signal", mssqlTxRetries, mssqlTxRetryDelay, func() error {
+		var err error
+		receipt, err = s.deliverSignalReceiptOnce(ctx, workflowID, signalName, payload, idempotencyKey)
+		return err
+	})
+	if err != nil {
+		return SignalReceipt{}, err
+	}
+	return receipt, nil
+}
+
+// deliverSignalReceiptOnce is one attempt: the whole delivery in one transaction.
+func (s *MSSQLStore) deliverSignalReceiptOnce(ctx context.Context, workflowID, signalName, payload, idempotencyKey string) (SignalReceipt, error) {
 	// An UNLOCKED read of the chain's end, before the transaction so its second connection is not held while this call holds one; lockChainEnd checks it again under the lock.
 	hint, err := latestRunInChain(ctx, workflowID, s.successorOfRun)
 	if err != nil {
