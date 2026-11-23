@@ -378,6 +378,12 @@ func (b *wasmtimeBackend) compileComponentMiss(key string, wasmBytes []byte) (*C
 			return nil, false, err
 		}
 	}
+	// A component refused for want of memory within the window is answered the same way without waiting for a turn or reading the memory again.
+	if h := b.compileHeadroom; h != nil {
+		if left, refused := h.refusalFor(key); refused {
+			return nil, false, h.refusal(0, h.needFor(len(wasmBytes)), true, left)
+		}
+	}
 	if sem := b.componentCompileSem; sem != nil {
 		start := time.Now()
 		sem <- struct{}{}
@@ -420,6 +426,22 @@ func (b *wasmtimeBackend) compileComponentMiss(key string, wasmBytes []byte) (*C
 			"artifact error means the child could not run or write (is the system temp directory writable and not full?), and the worker's own binary is the child, so a binary replaced under a running worker "+
 			"does it. Counted on cleat_component_precompile_fallbacks_total{reason}. To compile in this process on purpose, set --component-precompile=false",
 			"reason", reason, "fallbacks_total", n, "error", err)
+	}
+	// The compile below runs in THIS process: the fallback after a child that failed, or every compile with precompile off. Look at the memory left NOW, inside our turn, so the compile
+	// ahead of us has already kept what it keeps.
+	if h := b.compileHeadroom; h != nil {
+		refusal, unreadable := h.check(key, len(wasmBytes))
+		if refusal != nil {
+			var ref *ComponentCompileRefusedError
+			if errors.As(refusal, &ref) {
+				b.log().Error("component not compiled in this process: not enough memory left; returning the run to the queue and keeping the components already compiled running",
+					"headroom_mib", ref.HeadroomBytes>>20, "needed_mib", ref.NeededBytes>>20, "memory_limit_mib", ref.MemoryLimitBytes>>20, "retry_after", ref.RetryAfter.Round(time.Second), "reason", ref.Reason)
+			}
+			return nil, false, refusal
+		}
+		if unreadable && h.unreadable.CompareAndSwap(false, true) {
+			b.log().Warn("the memory left in this container could not be read, so an in-process component compile is not checked against it")
+		}
 	}
 	comp, err := componentCompileFunc(b.engine, wasmBytes)
 	return comp, true, err

@@ -95,3 +95,54 @@ func TestTheInProcessFallbackAfterAFailedChildAlsoTakesItsTurn(t *testing.T) {
 		t.Errorf("%d fallback compiles ran at once; want 1", max.Load())
 	}
 }
+
+// The two tests above build their own backend, so they prove compileComponentMiss serialises when it is HANDED a semaphore, not that the worker's backend has one: deleting the line in
+// NewWasmtimeBackend, or in PerExecution's copy, left every one of them green (cleat-review3, mutant X1). This is the worker's own path: a backend from NewWasmtimeBackend, copies of it
+// the way each execution takes them, and the six distinct components through THOSE.
+func TestTheBackendTheWorkerBuildsSharesOneCompileSemaphoreAndHeadroomWithEveryExecutionCopy(t *testing.T) {
+	restore, max, calls := countingCompile(t)
+	defer restore()
+
+	b, err := NewWasmtimeBackend(t.Context(), WithWasmtimeCompileHeadroom(func() (uint64, bool) { return 8 << 30, true }, 800<<20, time.Minute, 16<<30))
+	if err != nil {
+		t.Fatalf("NewWasmtimeBackend: %v", err)
+	}
+	defer b.Close(t.Context())
+
+	if b.componentCompileSem == nil || cap(b.componentCompileSem) != 1 {
+		t.Fatalf("the backend NewWasmtimeBackend builds has no one-slot compile semaphore (%v): a worker would compile distinct components at once", b.componentCompileSem)
+	}
+	if b.compileHeadroom == nil {
+		t.Fatal("the backend NewWasmtimeBackend builds dropped the compile headroom option")
+	}
+	copies := make([]*wasmtimeBackend, 6)
+	for i := range copies {
+		c, ok := b.PerExecution(time.Second).(*wasmtimeBackend)
+		if !ok {
+			t.Fatalf("PerExecution returned a %T", b.PerExecution(time.Second))
+		}
+		if c.componentCompileSem != b.componentCompileSem {
+			t.Fatalf("copy %d has its own compile semaphore, not the worker's: two executions would compile at once", i)
+		}
+		if c.compileHeadroom != b.compileHeadroom {
+			t.Fatalf("copy %d dropped the compile headroom check", i)
+		}
+		copies[i] = c
+	}
+
+	var wg sync.WaitGroup
+	for i, c := range copies {
+		wg.Add(1)
+		go func(i int, c *wasmtimeBackend) {
+			defer wg.Done()
+			_, _, _ = c.compileComponentMiss(fmt.Sprintf("worker-component-%d", i), []byte{0})
+		}(i, c)
+	}
+	wg.Wait()
+	if calls.Load() != 6 {
+		t.Fatalf("%d of 6 compiles ran", calls.Load())
+	}
+	if max.Load() != 1 {
+		t.Errorf("%d compiles ran at once through the worker's own backend and its copies; want 1", max.Load())
+	}
+}

@@ -3211,7 +3211,7 @@ func applyEngineGlobalsFromFlags() {
 // and StoreLimits (memory/table/instance ceilings), plus optional fuel-based instruction metering when --wasm-instruction-limit is set.
 // The memory limit is the flag's value, or the engine's default (256 MiB) for 0: see wasmtimeMemoryLimitBytes.
 func wasmtimeOptionsFromFlags(logger *slog.Logger) []engine.WasmtimeOption {
-	return append(componentPrecompileOptionFromFlags(logger), []engine.WasmtimeOption{
+	return append(append(componentPrecompileOptionFromFlags(logger), compileHeadroomOptionFromFlags(logger)...), []engine.WasmtimeOption{
 		engine.WithWasmtimeExecutionTimeout(*wasmInstanceTimeout),
 		engine.WithWasmtimeInstructionLimit(uint64(*wasmInstructionLimit)),
 		engine.WithWasmtimeMemoryLimits(wasmtimeMemoryLimitBytes(*wasmMemoryMaxMB), 0, 0),

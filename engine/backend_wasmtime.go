@@ -131,6 +131,9 @@ type wasmtimeBackend struct {
 	// by every PerExecution copy, like compileLocks.
 	componentCompileSem chan struct{}
 
+	// compileHeadroom, when non-nil, refuses an in-process component compile the container has no memory left for (WithWasmtimeCompileHeadroom). Shared by every PerExecution copy.
+	compileHeadroom *compileHeadroom
+
 	// precompiler, when non-nil, compiles components in a child process (WithWasmtimeComponentPrecompile). Shared by every PerExecution copy; the root backend owns its directory.
 	precompiler *componentPrecompiler
 	metaCache   *sync.Map // per-key *wasmMeta (envNeeded, hasWasi, language)
@@ -228,6 +231,7 @@ func NewWasmtimeBackend(ctx context.Context, opts ...WasmtimeOption) (*wasmtimeB
 		components:          newComponentCache(moduleCache),
 		compileLocks:        new(sync.Map),
 		componentCompileSem: make(chan struct{}, 1),
+		compileHeadroom:     bcfg.compileHeadroom,
 		metaCache:           new(sync.Map),
 		limits:              lim,
 		logger:              bcfg.logger,
@@ -340,6 +344,7 @@ func (b *wasmtimeBackend) PerExecution(tenantInstanceTimeout time.Duration) Wasm
 		components:          b.components,
 		compileLocks:        b.compileLocks,
 		componentCompileSem: b.componentCompileSem,
+		compileHeadroom:     b.compileHeadroom,
 		precompiler:         b.precompiler,
 		metaCache:           b.metaCache,
 		limits:              lim,
