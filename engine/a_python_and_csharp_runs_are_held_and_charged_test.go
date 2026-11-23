@@ -62,9 +62,9 @@ func TestGoPythonAndCSharpAreHeldAndEveryOtherLanguageIsRefused(t *testing.T) {
 // The numbers are the larger measured figure per language (WS-cleat1's and design section 9a's), rounded up; a change to them is a change to a measurement and has to say so here.
 func TestTheChargesAreTheMeasuredFiguresRoundedUp(t *testing.T) {
 	const mib = 1 << 20
-	for lang, want := range map[string]uint64{"go": 24, "python": 17, "csharp": 66} {
+	for lang, want := range map[string]uint64{"go": 24, "python": 3, "csharp": 18} {
 		if got := defaultResidentInstanceBytes[lang] / mib; got != want {
-			t.Errorf("%s per instance = %d MiB, want %d (the larger measured figure, rounded up: 19.6 / 16.2 / 65.7, each after a guest made garbage)", lang, got, want)
+			t.Errorf("%s per instance = %d MiB, want %d (Go: the larger measured figure, 19.6 MiB rounded up; Python 1.31 + 1 and C# 16.7 + 1, each rounded up, once cleat#4387 and cleat#4386 are in the component)", lang, got, want)
 		}
 	}
 }
@@ -145,7 +145,7 @@ func TestTwoDistinctPythonDefinitionsAreBothHeldAtTheDefaultBudget(t *testing.T)
 			t.Fatalf("python definition %d (%s) was refused at the default budget: a charge beyond the per-instance one has crept back in", i+1, name)
 		}
 	}
-	if got, want := chargedBytes(set), uint64(2*17<<20); got != want {
+	if got, want := chargedBytes(set), uint64(2*3<<20); got != want {
 		t.Fatalf("two python runs are charged %d bytes, want %d (two instances and nothing else)", got, want)
 	}
 }
@@ -155,7 +155,7 @@ func TestTwoDistinctPythonDefinitionsAreBothHeldAtTheDefaultBudget(t *testing.T)
 func TestTheDefaultBudgetIsTheDearestInstanceTimesMaxRuns(t *testing.T) {
 	clock := newFakeResidentClock(residentT)
 	set := newTestResidentSet(t, residentTestConfig(clock, nil)) // MaxRuns 4, no explicit budget
-	if got, want := set.cfg.MemoryBudgetBytes, uint64(66<<20)*4; got != want {
-		t.Fatalf("the default budget is %d, want %d (4 x 66 MiB csharp)", got, want)
+	if got, want := set.cfg.MemoryBudgetBytes, uint64(24<<20)*4; got != want {
+		t.Fatalf("the default budget is %d, want %d (4 x 24 MiB go, now the dearest)", got, want)
 	}
 }

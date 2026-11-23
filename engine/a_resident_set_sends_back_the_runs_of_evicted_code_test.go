@@ -47,7 +47,7 @@ func TestEvictCodeSendsBackOnlyTheRunsOfThatCodeAndGivesTheirChargeBack(t *testi
 	if n := set.Len(); n != 2 {
 		t.Fatalf("%d runs still held, want 2 (the runs of another code and of no known code)", n)
 	}
-	if got, want := chargedBytes(set), uint64(2*17<<20); got != want {
+	if got, want := chargedBytes(set), uint64(2*3<<20); got != want {
 		t.Errorf("the set is charged %d after two runs were sent back, want %d: their charges were not given back", got, want)
 	}
 	if n := residentCounter(t, m, "cleat_resident_evictions_total", `reason="code"`); n != 2 {

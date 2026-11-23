@@ -32,17 +32,19 @@ import (
 var defaultResidentInstanceBytes = map[string]uint64{
 	// design section 9a: 2.5 MiB for a minimal Go guest and 19.6 MiB after the guest had allocated and dropped about 256 MiB. Rounded up from the second.
 	"go": 24 << 20,
-	// The rule for every language is the one Go's line already follows: the LARGER of the measured figures, rounded up, because a too-high charge can only make
-	// residency park less.
+	// The rule for every language is the one Go's line already follows: the measured figure, rounded up, because a too-high charge can only make residency park less.
 	//
-	// Python: WS-cleat1, per held instance, anonymous (private) memory, which is what the cgroup charges: 12.0 to 12.2 MiB for call_all_plugins (no sharing), 1.3 to 1.6
-	// MiB for python-hello, whose RSS (8.3 MiB) is mostly copy-on-write pages shared with the pre-initialised snapshot (the two guests differ eightfold on one runtime,
-	// cause not established). Design section 9a: 16.2 MiB after a guest had allocated and dropped about 256 MiB, at a 32 MiB and at a 256 MiB cap alike. 16.2 rounded up.
-	"python": 17 << 20,
-	// C#: WS-cleat1, 48.8 MiB anonymous and 49.2 to 49.3 MiB RSS per held instance, the same at every N from 1 to 60. Design section 9a: 65.7 MiB after a guest had
-	// allocated and dropped about 256 MiB at a 256 MiB cap (49.5 at a 64 MiB cap), and 256 MiB is the default since cleat#4200, because a .NET heap sizes itself to the
-	// limit. 65.7 rounded up. The coordinator asked for 49.2; the larger measured figure is the more conservative reading of the same instruction.
-	"csharp": 66 << 20,
+	// Python: 1.31 MiB per held instance (Pss, a fit over N = 1 to 64 held instances, three repetitions each, R2 = 1.0000, 2026-11-22) once a component is built with the dense
+	// data segments of cleat#4387, which let wasmtime share the CPython module's memory image between instances; 12.1 MiB before it. Plus 1 MiB for the store and the session,
+	// 2.3, rounded up to 3. THE CAVEAT: a component built BEFORE cleat#4387 still costs 12.1 MiB, so this charges it about 9 MiB short; the engine cannot tell the two apart
+	// from the bytes, and --memory-soft-limit, which reads the cgroup's real use, is what catches it.
+	"python": 3 << 20,
+	// C#: 16.7 MiB per held instance (the same fit, 2026-11-22) at the 8 MiB GC segments of cleat#4386, which stop the runtime zero-filling three 16 MiB segments; 48.7 MiB before.
+	// Plus 1 MiB, 17.7, rounded up to 18. THE SAME CAVEAT: a component built before cleat#4386 costs 48.7 MiB, so this charges it about 31 MiB short.
+	// What a guest ALLOCATES before it waits adds on top roughly one for one (measured: a guest that touched 64 MiB cost 64 MiB more, in both), so every figure here is a floor
+	// for a guest that does real work and never a ceiling. The earlier figures (Python 17, C# 66) were the larger of the measurements taken after a guest had allocated and dropped
+	// about 256 MiB; those were NOT re-measured after the two changes, so this table is lower for two reasons: the instances really are smaller, and the high-water allowance is gone.
+	"csharp": 18 << 20,
 }
 
 // WHAT IS DELIBERATELY NOT CHARGED: the compiled component. WS-cleat1 measured a per-process fixed cost for Python (+493 to +510 MiB) and C# (+81 MiB), and an earlier
