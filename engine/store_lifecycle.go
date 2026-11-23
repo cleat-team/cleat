@@ -860,6 +860,14 @@ func (s *PostgresStore) ContinueAsNew(ctx context.Context, currentRunID, workerI
 		return "", fmt.Errorf("continue as new: %w", err)
 	}
 
+	// Signals stored on the old run and not yet consumed belong to the WORKFLOW, and the workflow goes on as the new run: carry them (cleat#4340). This runs AFTER the old run's lease row was
+	// updated above, and that update waits for any delivery that holds the row (a delivery locks it before it decides: signal_forward.go), so every such delivery has committed and its row is
+	// visible to this statement; one that arrives later finds the run done with a successor and is forwarded instead. `id` order is kept,
+	// so the successor reads them in the order they were sent.
+	if _, err := tx.ExecContext(ctx, `UPDATE workflow_signals SET workflow_id = $1 WHERE workflow_id = $2 AND tenant_id = $3`, newRunID, currentRunID, s.tenantID); err != nil {
+		return "", fmt.Errorf("continue as new: carry the pending signals: %w", err)
+	}
+
 	if err := tx.Commit(); err != nil {
 		return "", err
 	}

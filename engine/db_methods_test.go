@@ -4683,8 +4683,10 @@ func TestPostgresStore_DeliverSignal_BeginError(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error from begin failure")
 	}
-	if !strings.Contains(err.Error(), "deliver signal: begin") {
-		t.Errorf("expected 'deliver signal: begin' error, got: %v", err)
+	// The chain's end is read before the delivery's own transaction is opened (cleat#4340), and that read opens a transaction too, so a database that cannot begin one fails there first.
+	// What the caller is owed is unchanged: an error that names the delivery and carries the driver's own "begin failed".
+	if !strings.Contains(err.Error(), "deliver signal") || !strings.Contains(err.Error(), "begin failed") {
+		t.Errorf("expected a 'deliver signal' error carrying 'begin failed', got: %v", err)
 	}
 }
 
