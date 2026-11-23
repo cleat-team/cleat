@@ -308,6 +308,12 @@ func (s *MySQLStore) RequestCancellation(ctx context.Context, workflowID, reason
 // requestCancellationTo sets the flag on the END of workflowID's continue-as-new chain, under the lock that orders it against that run's continue (cleat#4340). A flag set on a run
 // that then continues is carried to its successor by ContinueAsNew.
 func (s *MySQLStore) requestCancellationTo(ctx context.Context, workflowID, reason string, settled *string) error {
+	return s.retryingLockConflict("request cancellation", func() error {
+		return s.requestCancellationOnceTo(ctx, workflowID, reason, settled)
+	})
+}
+
+func (s *MySQLStore) requestCancellationOnceTo(ctx context.Context, workflowID, reason string, settled *string) error {
 	hint, err := latestRunInChain(ctx, workflowID, s.successorOfRun)
 	if err != nil {
 		return fmt.Errorf("request cancellation: resolve the chain: %w", err)

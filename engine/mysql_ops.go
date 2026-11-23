@@ -1585,6 +1585,29 @@ func (s *MySQLStore) preemptivelySettle(ctx context.Context, workflowID, reason,
 // preemptivelySettleTo is preemptivelySettle that also says which run it acted on, through settled when it is not nil: a cancel or a terminate addressed to a run that has continued
 // as new acts on the END of its chain (cleat#4340). See PostgresStore.preemptivelySettleTo.
 func (s *MySQLStore) preemptivelySettleTo(ctx context.Context, workflowID, reason, finalStatus string, settled *string) error {
+	return s.retryingLockConflict(finalStatus+" workflow", func() error {
+		return s.preemptivelySettleOnceTo(ctx, workflowID, reason, finalStatus, settled)
+	})
+}
+
+// retryingLockConflict runs one whole transaction again when InnoDB refuses it as a deadlock victim (1213) or a lock wait timeout (1205), up to 8 attempts and with no sleep, as
+// startNewRunUnderIdempotencyKey does and for the same reasons (see its doc comment): the server rolled the victim back entirely, so running it again is safe, and the lock it needed is
+// already released. A cancel or a terminate addressed to a continued run reads the successor row, which a racing continue-as-new has inserted and not committed, while that continue
+// waits for the old run's row this verb holds (cleat#4340): a cycle, and InnoDB picks a victim. Measured: one of four racing cancels was chosen once in six runs of the race test.
+func (s *MySQLStore) retryingLockConflict(what string, once func() error) error {
+	const maxAttempts = 8
+	var lastErr error
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		err := once()
+		if err == nil || (!isDeadlockError(err) && !isLockWaitTimeout(err)) {
+			return err
+		}
+		lastErr = err
+	}
+	return fmt.Errorf("%s: %d attempts all lost a lock conflict: %w", what, maxAttempts, lastErr)
+}
+
+func (s *MySQLStore) preemptivelySettleOnceTo(ctx context.Context, workflowID, reason, finalStatus string, settled *string) error {
 	hint, err := latestRunInChain(ctx, workflowID, s.successorOfRun)
 	if err != nil {
 		return fmt.Errorf("%s workflow: resolve the chain: %w", finalStatus, err)
