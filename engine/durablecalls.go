@@ -170,8 +170,9 @@ func requestDivergenceDetail(a stepArgs, rec *EventRecord) string {
 
 // callRequestIdentity is the Identity of the four durable-call specs that carry a request (call, call_with_retry, call_with_heartbeat, durable_send): the service and the
 // operation, and then the request body (cleat#4424). A call that asks the same service the same operation with a different body is not the recorded call, and until the
-// body was compared it was handed the recorded answer for the old one with no divergence; fetch has always compared its body. The body is the string the record carries,
-// compared exactly as fetch's is, and a divergence names each body by its size and a short hash and never prints it (redactedBody, cleat#4321).
+// body was compared it was handed the recorded answer for the old one with no divergence; fetch has always compared its body. The body is the string the record carries, compared
+// as the same bytes or the same JSON value (sameRequest: ABI.md §6.7 promises cross-language replay, and two SDKs do not serialise one request alike), and a divergence names each
+// body by its size and a short hash and never prints it (redactedBody, cleat#4321).
 //
 // THE BODY IS COMPARED ONLY ON A RECORD THAT CARRIES ONE, and that is a limit of what is recorded, not a choice here. A call event and a send event carry the request. A
 // call_attempt_failed event does not, a heartbeat event does not, and a call_retry_refused event deliberately does not ("a request body is exactly the kind of value the
@@ -181,7 +182,7 @@ func callRequestIdentity(verb string, a stepArgs, rec *EventRecord) string {
 	if rec.Service != a.s1 || rec.Op != a.s2 {
 		return fmt.Sprintf("%s %s.%s, recorded %s.%s", verb, a.s1, a.s2, rec.Service, rec.Op)
 	}
-	if (rec.EventType == EventTypeCall || rec.EventType == EventTypeDurableSend) && rec.Request != a.s3 {
+	if (rec.EventType == EventTypeCall || rec.EventType == EventTypeDurableSend) && !sameRequest(rec.Request, a.s3) {
 		return fmt.Sprintf("%s %s.%s with a different request: %s, recorded %s", verb, a.s1, a.s2, redactedBody(a.s3), redactedBody(rec.Request))
 	}
 	return ""

@@ -56,6 +56,8 @@ func idPluginRegistry(t *testing.T) []EngineOption {
 const (
 	idBodyRecorded = `{"order":1001,"note":"RECORDED-SENTINEL"}`
 	idBodyOther    = `{"order":1002,"note":"OTHER-SENTINEL"}`
+	// the recorded request as another SDK's serialiser writes it: the same JSON value, the keys in another order
+	idBodyRecordedReordered = `{"note":"RECORDED-SENTINEL","order":1001}`
 )
 
 func idCallHistory() []EventRecord {
@@ -84,10 +86,22 @@ func TestACallAndAPluginCallReplayOnlyTheRequestTheyRecorded(t *testing.T) {
 			return s.PluginCall(ctx, nil, "p", fn, input, 0, idBufLen)
 		}
 	}
+	fetch := func(body string) func(ctx context.Context, s *execSession) int64 {
+		return func(ctx context.Context, s *execSession) int64 {
+			return s.Fetch(ctx, nil, "POST", "http://example.invalid/x", "{}", body, 0, idBufLen)
+		}
+	}
+	fetchHistory := []EventRecord{{Step: 0, EventType: EventTypeFetch, FetchMethod: "POST", FetchURL: "http://example.invalid/x", FetchBody: idBodyRecorded, FetchResponse: `"recorded answer"`}}
 	rows := []row{
+		// fetch compared its body byte for byte until cleat#4424; it now compares it as a call's request is (the owner's decision), so the same JSON in another key order replays.
+		{"fetch, the same body (control)", fetch(idBodyRecorded), fetchHistory, false},
+		{"fetch, the same JSON with its keys in another order (loosened by cleat#4424)", fetch(idBodyRecordedReordered), fetchHistory, false},
+		{"fetch, a different value", fetch(idBodyOther), fetchHistory, true},
 		{"call, the same body (control)", call(idBodyRecorded), idCallHistory(), false},
+		{"call, the same request written another way (control: cross-language, ABI.md 6.7)", call(idBodyRecordedReordered), idCallHistory(), false},
 		{"call, a different body", call(idBodyOther), idCallHistory(), true},
 		{"plugin_call, the same input (control)", pcall("plain", idBodyRecorded), idPluginHistory("plain", idBodyRecorded), false},
+		{"plugin_call, the same input written another way (control: cross-language)", pcall("plain", idBodyRecordedReordered), idPluginHistory("plain", idBodyRecorded), false},
 		{"plugin_call, a different input", pcall("plain", idBodyOther), idPluginHistory("plain", idBodyRecorded), true},
 	}
 	for _, r := range rows {
@@ -148,6 +162,9 @@ func TestAPluginCallToAFunctionWithSecretOnlyFieldsReplaysWhetherItsInputWasReco
 		{"a refused call recorded masked, replayed with a DIFFERENT live input", `{"api_key":"LITERAL-NOT-A-REFERENCE","x":2}`, failedHistory, "diverge", ""},
 		{"a successful call recorded as passed, replayed with the same input", ref, idPluginHistory("secret", ref), "", `"recorded answer"`},
 		{"a successful call recorded as passed, replayed with a different input", `{"api_key":"${secret:k}","x":2}`, idPluginHistory("secret", ref), "diverge", ""},
+		// Only a FAILED call is recorded masked, so only a failure record is offered the live input in its masked form. A success record that merely EQUALS the masked form of the live
+		// input is another input's record, and accepting it would let two different inputs look alike through a mask that is lossy by design.
+		{"a SUCCESS record equal to the masked form of the live input is not that input's", live, idPluginHistory("secret", masked), "diverge", ""},
 	} {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {

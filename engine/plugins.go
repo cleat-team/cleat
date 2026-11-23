@@ -486,14 +486,16 @@ var pluginCallStep = stepSpec{
 	// The guest decodes result<string, call-failure>: a divergence is answered in the durable-call layout, as every durable call's is.
 	Result: layoutDurableCall,
 	// The plugin, the function AND the input (cleat#4424). Until this compared the input, a call to the same function with a different input was handed the recorded output for
-	// the old one with no divergence; fetch has always compared its body. The recorded input is what invokePlugin recorded: the guest's input as passed on a success, and with a
-	// declared function's secret-only fields masked on a FAILED call (plugins.go). The live input is therefore accepted in either form, s3 as the guest passed it and s4 masked the
-	// same way (redactedLiveInput), so a failed call to such a function replays and a different input still diverges. The two are equal for a function that declares none.
+	// the old one with no divergence; fetch has always compared its body. The input is compared as the same bytes or the same JSON value (sameRequest), as a call's request is.
+	// The recorded input is what invokePlugin recorded: the guest's input as passed on a success, and with a declared function's secret-only fields masked on a FAILED call, and only
+	// then (a record with PluginError set). So the live input as passed (s3) is compared with every record, and the live input masked the same way (s4, redactedLiveInput) only with a
+	// failure record: a success was never recorded masked, and offering it the masked form would only make two different inputs look alike. The mask is lossy by design (an input that
+	// is not an object, or does not parse, becomes one bare marker, and a ${secret:k} reference masks like a literal), so a failed call's input is compared at that resolution and no finer.
 	Identity: func(a stepArgs, rec *EventRecord) string {
 		if rec.PluginName != a.s1 || rec.PluginFunc != a.s2 {
 			return fmt.Sprintf("plugin %s/%s, recorded %s/%s", a.s1, a.s2, rec.PluginName, rec.PluginFunc)
 		}
-		if rec.PluginInput != a.s3 && rec.PluginInput != a.s4 {
+		if !sameRequest(rec.PluginInput, a.s3) && !(rec.PluginError != "" && sameRequest(rec.PluginInput, a.s4)) {
 			return fmt.Sprintf("plugin %s/%s with a different input: %s, recorded %s", a.s1, a.s2, redactedBody(a.s4), redactedBody(rec.PluginInput))
 		}
 		return ""

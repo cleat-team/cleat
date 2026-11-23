@@ -2190,13 +2190,13 @@ Use `cleat_uuid` (ABI 2.40) for deterministic UUID generation from a seed.
 
 ### 6.7 Cross-Language Replay Guarantee
 
-When a workflow is compiled from two different languages (e.g., Go and Rust) using SDKs that comply with this section, and both implementations make the same sequence of host calls with the same service/operation pairs:
+When a workflow is compiled from two different languages (e.g., Go and Rust) using SDKs that comply with this section, and both implementations make the same sequence of host calls with the same service/operation pairs and the same requests (as JSON values; see below):
 
 1. **Execution**: Both produce the same event history (same events in same order)
 2. **Replay**: History from language A can be replayed against WASM from language B
 3. **Output**: Both produce bit-identical result JSON
 
-The cleat engine matches replay events by step index, checking `EventType`, `Service`, and `Op` for equality. Request JSON is not compared during replay matching.
+The cleat engine matches replay events by step index, checking `EventType`, `Service`, and `Op` for equality, and then the request (cleat#4424): a call's request, a plugin call's input, a send's request and a fetch's body. A request is compared as the same bytes or **the same JSON value**: key order, insignificant whitespace and the way a number is written (`1`, `1.0`, `1e0`) are not significant, because two SDKs do not serialise one request alike (the Go SDK's struct fields come out in declaration order, the Rust SDK's `serde_json` sorts every level), and a request that differs in any value diverges. Numbers are compared by exact value, so two integers beyond 2^53 are not confused. A request that is not JSON, has anything after its JSON value, or repeats a key in one object (which parser wins is not defined) is compared as bytes. Request bodies are never printed: a divergence names each by its size and a short hash.
 
 **Guarantee scope**: This guarantee applies to workflows that (a) use only the host functions listed in this ABI, (b) avoid language-specific non-deterministic features (raw map iteration, GC-based cleanup, language-native RNG), and (c) produce results serializable through the host's JSON normalization.
 

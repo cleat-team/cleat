@@ -608,7 +608,9 @@ var fetchStep = stepSpec{
 		if rec.FetchMethod != a.s1 || rec.FetchURL != a.s2 {
 			return fmt.Sprintf("%s %s, recorded %s %s", a.s1, a.s2, rec.FetchMethod, rec.FetchURL)
 		}
-		if rec.FetchBody != a.s4 {
+		// The body is compared as the same bytes or the same JSON value (sameRequest, cleat#4424), as a call's request is: it compared byte for byte until then, and the same JSON
+		// body written with its keys in another order (which two SDKs do) was a divergence. Measured on develop: {"a":1,"b":2} against a record of {"b":2,"a":1} diverged.
+		if !sameRequest(rec.FetchBody, a.s4) {
 			return fmt.Sprintf("%s %s with a different body: %s, recorded %s", a.s1, a.s2, redactedBody(a.s4), redactedBody(rec.FetchBody))
 		}
 		return ""

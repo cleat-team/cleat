@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"testing"
@@ -12,7 +13,7 @@ import (
 // compaction, which rebuilds the history from a trimmed copy. Each is exercised here with a body chosen to expose a normaliser: irregular whitespace, keys out of order, non-ASCII, a
 // trailing newline, and enough bytes to cross any inline size threshold. A comparison that diverged on any of them would fail every compacted, encrypted or stored run on its next replay.
 //
-// The history holds ALL FIVE call kinds that compare a request (call, plugin_call, call_with_retry, call_with_heartbeat, durable_send), one after the other, so that a run is replayed
+// The history holds ALL SIX call kinds that compare a request (call, plugin_call, call_with_retry, call_with_heartbeat, durable_send, fetch), one after the other, so that a run is replayed
 // in order as a workflow would replay it, and "diverges at the right step" means something: the calls before it must have replayed and consumed exactly their own records.
 
 func awkwardBody(tag string) string {
@@ -56,6 +57,12 @@ var seqKinds = []seqKind{
 		return []EventRecord{{EventType: EventTypeDurableSend, Service: "svc", Op: "op4", Request: b}}
 	}, func(ctx context.Context, s *execSession, b string) int64 {
 		return s.DurableSend(ctx, nil, "svc", "op4", b)
+	}},
+	// fetch compared its body byte for byte until cleat#4424 and now compares it as a call's request is; it is stored and compacted through other fields (fetch_body, ChildInput).
+	{"fetch", func(b string) []EventRecord {
+		return []EventRecord{{EventType: EventTypeFetch, FetchMethod: "POST", FetchURL: "http://example.invalid/x", FetchBody: b, FetchResponse: `"a"`}}
+	}, func(ctx context.Context, s *execSession, b string) int64 {
+		return s.Fetch(ctx, nil, "POST", "http://example.invalid/x", "{}", b, 0, idBufLen)
 	}},
 }
 
@@ -101,19 +108,48 @@ func assertReplaysTheRecordedSequence(t *testing.T, opts []EngineOption, hist []
 	if at, s := replaySeq(opts, hist, bodies); at != -1 || s.stepCount != len(hist) {
 		t.Fatalf("the SAME bodies did not replay (a comparison that diverges on everything): stopped at %d (%s) with stepCount %d of %d", at, nameOf(at), s.stepCount, len(hist))
 	}
-	// Each kind in turn: a body differing by one trailing space diverges AT THAT CALL, having consumed exactly the records of the calls before it.
+	// The SAME requests written another way (keys sorted, no whitespace: another SDK's serialiser) replay too, call after call. This is the cross-language guarantee, ABI.md §6.7.
+	other := make([]string, len(bodies))
+	for i := range bodies {
+		other[i] = reserialised(t, bodies[i])
+	}
+	if at, s := replaySeq(opts, hist, other); at != -1 || s.stepCount != len(hist) {
+		t.Errorf("the same requests re-serialised did not replay: stopped at %d (%s) with stepCount %d of %d", at, nameOf(at), s.stepCount, len(hist))
+	}
+	// Each kind in turn: a body with ONE VALUE changed diverges AT THAT CALL, having consumed exactly the records of the calls before it.
 	for i, k := range seqKinds {
 		changed := append([]string(nil), bodies...)
-		changed[i] += " "
+		changed[i] = strings.Replace(bodies[i], `"tag":"`, `"tag":"X`, 1)
+		if changed[i] == bodies[i] {
+			t.Fatalf("PRECONDITION FAILED: the changed body for %s is unchanged", k.name)
+		}
 		want := 0
 		for j := 0; j < i; j++ {
 			want += len(seqKinds[j].records(bodies[j]))
 		}
 		at, s := replaySeq(opts, hist, changed)
 		if at != i || s.stepCount != want {
-			t.Errorf("%s: a body differing by one trailing space: diverged at call %d (%s) with stepCount %d, want call %d at stepCount %d", k.name, at, nameOf(at), s.stepCount, i, want)
+			t.Errorf("%s: a body with one value changed: diverged at call %d (%s) with stepCount %d, want call %d at stepCount %d", k.name, at, nameOf(at), s.stepCount, i, want)
 		}
 	}
+}
+
+// reserialised is the same JSON value written another way: Go's compact form with every key sorted, which is what another SDK's serialiser may produce for the same request
+// (ABI.md §6.7). It must come out as different BYTES, or the row that uses it measures nothing.
+func reserialised(t *testing.T, body string) string {
+	t.Helper()
+	var v any
+	if err := json.Unmarshal([]byte(body), &v); err != nil {
+		t.Fatalf("PRECONDITION FAILED: the test body is not JSON: %v", err)
+	}
+	out, err := json.Marshal(v)
+	if err != nil {
+		t.Fatalf("PRECONDITION FAILED: cannot re-serialise the test body: %v", err)
+	}
+	if string(out) == body {
+		t.Fatalf("PRECONDITION FAILED: re-serialising changed no byte, so the row would measure nothing")
+	}
+	return string(out)
 }
 
 func nameOf(i int) string {
@@ -180,7 +216,7 @@ func TestEveryRequestCarryingCallPersistedInAStoreReplaysOnTheSameRequestOnEvery
 				}
 				// PRECONDITION: the store handed every body back byte for byte. If it did not, the comparison below would be measuring the store, and this says so first.
 				for i := range written {
-					if loaded[i].Request != written[i].Request || loaded[i].PluginInput != written[i].PluginInput {
+					if loaded[i].Request != written[i].Request || loaded[i].PluginInput != written[i].PluginInput || loaded[i].FetchBody != written[i].FetchBody {
 						t.Fatalf("PRECONDITION FAILED: the %s store did not return step %d (%s) unchanged (request %d bytes want %d, plugin input %d bytes want %d)",
 							name, i, written[i].EventType, len(loaded[i].Request), len(written[i].Request), len(loaded[i].PluginInput), len(written[i].PluginInput))
 					}
@@ -206,7 +242,7 @@ func TestEveryRequestCarryingCallReplaysOnTheSameRequestAfterCompaction(t *testi
 	}
 	for i := range hist {
 		// A record that carries no request (an attempt, a heartbeat) must stay without one; the others must carry it whole.
-		if rebuilt[i].Request != hist[i].Request || rebuilt[i].PluginInput != hist[i].PluginInput {
+		if rebuilt[i].Request != hist[i].Request || rebuilt[i].PluginInput != hist[i].PluginInput || rebuilt[i].FetchBody != hist[i].FetchBody {
 			t.Fatalf("compaction changed step %d (%s): request %d bytes want %d, plugin input %d bytes want %d",
 				i, hist[i].EventType, len(rebuilt[i].Request), len(hist[i].Request), len(rebuilt[i].PluginInput), len(hist[i].PluginInput))
 		}
