@@ -32,6 +32,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -183,8 +184,16 @@ type componentPrecompiler struct {
 
 	childCompiles atomic.Int64 // components served from a child's artifact
 	fallbacks     atomic.Int64 // misses where the child path failed and the worker compiled in-process
-	refusals      atomic.Int64 // misses refused because the child was killed (see errPrecompileChildKilled)
-	lastRecord    atomic.Pointer[componentChildRecord]
+	refusals      atomic.Int64 // misses refused because the child was killed (see ComponentCompileRefusedError)
+	spawns        atomic.Int64 // children started
+
+	memLimit uint64
+	window   time.Duration
+	// now is the clock the refusal window reads; a test replaces it.
+	now          func() time.Time
+	mu           sync.Mutex
+	refusedUntil map[string]time.Time // component key -> when this worker will try it again
+	lastRecord   atomic.Pointer[componentChildRecord]
 }
 
 func newComponentPrecompiler(cfg ComponentPrecompile, instructionLimit uint64, logger *slog.Logger) (*componentPrecompiler, error) {
@@ -202,9 +211,14 @@ func newComponentPrecompiler(cfg ComponentPrecompile, instructionLimit uint64, l
 	if timeout <= 0 {
 		timeout = DefaultComponentPrecompileTimeout
 	}
+	window := cfg.RefusalWindow
+	if window <= 0 {
+		window = DefaultComponentPrecompileRefusalWindow
+	}
 	return &componentPrecompiler{
 		exe: cfg.Executable, dir: dir, timeout: timeout, instructionLimit: instructionLimit,
 		parallel: cfg.ParallelCompilation, log: logger, sem: make(chan struct{}, 1),
+		memLimit: cfg.MemoryLimitBytes, window: window, now: time.Now, refusedUntil: map[string]time.Time{},
 	}, nil
 }
 
@@ -255,6 +269,7 @@ func (p *componentPrecompiler) compile(engine *wasmtime.Engine, wasm []byte) (*C
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), p.timeout)
 	defer cancel()
+	p.spawns.Add(1)
 	cmd := exec.CommandContext(ctx, p.exe, SerializeComponentArg, in, out,
 		"--instruction-limit", fmt.Sprint(limit), fmt.Sprintf("--parallel-compilation=%t", p.parallel))
 	cmd.Env = append([]string{}, p.childEnv...) // non-nil: an empty environment, not the worker's
@@ -316,20 +331,51 @@ func (p *componentPrecompiler) compile(engine *wasmtime.Engine, wasm []byte) (*C
 	return comp, rec, nil
 }
 
-// errPrecompileChildKilled is a child that died of SIGKILL, which in a container is nearly always the out-of-memory killer.
+// errPrecompileChildKilled is a child that died of SIGKILL, which in a container is nearly always the out-of-memory killer. compileComponentMiss turns it into a ComponentCompileRefusedError.
 type errPrecompileChildKilled struct{ cause error }
 
 func (e *errPrecompileChildKilled) Error() string {
-	return "component precompile: the compile child was killed (" + e.cause.Error() + "), most likely by this container's memory limit. Compiling it in the worker would need more memory " +
-		"than the child did, so it was not attempted; raise the memory limit, or compile the component outside the worker"
+	return "the precompile child was killed: " + e.cause.Error()
+}
+func (e *errPrecompileChildKilled) Unwrap() error { return e.cause }
+
+// refusalFor returns how long key is still refused on this worker, and whether it is.
+func (p *componentPrecompiler) refusalFor(key string) (time.Duration, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	until, ok := p.refusedUntil[key]
+	if !ok {
+		return 0, false
+	}
+	if left := until.Sub(p.now()); left > 0 {
+		return left, true
+	}
+	delete(p.refusedUntil, key) // expired: forget it, so the map holds only live refusals
+	return 0, false
 }
 
-func (e *errPrecompileChildKilled) Unwrap() error { return e.cause }
+// refuse records that key's child was killed and returns the error that releases the run. repeat is true when no child was started.
+func (p *componentPrecompiler) refuse(key string, cause error, left time.Duration, repeat bool) error {
+	if !repeat {
+		p.mu.Lock()
+		p.refusedUntil[key] = p.now().Add(p.window)
+		p.mu.Unlock()
+		left = p.window
+	}
+	p.refusals.Add(1)
+	return &ComponentCompileRefusedError{MemoryLimitBytes: p.memLimit, ParallelCompilation: p.parallel, RetryAfter: left, Repeat: repeat, Cause: cause}
+}
 
 // compileComponentMiss is acquireComponent's compile step. It returns the component and whether it was compiled IN THIS PROCESS, which is what componentCache.compiles counts. With a precompiler
 // configured it tries the child first and falls back to the in-process compile on any failure, logged and counted, never returned as an error.
-func (b *wasmtimeBackend) compileComponentMiss(wasmBytes []byte) (*C.wasmtime_component_t, bool, error) {
+func (b *wasmtimeBackend) compileComponentMiss(key string, wasmBytes []byte) (*C.wasmtime_component_t, bool, error) {
 	if p := b.precompiler; p != nil {
+		if left, refused := p.refusalFor(key); refused {
+			// One attempt per component per window: a run released for retry must not respawn a child that was just killed.
+			err := p.refuse(key, nil, left, true)
+			b.log().Warn("component compile refused without trying: its precompile child was killed within the refusal window", "retry_after", left.Round(time.Second))
+			return nil, false, err
+		}
 		comp, rec, err := p.compile(b.engine, wasmBytes)
 		if err == nil {
 			p.childCompiles.Add(1)
@@ -342,9 +388,10 @@ func (b *wasmtimeBackend) compileComponentMiss(wasmBytes []byte) (*C.wasmtime_co
 		if errors.As(err, &killed) {
 			// SIGKILL is, on a container, almost always the kernel's out-of-memory kill (the child asks to be its first choice, see lowerOOMPriority). Compiling in THIS process needs more memory than
 			// the child did, so it would be killed too, with every run it holds, and a restart would replay into the same compile. Refuse this one execution with the reason instead.
-			p.refusals.Add(1)
-			b.log().Error("component precompile child was killed; not compiling in this process, which would need more memory", "error", err)
-			return nil, false, err
+			refusal := p.refuse(key, err, 0, false)
+			b.log().Error("component precompile child was killed; not compiling in this process, which would need more memory",
+				"memory_limit_mib", p.memLimit>>20, "parallel_compilation", p.parallel, "retry_after", p.window.Round(time.Second), "error", refusal)
+			return nil, false, refusal
 		}
 		p.fallbacks.Add(1)
 		b.log().Warn("component precompile in a child failed; compiling in this process", "error", err)

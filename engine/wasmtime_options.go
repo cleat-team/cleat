@@ -1,6 +1,8 @@
 package engine
 
 import (
+	"errors"
+	"fmt"
 	"log/slog"
 	"time"
 )
@@ -192,9 +194,63 @@ type ComponentPrecompile struct {
 	Executable string
 	// Timeout bounds one child. <= 0 takes DefaultComponentPrecompileTimeout.
 	Timeout time.Duration
+	// MemoryLimitBytes is the worker's memory limit as the worker read it, 0 if unknown. It is only REPORTED (in a refusal's message, log and metric); nothing here acts on it.
+	MemoryLimitBytes uint64
+	// RefusalWindow is how long this worker refuses to try a component again after its child was killed: one attempt per component per window, so a run released for retry cannot loop
+	// a doomed child. <= 0 takes DefaultComponentPrecompileRefusalWindow.
+	RefusalWindow time.Duration
 	// ParallelCompilation is wasmtime's parallel_compilation in the CHILD only. false lowers the compile's memory high-water and lengthens it; it does not bind the artifact. This is the Go zero value, so a caller that sets nothing gets the LOW-memory compile; the worker passes the value --component-precompile-parallel resolved (parallel unless its memory limit is under 1 GiB).
 	ParallelCompilation bool
 }
+
+// DefaultComponentPrecompileRefusalWindow is how long a component whose child was killed is refused on this worker before another child is tried.
+const DefaultComponentPrecompileRefusalWindow = 5 * time.Minute
+
+// ErrComponentCompileRefused is what a refused compile matches with errors.Is. It is NOT a failure of the workflow: the guest never ran, so there is no outcome to record. The worker releases the run
+// with a back-off (as it does for ErrLimitsUnavailable) so it retries, possibly on a worker with more memory.
+var ErrComponentCompileRefused = errors.New("component compile refused")
+
+// ComponentCompileRefusedError says why a component was not compiled, with what an operator needs to act: the memory limit the worker read, the compile mode, and when this worker will try again.
+type ComponentCompileRefusedError struct {
+	// MemoryLimitBytes is the worker's memory limit as it read it, 0 if unknown.
+	MemoryLimitBytes uint64
+	// ParallelCompilation is the child's compile mode.
+	ParallelCompilation bool
+	// RetryAfter is how long until this worker will try this component again. The run is released for at least this long.
+	RetryAfter time.Duration
+	// Repeat is true when the refusal was answered without trying: an earlier attempt within the window was killed.
+	Repeat bool
+	// Cause is what the child died of, nil for a repeat.
+	Cause error
+}
+
+func (e *ComponentCompileRefusedError) Error() string {
+	limit := "an unknown memory limit"
+	if e.MemoryLimitBytes > 0 {
+		limit = fmt.Sprintf("a %d MiB memory limit", e.MemoryLimitBytes>>20)
+	}
+	advice := "raise the memory limit, or compile the component outside the worker"
+	if e.ParallelCompilation {
+		advice = "set --component-precompile-parallel=false or raise the memory limit"
+	}
+	what := "the precompile child was killed"
+	if e.Cause != nil {
+		what += " (" + e.Cause.Error() + ")"
+	}
+	if e.Repeat {
+		what = "an earlier precompile child for this component was killed within the last " + DefaultComponentPrecompileRefusalWindow.String() + ", so none was started"
+	}
+	return fmt.Sprintf("%s: %s, most likely by %s with parallel_compilation=%t. Compiling the component in the worker would need more memory than the child did, "+
+		"so it was not attempted; this run is released and will be retried in %s, possibly on another worker. To fix it: %s",
+		ErrComponentCompileRefused.Error(), what, limit, e.ParallelCompilation, e.RetryAfter.Round(time.Second), advice)
+}
+
+// Is makes errors.Is(err, ErrComponentCompileRefused) true, so the worker can tell this from a workflow's own failure.
+func (e *ComponentCompileRefusedError) Is(target error) bool {
+	return target == ErrComponentCompileRefused
+}
+
+func (e *ComponentCompileRefusedError) Unwrap() error { return e.Cause }
 
 // SerializeComponentArg is the argument that makes the worker binary act as the precompile child. It is matched against os.Args[1] BEFORE flag parsing, so no flag, workflow, HTTP route or
 // environment can reach it; only an exec of the binary with this exact first argument does. Declared here, untagged, because the worker's main reads it in every build.

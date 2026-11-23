@@ -1126,10 +1126,12 @@ idle-machine times**). x86-64 is not measured.
 |---|---|---|---|---|
 | 512 MiB | off | **killed by the kernel's OOM killer, 3 of 3** | at the limit | — |
 | 512 MiB | on (`auto`: no parallel) | completes, 3 of 3 | 464 to 512 MiB | 68 MiB |
-| 512 MiB | on, `--component-precompile-parallel=true` | the child is killed; the run **fails with an error naming the memory limit**, the worker stays up, 3 of 3 | 512 MiB | 65 MiB |
+| 512 MiB | on, `--component-precompile-parallel=true` | the child is OOM-killed; the run is **released, not failed** (status stays `ready`, retried in 5 min), the worker stays up, 3 of 3 (Docker, `memory.oom.group` 0) | 512 MiB | 65 MiB |
 | 2 GiB | off | completes | 559 to 601 MiB | 529 to 558 MiB |
 | 2 GiB | on (`auto`: parallel) | completes | 661 to 679 MiB | 67 MiB |
 | 2 GiB | on, `--component-precompile-parallel=false` | completes | 476 to 511 MiB | 68 MiB |
+
+**512 MiB is a tight configuration, stated as one.** The chart's default is 2 GiB (owner decision, cleat#4393), where the flag has room to spare.
 
 **At 512 MiB it fits, and barely.** The child's own peak is about 384 MiB and
 the worker about 68 MiB, so the compile uses roughly 450 MiB of anonymous memory
@@ -1141,15 +1143,29 @@ The child compile took 3 to 6 s with parallel compilation and 7 to 30 s without
 it, on a loaded host; cleat-77 measured 1.3 s and 5.7 s in the same harness
 configuration. The difference was not isolated.
 
-**A child that is killed does not fall back to compiling in the worker.** The
-child asks the kernel to kill it first when memory runs out
-(`oom_score_adj` 1000). If it dies of SIGKILL, the execution fails with
-`component precompile: the compile child was killed ... most likely by this
-container's memory limit`, because compiling in the worker needs more memory than
-the child did and kills the worker and every run it holds (measured: 531 MiB
-worker, container killed). Every *other* child failure (cannot start, times out,
-exits non-zero, writes an artifact the worker will not accept) is logged and falls back to the
-in-process compile.
+**A child that is killed does not fall back to compiling in the worker, and the run is not failed.**
+The child asks the kernel to kill it first when memory runs out (`oom_score_adj`
+1000). If it dies of SIGKILL, compiling in the worker would need more memory than
+the child did and kill the worker and every run it holds (measured: 531 MiB
+worker, container killed), so the compile is *refused*. The guest never ran, so
+the run is **released** (it stays `ready`, as for a worker that cannot serve it),
+for the refusal window (5 minutes), and may be served by a worker with more
+memory. Inside the window this worker starts no further child for that
+component, so a released run cannot loop one. The worker logs an ERROR naming the
+memory limit, the compile mode and the fix, and counts it on
+`cleat_workflow_releases_total{check="component_compile_refused",memory_limit_mib,parallel_compilation}`:
+a rate on that check is the alert. Every *other* child failure (cannot start,
+times out, exits non-zero, writes an artifact the worker will not accept) is
+logged and falls back to the in-process compile.
+
+**"The worker stays up" is measured on Docker, where `memory.oom.group` is 0**
+(an out-of-memory kill takes one process). Where it is 1, the kill takes every
+process in the container, the worker included, and nothing in the worker can
+protect it: the flag then lowers the steady state only, and the memory limit must
+hold the compile peak. Kubernetes sets it to 1 by default on cgroup v2 in recent
+versions, and the kubelet's `singleProcessOOMKill` restores per-process kills; that is from
+Kubernetes' documentation and was **not measured here**. The worker reads
+`/sys/fs/cgroup/memory.oom.group` at start-up with the flag on and warns when it is 1.
 
 **The artifact is native code.** wasmtime documents that loading one is unsafe for
 arbitrary input, so the worker loads only a file its own child just wrote, into a
@@ -1157,8 +1173,9 @@ directory it created mode 0700, after checking the size and SHA-256 the child
 reported. The child runs with an empty environment (the worker's holds database
 credentials), and a worker with `--wasm-instruction-limit` set compiles the
 child's artifact with fuel to match: fuel binds the artifact, and a mismatch is
-refused, not loaded. The directory is in the system temp directory; if that is
-a memory-backed filesystem the 46 MB artifact counts against the limit while it exists.
+refused, not loaded. The directory is in the system temp directory; if `TMPDIR` is memory-backed (a
+Kubernetes `emptyDir` with `medium: Memory`, for instance) the 46 MB artifact is
+in the same cgroup as the compile and counts against the limit while it exists.
 
 The child is this binary, found with `os.Executable` and resolved once at start-up.
 

@@ -3230,6 +3230,9 @@ func componentPrecompileOptionFromFlags(logger *slog.Logger) []engine.WasmtimeOp
 		logger.Warn("--component-precompile is set but the worker's own executable could not be resolved to an absolute path; compiling in-process", "error", err)
 		return nil
 	}
+	if msg := oomGroupWarning(readOOMGroup()); msg != "" {
+		logger.Warn(msg)
+	}
 	var total uint64
 	if mi := NewMemoryMonitor(*memoryCheckInterval).Read(); mi.Source != "" {
 		total = mi.TotalBytes
@@ -3243,8 +3246,29 @@ func componentPrecompileOptionFromFlags(logger *slog.Logger) []engine.WasmtimeOp
 	return []engine.WasmtimeOption{engine.WithWasmtimeComponentPrecompile(engine.ComponentPrecompile{
 		Executable:          exe,
 		Timeout:             *componentPrecompileTimeout,
+		MemoryLimitBytes:    total,
 		ParallelCompilation: parallel,
 	})}
+}
+
+// cgroupOOMGroupPath says whether an out-of-memory kill takes the whole cgroup (1) or one process (0).
+const cgroupOOMGroupPath = "/sys/fs/cgroup/memory.oom.group"
+
+func readOOMGroup() (string, error) {
+	b, err := os.ReadFile(cgroupOOMGroupPath)
+	return string(b), err
+}
+
+// oomGroupWarning is the warning --component-precompile owes when the container's out-of-memory kill is per-cgroup. The refusal path assumes the kernel kills the child and leaves the worker;
+// under memory.oom.group=1 it kills every process in the cgroup, the worker included, so the child's death is not survivable and nothing in the worker can protect it. Measured on Docker, where the
+// file reads 0 (cleat-review3 on #4398); that Kubernetes sets it to 1 by default on cgroup v2 (and that the kubelet's singleProcessOOMKill restores per-process kills) is from its documentation and
+// was NOT measured here. An unreadable file (no cgroup v2, not Linux) says nothing: the caller gets "".
+func oomGroupWarning(content string, readErr error) string {
+	if readErr != nil || strings.TrimSpace(content) != "1" {
+		return ""
+	}
+	return "--component-precompile is on, and this container's memory.oom.group is 1: an out-of-memory kill takes EVERY process in the cgroup, this worker included, so a killed " +
+		"compile child is not survivable and the worker's refusal cannot protect it. The flag lowers the steady state only; the memory limit must hold the compile peak"
 }
 
 // precompileParallelFloorBytes is the memory limit under which the precompile child compiles with parallel_compilation off. Measured on one machine (cleat-77,

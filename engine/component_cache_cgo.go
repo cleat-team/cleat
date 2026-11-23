@@ -132,7 +132,7 @@ func (b *wasmtimeBackend) acquireComponent(wasmBytes []byte) (*C.wasmtime_compon
 		return held.(*C.wasmtime_component_t), nil
 	}
 
-	compiled, inProcess, err := b.compileComponentMiss(wasmBytes)
+	compiled, inProcess, err := b.compileComponentMiss(key, wasmBytes)
 	if err != nil {
 		// A failed compile is not cached: the next call compiles again and gets
 		// the same error, rather than a stale refusal outliving a fixed engine.

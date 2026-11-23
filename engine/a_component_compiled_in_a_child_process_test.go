@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -449,15 +450,32 @@ func TestTheChildAsksToBeTheFirstChoiceForAnOutOfMemoryKill(t *testing.T) {
 }
 
 // A child killed by SIGKILL (the out-of-memory killer, on a container) is NOT answered by compiling in the worker: that needs more memory than the child did and would kill the worker and every run
-// it holds. The execution is refused with the reason, the worker lives, and the next execution works once the child does. Measured on a 512 MiB container: the child is killed, the worker falls back,
-// and the container dies at 531 MiB.
-func TestAChildKilledBySIGKILLIsRefusedNotAnsweredWithACompileInTheWorker(t *testing.T) {
+// it holds. The execution is REFUSED, with an error that is not the workflow's failure (the worker releases the run for a retry) and that names the memory limit, the compile mode and the fix.
+// Measured on a 512 MiB container: the child is killed, the old fallback compiled in the worker, and the container died at 531 MiB.
+func TestAChildKilledBySIGKILLIsRefusedAsARetryableErrorNotAnsweredWithACompileInTheWorker(t *testing.T) {
 	b, logs := newPrecompileBackend(t)
 	b.precompiler.childEnv = []string{precompileFaultEnv + "=kill-self"}
+	b.precompiler.memLimit = 512 << 20
+	b.precompiler.parallel = true
 
 	_, err := b.PerExecution(0).Execute(context.Background(), distinctComponent(t, 0), "run", json.RawMessage(`"x"`), &mockHostHandler{})
-	if err == nil || !strings.Contains(err.Error(), "compile child was killed") || !strings.Contains(err.Error(), "memory limit") {
-		t.Fatalf("a killed child's execution returned %v, want an error naming the kill and the memory limit\n%s", err, logs.String())
+	if !errors.Is(err, ErrComponentCompileRefused) {
+		t.Fatalf("a killed child's execution returned %v, want an error that matches ErrComponentCompileRefused (the worker releases such a run instead of failing it)\n%s", err, logs.String())
+	}
+	var ref *ComponentCompileRefusedError
+	if !errors.As(err, &ref) {
+		t.Fatalf("the refusal does not carry its detail: %v", err)
+	}
+	if ref.MemoryLimitBytes != 512<<20 || !ref.ParallelCompilation || ref.RetryAfter != DefaultComponentPrecompileRefusalWindow || ref.Repeat {
+		t.Errorf("refusal = %+v, want limit 512 MiB, parallel, retry after %s, not a repeat", ref, DefaultComponentPrecompileRefusalWindow)
+	}
+	for _, want := range []string{"512 MiB memory limit", "parallel_compilation=true", "--component-precompile-parallel=false", "released and will be retried"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the refusal says %q, want it to contain %q", err.Error(), want)
+		}
+	}
+	if !strings.Contains(logs.String(), "memory_limit_mib=512") || !strings.Contains(logs.String(), "level=ERROR") {
+		t.Errorf("the refusal was not logged loudly with the memory limit:\n%s", logs.String())
 	}
 	if compilesOf(b) != 0 {
 		t.Errorf("the worker compiled in-process %d time(s) after its child was killed: that is the compile that kills a container", compilesOf(b))
@@ -466,10 +484,65 @@ func TestAChildKilledBySIGKILLIsRefusedNotAnsweredWithACompileInTheWorker(t *tes
 		t.Errorf("refusals=%d fallbacks=%d child=%d, want 1, 0, 0", b.precompiler.refusals.Load(), b.precompiler.fallbacks.Load(), b.precompiler.childCompiles.Load())
 	}
 
-	// Not sticky: nothing was cached, and a healthy child serves the same component.
-	b.precompiler.childEnv = nil
-	runComponent(t, b, distinctComponent(t, 0))
-	if b.precompiler.childCompiles.Load() != 1 || compilesOf(b) != 0 {
-		t.Errorf("after the kill, child=%d compiles=%d, want 1 and 0\n%s", b.precompiler.childCompiles.Load(), compilesOf(b), logs.String())
+	// With parallel already off the advice must not tell the operator to set it off.
+	b2, _ := newPrecompileBackend(t)
+	b2.precompiler.childEnv = []string{precompileFaultEnv + "=kill-self"}
+	b2.precompiler.parallel = false
+	_, err = b2.PerExecution(0).Execute(context.Background(), distinctComponent(t, 0), "run", json.RawMessage(`"x"`), &mockHostHandler{})
+	if err == nil || strings.Contains(err.Error(), "--component-precompile-parallel=false") || !strings.Contains(err.Error(), "raise the memory limit") {
+		t.Errorf("with parallel already off the advice was %v", err)
+	}
+}
+
+// One attempt per component per window. Inside the window the same component is refused WITHOUT starting a child, so a run released for retry cannot loop a doomed child; another component is not
+// affected; after the window a child is tried again and, once healthy, serves it. The window is read from a clock the test controls, so nothing here waits.
+func TestAComponentWhoseChildWasKilledIsNotTriedAgainInsideTheRefusalWindow(t *testing.T) {
+	b, logs := newPrecompileBackend(t)
+	p := b.precompiler
+	clock := time.Unix(1_000_000, 0)
+	p.now = func() time.Time { return clock }
+	p.window = 10 * time.Minute
+	p.childEnv = []string{precompileFaultEnv + "=kill-self"}
+	exec := func(n int) error {
+		_, err := b.PerExecution(0).Execute(context.Background(), distinctComponent(t, n), "run", json.RawMessage(`"x"`), &mockHostHandler{})
+		return err
+	}
+
+	if err := exec(0); !errors.Is(err, ErrComponentCompileRefused) {
+		t.Fatalf("first attempt: %v", err)
+	}
+	if got := p.spawns.Load(); got != 1 {
+		t.Fatalf("spawns after the first attempt = %d, want 1", got)
+	}
+
+	clock = clock.Add(3 * time.Minute)
+	err := exec(0)
+	var ref *ComponentCompileRefusedError
+	if !errors.As(err, &ref) || !ref.Repeat || ref.RetryAfter != 7*time.Minute {
+		t.Fatalf("second attempt inside the window = %v (%+v), want a repeat refusal retrying in 7m", err, ref)
+	}
+	if got := p.spawns.Load(); got != 1 {
+		t.Errorf("spawns = %d after a refusal inside the window, want still 1: a child was started for a component refused moments ago\n%s", got, logs.String())
+	}
+
+	// KNOWN NEGATIVE: a different component has its own window.
+	if err := exec(1); !errors.Is(err, ErrComponentCompileRefused) || p.spawns.Load() != 2 {
+		t.Errorf("a different component: err=%v spawns=%d, want a fresh attempt (2 spawns) that was refused", err, p.spawns.Load())
+	}
+
+	// After the window, with a healthy child, the component is served.
+	clock = clock.Add(8 * time.Minute)
+	p.childEnv = nil
+	if err := exec(0); err != nil {
+		t.Fatalf("after the window with a healthy child: %v\n%s", err, logs.String())
+	}
+	if p.childCompiles.Load() != 1 || compilesOf(b) != 0 {
+		t.Errorf("child=%d compiles=%d, want served by a child (1, 0)", p.childCompiles.Load(), compilesOf(b))
+	}
+	p.mu.Lock()
+	_, stillRefused := p.refusedUntil[b.components.key(distinctComponent(t, 0))]
+	p.mu.Unlock()
+	if stillRefused {
+		t.Error("the expired refusal was not forgotten")
 	}
 }
