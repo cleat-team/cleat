@@ -1,6 +1,7 @@
 package main
 
 import (
+	"os"
 	"testing"
 )
 
@@ -75,8 +76,10 @@ func TestAParentsLimitBoundsTheMonitorAndItsUsageIsTheParents(t *testing.T) {
 	}
 }
 
-func TestWithNoLimitAnywhereTheTotalIsTheHostsAndTheUsageIsTheOwnCgroups(t *testing.T) {
-	info := readOnce(t, map[string]string{
+// With no limit at any level the cgroup source DECLINES and the monitor falls through to /proc/meminfo, which pairs the host's MemTotal with HOST-WIDE usage (MemAvailable). The first
+// version paired the host's total with this cgroup's own memory.current, which reads a busy host as nearly empty (cleat-review3, measured: 2 MiB used against a host at ~5751 MiB).
+func TestWithNoLimitAnywhereTheCgroupSourceDeclinesSoTheHostWideReadingIsUsed(t *testing.T) {
+	root := fakeHost(t, map[string]string{
 		"proc/self/cgroup":                        "0::/docker/abc\n",
 		"proc/meminfo":                            meminfo(64 * gib >> 10),
 		"sys/fs/cgroup/memory.max":                "max\n",
@@ -84,8 +87,71 @@ func TestWithNoLimitAnywhereTheTotalIsTheHostsAndTheUsageIsTheOwnCgroups(t *test
 		"sys/fs/cgroup/docker/abc/memory.max":     "max\n",
 		"sys/fs/cgroup/docker/abc/memory.current": "104857600\n",
 	})
-	if info.TotalBytes != 64*gib || info.UsedBytes != 100<<20 {
-		t.Errorf("total %d used %d, want the host's 64 GiB and this cgroup's own 100 MiB", info.TotalBytes, info.UsedBytes)
+	if _, ok := probeCgroupV2At(root); ok {
+		t.Fatal("the cgroup v2 source answered with no limit at any level: it would pair the host's total with this cgroup's own usage")
+	}
+	// The control: give the same hierarchy one numeric limit and it answers.
+	files := map[string]string{
+		"proc/self/cgroup":                        "0::/docker/abc\n",
+		"proc/meminfo":                            meminfo(64 * gib >> 10),
+		"sys/fs/cgroup/memory.max":                "max\n",
+		"sys/fs/cgroup/docker/abc/memory.max":     "536870912\n",
+		"sys/fs/cgroup/docker/abc/memory.current": "104857600\n",
+	}
+	if _, ok := probeCgroupV2At(fakeHost(t, files)); !ok {
+		t.Fatal("a hierarchy with a numeric limit was not read: the decline above proves nothing")
+	}
+}
+
+// cleat-review3's measured case: a leaf with the TIGHTER limit (2 GiB) using 1 GiB, under a parent at 4 GiB using 3.9 GiB. The parent has about 102 MiB of headroom and the leaf
+// 1 GiB, so the parent is what runs out first and is what the monitor must report, though its limit is the larger.
+func TestTheLevelWithTheLeastHeadroomIsReportedNotTheTightestLimit(t *testing.T) {
+	files := map[string]string{
+		"proc/self/cgroup":                    "0::/p/leaf\n",
+		"proc/meminfo":                        meminfo(64 * gib >> 10),
+		"sys/fs/cgroup/p/memory.max":          "4294967296\n",
+		"sys/fs/cgroup/p/memory.current":      "4187593114\n", // 3.9 GiB
+		"sys/fs/cgroup/p/leaf/memory.max":     "2147483648\n",
+		"sys/fs/cgroup/p/leaf/memory.current": "1073741824\n", // 1 GiB
+	}
+	info := readOnce(t, files)
+	if info.TotalBytes != 4*gib || info.UsedBytes != 4187593114 {
+		t.Errorf("total %d used %d, want the PARENT's 4 GiB and 3.9 GiB: it has ~102 MiB of headroom and the leaf 1 GiB", info.TotalBytes, info.UsedBytes)
+	}
+	// The CONTROL: the same two limits, with the leaf nearly full instead. The leaf binds, so a function that always picked the parent would fail THIS row.
+	files["sys/fs/cgroup/p/memory.current"] = "2147483648\n"      // the parent at 2 GiB: 2 GiB of headroom
+	files["sys/fs/cgroup/p/leaf/memory.current"] = "2040109465\n" // the leaf at 1.9 GiB of its 2: ~102 MiB
+	info = readOnce(t, files)
+	if info.TotalBytes != 2*gib || info.UsedBytes != 2040109465 {
+		t.Errorf("control: total %d used %d, want the LEAF's 2 GiB and 1.9 GiB", info.TotalBytes, info.UsedBytes)
+	}
+}
+
+// The binding level changes over time, so it is chosen at every READ and not once at probe time: the same probe, the files rewritten between two reads.
+func TestTheBindingLevelIsChosenAtEveryReadNotOnceAtStartUp(t *testing.T) {
+	root := fakeHost(t, map[string]string{
+		"proc/self/cgroup":                    "0::/p/leaf\n",
+		"proc/meminfo":                        meminfo(64 * gib >> 10),
+		"sys/fs/cgroup/p/memory.max":          "4294967296\n",
+		"sys/fs/cgroup/p/memory.current":      "1073741824\n",
+		"sys/fs/cgroup/p/leaf/memory.max":     "2147483648\n",
+		"sys/fs/cgroup/p/leaf/memory.current": "1932735283\n", // the leaf is the one close to its limit
+	})
+	fn, ok := probeCgroupV2At(root)
+	if !ok {
+		t.Fatal("no source")
+	}
+	first, _ := fn()
+	if first.TotalBytes != 2*gib {
+		t.Fatalf("first read: total %d, want the leaf's 2 GiB (it is the one at 90%%)", first.TotalBytes)
+	}
+	// A sibling grows: now the parent is the one about to run out.
+	if err := os.WriteFile(root+"sys/fs/cgroup/p/memory.current", []byte("4187593114\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	second, _ := fn()
+	if second.TotalBytes != 4*gib || second.UsedBytes != 4187593114 {
+		t.Errorf("second read: total %d used %d, want the parent's 4 GiB and 3.9 GiB after a sibling grew", second.TotalBytes, second.UsedBytes)
 	}
 }
 

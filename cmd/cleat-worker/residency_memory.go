@@ -89,27 +89,36 @@ func readCgroupLimit(root string) (uint64, string, bool) {
 	return best, memSourceCgroupV1, best != 0
 }
 
-// cgroupV2Limit is the tightest numeric memory.max on the process's own cgroup (from /proc/self/cgroup) and every ancestor up to the mount's root, and the directory
-// that limit lives in, relative to the cgroup mount and ending in a slash ("/docker/abc/"). A parent's limit bounds its children, and the usage that limit is measured
-// against is that directory's memory.current, which is why the directory is returned and not only the number: the memory monitor reads its usage from it (cleat#4431), so
-// the budget and the backstop are measured against the SAME cgroup. This is the one resolver both use.
-func cgroupV2Limit(root string) (limit uint64, dir string, ok bool) {
+// cgroupLevel is one cgroup in the process's hierarchy that carries a numeric memory.max: the limit, and the directory it lives in relative to the cgroup mount, ending in a slash.
+type cgroupLevel struct {
+	Limit uint64
+	Dir   string
+}
+
+// cgroupV2Levels lists EVERY cgroup on the process's own path (from /proc/self/cgroup) up to the mount's root that carries a numeric memory.max, deepest first. A level with
+// "max", no file, or garbage is not a limit and is not listed. Which of them binds is not knowable from the limits alone: a parent's limit is measured against the parent's
+// memory.current, siblings included, so the level that runs out first is the one with the least HEADROOM (limit minus use), and that changes over time (the memory monitor
+// picks it at every read; cleat#4431, cleat-review3). The resolver returns all of them so each reader can decide on what it knows.
+func cgroupV2Levels(root string) []cgroupLevel {
 	v2Path, _ := selfCgroupPaths(root + "proc/self/cgroup")
+	var out []cgroupLevel
 	for _, d := range ancestors(v2Path) {
-		if n, found := parseLimit(root + "sys/fs/cgroup" + d + "memory.max"); found && (limit == 0 || n < limit) {
-			limit, dir = n, d
+		if n, found := parseLimit(root + "sys/fs/cgroup" + d + "memory.max"); found {
+			out = append(out, cgroupLevel{Limit: n, Dir: d})
+		}
+	}
+	return out
+}
+
+// cgroupV2Limit is the tightest numeric memory.max among those levels, and where it lives. This is what a STATIC reader (the residency budget, computed once) takes: a share
+// of the smallest limit. The monitor does not use it, because the tightest limit is not always the level with the least headroom.
+func cgroupV2Limit(root string) (limit uint64, dir string, ok bool) {
+	for _, l := range cgroupV2Levels(root) {
+		if limit == 0 || l.Limit < limit {
+			limit, dir = l.Limit, l.Dir
 		}
 	}
 	return limit, dir, limit != 0
-}
-
-// ownCgroupV2Dir is the process's own cgroup directory, in the same form as cgroupV2Limit's, for reading usage when no level of the hierarchy has a limit.
-func ownCgroupV2Dir(root string) string {
-	v2, _ := selfCgroupPaths(root + "proc/self/cgroup")
-	if v2 == "/" {
-		return "/"
-	}
-	return v2 + "/"
 }
 
 // parseLimit reads a cgroup limit file: a positive number, or false for "max", a missing file or garbage.
