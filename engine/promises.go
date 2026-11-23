@@ -56,6 +56,12 @@ var createPromiseStep = stepSpec{
 		return ""
 	},
 	Decode: func(c *stepCtx, rec *EventRecord) int64 {
+		// A promise the store refused to create replays as the refusal, with the message the original run was handed (cleat#4335). An event with no
+		// Err is a success, which is every event recorded before this field was set on the call.
+		if rec.Err != "" {
+			written, _ := c.s.writeResult(c.ctx, c.m, c.args.outPtr, rec.Err, c.args.outMaxLen)
+			return packSimpleResult(1, written)
+		}
 		written, writtenEC := c.s.writeOut(c.ctx, c.m, c.args.outPtr, rec.PromiseID, c.args.outMaxLen)
 		return packSimpleResult(writtenEC, written)
 	},
@@ -72,41 +78,38 @@ var createPromiseStep = stepSpec{
 			promiseID = id.String()
 		}
 
+		// THE STORE IS WRITTEN FIRST AND THE EVENT RECORDS HOW IT WENT (cleat#4335, which closed cleat#4203). The order used to be the reverse: the event
+		// was recorded, then the store written, and a write that failed was told to the guest and recorded nowhere, so a replay answered success where the
+		// original run had been told an error. An event is persisted when it is recorded, so it cannot be amended afterwards; the outcome has to be known
+		// first. The failure is carried in Err, the field run_detached's refused start uses (cleat#4114), and Decode above answers from it.
+		//
+		// What the order changes is the crash window, and it is the better one. A crash between the two used to leave an event whose row was never written:
+		// the replay answered success with an id nobody had created, and every await of it suspended for ever (the hang IMPROVEMENT-PLAN 3.218 describes).
+		// It now leaves a row whose event was never recorded: the replay runs the call again, generates a NEW id, and the first row is an orphan that
+		// no guest was ever given. See also cleat#4335 for the per-store reading of whether repeating the write is safe.
+		//
+		// A MISSING store is the same failure as a failing one (3.231: the worker did not call WithPromiseStore, so this branch was ALWAYS the nil one and
+		// every create returned success while every await hung), and it is recorded the same way.
+		var storeErr string
+		if s.engine.promiseStore == nil {
+			s.engine.log().ErrorContext(ctx, "create_promise: no promise store configured", "workflow_id", s.workflowID, "tenant_id", s.tenantID)
+			storeErr = errNoPromiseStore
+		} else if err := s.engine.promiseStore.CreatePromise(ctx, s.workflowID, name, promiseID); err != nil {
+			// REPORTED, not logged and continued: the guest used to be told success, got an id nothing would ever settle, and hung on it (3.218).
+			// cleat_create_promise returns errCode in bits 0-31 (ABI.md 2.34), so the ABI has always had somewhere to put this.
+			s.engine.log().ErrorContext(ctx, "create_promise failed", "workflow_id", s.workflowID, "tenant_id", s.tenantID, "error", err)
+			storeErr = err.Error()
+		}
+
 		c.Record(EventRecord{
 			Step:        s.stepCount,
 			EventType:   EventTypeCreatePromise,
 			PromiseName: name,
 			PromiseID:   promiseID,
+			Err:         storeErr,
 		})
-
-		// Persist to the promise store, and REPORT A FAILURE rather than logging it.
-		//
-		// This used to log and continue, returning errCode 0 to the guest. The
-		// consequence was not "history and the store disagree" -- it was a hang.
-		// The event above already asserts the promise exists, the guest gets an ID
-		// and proceeds, and the later AwaitPromise calls GetPromise, finds nothing,
-		// falls past both the resolved and rejected branches, and SUSPENDS. It
-		// waits for a promise no external caller can ever resolve, because the row
-		// they would resolve against was never written. Nothing errors and the log
-		// line is the only trace. IMPROVEMENT-PLAN 3.218.
-		//
-		// The ABI has always had somewhere to put this: cleat_create_promise
-		// returns errCode in bits 0-31 (ABI.md 2.34). The failure was not
-		// unreportable, it was unreported.
-		// A MISSING store is the same failure as a failing one, and until now only
-		// the second was reported. 3.218 fixed the error branch below and left the
-		// nil branch returning success -- which is the exact defect its own comment
-		// names, one line up. The engine offers WithPromiseStore and the worker did
-		// not call it (3.231), so on a real deployment this branch was ALWAYS the
-		// nil one: every create returned success and every await hung.
-		if s.engine.promiseStore == nil {
-			s.engine.log().ErrorContext(ctx, "create_promise: no promise store configured", "workflow_id", s.workflowID, "tenant_id", s.tenantID)
-			written, _ := s.writeResult(ctx, m, promiseIDPtr, errNoPromiseStore, promiseIDMaxLen)
-			return packSimpleResult(1, written)
-		}
-		if err := s.engine.promiseStore.CreatePromise(ctx, s.workflowID, name, promiseID); err != nil {
-			s.engine.log().ErrorContext(ctx, "create_promise failed", "workflow_id", s.workflowID, "tenant_id", s.tenantID, "error", err)
-			written, _ := s.writeResult(ctx, m, promiseIDPtr, err.Error(), promiseIDMaxLen)
+		if storeErr != "" {
+			written, _ := s.writeResult(ctx, m, promiseIDPtr, storeErr, promiseIDMaxLen)
 			return packSimpleResult(1, written)
 		}
 
@@ -338,6 +341,30 @@ const (
 	PromiseOpReject     = "reject"
 )
 
+// settlementDecode is the replay answer of resolve_promise and reject_promise: success, unless the event says the store refused the write (cleat#4335).
+// The guest's result carries no message for these two (packSimpleResult(1, 0)), so the event's Err only decides the status.
+func settlementDecode(_ *stepCtx, rec *EventRecord) int64 {
+	if rec.Err != "" {
+		return packSimpleResult(1, 0)
+	}
+	return 0
+}
+
+// settleStore performs the store write of a settlement and returns the message to record when it failed, "" when it did not. A missing store is a
+// failure like a refusing one (errNoPromiseStore), which is recorded and answered the same way.
+func settleStore(c *stepCtx, op string, write func() error) string {
+	s, ctx := c.s, c.ctx
+	if s.engine.promiseStore == nil {
+		s.engine.log().ErrorContext(ctx, op+": no promise store configured", "workflow_id", s.workflowID, "tenant_id", s.tenantID)
+		return errNoPromiseStore
+	}
+	if err := write(); err != nil {
+		s.engine.log().ErrorContext(ctx, op+" failed", "workflow_id", s.workflowID, "tenant_id", s.tenantID, "error", err)
+		return err.Error()
+	}
+	return ""
+}
+
 func (s *execSession) ResolvePromise(ctx context.Context, m api.Module, promiseID, value string) int64 {
 	return s.step(ctx, m, &resolvePromiseStep, stepArgs{s1: promiseID, s2: value})
 }
@@ -362,13 +389,14 @@ var resolvePromiseStep = stepSpec{
 	Identity: func(a stepArgs, rec *EventRecord) string {
 		return settlementIdentity(a.s1, rec, PromiseOpResolve)
 	},
-	// Consumed and answered with success, whatever the original run was told by the store (see the characterization row
-	// resolve_promise/store_error_then_replay: nothing in the event says the store write failed).
-	Decode: func(*stepCtx, *EventRecord) int64 { return 0 },
+	Decode: settlementDecode,
 	Fresh: func(c *stepCtx) int64 {
 		s, ctx, promiseID, value := c.s, c.ctx, c.args.s1, c.args.s2
 
-		// Fresh execution: record and dispatch.
+		// The store first, then the event with its outcome: see createPromiseStep for why, and for what the order does to the crash window.
+		// Reported, not logged-and-swallowed: cleat_resolve_promise's adapter already decodes `errCode := uint32(result)` and turns a non-zero
+		// into an error, so the ABI has always had somewhere to put this. A resolve that silently did nothing leaves every awaiter suspended.
+		storeErr := settleStore(c, "resolve_promise", func() error { return s.engine.promiseStore.ResolvePromise(ctx, promiseID, value) })
 		c.Record(EventRecord{
 			Step:      s.stepCount,
 			EventType: EventTypePromiseResolved,
@@ -380,19 +408,9 @@ var resolvePromiseStep = stepSpec{
 			Op:            PromiseOpResolve,
 			PromiseID:     promiseID,
 			PromiseResult: value,
+			Err:           storeErr,
 		})
-
-		// Reported, not logged-and-swallowed. cleat_resolve_promise's adapter
-		// already decodes `errCode := uint32(result)` and turns a non-zero into an
-		// error, so the ABI has always had somewhere to put this -- the same
-		// sentence 3.218 wrote about CreatePromise, still true here afterwards.
-		// A resolve that silently did nothing leaves every awaiter suspended.
-		if s.engine.promiseStore == nil {
-			s.engine.log().ErrorContext(ctx, "resolve_promise: no promise store configured", "workflow_id", s.workflowID, "tenant_id", s.tenantID)
-			return packSimpleResult(1, 0)
-		}
-		if err := s.engine.promiseStore.ResolvePromise(ctx, promiseID, value); err != nil {
-			s.engine.log().ErrorContext(ctx, "resolve_promise failed", "workflow_id", s.workflowID, "tenant_id", s.tenantID, "error", err)
+		if storeErr != "" {
 			return packSimpleResult(1, 0)
 		}
 		return 0
@@ -418,11 +436,12 @@ var rejectPromiseStep = stepSpec{
 	Identity: func(a stepArgs, rec *EventRecord) string {
 		return settlementIdentity(a.s1, rec, PromiseOpReject)
 	},
-	Decode: func(*stepCtx, *EventRecord) int64 { return 0 },
+	Decode: settlementDecode,
 	Fresh: func(c *stepCtx) int64 {
 		s, ctx, promiseID, errMsg := c.s, c.ctx, c.args.s1, c.args.s2
 
-		// Fresh execution: record and dispatch. Service and Op: see resolvePromiseStep.
+		// The store first, then the event with its outcome (see createPromiseStep). Service and Op: see resolvePromiseStep.
+		storeErr := settleStore(c, "reject_promise", func() error { return s.engine.promiseStore.RejectPromise(ctx, promiseID, errMsg) })
 		c.Record(EventRecord{
 			Step:         s.stepCount,
 			EventType:    EventTypePromiseRejected,
@@ -430,15 +449,9 @@ var rejectPromiseStep = stepSpec{
 			Op:           PromiseOpReject,
 			PromiseID:    promiseID,
 			PromiseError: errMsg,
+			Err:          storeErr,
 		})
-
-		// Same as resolvePromiseStep above, and for the same reason.
-		if s.engine.promiseStore == nil {
-			s.engine.log().ErrorContext(ctx, "reject_promise: no promise store configured", "workflow_id", s.workflowID, "tenant_id", s.tenantID)
-			return packSimpleResult(1, 0)
-		}
-		if err := s.engine.promiseStore.RejectPromise(ctx, promiseID, errMsg); err != nil {
-			s.engine.log().ErrorContext(ctx, "reject_promise failed", "workflow_id", s.workflowID, "tenant_id", s.tenantID, "error", err)
+		if storeErr != "" {
 			return packSimpleResult(1, 0)
 		}
 		return 0

@@ -5,8 +5,8 @@ package engine
 //
 //	(a) replay ends with stepCount == len(history), nothing unread, and the dispatcher noted no violation;
 //	(b) the effect happened exactly once: replaying it did not do it again;
-//	(c) the answer is the one the original run got -- EXCEPT for a call whose fresh side can report a store failure the event does not record
-//	    (see roundTripExceptions);
+//	(c) the answer is the one the original run got, WHEN THE STORE REFUSES THE WRITE TOO (cleat#4335: this was an exception, named in a table, while
+//	    a failed write was reported to the guest and recorded nowhere; the second pass below is the same properties with a refusing store);
 //	(d) a second replay changes nothing;
 //	(e) a call made after the replay is a fresh step at the frontier: it records, it counts, and leaving replay noted nothing.
 //
@@ -18,6 +18,7 @@ package engine
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -25,32 +26,36 @@ import (
 	"github.com/cleat-team/cleat/engine/testutil"
 )
 
-// countingPromiseStore counts the writes that reach the store: the effects of the three promise calls.
+// countingPromiseStore counts the writes that reach the store: the effects of the three promise calls. With refuse set, every write is counted
+// and then refused, which is the store failure of cleat#4335.
 type countingPromiseStore struct {
 	mockPromiseStore
 	writes int32
+	refuse bool
 }
+
+var errRoundTripStoreDown = fmt.Errorf("round-trip store down")
 
 func (c *countingPromiseStore) CreatePromise(ctx context.Context, w, n, id string) error {
 	atomic.AddInt32(&c.writes, 1)
+	if c.refuse {
+		return errRoundTripStoreDown
+	}
 	return c.mockPromiseStore.CreatePromise(ctx, w, n, id)
 }
 func (c *countingPromiseStore) ResolvePromise(ctx context.Context, id, r string) error {
 	atomic.AddInt32(&c.writes, 1)
+	if c.refuse {
+		return errRoundTripStoreDown
+	}
 	return c.mockPromiseStore.ResolvePromise(ctx, id, r)
 }
 func (c *countingPromiseStore) RejectPromise(ctx context.Context, id, e string) error {
 	atomic.AddInt32(&c.writes, 1)
+	if c.refuse {
+		return errRoundTripStoreDown
+	}
 	return c.mockPromiseStore.RejectPromise(ctx, id, e)
-}
-
-// roundTripExceptions names the calls for which property (c) cannot hold when the store write fails, and why. This is not exercised here
-// (the store does not fail in the round trip); it is on the list so that the next reader of (c) finds the gap named. The characterization
-// rows <call>/store_error and <call>/store_error_then_replay measure it, and it is filed as its own issue, cleat#4203 (WS-cleat-2's reading, measured here).
-var roundTripExceptions = map[string]string{
-	"create_promise":  "a failed promise-store write is reported to the guest but not recorded; replay answers the recorded success",
-	"resolve_promise": "same",
-	"reject_promise":  "same",
 }
 
 func TestEveryPromiseSpecRoundTripsThroughARealEventHistory(t *testing.T) {
@@ -70,19 +75,21 @@ func TestEveryPromiseSpecRoundTripsThroughARealEventHistory(t *testing.T) {
 			defer db.Close()
 			for i, pc := range promiseCalls {
 				pc := pc
-				t.Run(pc.name, func(t *testing.T) { roundTripPromiseCall(t, d.dialect, db, i, pc) })
+				// Two passes: the store accepts the write, and the store REFUSES it (cleat#4335). The second is the one that was an exception.
+				t.Run(pc.name, func(t *testing.T) { roundTripPromiseCall(t, d.dialect, db, 2*i, pc, false) })
+				t.Run(pc.name+"/store_refuses", func(t *testing.T) { roundTripPromiseCall(t, d.dialect, db, 2*i+1, pc, true) })
 			}
 		})
 	}
 }
 
-func roundTripPromiseCall(t *testing.T, dialect testutil.Dialect, db *sql.DB, n int, pc promiseCall) {
+func roundTripPromiseCall(t *testing.T, dialect testutil.Dialect, db *sql.DB, n int, pc promiseCall, refuse bool) {
 	t.Helper()
 	ctx := context.Background()
 	wfID := "round-trip-" + string(dialect) + "-" + time.Now().Format("150405.000000") + string(rune('a'+n))
 	seedWorkflowInstance(t, db, dialect, wfID)
 	store := storeFor(t, dialect, db)
-	ps := &countingPromiseStore{}
+	ps := &countingPromiseStore{refuse: refuse}
 	eng := NewEngine(nil, nil, WithWorkflowID(wfID), WithTenantID(DefaultTenantUUID), WithWorkflowStore(store), WithDB(db), WithPromiseStore(ps))
 	session := func(history []EventRecord) *execSession {
 		return &execSession{
@@ -102,6 +109,9 @@ func roundTripPromiseCall(t *testing.T, dialect testutil.Dialect, db *sql.DB, n 
 	// The original run.
 	fresh := session(nil)
 	freshRes := pc.call(fresh)
+	if refuse && byte(freshRes) == 0 {
+		t.Fatalf("PRECONDITION FAILED: the store refused the write and the original run was told success (%#x), so this pass measures nothing", freshRes)
+	}
 	history := load()
 	if len(history) != 1 || ps.writes != 1 {
 		t.Fatalf("PRECONDITION FAILED: the fresh run left %d events in the store and made %d store writes, want 1 and 1 (the round trip below is about THAT history)", len(history), ps.writes)
@@ -145,8 +155,5 @@ func roundTripPromiseCall(t *testing.T, dialect testutil.Dialect, db *sql.DB, n 
 	}
 	if h := load(); len(h) != 2 {
 		t.Errorf("(e) the frontier call left %d events in the store, want 2", len(h))
-	}
-	if _, ok := roundTripExceptions[pc.name]; !ok {
-		t.Errorf("%s has no entry in roundTripExceptions; every real spec says whether property (c) can hold when its store write fails", pc.name)
 	}
 }

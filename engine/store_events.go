@@ -332,6 +332,11 @@ func eventRecordToPayload(rec EventRecord) ([]byte, error) {
 	case "create_promise":
 		payload["promise_name"] = rec.PromiseName
 		payload["promise_id"] = rec.PromiseID
+		// A store write that FAILED (cleat#4335): replay answers the call from it, so it is inside the checksum and an edited one breaks the chain. Only
+		// when set, so every create recorded before this existed hashes exactly as it did.
+		if rec.Err != "" {
+			payload["error"] = rec.Err
+		}
 	case "await_promise", "promise_resolved", "promise_rejected":
 		payload["promise_id"] = rec.PromiseID
 		// Only when set, so an await recorded before this existed keeps
@@ -345,6 +350,10 @@ func eventRecordToPayload(rec EventRecord) ([]byte, error) {
 		}
 		if rec.PromiseError != "" {
 			payload["promise_error"] = rec.PromiseError
+		}
+		// The same for a resolve or reject whose store write failed (cleat#4335). An await never sets Err, so its payload is unchanged.
+		if rec.Err != "" {
+			payload["error"] = rec.Err
 		}
 	case "update_handler":
 		if rec.UpdateHandlerName != "" {
@@ -851,6 +860,9 @@ func populateFromPayload(rec *EventRecord, payload []byte) {
 		}
 		if v, ok := m["promise_error"].(string); ok {
 			rec.PromiseError = v
+		}
+		if v, ok := m["error"].(string); ok {
+			rec.Err = v
 		}
 	case "update_handler":
 		if v, ok := m["update_handler_name"].(string); ok {

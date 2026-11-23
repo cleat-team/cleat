@@ -96,20 +96,26 @@ func characterizePromiseCall(t *testing.T, pc promiseCall) map[string]string {
 	n5 := len(s5.history)
 	got["segment_frontier"] = observe(s5, pc.call(s5), n5)
 
-	// no store: the engine has no promise store, so the event is recorded and the guest is told it failed.
+	// no store: the engine has no promise store, so the guest is told it failed and the event records that (cleat#4335).
 	s6 := promiseSession(nil, nil)
 	s6.engine = NewEngine(nil, nil)
 	s6.nowMs = time.Now().UnixMilli()
 	got["no_store"] = observe(s6, pc.call(s6), 0)
 
-	// store error: the store refuses; the event is already recorded and stays, and the guest is told the call failed.
+	// no store, then replay: the history that run recorded replays as the same failure. Until cleat#4335 this half was read from the code and
+	// not measured, because it was not a row.
+	recordedAfterNoStore := append([]EventRecord(nil), s6.history...)
+	s6b := newSession(nil, recordedAfterNoStore)
+	got["no_store_then_replay"] = observe(s6b, pc.call(s6b), len(s6b.history))
+
+	// store error: the store refuses; the event records the refusal and the guest is told the call failed.
 	s7 := promiseSession(&mockPromiseStore{}, nil)
 	s7.engine = NewEngine(nil, nil, WithPromiseStore(&refusingPromiseStore{}))
 	got["store_error"] = observe(s7, pc.call(s7), 0)
 
-	// store error, then replay: nothing in the recorded event says the store write failed, so a replay of that history hands the guest the
-	// SUCCESS the event implies, where the original run was handed an error (WS-cleat-2's reading of the round-trip property (c), measured
-	// here). Kept as a row so that the migration neither hides nor fixes it silently; filed as cleat#4203.
+	// store error, then replay: the event carries the refusal, so a replay of that history hands the guest the ERROR the original run was
+	// handed. Until cleat#4335 this answered success (WS-cleat-2's reading of the round-trip property (c), found as cleat#4203): the row
+	// stayed in this table while it was true, so the migration neither hid nor fixed it silently.
 	recordedAfterFailure := append([]EventRecord(nil), s7.history...)
 	s8 := newSession(nil, recordedAfterFailure)
 	got["store_error_then_replay"] = observe(s8, pc.call(s8), len(s8.history))
@@ -150,45 +156,50 @@ func (refusingPromiseStore) RejectPromise(context.Context, string, string) error
 	return fmt.Errorf("store down")
 }
 
-// promiseGolden is what characterizePromiseCall returned on develop 7d1d0e20, before any of these calls went through step().
+// promiseGolden is what characterizePromiseCall returned on develop 7d1d0e20, before any of these calls went through step(), EXCEPT the rows
+// store_error, no_store, store_error_then_replay and no_store_then_replay, which cleat#4335 changed on purpose: a store write that failed is
+// recorded in the event's err and replays as the failure. Every other value is the one measured before the dispatcher existed.
 var promiseGolden = map[string]map[string]string{
 	"create_promise": {
 		"divergence":                 "res=0x1 isReplay=true step=0 recorded=[]",
 		"fresh":                      "res=0x0 isReplay=false step=1 recorded=[create_promise/step=0/svc=\"\"/op=\"\"/id=\"<generated>\"/name=\"n\"/result=\"\"/err=\"\"]",
 		"frontier":                   "res=0x0 isReplay=false step=2 recorded=[create_promise/step=1/svc=\"\"/op=\"\"/id=\"<generated>\"/name=\"n\"/result=\"\"/err=\"\"]",
-		"no_store":                   "res=0x1 isReplay=false step=1 recorded=[create_promise/step=0/svc=\"\"/op=\"\"/id=\"<generated>\"/name=\"n\"/result=\"\"/err=\"\"]",
+		"no_store":                   "res=0x1 isReplay=false step=1 recorded=[create_promise/step=0/svc=\"\"/op=\"\"/id=\"<generated>\"/name=\"n\"/result=\"\"/err=\"no promise store configured on this engine (engine.WithPromiseStore was never called); a durable promise cannot be created, awaited or settled without one\"]",
+		"no_store_then_replay":       "res=0x1 isReplay=true step=1 recorded=[]",
 		"replay":                     "res=0x0 isReplay=true step=1 recorded=[]",
 		"replay_mismatched_identity": "res=0x1 isReplay=true step=0 recorded=[]", // CHANGED ON PURPOSE by the dispatcher's identity check (cleat#4211): was res=0x0 step=1, accepted and consumed
 		"segment_fresh":              "res=0x80000000 isReplay=false step=0 recorded=[]",
 		"segment_frontier":           "res=0x80000000 isReplay=false step=1 recorded=[]",
-		"store_error":                "res=0x1 isReplay=false step=1 recorded=[create_promise/step=0/svc=\"\"/op=\"\"/id=\"<generated>\"/name=\"n\"/result=\"\"/err=\"\"]",
-		"store_error_then_replay":    "res=0x0 isReplay=true step=1 recorded=[]",
+		"store_error":                "res=0x1 isReplay=false step=1 recorded=[create_promise/step=0/svc=\"\"/op=\"\"/id=\"<generated>\"/name=\"n\"/result=\"\"/err=\"store down\"]",
+		"store_error_then_replay":    "res=0x1 isReplay=true step=1 recorded=[]",
 	},
 	"resolve_promise": {
 		"divergence":                 "res=0x1 isReplay=true step=0 recorded=[]",
 		"fresh":                      "res=0x0 isReplay=false step=1 recorded=[promise_resolved/step=0/svc=\"promise\"/op=\"resolve\"/id=\"p-1\"/name=\"\"/result=\"v\"/err=\"\"]",
 		"frontier":                   "res=0x0 isReplay=false step=2 recorded=[promise_resolved/step=1/svc=\"promise\"/op=\"resolve\"/id=\"p-1\"/name=\"\"/result=\"v\"/err=\"\"]",
-		"no_store":                   "res=0x1 isReplay=false step=1 recorded=[promise_resolved/step=0/svc=\"promise\"/op=\"resolve\"/id=\"p-1\"/name=\"\"/result=\"v\"/err=\"\"]",
+		"no_store":                   "res=0x1 isReplay=false step=1 recorded=[promise_resolved/step=0/svc=\"promise\"/op=\"resolve\"/id=\"p-1\"/name=\"\"/result=\"v\"/err=\"no promise store configured on this engine (engine.WithPromiseStore was never called); a durable promise cannot be created, awaited or settled without one\"]",
+		"no_store_then_replay":       "res=0x1 isReplay=true step=1 recorded=[]",
 		"replay":                     "res=0x0 isReplay=true step=1 recorded=[]",
 		"replay_by_type_alone":       "res=0x0 isReplay=true step=1 recorded=[]",
 		"replay_mismatched_identity": "res=0x1 isReplay=true step=0 recorded=[]", // CHANGED ON PURPOSE by the dispatcher's identity check (cleat#4211): was res=0x0 step=1, accepted and consumed
 		"segment_fresh":              "res=0x80000000 isReplay=false step=0 recorded=[]",
 		"segment_frontier":           "res=0x80000000 isReplay=false step=1 recorded=[]",
-		"store_error":                "res=0x1 isReplay=false step=1 recorded=[promise_resolved/step=0/svc=\"promise\"/op=\"resolve\"/id=\"p-1\"/name=\"\"/result=\"v\"/err=\"\"]",
-		"store_error_then_replay":    "res=0x0 isReplay=true step=1 recorded=[]",
+		"store_error":                "res=0x1 isReplay=false step=1 recorded=[promise_resolved/step=0/svc=\"promise\"/op=\"resolve\"/id=\"p-1\"/name=\"\"/result=\"v\"/err=\"store down\"]",
+		"store_error_then_replay":    "res=0x1 isReplay=true step=1 recorded=[]",
 	},
 	"reject_promise": {
 		"divergence":                 "res=0x1 isReplay=true step=0 recorded=[]",
 		"fresh":                      "res=0x0 isReplay=false step=1 recorded=[promise_rejected/step=0/svc=\"promise\"/op=\"reject\"/id=\"p-1\"/name=\"\"/result=\"\"/err=\"\"]",
 		"frontier":                   "res=0x0 isReplay=false step=2 recorded=[promise_rejected/step=1/svc=\"promise\"/op=\"reject\"/id=\"p-1\"/name=\"\"/result=\"\"/err=\"\"]",
-		"no_store":                   "res=0x1 isReplay=false step=1 recorded=[promise_rejected/step=0/svc=\"promise\"/op=\"reject\"/id=\"p-1\"/name=\"\"/result=\"\"/err=\"\"]",
+		"no_store":                   "res=0x1 isReplay=false step=1 recorded=[promise_rejected/step=0/svc=\"promise\"/op=\"reject\"/id=\"p-1\"/name=\"\"/result=\"\"/err=\"no promise store configured on this engine (engine.WithPromiseStore was never called); a durable promise cannot be created, awaited or settled without one\"]",
+		"no_store_then_replay":       "res=0x1 isReplay=true step=1 recorded=[]",
 		"replay":                     "res=0x0 isReplay=true step=1 recorded=[]",
 		"replay_by_type_alone":       "res=0x0 isReplay=true step=1 recorded=[]",
 		"replay_mismatched_identity": "res=0x1 isReplay=true step=0 recorded=[]", // CHANGED ON PURPOSE by the dispatcher's identity check (cleat#4211): was res=0x0 step=1, accepted and consumed
 		"segment_fresh":              "res=0x80000000 isReplay=false step=0 recorded=[]",
 		"segment_frontier":           "res=0x80000000 isReplay=false step=1 recorded=[]",
-		"store_error":                "res=0x1 isReplay=false step=1 recorded=[promise_rejected/step=0/svc=\"promise\"/op=\"reject\"/id=\"p-1\"/name=\"\"/result=\"\"/err=\"\"]",
-		"store_error_then_replay":    "res=0x0 isReplay=true step=1 recorded=[]",
+		"store_error":                "res=0x1 isReplay=false step=1 recorded=[promise_rejected/step=0/svc=\"promise\"/op=\"reject\"/id=\"p-1\"/name=\"\"/result=\"\"/err=\"store down\"]",
+		"store_error_then_replay":    "res=0x1 isReplay=true step=1 recorded=[]",
 	},
 }
 

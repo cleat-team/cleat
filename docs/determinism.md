@@ -54,32 +54,6 @@ wazero under CLI and test tooling — implement strict IEEE 754 semantics withou
 | `time.Now()` | No | **Blocked** at vet/build time |
 | `crypto/rand` | No | **Blocked** at vet/build time |
 
-### Known limitation: a promise call whose store write failed replays as a success
-
-`create_promise`, `resolve_promise` and `reject_promise` record their event first and write the promise store second. When the store
-write fails, or the worker has no promise store, **the guest is told the call failed, and the event stays in the history**. Nothing in
-the event says the write failed, so a replay of that history answers **success**. The original run and its replay can therefore see
-different results from the same call: the guest may have taken a different branch on the error, and after a replay it sees success.
-
-Measured on develop `3cd7a57c` (2026-11-21), against the real host functions with a store that refuses every write
-(`TestAPromiseSingleStepBehavesAsItDidBeforeTheDispatcher`, rows `store_error` and `store_error_then_replay`). The no-store case
-(row `no_store`) is measured for the fresh run, which fails and records the same event; its replay is not a row of its own, so that
-half is read from the code, not measured:
-
-| call | fresh run, store refuses the write | replay of the history that run recorded |
-|---|---|---|
-| `create_promise` | error (`0x1`), event recorded | success (`0x0`) |
-| `resolve_promise` | error (`0x1`), event recorded | success (`0x0`) |
-| `reject_promise` | error (`0x1`), event recorded | success (`0x0`) |
-
-What this means for a workflow today: **do not branch on the error from one of these three calls in a way that matters after a
-replay.** A promise store that refuses a write is an operational fault, and the calls' results are not replay-stable while it lasts.
-All three are replay-stable when the write succeeds, which is the ordinary case.
-
-This is documented and not fixed in 0.6.0, because recording the failure changes the history format and the options (record the failure
-on the event, or write the store before recording) depend on whether each promise-store write is idempotent. That decision and the fix
-are tracked in cleat#4335; the finding is cleat#4203.
-
 ## Common Non-Determinism Patterns
 
 ### 1. Map Iteration (E021)

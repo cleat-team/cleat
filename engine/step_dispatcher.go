@@ -130,8 +130,8 @@ type stepCtx struct {
 func (c *stepCtx) Reinvoking() bool { return c.reinvoking }
 
 // Record records an event where the call records it today. It is the only way a spec's Fresh writes history, which is what lets the
-// dispatcher check afterwards that it wrote what the spec declared. Calls differ on WHEN they record (a promise create records first and
-// writes its store after), so Fresh calls this where its call did and the dispatcher imposes no order.
+// dispatcher check afterwards that it wrote what the spec declared. Calls differ on WHEN they record (a promise create writes its store first
+// and records how it went, cleat#4335; until then it recorded first), so Fresh calls this where its call does and the dispatcher imposes no order.
 func (c *stepCtx) Record(rec EventRecord) eventPersistence {
 	c.recorded++
 	return c.s.recordEvent(rec)
