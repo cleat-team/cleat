@@ -1,0 +1,7 @@
+{{- /*
+  Renders nothing: it only refuses (cleat#4393). See _resources-guard.tpl for what and why.
+*/ -}}
+{{- $msg := include "cleat.resourcesRefusal" .Values.resources -}}
+{{- if $msg -}}
+{{- fail $msg -}}
+{{- end -}}

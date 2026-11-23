@@ -4804,6 +4804,41 @@ jobs:
       - name: helm template renders without error
         run: helm template cleat charts/cleat --version 0.3.0-dryrun > /tmp/cleat-chart-rendered.yaml
 
+      # cleat#4393: Helm deep-merges an install's values over the chart's, so setting only a limit below the default request (or only a request
+      # above the default limit) leaves a request above its limit, which Kubernetes rejects at apply time and helm lint and helm template both pass.
+      # templates/resources-guard.yaml refuses it at render time and says what to set. The Go stand-in in tests/manifests cannot run sprig, so this is
+      # checked with the real helm, with its positive controls in the same step: a guard that refused everything, or nothing, would otherwise pass.
+      - name: a request above its limit is refused at render time, and a consistent override is not
+        run: |
+          set -uo pipefail
+          fail=0
+          refuses() { # <what> <must-name> <helm args...>
+            local what="$1" must="$2"; shift 2
+            if out=$(helm template cleat charts/cleat "$@" 2>&1); then
+              echo "::error::$what: helm template ACCEPTED it, want a refusal"; fail=1
+            elif ! grep -qF "$must" <<<"$out"; then
+              echo "::error::$what: refused, but the message does not name '$must':"; echo "$out" | head -3; fail=1
+            else
+              echo "ok: $what is refused"
+            fi
+          }
+          accepts() { # <what> <helm args...>
+            local what="$1"; shift
+            if out=$(helm template cleat charts/cleat "$@" 2>&1); then echo "ok: $what is accepted"
+            else echo "::error::$what: helm template REFUSED it:"; echo "$out" | head -3; fail=1; fi
+          }
+          accepts "the defaults"
+          accepts "a limit and a request set together" --set resources.limits.memory=512Mi --set resources.requests.memory=256Mi
+          accepts "a limit equal to the default request" --set resources.limits.memory=2Gi
+          accepts "a smaller limit with its own request" --set resources.limits.memory=1Gi --set resources.requests.memory=1Gi
+          refuses "limits.memory=1Gi set alone (the default request is 2Gi)" "resources.requests.memory" --set resources.limits.memory=1Gi
+          accepts "a quantity the guard cannot parse (never compared)" --set resources.limits.memory=1e3
+          refuses "limits.memory=512Mi set alone" "resources.requests.memory" --set resources.limits.memory=512Mi
+          refuses "limits.cpu=250m set alone" "resources.requests.cpu" --set resources.limits.cpu=250m
+          refuses "requests.memory=4Gi set alone" "resources.limits.memory" --set resources.requests.memory=4Gi
+          refuses "limits.memory=1G (1e9, below the 2Gi request)" "resources.requests.memory" --set resources.limits.memory=1G
+          exit $fail
+
       # A scratch, unauthenticated registry -- this job has no ghcr.io
       # credentials and should not need any to prove push mechanics work.
       # -p 5050:5000 rather than the image's own 5000, to stay clear of

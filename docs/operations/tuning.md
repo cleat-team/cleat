@@ -211,6 +211,36 @@ lower the flag or `--concurrency`; do not size to the ceiling unless every workf
 | 4 GB | 20 | 64 | 0.75 |
 | 8 GB | 40 | 64 | 0.80 |
 
+### In Kubernetes: the Helm chart's defaults
+
+The chart ships requests 500m CPU / 2Gi and limits 2 CPU / 2Gi (the memory request equals the limit by the owner's decision: a worker reserves its memory; the default 2 replicas need 4 GiB of allocatable memory free), and an autoscaler on CPU only (cleat#4393). They are
+chosen to work out of the box, not to be tight; set `resources` to shrink them for a workload you have measured, and
+**set both `requests` and `limits`** for each of cpu and memory: Helm merges your values over the chart's, so a limit
+set alone below the default request leaves a request above its limit, which Kubernetes rejects. The chart refuses that at
+render time and names what to set. The raw manifests `k8s/deployment.yaml` and `k8s/migrate-job.yaml` carry the same values.
+What a worker uses, measured on 2026-11-22/23 (arm64 Linux; cleat#4377 and cleat#4389 have the data):
+
+| | |
+|---|---|
+| idle worker, no workflows | about 35 MiB resident |
+| process baseline after one guest has compiled and run | Go about 207 MiB, C# about 112 MiB, **Python about 565 MiB** |
+| the first compile of a distinct Python component | peaks about 475 to 525 MiB **above** the baseline, once per component per worker |
+| each held run (residency) | Go about 1.5 MiB; Python 1.3 MiB (12 before cleat#4382); C# 17 MiB (49 before cleat#4378) |
+| a cached compiled component | about 100 MiB (Python), 10 to 17 MiB (C#) |
+
+Under a cgroup limit the Python compile was killed at 512 MiB and completed at 768 MiB and above, so the old 512Mi
+default could not run a Python workflow at all; and at a 0.5 CPU limit it took 11.4 s against 1.2 to 2.4 s
+unconstrained. Two things scale with the limit: the worker stops claiming new work at `--memory-soft-limit` of the
+container limit (1.6 GiB of 2Gi at the default 0.80), and the residency budget defaults to 8 held runs x the dearest
+per-run charge (528 MiB, because C# is charged 66 MiB), so it is about a quarter of 2Gi.
+
+**Why the autoscaler does not scale on memory by default.** The HPA's memory metric is a percentage of the *request*,
+and per-pod memory does not fall as replicas are added: it is dominated by the compiled-component cache, held runs
+and allocator retention, which grow by design. With the old 128Mi request an 80% target was 102 MiB, below a warmed
+Go worker's 207 MiB, so the HPA computed `ceil(2 x 162/80)` = 5 replicas (207 MiB is 162% of a 128Mi request) and kept climbing to `maxReplicas`. (From
+the HPA's documented formula and the measured baselines; not from a cluster run.) Set `autoscaling.targetMemory` if
+you want it anyway, against a request you have sized for it.
+
 ## WASM cache sizing
 
 Compiled WASM modules are cached in memory (LRU eviction). Disk cache is optional
