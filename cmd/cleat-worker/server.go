@@ -83,7 +83,10 @@ type apiServer struct {
 	store       engine.WorkflowStore
 	worker      *Worker
 	maxBodySize int64
-	db          *sql.DB
+	// maxDefinitionBodySize is --max-definition-body-size: the ceiling on POST /api/definitions, which carries a whole workflow component as
+	// base64 inside JSON. 0 means the default, definitionMaxBodySize (cleat#4400).
+	maxDefinitionBodySize int64
+	db                    *sql.DB
 
 	// queryStateSearchWindow is how many of a tenant's most recent runs a published-state search examines
 	// on a deployment that seals query_state (cleat#3775). 0 refuses that search, naming the flag.
@@ -461,12 +464,13 @@ type bodyLimit struct {
 	help string
 }
 
-// definitionMaxBodySize is the ceiling on a workflow definition upload.
+// definitionMaxBodySize is the DEFAULT ceiling on a workflow definition upload, moved by --max-definition-body-size (cleat#4400).
 //
-// Named because cleat#1332's message has to name the thing that sets the
-// limit, and this was an inline 10*1024*1024 with no name anywhere -- not in
-// the flags, not in the docs, and not in the 400 it used to produce.
-const definitionMaxBodySize int64 = 10 * 1024 * 1024
+// Named because cleat#1332's message has to name the thing that sets the limit, and this was an inline 10*1024*1024 with no name anywhere -- not in
+// the flags, not in the docs, and not in the 400 it used to produce. It was a fixed 10 MiB until cleat#4400: a built Python component is about
+// 19.5 MB and the body carries it as base64 inside JSON (wasm_bytes_base64, about a third larger), so a Python workflow could not be deployed through
+// POST /api/definitions at all.
+const definitionMaxBodySize int64 = 64 * 1024 * 1024
 
 // terminateMaxBodySize is the ceiling on a dead-letter terminate's reason.
 // Also previously an unnamed inline literal (int64(1<<10)).
@@ -481,8 +485,14 @@ func signalBodyLimit() bodyLimit {
 		"update endpoints and not changed by --max-body-size"}
 }
 
-func definitionBodyLimit() bodyLimit {
-	return bodyLimit{definitionMaxBodySize, "fixed for the definition upload endpoint and " +
+// definitionBodyLimit is the ceiling on a definition upload: --max-definition-body-size, or the default when it was not set (a test server, or
+// a flag of zero). It is NOT moved by --max-body-size, which is the 1 MiB ceiling of the ordinary endpoints, and the 413 says which flag does.
+func (s *apiServer) definitionBodyLimit() bodyLimit {
+	max := s.maxDefinitionBodySize
+	if max <= 0 {
+		max = definitionMaxBodySize
+	}
+	return bodyLimit{max, "set by --max-definition-body-size for the definition upload endpoint and " +
 		"not changed by --max-body-size"}
 }
 
@@ -3130,7 +3140,7 @@ func (s *apiServer) handleCreateDefinition(w http.ResponseWriter, r *http.Reques
 	// contradicting each other in a single response, on the WASM upload, which
 	// is the most legitimate 413 in the API. cleat#1338.
 	var req createDefRequest
-	if !s.decodeJSONBody(w, r, definitionBodyLimit(), &req) {
+	if !s.decodeJSONBody(w, r, s.definitionBodyLimit(), &req) {
 		return
 	}
 

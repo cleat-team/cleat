@@ -834,13 +834,14 @@ See [Streaming tokens to a client](../how-to/stream-tokens-to-a-client.md).
 General endpoints use this limit.
 
 **Five endpoints do not, and this flag does not move any of them.** There are
-four ceilings in total:
+four ceilings in total, and one of them has a flag of its own,
+[`--max-definition-body-size`](#--max-definition-body-size):
 
 | limit | endpoints | moved by |
 |---|---|---|
 | `--max-body-size`, 1 MiB default | everything not listed below | this flag |
 | **64 KB**, fixed | `POST /api/workflows/:id/signal`, `POST /api/workflows/:id/cancel`, `POST /api/workflows/:id/update/:name` | nothing |
-| **10 MiB**, fixed | `POST /api/definitions` (WASM upload) | nothing |
+| **64 MiB** by default | `POST /api/definitions` (WASM upload) | `--max-definition-body-size` |
 | **1 KB**, fixed | `POST /api/dead-letters/:id/terminate` | nothing |
 
 This line named only "signal endpoints" until cleat#1332, so cancel was
@@ -854,13 +855,39 @@ itself:
 
     {"error":"request body too large: the limit is 1048576 bytes, set by --max-body-size"}
     {"error":"request body too large: the limit is 65536 bytes, fixed for the signal, cancel and update endpoints and not changed by --max-body-size"}
-    {"error":"request body too large: the limit is 10485760 bytes, fixed for the definition upload endpoint and not changed by --max-body-size"}
+    {"error":"request body too large: the limit is 67108864 bytes, set by --max-definition-body-size for the definition upload endpoint and not changed by --max-body-size"}
 
 Seven of the sixteen bounded endpoints used to answer `400 {"error":"invalid
 JSON: http: request body too large"}` instead — a status asserting the body was
 malformed, on a body that was never read. cleat#1338 made all sixteen agree;
 that is a status-code change for those seven, and clients branching on `400`
 for an oversized body need to handle `413`.
+
+---
+
+### --max-definition-body-size
+
+| Type | Default | Description |
+|------|---------|-------------|
+| int64 | `67108864` (64 MiB) | Maximum request body size in bytes for `POST /api/definitions` |
+
+The upload carries the whole workflow component as base64 inside a JSON body
+(`wasm_bytes_base64`), so the body is about a third larger than the component.
+A built Python component is about 19.5 MB, which is about 26 MB on the wire;
+before cleat#4400 this ceiling was a fixed 10 MiB and a Python workflow could
+not be uploaded through the API at all. Go, Rust, TypeScript and C# components
+are a few MB.
+
+`--max-body-size` does not move this ceiling, and this flag does not move any
+other. `cleat deploy` and `cleatctl deploy` write the database directly and
+never reach this endpoint.
+
+The worker holds the request in memory while it decodes it. Measured on one
+upload through the real handler (cleat#4400): a 19.5 MB component, a 26.0 MB
+body, peaked about 93 MB above the heap before the request, and a 30.0 MB
+component about 117 MB. Those figures include the test's own copy of the body,
+so the server's share is smaller by about one body. Raise this flag with that
+multiple in mind on a worker that takes concurrent uploads.
 
 ---
 

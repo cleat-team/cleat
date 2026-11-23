@@ -2672,6 +2672,7 @@ func main() {
 			store:                  store,
 			worker:                 w,
 			maxBodySize:            *maxBodySize,
+			maxDefinitionBodySize:  *maxDefinitionBodySize,
 			maxPriorityMagnitude:   *maxPriorityMagnitude,
 			queryStateSearchWindow: *queryStateSearchWindow,
 			db:                     db,
