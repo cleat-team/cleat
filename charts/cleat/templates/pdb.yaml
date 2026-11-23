@@ -1,0 +1,15 @@
+{{- if .Values.podDisruptionBudget.enabled }}
+# A node drain evicts the workers one at a time instead of all at once (cleat#4439). It limits VOLUNTARY
+# disruptions only (a drain, a node-pool upgrade); a node that dies takes its pods regardless.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "cleat.fullname" . }}
+  labels:
+    {{- include "cleat.labels" . | nindent 4 }}
+spec:
+  maxUnavailable: {{ .Values.podDisruptionBudget.maxUnavailable }}
+  selector:
+    matchLabels:
+      {{- include "cleat.selectorLabels" . | nindent 6 }}
+{{- end }}

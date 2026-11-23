@@ -140,3 +140,22 @@ spec:
       affinity:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+      {{- if .Values.topologySpread.enabled }}
+      # Keeps two workers off one node (cleat#4439). A preference by default (ScheduleAnyway), not a refusal:
+      # see topologySpread in values.yaml for why, and how to make it strict.
+      topologySpreadConstraints:
+        - maxSkew: {{ .Values.topologySpread.maxSkew }}
+          topologyKey: {{ .Values.topologySpread.topologyKey }}
+          whenUnsatisfiable: {{ .Values.topologySpread.whenUnsatisfiable }}
+          labelSelector:
+            matchLabels:
+              {{- include "cleat.selectorLabels" . | nindent 14 }}
+        {{- if .Values.topologySpread.zoneKey }}
+        - maxSkew: {{ .Values.topologySpread.maxSkew }}
+          topologyKey: {{ .Values.topologySpread.zoneKey }}
+          whenUnsatisfiable: {{ .Values.topologySpread.zoneWhenUnsatisfiable }}
+          labelSelector:
+            matchLabels:
+              {{- include "cleat.selectorLabels" . | nindent 14 }}
+        {{- end }}
+      {{- end }}
