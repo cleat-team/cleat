@@ -275,6 +275,9 @@ Measured 2026-11-22 (cleat#4266) with componentize-py 0.25.1, whose guest is CPy
 
 ### Present without a top-level import
 
+**Since cleat#4266 the SDK preloads a few modules, so the counts above are one step out of date:** `heapq` and `_strptime` were in the "need a top-level import" group when this was measured and are now present in every component (and so are the five codec modules under `encodings`, see the call table below). The totals were **not re-measured** after that change; by arithmetic they would read 132 present, 165 not, 118 recoverable, 42 unavailable, which is a derivation and not a measurement.
+
+
 These import at run time even when your workflow never imported them: 130 names, of which the 72 public ones are below (the other 58 are underscore-prefixed implementation modules such as `_io` and `_collections`). A module can be here and still lazily import another module when you call it: see the call table below.
 
 `abc`, `annotationlib`, `array`, `ast`, `atexit`, `base64`, `binascii`, `bisect`, `builtins`, `cmath`, `codecs`, `collections`, `compression`, `contextlib`, `copy`, `copyreg`, `dataclasses`, `datetime`, `dis`, `email`, `encodings`, `enum`, `errno`, `faulthandler`, `fnmatch`, `functools`, `gc`, `genericpath`, `hashlib`, `http`, `importlib`, `inspect`, `io`, `ipaddress`, `itertools`, `json`, `keyword`, `linecache`, `marshal`, `math`, `ntpath`, `opcode`, `operator`, `os`, `posix`, `posixpath`, `pyexpat`, `quopri`, `random`, `re`, `reprlib`, `select`, `shutil`, `site`, `socket`, `stat`, `string`, `struct`, `sys`, `tempfile`, `time`, `token`, `tokenize`, `types`, `typing`, `unicodedata`, `urllib`, `uuid`, `warnings`, `weakref`, `zipimport`, `zlib`.
@@ -283,23 +286,23 @@ This is whatever the SDK and the interpreter themselves import, so it can change
 
 ### Available once imported at the top level
 
-The other 119 standard-library modules: everything that is in neither the list above nor the "Not in the component at all" list below, leaving out the six names that were not tried (`antigravity`, `idlelib`, `this`, `tkinter`, `turtle`, `turtledemo`). Among the ones people reach for, **`decimal`, `fractions`, `statistics`, `heapq`, `csv`, `difflib`, `textwrap`, `pprint`, `argparse`, `pathlib`, `logging`, `traceback`, `queue`, `glob`, `secrets`, `hmac`, `shlex`, `html`, `calendar`, `tomllib`, `gzip`, `zipfile`, `numbers`, `pickle` and `sqlite3`** all fail with `ModuleNotFoundError` if first imported inside a function, and import if imported at the top level. For `decimal`, `fractions`, `statistics`, `heapq`, `csv`, `difflib`, `textwrap`, `pprint`, `logging`, `traceback`, `queue`, `calendar`, `shlex`, `html`, `secrets`, `tomllib`, `gzip` and `hmac`, a basic call was also run and worked. "Imports" is all that was measured for the rest.
+The other 119 standard-library modules: everything that is in neither the list above nor the "Not in the component at all" list below, leaving out the six names that were not tried (`antigravity`, `idlelib`, `this`, `tkinter`, `turtle`, `turtledemo`). Among the ones people reach for, **`decimal`, `fractions`, `statistics`, `csv`, `difflib`, `textwrap`, `pprint`, `argparse`, `pathlib`, `logging`, `traceback`, `queue`, `glob`, `secrets`, `hmac`, `shlex`, `html`, `calendar`, `tomllib`, `gzip`, `zipfile`, `numbers`, `pickle` and `sqlite3`** all fail with `ModuleNotFoundError` if first imported inside a function, and import if imported at the top level. For `decimal`, `fractions`, `statistics`, `csv`, `difflib`, `textwrap`, `pprint`, `logging`, `traceback`, `queue`, `calendar`, `shlex`, `html`, `secrets`, `tomllib`, `gzip` and `hmac`, a basic call was also run and worked. "Imports" is all that was measured for the rest.
 
 ### A call that imports a helper the first time it runs
 
-These modules are present, but the call below imports another module on first use, and that one is only in the component if **you** import it at the top level. Each remedy was measured on its own: that one import fixed exactly that call.
+Some calls import another module the first time they run. For these, **the SDK does it for you** (cleat#4266): `cleat_sdk` imports the modules below when it is imported, and every workflow imports it, so they are in every component and you need no import of your own.
 
-| call | import at the top level |
+| call | the module the SDK carries |
 |---|---|
-| `datetime.strptime()`, `time.strptime()` | `import _strptime` |
-| `Counter.most_common()` | `import heapq` |
-| `.encode()` / `.decode()` with `"cp1252"` | `import encodings.cp1252` |
-| `… "shift_jis"` | `import encodings.shift_jis` |
-| `… "iso-8859-15"` | `import encodings.iso8859_15` |
-| `… "utf-8-sig"` | `import encodings.utf_8_sig` |
-| `… "idna"` | `import encodings.idna` **and** `import encodings.punycode` (the first alone is not enough) |
+| `datetime.strptime()`, `time.strptime()` | `_strptime` |
+| `Counter.most_common()` | `heapq` |
+| `.encode()` / `.decode()` with `"cp1252"` | `encodings.cp1252` |
+| `… "shift_jis"` | `encodings.shift_jis` |
+| `… "iso-8859-15"` | `encodings.iso8859_15` |
+| `… "utf-8-sig"` | `encodings.utf_8_sig` |
+| `… "idna"` | `encodings.idna` and `encodings.punycode` |
 
-`utf-8`, `ascii`, `latin-1`, `utf-16` and `utf-32` need nothing. Other codecs and other calls were **not** measured and are probably the same.
+This is a short list of calls that were measured to fail and to be fixed by exactly that import, not a preload of the standard library. It costs about **0.4 to 0.5 MiB** of component size (2.5 to 3 percent; measured, warm builds). `utf-8`, `ascii`, `latin-1`, `utf-16` and `utf-32` need nothing. **Other codecs and other calls that import a helper on first use were not measured and are probably the same:** for those, import the helper at the top level of your workflow module, which is the rule above. The source of the list is `cleat_sdk/_stdlib_preload.py`.
 
 ### Not in the component at all
 
@@ -695,7 +698,7 @@ When your workflow is compiled to WASM, `componentize-py` bundles a minimal CPyt
 
 - **Pure-Python imports** -- Pure Python modules on the Python path work normally
 - **C extension modules** -- Native code (`.so`/`.pyd`) does **not** work in WASM
-- **stdlib modules** -- Only the standard-library modules imported at the top level of your workflow module (or already present in every component) are there at run time: import what you use at the top level (see [compatibility section](#python-standard-library-compatibility))
+- **stdlib modules** -- Only the standard-library modules imported at the top level of your workflow module (or already present in every component, including the few the SDK preloads) are there at run time: import what you use at the top level (see [compatibility section](#python-standard-library-compatibility))
 - **Third-party packages** -- Pure-Python packages (e.g., `langchain-core`) can work if they are on the Python path and do not depend on C extensions
 - **Relative imports** -- Use absolute imports within your workflow file; relative imports may not resolve correctly in the WASM context
 

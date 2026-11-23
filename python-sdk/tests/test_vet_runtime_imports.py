@@ -15,6 +15,10 @@ extra import is the one named in the row ran the call correctly, while every oth
 the same guest still failed. These tests cannot run a component, so what they pin is that the
 vet says what was measured: the row exists, it names exactly those modules, and the remedy
 silences it.
+
+Since cleat#4266 the SDK preloads every module these rows name, so under the real preload NONE of them warns. This file tests the MECHANISM, with
+the preload emptied (``nothing_preloaded``, applied to every test here): the rows are the record of what was measured, and a row for a module the
+SDK does not preload must warn. What the real preload does is in test_stdlib_preload.py.
 """
 
 from __future__ import annotations
@@ -27,12 +31,20 @@ from pathlib import Path
 
 import pytest
 
+import cleat_sdk.vet as vet_module
 from cleat_sdk.vet import (
     INTERPRETER_BUILTIN_MODULES,
     LAZY_IMPORT_CODECS,
     LAZY_IMPORT_METHODS,
     analyze_file,
 )
+
+
+@pytest.fixture(autouse=True)
+def nothing_preloaded(monkeypatch) -> None:
+    """Empty the SDK's preload set, so the rows warn as they did before cleat#4266 and the mechanism can be tested."""
+    monkeypatch.setattr(vet_module, "PRELOADED_MODULES", ())
+
 
 # ---------------------------------------------------------------------------
 # Helpers
