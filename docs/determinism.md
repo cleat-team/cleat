@@ -114,6 +114,42 @@ The following patterns are blocked at build time:
 - `fmt.Print*` -- blocked (captures stdout non-deterministically)
 - Goroutines, channels -- use cleat's async patterns
 
+## The monotonic clock is real elapsed time, in every language
+
+**`h.Now()` is replayable and the monotonic clock is not.** A guest that reads its language's monotonic clock (Python's `time.monotonic()`,
+`time.perf_counter()` and their `_ns` forms, C#'s `Stopwatch` and `Environment.TickCount64`, Go's `time.Since`) gets the host's real elapsed time. A
+replay of the same workflow reads a different value, so anything computed from it differs too: an elapsed time, a timeout measured in the guest, a
+`while monotonic() - t0 < 0.5` loop that ran 41 times and runs 42. The wall clock the workflow sees through `h.Now()` is recorded and is the same on
+replay; so is a sleep taken with `h.DurableSleep()` (`h.sleep()` in Python).
+
+| guests on | what the monotonic clock is | how that was established |
+|---|---|---|
+| the core-module path (Go runs here) | real elapsed time since the instance started, never zero and never backwards (`nextMonotonicNs`) | **read from the code.** It was a count of reads until cleat#1300, which made a 500 ms sleep take 62.5 s, so it was made real on purpose |
+| the component path (Python, C#) | the host's own monotonic clock; `wasi:clocks/monotonic-clock` is not shadowed | **measured**, Python 2026-11-23 on componentize-py 0.25.1: two runs of one workflow id read `0.5029` and `0.5021` seconds for a `time.sleep(0.5)`, and the deadline loop above ran 41 and then 42 iterations. C# `Stopwatch`: measured to differ on every run, as the C# README records |
+
+**Why the component path is not simply pinned.** A shadow of that interface replaces all of it, and the interface also exports `subscribe-instant` and
+`subscribe-duration`, which return `pollable` resources the host cannot supply from outside the WASI implementation it links. Measured: a guest
+instantiated against a shadow of `now` and `resolution` alone fails with `component imports instance wasi:clocks/monotonic-clock@0.2.9, but a matching
+implementation was not found in the linker`. So the clock stays real and the tooling says so.
+
+**What to write instead.** Take two `h.Now()` readings and subtract them for an elapsed time, sleep with the durable sleep, and do not loop on a
+monotonic deadline.
+
+**What `cleat vet` says**, per language (what it refuses and what it does not):
+
+| language | refused or flagged |
+|---|---|
+| Python | `time.sleep` (PY004, error); `time.time` (PY005, error); **`time.monotonic`, `monotonic_ns`, `perf_counter`, `perf_counter_ns` and `time.sleep` through an alias (PY016, warning)** |
+| C# | `Stopwatch` (CV006), `Environment.TickCount` and `TickCount64` (CV007), `Thread.Sleep` (CV005) |
+| Go | `time.Now` (E003), `time.Sleep` (E004), `time.After`, `NewTicker`, `NewTimer` (E014) |
+| Rust | `std::time::Instant::now` (R005) |
+| Java | `System.currentTimeMillis` (J001) and `Thread.sleep` (J003); `System.nanoTime` is **not** flagged |
+| TypeScript | no vet exists |
+
+PY016 is a warning, not an error, so it never refuses a build that runs today. Python's `time.sleep` also blocks its execution for its whole duration and
+the instance timeout does not interrupt it (cleat#4403, measured: a 0.5 s sleep under a 150 ms timeout ran its full 524 ms and failed only after it
+returned). **Not measured:** the monotonic clock in Rust, Java and TypeScript guests, and what a blocking sleep does to other workflows on the same worker.
+
 ## Why there is no `isReplaying()`
 
 Cleat does not give a workflow a way to ask whether it is currently replaying.

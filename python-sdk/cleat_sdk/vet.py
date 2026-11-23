@@ -51,6 +51,20 @@ ERROR_MULTIPLE_ENTRIES = "PY013"  # multiple @cleat_entry functions
 WARN_FUNCTION_IMPORT = "PY014"  # stdlib module imported inside a function
 WARN_LAZY_IMPORT_CALL = "PY015"  # call that imports a module the first time it runs
 
+#: A real-time clock read or sleep in workflow code (cleat#4396). A WARNING, never an error: it must not newly refuse a build that runs today.
+#: ``time.sleep`` written plainly is the PY004 error and is not reported twice; this covers the same call through an alias, and the clock reads
+#: that PY004 and PY005 never named.
+WARN_REAL_TIME_CLOCK = "PY016"
+
+#: The ``time`` functions that read the host's real monotonic clock. Measured 2026-11-23 (componentize-py 0.25.1): two runs of one workflow id read
+#: different values, so anything computed from them differs between a run and its replay. ``time.time`` is PY005's and ``time.sleep`` is PY004's.
+MONOTONIC_CLOCK_CALLS: tuple[str, ...] = (
+    "monotonic",
+    "monotonic_ns",
+    "perf_counter",
+    "perf_counter_ns",
+)
+
 #: SDK durable leaf function names --- HostCalls methods that the runtime
 #: journalises (i.e. they create events in the workflow history).
 DURABLE_LEAVES: set[str] = {
@@ -137,13 +151,14 @@ FORBIDDEN_API_RULES: dict[tuple[str | None, str], tuple[str, str, str]] = {
     ),
     ("time", "sleep"): (
         "PY004",
-        "time.sleep() is not allowed in durable functions: real-time sleep advances differently on each replay, breaking determinism.",
+        "time.sleep() is not allowed in durable functions: real-time sleep advances differently on each replay, breaking determinism. It also blocks the worker "
+        "for its whole duration, and the instance timeout does not interrupt it (cleat#4403).",
         "Use h.sleep() instead",
     ),
     ("time", "time"): (
         "PY005",
         "time.time() is not allowed in durable functions: wall-clock time differs across replays, causing divergent behavior.",
-        "Use h.Now() or the workflow clock instead",
+        "Use h.now() for the replayable workflow clock instead",
     ),
     ("random", "random"): (
         "PY006",
@@ -794,6 +809,91 @@ def _codec_module(name: str) -> str:
     return encodings.aliases.aliases.get(normalised, normalised)
 
 
+class RealTimeClockChecker(ast.NodeVisitor):
+    """Warns about a real-time clock read or sleep in the code a workflow executes (cleat#4396).
+
+    The host's monotonic clock is real elapsed time and replay does not reproduce it: ``wasi:clocks/monotonic-clock`` is not shadowed, because a
+    shadow replaces the whole interface and its ``subscribe-*`` functions return pollables the host cannot supply. So ``time.monotonic()``,
+    ``monotonic_ns``, ``perf_counter`` and ``perf_counter_ns`` return a different value on a replay, and so does anything computed from one (an
+    elapsed time, a loop that runs until a deadline). The owner decided to keep the clock real and say so, which is what this is.
+
+    One warning code, PY016, over the same scope as the forbidden-API checker (the functions the entry points reach). A reference counts as well as
+    a call, because ``clock = time.perf_counter`` reads the clock later. Names are resolved through the file's own imports (``import time as t``,
+    ``from time import monotonic as m``); a bare ``time`` is taken to be the module as the existing rules do. A ``time.sleep`` written plainly is the
+    PY004 error and is skipped here; the same call through an alias is reported, as a warning, so it cannot newly refuse a build.
+    """
+
+    def __init__(self, filepath: str, tree: ast.AST, target_funcs: set[str]) -> None:
+        self.filepath = filepath
+        self.target_funcs = target_funcs
+        self.warnings: list[dict[str, Any]] = []
+        self._depth = 0  # >0 while inside a function whose code the workflow executes
+        # Names that mean the ``time`` module, and local names bound to one of its functions (``from time import x as y``).
+        self._modules: set[str] = {"time"}
+        self._functions: dict[str, str] = {}
+        interesting = set(MONOTONIC_CLOCK_CALLS) | {"sleep"}
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    if alias.name == "time" and alias.asname:
+                        self._modules.add(alias.asname)
+            elif isinstance(node, ast.ImportFrom) and node.module == "time" and node.level == 0:
+                for alias in node.names:
+                    if alias.name in interesting:
+                        self._functions[alias.asname or alias.name] = alias.name
+
+    def _warn(self, node: ast.AST, function: str) -> None:
+        if function == "sleep":
+            message = (
+                "time.sleep() really sleeps: it blocks the worker for its whole duration, the instance timeout does not interrupt it (cleat#4403), "
+                "and it is not durable. PY004 refuses `time.sleep` written plainly; this is the same call through an alias."
+            )
+            suggestion = "Use h.sleep(seconds) for a durable sleep"
+        else:
+            message = (
+                f"time.{function}() reads the host's real monotonic clock, which replay does not reproduce: its value, and anything computed from it "
+                "(an elapsed time, a loop that runs until a deadline), differs between a run and its replay (cleat#4396)."
+            )
+            suggestion = (
+                "Use h.now() for a replayable clock (milliseconds since the epoch; subtract two readings for an elapsed time) "
+                "and h.sleep(seconds) for a durable sleep"
+            )
+        self.warnings.append(
+            {
+                "code": WARN_REAL_TIME_CLOCK,
+                "file": self.filepath,
+                "line": getattr(node, "lineno", 0),
+                "column": getattr(node, "col_offset", 0),
+                "message": message,
+                "suggestion": suggestion,
+            }
+        )
+
+    def _check_function(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
+        if node.name in self.target_funcs:
+            self._depth += 1
+            self.generic_visit(node)
+            self._depth -= 1
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+        self._check_function(node)
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+        self._check_function(node)
+
+    def visit_Attribute(self, node: ast.Attribute) -> None:
+        if self._depth and isinstance(node.value, ast.Name) and node.value.id in self._modules:
+            if node.attr in MONOTONIC_CLOCK_CALLS:
+                self._warn(node, node.attr)
+            elif node.attr == "sleep" and node.value.id != "time":
+                self._warn(node, "sleep")
+        self.generic_visit(node)
+
+    def visit_Name(self, node: ast.Name) -> None:
+        if self._depth and isinstance(node.ctx, ast.Load) and node.id in self._functions:
+            self._warn(node, self._functions[node.id])
+
+
 class RuntimeImportChecker(ast.NodeVisitor):
     """Warns about imports that happen only when the workflow RUNS (cleat#4266).
 
@@ -1214,6 +1314,19 @@ def analyze_file(filepath: str) -> AnalysisResult:
     runtime_imports = RuntimeImportChecker(filepath, tree)
     runtime_imports.visit(tree)
     for warning in runtime_imports.warnings:
+        result.add_warning(
+            warning["code"],
+            warning["line"],
+            warning["message"],
+            warning["suggestion"],
+            warning["column"],
+        )
+
+    # --- A real-time clock read or sleep (warning; cleat#4396) ---
+    # Same scope as the forbidden-API checker: what the workflow executes.
+    real_time = RealTimeClockChecker(filepath, tree, to_check)
+    real_time.visit(tree)
+    for warning in real_time.warnings:
         result.add_warning(
             warning["code"],
             warning["line"],
