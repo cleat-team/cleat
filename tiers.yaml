@@ -1659,8 +1659,8 @@ required_contexts:
   # `measured` is the date the declared list below was last compared against branch
   # protection itself, not the date this file was last edited. Only --check-live and the
   # default run's live attempt can move it; an entry added from a PR description cannot.
-  measured: 2026-09-29
-  total: 34
+  measured: 2026-11-23
+  total: 35
 
   # `covers` is one of:
   #   tier1        the context runs only tier-1 packages/modules
@@ -1847,6 +1847,30 @@ required_contexts:
       workflow: ci.yml
       job: test-python
       covers: infra
+
+    # Required on 2026-11-23 (cleat#4169), once chaos.yml stopped using a workflow-level
+    # `paths:` filter and started reporting on every pull request and merge-queue entry.
+    - context: Chaos sample
+      workflow: chaos.yml
+      job: chaos-sample
+      covers: undeclared
+      why_required: |
+        The seeded fault-injection sample: `go test -tags chaos ./tests/chaos -run TestChaosSeeded`
+        against a real worker and database, 60 seeds, about seven minutes. `./tests/chaos` is in
+        no tier in this file, so this context gates a package that tiers.yaml neither claims nor
+        parks; that is the gap `covers: undeclared` exists to make visible, and it is recorded
+        here rather than closed by assigning the package a tier in a PR about something else.
+
+        It is required because it is the check that replays a run after a crash and compares it
+        with a fault-free one, which no other required context does. It is SKIPPED, and a skipped
+        job counts as passing, on a pull request whose diff touches none of the replay machinery
+        (`scripts/chaos-sample-relevant.sh` decides, from the diff, in the `Chaos sample
+        relevance` job) and on every merge-queue entry. A docs-only PR therefore reports it as
+        skipping, read from a real run on 2026-11-23 (#4411); the queue reports it skipped, read
+        from two (#4404, #4398).
+
+        `Chaos sample relevance` is deliberately NOT required: a failure to decide is read as
+        "run it", so the relevance job cannot let a relevant change through by failing.
 
     # --- tier2.gated_by suites, which have their own stricter jobs -------------------
     - context: Cross-Language WASM E2E

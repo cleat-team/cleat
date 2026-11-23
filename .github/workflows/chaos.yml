@@ -9,11 +9,12 @@
 #   chaos-sample  a SEEDED random sample, bounded to a few minutes, on every pull request that touches the replay machinery.
 #   chaos-full    every boundary x every fault, on a schedule and on demand. This is the pre-release sweep and a 0.6.0 gate.
 #
-# NOT A REQUIRED CHECK: Chaos sample
-# Not required yet. Making `Chaos sample` required is a branch-protection change, which is the owner's to make (tiers.yaml's required_contexts
-# block). It runs on every PR that touches the replay machinery so its record exists before anyone is asked to depend on it.
+# A REQUIRED CHECK: Chaos sample
+# Required on develop since 2026-11-23 (cleat#4169; tiers.yaml's required_contexts block says why, and `Chaos sample relevance` and `Chaos full sweep` are
+# deliberately NOT required). It runs on every PR that touches the replay machinery, and it is the check that replays a run after a crash and compares it
+# with a fault-free one.
 #
-# READY TO BE REQUIRED, which it was not before this change. A required check must REPORT on every pull request and on every merge-queue entry, and a
+# WHY IT CAN BE REQUIRED, which it could not before #4404. A required check must REPORT on every pull request and on every merge-queue entry, and a
 # workflow-level `on.pull_request.paths` filter means the workflow does not run at all for a PR that touches none of those paths, so the check would
 # be pending forever on a docs-only PR. Now:
 #   pull_request   `Chaos sample` ALWAYS reports. The `changes` job reads the PR's diff (scripts/chaos-sample-relevant.sh holds the path list, the old

@@ -51,6 +51,7 @@
 
 Blobstore S3 Round-Trip
 Build
+Chaos sample
 Closing References
 Cluster Integration Tests
 Contributor License Agreement
