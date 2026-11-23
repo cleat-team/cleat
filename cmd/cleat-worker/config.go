@@ -271,7 +271,10 @@ var (
 			"any Down SQL.")
 	createTenantDisplayName = flag.String("tenant-display-name", "", "Display name for --create-tenant (defaults to the name)")
 	maxBodySize             = flag.Int64("max-body-size", 1048576, "Maximum request body size in bytes (default 1 MiB)")
-	pluginMaxBodySize       = flag.Int64("plugin-max-body-size", 1048576, "Maximum request body size in bytes for plugin HTTP routes, unless a route "+
+	maxDefinitionBodySize   = flag.Int64("max-definition-body-size", definitionMaxBodySize, "Maximum request body size in bytes for POST /api/definitions, "+
+		"which carries a whole workflow component as base64 inside JSON (about a third larger than the component). Separate from --max-body-size. "+
+		"A Python component is about 19.5 MB, so it is about 26 MB on the wire (default 64 MiB)")
+	pluginMaxBodySize = flag.Int64("plugin-max-body-size", 1048576, "Maximum request body size in bytes for plugin HTTP routes, unless a route "+
 		"declares a larger ceiling of its own (e.g. blobstore's PUT, sized by max_blob_size). Separate from --max-body-size, which "+
 		"bounds only the core API. cleat#2232 (default 1 MiB)")
 	maxPriorityMagnitude = flag.Int("max-priority-magnitude", engine.DefaultMaxPriorityMagnitude,

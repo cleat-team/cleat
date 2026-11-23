@@ -248,7 +248,7 @@ func TestEveryBodyLimitNamesTheKnobThatMovesIt(t *testing.T) {
 	}{
 		{"configured", api.configuredBodyLimit()},
 		{"signal", signalBodyLimit()},
-		{"definition", definitionBodyLimit()},
+		{"definition", api.definitionBodyLimit()},
 		{"terminate", terminateBodyLimit()},
 	} {
 		if c.lim.max <= 0 {
