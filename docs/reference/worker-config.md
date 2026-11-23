@@ -377,6 +377,33 @@ Example: `--max-workflow-duration 5m`
 
 ---
 
+## Sizing a worker by language
+
+What one worker costs depends on the guest language far more than on anything else, and the figures differ by more than an order of magnitude between languages. Every number below is **measured**, says where it comes from, and holds only for the conditions in the last paragraph. The held figures are what `--resident-memory-percent` and `--resident-memory-budget-mb` charge against; the compile figures are what a worker's memory has to cover beside them.
+
+| | Go | Python | C# |
+|---|---:|---:|---:|
+| **Held run, idle instance** (private memory, Pss, per held instance) | 1.5 MiB | 1.3 MiB | 16.8 MiB |
+| **Held run after the guest has handled large objects** (allocated and dropped 256 MiB in 4 MiB chunks) | 19.6 MiB | 9.5 MiB | **57.4 MiB** |
+| **What a held run is charged** (0.6.0) | 24 MiB | 11 MiB | **59 MiB** |
+| **Held runs in the default budget of a 2Gi worker** (20% = 409 MiB, whole runs) | 17 | 37 | **6** |
+| First distinct component compiled **in the worker** (RSS above the baseline) | not measured | +486 to +512 MiB | +59 to +60 MiB |
+| Each further distinct component compiled in the worker (RSS, before the allocator gives memory back) | not measured | +185 to +268 MiB | +15 to +20 MiB |
+| Same, with **`--component-precompile`** (the worker keeps the artifact, the compile runs in a child) | not measured | +27 MiB | +2.4 MiB |
+| Charge of one entry in the compiled-component cache (3.5 times its serialized artifact) | not applicable (a core module) | 111 to 153 MiB (about 6 or 7 per 1 GiB bound) | about 11 MiB |
+
+**Where each number comes from.** Held, idle: a fit of Pss against the number of held instances, over 1 to 64, three repetitions, R squared 1.0000, 2026-11-22, on the builds with cleat#4386 (C#: 8 MiB GC segments, 48.7 MiB before) and cleat#4387 (Python: dense data segments, 12.1 MiB before). Held, after large objects: the stage-0 probe's pattern, re-run on the fixed builds on 2026-11-23, a fit over 4 to 16 held instances, held count read from the held set and equal to N in every row (raw rows: `testdata/heldmem/raw/churn/` on `feature/resident-memory-percent-design`); an independent re-run by a second reviewer gave C# 57.55 MiB (65.1 on the default GC segments), and Python 5.9 MiB with a different guest. Go's 19.6 MiB is the original design measurement of the same pattern, and its idle figure is a fit over held instances of a minimal guest. Compile: the component-memory measurements of 2026-11-23 (one worker process, RSS above the baseline, arm64 Linux). Cache charge: `engine/compiled_size_estimate.go`, measured artifacts of 46 MB (Python) and 3.2 MB (C#).
+
+**C# needs much more memory per held run than Python, and 0.6.0 charges for it.** An idle C# instance is 17 MiB, but one that has handled large objects stays near **57 MiB** (65 on a component built without the 8 MiB GC segments), because the runtime's large-object heap grows with it and wasm memory never shrinks, and a run is charged **59 MiB**. In the default budget of a 2Gi worker that is **6 held C# runs against 37 held Python runs**. Reducing it is planned for 0.7.0 (cleat#4440). Until then, for a worker that serves C# workflows:
+
+- **raise the container's memory limit** (`limits.memory` in the chart): the budget is a share of the limit, so a 4Gi worker holds about 13 C# runs;
+- **or lower `--resident-memory-percent`** if the worker cannot afford the held runs beside everything else, which makes residency hold fewer runs and suspend more (a suspended run costs a replay when it wakes, not correctness);
+- **or run C# on its own workers**, with their own memory limit, task queue and budget, so its cost does not displace a Python or Go worker's.
+
+**What a worker needs for compiling, at the same limit.** Measured on a real worker in a container limited to 2Gi, with the defaults, nine distinct Python components: **compiling in the worker** (the default) retained **about 250 to 300 MiB of memory per further distinct component** until the worker reached 1.76 GiB, and **the container was killed by the out-of-memory killer** when it then compiled one more (peak 2013 of 2048 MiB); the same limit with a fresh worker and six distinct components arriving at once reached the limit within 17 seconds and was killed. With **`--component-precompile`** the same nine components, 60 held-eligible runs and one more first-time compile all completed, with a **peak of 1159 MiB** and no kill; the six-at-once start completed in 41 seconds at a peak of 1425 MiB, because the child compiles one component at a time. A child that fails for an ordinary reason (not killed by the out-of-memory killer) falls back to compiling in the worker, and the one-at-a-time limit does **not** cover that fallback: in a test that forced every child to fail, the 2Gi worker was killed. See `--component-precompile` below and size `limits.memory` for several hundred MiB of retained memory per distinct Python component, not for one.
+
+**These figures are for the conditions they were measured under, and are floors for a workflow that does real work.** One machine (an arm64 Linux virtual machine; **x86-64 is not measured**); minimal and synthetic guests, not your workflow; **live data is not in any of them**, and a guest that once held 100 MiB keeps it, one for one, since wasm memory never shrinks; a component built before cleat#4386 (C#, 48.7 MiB idle per held run before) or cleat#4387 (Python, 12.1 MiB idle before) costs more per held run than the table says and is charged short, so rebuild your components. `--memory-soft-limit`, which reads the container's real use, is the backstop for all of it.
+
 ## Memory Management
 
 ### --memory-soft-limit
