@@ -73,81 +73,58 @@ func NewMemoryMonitor(interval time.Duration) *MemoryMonitor {
 	return mm
 }
 
-// probeCgroupV2 checks for /sys/fs/cgroup/memory.max and returns a read
-// function backed by cgroup v2 memory accounting. If memory.max is "max"
-// (no explicit limit), /proc/meminfo MemTotal is used for the total.
-func probeCgroupV2() (func() (MemoryInfo, error), bool) {
-	data, err := os.ReadFile("/sys/fs/cgroup/memory.max")
-	if err != nil {
+// probeCgroupV2 reads the process's own cgroup, from the real root.
+func probeCgroupV2() (func() (MemoryInfo, error), bool) { return probeCgroupV2At("/") }
+
+// probeCgroupV2At returns a read function backed by cgroup v2 memory accounting under root ("/" in the worker; a fake root laid out like / in a test).
+//
+// THE LIMIT AND THE USAGE ARE THE PROCESS'S OWN CGROUP HIERARCHY'S, not the mount's root (cleat#4431). The root of the cgroup mount is the process's own cgroup only inside a
+// PRIVATE cgroup namespace; under a host cgroup namespace (docker run --cgroupns=host, a systemd unit with MemoryMax=) it is the whole host, whose memory.max is "max", and this
+// used to read that: a 512 MiB container had its --memory-soft-limit and --memory-hard-limit taken as fractions of the HOST's memory and usage.
+//
+// WHICH LEVEL: every cgroup on the process's path with a numeric memory.max is a candidate (cgroupV2Levels), each measured against ITS OWN memory.current (a parent's limit
+// bounds the parent's total, siblings included), and at EVERY read the one with the LEAST HEADROOM (limit minus use) is reported, because that is the level that runs out first and
+// it changes over time: a leaf at 2 GiB using 1 GiB under a parent at 4 GiB using 3.9 GiB is about to hit the parent's limit, not its own (cleat-review3, measured).
+//
+// NO LIMIT AT ANY LEVEL: this source declines (false), and the monitor falls through to /proc/meminfo, which pairs the host's MemTotal with host-wide usage (MemAvailable). That is
+// the same principle: with no cgroup limit the host's memory is what runs out, so the numerator has to be host-wide; pairing the host's total with this cgroup's own usage, as the
+// first version of this change did, reads a busy host as nearly empty.
+func probeCgroupV2At(root string) (func() (MemoryInfo, error), bool) {
+	levels := cgroupV2Levels(root)
+	if len(levels) == 0 {
 		return nil, false
 	}
 
-	totalStr := strings.TrimSpace(string(data))
-	var totalBytes uint64
-	if totalStr == "max" {
-		// No explicit cgroup limit; fall back to /proc/meminfo for total.
-		memTotal, ok := readMemTotal()
-		if !ok {
-			return nil, false
-		}
-		totalBytes = memTotal
-	} else {
-		totalBytes, err = strconv.ParseUint(totalStr, 10, 64)
-		if err != nil {
-			return nil, false
-		}
-	}
-
 	return func() (MemoryInfo, error) {
-		currentData, err := os.ReadFile("/sys/fs/cgroup/memory.current")
-		if err != nil {
-			return MemoryInfo{}, err
-		}
-		currentStr := strings.TrimSpace(string(currentData))
-		currentBytes, err := strconv.ParseUint(currentStr, 10, 64)
-		if err != nil {
-			return MemoryInfo{}, err
-		}
-
-		used := currentBytes
-		avail := totalBytes - used
-		if totalBytes < used {
-			avail = 0
-		}
-
-		return MemoryInfo{
-			AvailableBytes: avail,
-			UsedBytes:      used,
-			TotalBytes:     totalBytes,
-			Source:         "cgroupv2",
-			CollectedAt:    time.Now(),
-		}, nil
-	}, true
-}
-
-// readMemTotal parses MemTotal from /proc/meminfo and returns it in bytes.
-func readMemTotal() (uint64, bool) {
-	f, err := os.Open("/proc/meminfo")
-	if err != nil {
-		return 0, false
-	}
-	defer f.Close()
-
-	scanner := bufio.NewScanner(f)
-	for scanner.Scan() {
-		line := scanner.Text()
-		if strings.HasPrefix(line, "MemTotal:") {
-			fields := strings.Fields(line)
-			if len(fields) >= 2 {
-				kb, err := strconv.ParseUint(fields[1], 10, 64)
-				if err != nil {
-					return 0, false
-				}
-				return kb * 1024, true
+		var best MemoryInfo
+		found := false
+		var lastErr error
+		for _, l := range levels {
+			currentData, err := os.ReadFile(root + "sys/fs/cgroup" + l.Dir + "memory.current")
+			if err != nil {
+				lastErr = err
+				continue
+			}
+			used, err := strconv.ParseUint(strings.TrimSpace(string(currentData)), 10, 64)
+			if err != nil {
+				lastErr = err
+				continue
+			}
+			avail := l.Limit - used
+			if l.Limit < used {
+				avail = 0
+			}
+			// The least headroom binds; on a tie the tighter limit.
+			if !found || avail < best.AvailableBytes || (avail == best.AvailableBytes && l.Limit < best.TotalBytes) {
+				best = MemoryInfo{AvailableBytes: avail, UsedBytes: used, TotalBytes: l.Limit, Source: "cgroupv2", CollectedAt: time.Now()}
+				found = true
 			}
 		}
-	}
-	return 0, false
+		if !found {
+			return MemoryInfo{}, lastErr
+		}
+		return best, nil
+	}, true
 }
 
 // probeProcMeminfo checks for /proc/meminfo and returns a read function
