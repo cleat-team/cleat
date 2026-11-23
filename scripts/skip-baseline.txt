@@ -242,7 +242,6 @@ engine	TestPluginMigrations_AllDialects	1
 engine	TestPostgresOpenIsolatedStoreMatchesOpenStore	1
 engine	TestPythonAHeldWaitRestartsTheExecutionFenceOnAComponent	1
 engine	TestPythonAllHostCallsWorkflowCompiles	1
-engine	TestPythonAnInstanceSharesAMemoryImage	1
 engine	TestPythonComponentExecutionFence	1
 engine	TestPythonComponentIsHeldThroughADurableSleepAndChargedAsPython	1
 engine	TestPythonCronEndToEnd	1
@@ -304,6 +303,7 @@ engine	TestTenantIsolation_Signals	1
 engine	TestTheCompiledSizeEstimateStillHolds	1
 engine	TestTheContextFreeInsertItselfIsRefused	1
 engine	TestTheDeletionAuditNamesWhoRemovedTheRow	1
+engine	TestTheDenseRewriteMakesWasmtimeBuildAnImageForASparseModule	1
 engine	TestTheHostRunsDefersOfAKilledJavaWorkflow	1
 engine	TestTheMigrationSetAppliesWithoutASuperuser	1
 engine	TestTheRowDisappearanceVerdictIsNotConstant	1
@@ -320,6 +320,7 @@ engine	mssqlDropTenantDB	2
 engine	mssqlTenantTestPool	2
 engine	mysqlDSNWithInterpolateParams	1
 engine	mysqlIntegrationStore	2
+engine	needPython	1
 engine	openMSSQLCompactArm	1
 engine	pythonChildPollEngine	1
 engine	pythonDeferSegment	1
