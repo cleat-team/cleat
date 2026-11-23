@@ -32,21 +32,23 @@ import (
 var defaultResidentInstanceBytes = map[string]uint64{
 	// design section 9a: 2.5 MiB for a minimal Go guest and 19.6 MiB after the guest had allocated and dropped about 256 MiB. Rounded up from the second.
 	"go": 24 << 20,
-	// The rule for every language is the one Go's line already follows: the measured figure, rounded up, because a too-high charge can only make residency park less.
+	// The rule for every language is the one Go's line already follows: the measured figure after a guest has allocated and dropped about 256 MiB, rounded up, because a too-high
+	// charge can only make residency park less. The pattern is the stage-0 probe's (design section 9a): 4 MiB chunks, one byte written per 4 KiB page, each kept in a static until the
+	// next replaces it, then dropped. Re-measured 2026-11-23 on the fixed builds, held through the real residency path, Pss, a fit over N = 4 to 16, two repetitions, the held
+	// count read from the set and equal to N in every row (raw rows: feature/resident-memory-percent-design, testdata/heldmem/raw/churn/).
 	//
-	// Python: 1.31 MiB per held instance (Pss, a fit over N = 1 to 64 held instances, three repetitions each, R2 = 1.0000, 2026-11-22) once a component is built with the dense
-	// data segments of cleat#4387, which let wasmtime share the CPython module's memory image between instances; 12.1 MiB before it. Plus 1 MiB for the store and the session,
-	// 2.3, rounded up to 3. Measured AFTER CHURN as the owner asked (a guest allocates and drops 256 MiB, in 1 MiB blocks or in 16 KiB ones, then parks; 8 held instances, fit over N = 4 to 32, two repetitions): 1.29 MiB for small objects and 2.38 MiB for 1 MiB blocks, the larger of which, plus 1 MiB, is 3.4, so 4. THE CAVEAT: a component built BEFORE cleat#4387 still costs 12.1 MiB, so this charges it about 8 MiB short; the engine cannot tell the two apart
-	// from the bytes, and --memory-soft-limit, which reads the cgroup's real use, is what catches it.
-	"python": 4 << 20,
-	// C#: 16.7 MiB per held instance (the same fit, 2026-11-22) at the 8 MiB GC segments of cleat#4386, which stop the runtime zero-filling three 16 MiB segments; 48.7 MiB before.
-	// Plus 1 MiB, 17.7, rounded up to 18. After the same churn the cost is 16.78 MiB (small objects) and 16.77 (1 MiB blocks): the GC reuses what the guest dropped, so garbage does not grow the instance. THE SAME CAVEAT: a component built before cleat#4386 costs 48.7 MiB, so this charges it about 31 MiB short.
-	// What a guest ALLOCATES before it waits adds on top roughly one for one (measured: a guest that touched 64 MiB cost 64 MiB more, in both), so every figure here is a floor
-	// for a guest that does real work and never a ceiling. The earlier figures (Python 17, C# 66) were the larger of the measurements taken after a guest had allocated and dropped
-	// about 256 MiB. That basis was re-run on the fixed builds and NOT reproduced: a C# build with the default GC segments, which the old basis measured at 65.7 MiB, reads 48.9 MiB
-	// after both kinds of churn, so the old figure included something this churn does not do, and what it was is not known. What DOES stay resident, because wasm memory never shrinks, is
-	// the high-water mark of LIVE data (1 MiB held costs about 1 MiB, measured), which is a property of the workflow and which no per-language figure can know.
-	"csharp": 18 << 20,
+	// Python: 9.5 MiB after that churn (1.3 with none, once a component is built with the dense data segments of cleat#4387; 12.1 before it). Plus 1 MiB for the store and the
+	// session, 10.5, rounded up to 11. THE CAVEAT: a component built BEFORE cleat#4387 costs about 8 MiB more, and the engine cannot tell the two apart from the bytes;
+	// --memory-soft-limit, which reads the cgroup's real use, is what catches it.
+	"python": 11 << 20,
+	// C#: 57.4 MiB after that churn at the 8 MiB GC segments of cleat#4386 (16.8 with none, 48.7 before cleat#4386). Plus 1 MiB, 58.4, rounded up to 59. So the 8 MiB segments save
+	// about 32 MiB for a workflow that allocates nothing large and only about 8 for one that churns large objects: the GC's large-object heap grows with them. The same churn on a
+	// build with the DEFAULT segments reads 65.3 MiB (the old table's 65.7, reproduced) at a 256 MiB per-store limit and 49.2 at 64 (the old 49.5), so the old basis is understood
+	// now. THE SAME CAVEAT: a component built before cleat#4386 costs about 8 MiB more after churn and about 32 more with none.
+	// What is NOT in any of these figures is LIVE data: wasm memory never shrinks and 1 MiB held costs about 1 MiB (measured), so a guest that once held 100 MiB keeps it, which is a
+	// property of the workflow and which no per-language figure can know. Smaller garbage does not grow an instance: 256 MiB dropped as 16 KiB or 1 MiB blocks, at once, left C# at 16.8 and
+	// Python at 1.3 to 2.4. So every figure is for a guest that churns LARGE objects and never a ceiling for one that holds a lot.
+	"csharp": 59 << 20,
 }
 
 // WHAT IS DELIBERATELY NOT CHARGED: the compiled component. WS-cleat1 measured a per-process fixed cost for Python (+493 to +510 MiB) and C# (+81 MiB), and an earlier
