@@ -304,7 +304,7 @@ def densify_module(module: bytes) -> tuple[bytes, dict] | None:
     # The equivalence check: the new module's memory image is the old one's, over the same range, and nothing else changed.
     new_sections = _wasm_sections(result)
     assert len(new_sections) == len(sections), "densify changed the number of sections"
-    for (sid, a, b), (nsid, na, nb) in zip(sections, new_sections):
+    for (sid, a, b), (nsid, na, nb) in zip(sections, new_sections, strict=True):
         assert sid == nsid, "densify reordered the sections"
         if sid not in (11, 12):
             assert module[a:b] == result[na:nb], f"densify changed section {sid}"

@@ -64,7 +64,7 @@ def _validates(module: bytes) -> None:
 
 
 # A layout shaped like CPython's: many small segments with gaps, more than half empty, over a span above wasmtime's 16 MiB.
-SPARSE = [(1024 + i * 40_000, bytes([i % 251 + 1]) * 12_000) for i in range(0, 600)] + [(22 * MIB, b"\xaa" * 28_000)]
+SPARSE = [(1024 + i * 40_000, bytes([i % 251 + 1]) * 12_000) for i in range(600)] + [(22 * MIB, b"\xaa" * 28_000)]
 
 
 def test_a_sparse_module_becomes_one_dense_segment_with_the_same_memory():
@@ -119,11 +119,11 @@ def test_every_other_section_is_byte_for_byte_unchanged():
     dense, _ = bw.densify_module(original)
     old, new = bw._wasm_sections(original), bw._wasm_sections(dense)
     assert [s[0] for s in old] == [s[0] for s in new]
-    for (sid, a, b), (_, na, nb) in zip(old, new):
+    for (sid, a, b), (_, na, nb) in zip(old, new, strict=True):
         if sid not in (11, 12):
             assert original[a:b] == dense[na:nb]
     # the data count follows the segment count
-    count = [dense[a:b] for sid, a, b in new if sid == 12][0]
+    count = next(dense[a:b] for sid, a, b in new if sid == 12)
     assert bw._read_uleb(count, 0)[0] == 1
 
 
