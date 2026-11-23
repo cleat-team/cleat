@@ -62,9 +62,9 @@ func TestGoPythonAndCSharpAreHeldAndEveryOtherLanguageIsRefused(t *testing.T) {
 // The numbers are the larger measured figure per language (WS-cleat1's and design section 9a's), rounded up; a change to them is a change to a measurement and has to say so here.
 func TestTheChargesAreTheMeasuredFiguresRoundedUp(t *testing.T) {
 	const mib = 1 << 20
-	for lang, want := range map[string]uint64{"go": 24, "python": 3, "csharp": 18} {
+	for lang, want := range map[string]uint64{"go": 24, "python": 4, "csharp": 18} {
 		if got := defaultResidentInstanceBytes[lang] / mib; got != want {
-			t.Errorf("%s per instance = %d MiB, want %d (Go: the larger measured figure, 19.6 MiB rounded up; Python 1.31 + 1 and C# 16.7 + 1, each rounded up, once cleat#4387 and cleat#4386 are in the component)", lang, got, want)
+			t.Errorf("%s per instance = %d MiB, want %d (Go: the larger measured figure, 19.6 MiB rounded up; Python 2.38 + 1 (the larger of the after-churn figures) and C# 16.78 + 1, each rounded up, once cleat#4387 and cleat#4386 are in the component)", lang, got, want)
 		}
 	}
 }
@@ -145,7 +145,7 @@ func TestTwoDistinctPythonDefinitionsAreBothHeldAtTheDefaultBudget(t *testing.T)
 			t.Fatalf("python definition %d (%s) was refused at the default budget: a charge beyond the per-instance one has crept back in", i+1, name)
 		}
 	}
-	if got, want := chargedBytes(set), uint64(2*3<<20); got != want {
+	if got, want := chargedBytes(set), uint64(2*4<<20); got != want {
 		t.Fatalf("two python runs are charged %d bytes, want %d (two instances and nothing else)", got, want)
 	}
 }
