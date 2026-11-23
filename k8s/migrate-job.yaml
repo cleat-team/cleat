@@ -42,10 +42,13 @@ spec:
                 secretKeyRef:
                   name: cleat-worker-migrate
                   key: database_url
+          # The same defaults as charts/cleat/values.yaml, which has the measurements behind them
+          # (cleat#4393): a Python component compile is OOM-killed at a 512Mi limit and takes 11.4 s
+          # at 500m of CPU, and the HPA below measures utilization against the REQUEST.
           resources:
             requests:
-              cpu: 100m
-              memory: 128Mi
-            limits:
               cpu: 500m
-              memory: 512Mi
+              memory: 1Gi
+            limits:
+              cpu: "2"
+              memory: 2Gi

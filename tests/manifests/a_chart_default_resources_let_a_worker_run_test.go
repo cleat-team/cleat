@@ -99,3 +99,82 @@ func TestTheDefaultAutoscalerScalesOnCPUAndNotOnMemory(t *testing.T) {
 		t.Errorf("setting a memory target dropped the CPU metric:\n%s", set)
 	}
 }
+
+// The raw manifests under k8s/ carry the SAME defaults as the chart, with the same defect fixed (cleat#4393): they said 128Mi / 512Mi, a Python compile is
+// killed at 512Mi, and their HPA scaled on memory as well. The owner's rule is that the defaults work smoothly wherever they come from, so this pins the two
+// manifests to the chart's values.yaml by VALUE (the chart is the source) and not to numbers written a second time here, and pins the manifest HPA to CPU only.
+
+// containerResources returns the first container's resources of the first document of kind in path.
+func containerResources(t *testing.T, path, kind string) map[string]any {
+	t.Helper()
+	for _, doc := range decodeYAMLDocs(t, path) {
+		if doc["kind"] != kind {
+			continue
+		}
+		spec, _ := doc["spec"].(map[string]any)
+		tmpl, _ := spec["template"].(map[string]any)
+		if kind == "Job" {
+			podSpec, _ := tmpl["spec"].(map[string]any)
+			cs, _ := podSpec["containers"].([]any)
+			c, _ := cs[0].(map[string]any)
+			r, _ := c["resources"].(map[string]any)
+			return r
+		}
+		podSpec, _ := tmpl["spec"].(map[string]any)
+		cs, _ := podSpec["containers"].([]any)
+		c, _ := cs[0].(map[string]any)
+		r, _ := c["resources"].(map[string]any)
+		return r
+	}
+	t.Fatalf("%s: no %s document found", path, kind)
+	return nil
+}
+
+func TestTheRawManifestsCarryTheChartsDefaultResources(t *testing.T) {
+	chart, _ := loadChartValues(t)["resources"].(map[string]any)
+	for _, tc := range []struct{ path, kind string }{
+		{"../../k8s/deployment.yaml", "Deployment"},
+		{"../../k8s/migrate-job.yaml", "Job"},
+	} {
+		got := containerResources(t, tc.path, tc.kind)
+		for _, kind := range []string{"requests", "limits"} {
+			cm, _ := chart[kind].(map[string]any)
+			gm, _ := got[kind].(map[string]any)
+			for _, res := range []string{"cpu", "memory"} {
+				if want, have := quantity(t, cm[res]), quantity(t, gm[res]); want != have {
+					t.Errorf("%s %s.%s = %v, but charts/cleat/values.yaml says %v: the raw manifest has drifted from the chart (cleat#4393)", tc.path, kind, res, gm[res], cm[res])
+				}
+			}
+		}
+	}
+}
+
+func TestTheRawManifestsAutoscalerScalesOnCPUAndNotOnMemory(t *testing.T) {
+	for _, doc := range decodeYAMLDocs(t, "../../k8s/deployment.yaml") {
+		if doc["kind"] != "HorizontalPodAutoscaler" {
+			continue
+		}
+		spec, _ := doc["spec"].(map[string]any)
+		metrics, _ := spec["metrics"].([]any)
+		var names []string
+		for _, m := range metrics {
+			mm, _ := m.(map[string]any)
+			if res, ok := mm["resource"].(map[string]any); ok {
+				names = append(names, toString(res["name"]))
+			}
+		}
+		hasCPU, hasMem := false, false
+		for _, n := range names {
+			hasCPU = hasCPU || n == "cpu"
+			hasMem = hasMem || n == "memory"
+		}
+		if !hasCPU {
+			t.Errorf("k8s/deployment.yaml's HPA has no CPU resource metric (has %v)", names)
+		}
+		if hasMem {
+			t.Errorf("k8s/deployment.yaml's HPA scales on memory (%v), which pins it at maxReplicas (cleat#4393)", names)
+		}
+		return
+	}
+	t.Fatal("k8s/deployment.yaml has no HorizontalPodAutoscaler")
+}

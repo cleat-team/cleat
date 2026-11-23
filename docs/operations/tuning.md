@@ -214,7 +214,10 @@ lower the flag or `--concurrency`; do not size to the ceiling unless every workf
 ### In Kubernetes: the Helm chart's defaults
 
 The chart ships requests 500m / 1Gi and limits 2 CPU / 2Gi, and an autoscaler on CPU only (cleat#4393). They are
-chosen to work out of the box, not to be tight; set `resources` to shrink them for a workload you have measured.
+chosen to work out of the box, not to be tight; set `resources` to shrink them for a workload you have measured, and
+**set both `requests` and `limits`** for each of cpu and memory: Helm merges your values over the chart's, so a limit
+set alone below the default request leaves a request above its limit, which Kubernetes rejects. The chart refuses that at
+render time and names what to set. The raw manifests `k8s/deployment.yaml` and `k8s/migrate-job.yaml` carry the same values.
 What a worker uses, measured on 2026-11-22/23 (arm64 Linux; cleat#4377 and cleat#4389 have the data):
 
 | | |

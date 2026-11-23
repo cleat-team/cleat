@@ -55,13 +55,16 @@ spec:
               port: 8080
             initialDelaySeconds: 2
             periodSeconds: 5
+          # The same defaults as charts/cleat/values.yaml, which has the measurements behind them
+          # (cleat#4393): a Python component compile is OOM-killed at a 512Mi limit and takes 11.4 s
+          # at 500m of CPU, and the HPA below measures utilization against the REQUEST.
           resources:
             requests:
-              cpu: 100m
-              memory: 128Mi
-            limits:
               cpu: 500m
-              memory: 512Mi
+              memory: 1Gi
+            limits:
+              cpu: "2"
+              memory: 2Gi
 ---
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
@@ -81,14 +84,12 @@ spec:
         target:
           type: Utilization
           averageUtilization: 70
-    - type: Resource
-      resource:
-        name: memory
-        target:
-          type: Utilization
-          averageUtilization: 80
-    # Custom metric for memory-pressure-driven scaling (requires prometheus-adapter).
-    # Uncomment to use instead of resource:memory above:
+    # No resource:memory metric (cleat#4393): it is a percentage of the request, a worker's memory is
+    # dominated by caches and held runs that grow by design, and a target below what one warmed worker
+    # uses pins the autoscaler at maxReplicas. charts/cleat/values.yaml (autoscaling.targetMemory) has
+    # the arithmetic. For memory-pressure-driven scaling use the custom metric below, or KEDA
+    # (k8s/keda-scaledobject.yaml).
+    # Custom metric for memory-pressure-driven scaling (requires prometheus-adapter):
     # - type: Pods
     #   pods:
     #     metric:

@@ -172,7 +172,10 @@ auth:
 # -- Container resource requests and limits. The defaults are chosen to WORK, not to be optimal:
 # a worker that is killed or starved by its own limit is a worse default than a pod that asks for
 # more than a small workload needs. Override `resources` to shrink them for a workload you have
-# measured; an install that already sets `resources` is unaffected by these defaults.
+# measured, and SET BOTH `requests` and `limits` for each of cpu and memory: Helm merges your values
+# over these maps, so setting only a limit below the default request (or only a request above the
+# default limit) leaves a request above its limit, which Kubernetes rejects. The chart refuses that at
+# render time with a message that says what to set (templates/_resources-guard.tpl).
 #
 # WHAT A WORKER ACTUALLY USES (arm64 Linux, 2026-11-22/23; cleat#4377 and cleat#4389 have the data):
 #   - an idle worker with no workflows: about 35 MiB resident.
