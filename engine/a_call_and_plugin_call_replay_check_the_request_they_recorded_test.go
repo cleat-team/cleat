@@ -100,6 +100,9 @@ func TestACallAndAPluginCallReplayOnlyTheRequestTheyRecorded(t *testing.T) {
 		{"call, the same body (control)", call(idBodyRecorded), idCallHistory(), false},
 		{"call, the same request written another way (control: cross-language, ABI.md 6.7)", call(idBodyRecordedReordered), idCallHistory(), false},
 		{"call, a different body", call(idBodyOther), idCallHistory(), true},
+		// WHICH RECORDS CARRY A REQUEST is decided by the record's TYPE, not by whether the field is empty: a call recorded with no request, replayed with one, is a different call. A
+		// comparison keyed on `rec.Request != ""` would skip exactly this case (found in review by a mutant that stayed green).
+		{"call recorded with an EMPTY request, replayed with a body", call("x"), []EventRecord{{Step: 0, EventType: EventTypeCall, Service: "svc", Op: "op", Response: `"recorded answer"`}}, true},
 		{"plugin_call, the same input (control)", pcall("plain", idBodyRecorded), idPluginHistory("plain", idBodyRecorded), false},
 		{"plugin_call, the same input written another way (control: cross-language)", pcall("plain", idBodyRecordedReordered), idPluginHistory("plain", idBodyRecorded), false},
 		{"plugin_call, a different input", pcall("plain", idBodyOther), idPluginHistory("plain", idBodyRecorded), true},
@@ -268,6 +271,20 @@ func TestTheRequestIsComparedOnlyOnARecordThatCarriesOne(t *testing.T) {
 	}
 	if why := durableSendStep.Identity(a, &EventRecord{EventType: EventTypeDurableSend, Service: "svc", Op: "op", Request: idBodyRecorded}); why == "" {
 		t.Errorf("durable_send: a send record with a different request was accepted")
+	}
+	// The converse, pinned by RECORD TYPE: a call or send record with an EMPTY request still carries one, so a live body that is not empty differs from it.
+	for _, c := range []struct {
+		spec *stepSpec
+		rec  EventRecord
+	}{
+		{&callStep, EventRecord{EventType: EventTypeCall, Service: "svc", Op: "op"}},
+		{&retryStep, EventRecord{EventType: EventTypeCall, Service: "svc", Op: "op"}},
+		{&heartbeatStep, EventRecord{EventType: EventTypeCall, Service: "svc", Op: "op"}},
+		{&durableSendStep, EventRecord{EventType: EventTypeDurableSend, Service: "svc", Op: "op"}},
+	} {
+		if why := c.spec.Identity(a, &c.rec); why == "" {
+			t.Errorf("%s: a %s record with an empty request was accepted for a live body %q: the record TYPE decides whether a request is compared, not whether the field is empty", c.spec.Name, c.rec.EventType, a.s3)
+		}
 	}
 	for _, c := range []struct {
 		spec *stepSpec

@@ -53,6 +53,23 @@ func TestARequestIsTheSameWhenItIsTheSameBytesOrTheSameJSONValue(t *testing.T) {
 		{"empty", ``, ` `, false},
 		{"a JSON body and a non-JSON one", `{"a":1}`, `{"a":1`, false},
 
+		// INVALID TEXT has no canonical form. The decoder maps every invalid byte and every lone-surrogate escape to U+FFFD, so without this these five pairs came out EQUAL (found in
+		// review; fetch and plugin_call compared bytes exactly before, so for them it was a regression). Lone-surrogate escapes are legal JSON syntax and real SDKs emit them.
+		{"two different invalid bytes in a string", "[\"\xff\"]", "[\"\xfe\"]", false},
+		{"an invalid byte and a literal U+FFFD", "[\"\xff\"]", "[\"\uFFFD\"]", false},
+		{"two different lone-surrogate escapes", `["\ud800"]`, `["\udc00"]`, false},
+		{"a lone-surrogate escape and a literal U+FFFD", `["\ud800"]`, "[\"\uFFFD\"]", false},
+		{"two different lone-surrogate escapes in a KEY", `{"\ud800":1}`, `{"\udc00":1}`, false},
+		{"a lone-surrogate escape in a key and a literal U+FFFD in a key", `{"\ud800":1}`, "{\"\uFFFD\":1}", false},
+		{"two different invalid bytes in a KEY", "{\"\xff\":1}", "{\"\xfe\":1}", false},
+		{"an invalid byte in a key and a literal U+FFFD in a key", "{\"\xff\":1}", "{\"\uFFFD\":1}", false},
+		{"identical invalid-UTF-8 bodies still match themselves", "[\"\xff\"]", "[\"\xff\"]", true},
+		{"identical lone-surrogate escapes still match themselves", `["\ud800"]`, `["\ud800"]`, true},
+		{"a body with a U+FFFD is compared as bytes, so a reordering is a difference", "{\"a\":\"\uFFFD\",\"b\":1}", "{\"b\":1,\"a\":\"\uFFFD\"}", false},
+		// the check must not over-reject: a VALID surrogate pair is one character, and non-ASCII text is ordinary
+		{"a valid surrogate pair and the character it spells", `["\ud83d\ude00"]`, "[\"😀\"]", true},
+		{"non-ASCII text with the keys reordered", `{"b":"日本語","a":"ü"}`, `{"a":"ü","b":"日本語"}`, true},
+
 		// DUPLICATE KEYS have no canonical form: which value wins is a parser's choice, so the body matches only an identical copy of itself
 		{"a duplicate key, identical copy", `{"a":1,"a":2}`, `{"a":1,"a":2}`, true},
 		{"a duplicate key against the last value alone", `{"a":1,"a":2}`, `{"a":2}`, false},

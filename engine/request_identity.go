@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 )
 
 // sameRequest says whether two request bodies are the same request (cleat#4424): the same bytes, or the same JSON VALUE.
@@ -23,7 +24,11 @@ import (
 //
 // WHAT FALLS BACK TO BYTES, which is to say "different unless identical": a body that is not JSON (nothing is promised about how two SDKs spell a non-JSON request), a body with
 // anything after its first value, a body with a DUPLICATE KEY (which value a duplicate means is a parser's choice, and two SDKs' parsers choose differently, so no canonical form
-// exists), nesting past maxCanonicalDepth, and a number whose exponent is too large to expand safely. A body that cannot be canonicalised can still match an identical copy of itself.
+// exists), nesting past maxCanonicalDepth, and a number whose exponent is too large to expand safely, and a string or key that is not valid text: the decoder maps EVERY invalid
+// byte and every lone-surrogate escape ("\ud800", which JSON.stringify and Python's json.dumps both emit) to U+FFFD, so the bytes \xff and \xfe, the escapes "\ud800" and "\udc00",
+// and a literal U+FFFD would all canonicalise alike, and two different requests would match (found in review; fetch and plugin_call compared bytes exactly before this PR, so for
+// them that was a regression). A body with a U+FFFD in any string or key has no canonical form. (Invalid bytes need no check of their own: inside a string the decoder turns each
+// into a U+FFFD, which is refused as above, and anywhere else they are a syntax error. A separate utf8.ValidString check decided nothing, and a mutant that removed it stayed green.) A body that cannot be canonicalised can still match an identical copy of itself.
 // So of two bodies neither of which parses, only identical ones match: they cannot "match each other" by both failing.
 func sameRequest(a, b string) bool {
 	if a == b {
@@ -76,8 +81,8 @@ func writeCanonical(dec *json.Decoder, sb *strings.Builder, depth int) bool {
 					return false
 				}
 				key, isStr := kt.(string)
-				if !isStr || seen[key] {
-					return false // a non-string key cannot happen from the decoder, a repeated one has no canonical form
+				if !isStr || seen[key] || strings.ContainsRune(key, utf8.RuneError) {
+					return false // a non-string key cannot happen from the decoder, a repeated one has no canonical form, and a U+FFFD may stand for an invalid byte or a lone surrogate
 				}
 				seen[key] = true
 				var vb strings.Builder
@@ -121,6 +126,9 @@ func writeCanonical(dec *json.Decoder, sb *strings.Builder, depth int) bool {
 			return false
 		}
 	case string:
+		if strings.ContainsRune(t, utf8.RuneError) {
+			return false // a U+FFFD may stand for an invalid byte or a lone surrogate escape: see sameRequest
+		}
 		b, _ := json.Marshal(t)
 		sb.Write(b)
 	case json.Number:
