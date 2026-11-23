@@ -112,6 +112,8 @@ type Metrics struct {
 	// --- UpDownCounters (Int64UpDownCounter) ---
 	workflowsActive                metric.Int64UpDownCounter
 	residentRuns                   metric.Int64UpDownCounter
+	residentMemoryBudget           metric.Int64UpDownCounter
+	residentMemoryCharged          metric.Int64UpDownCounter
 	workerCount                    metric.Int64UpDownCounter
 	eventHistorySize               metric.Int64UpDownCounter
 	wasmCacheEntries               metric.Int64UpDownCounter
@@ -561,6 +563,24 @@ func New(cfg Config) (*Metrics, error) {
 	)
 	if err != nil {
 		return nil, fmt.Errorf("cleat_resident_runs: %w", err)
+	}
+
+	m.residentMemoryBudget, err = meter.Int64UpDownCounter(
+		"cleat_resident_memory_budget_bytes",
+		metric.WithDescription("The memory the runs held on this worker may add up to, in bytes (cleat#4377); set once at start-up"),
+		metric.WithUnit("By"),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("cleat_resident_memory_budget_bytes: %w", err)
+	}
+
+	m.residentMemoryCharged, err = meter.Int64UpDownCounter(
+		"cleat_resident_memory_charged_bytes",
+		metric.WithDescription("What the runs held on this worker are charged against that budget right now, in bytes: an estimate by language, not a reading"),
+		metric.WithUnit("By"),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("cleat_resident_memory_charged_bytes: %w", err)
 	}
 
 	m.workflowsActive, err = meter.Int64UpDownCounter(
@@ -1113,6 +1133,16 @@ func (m *Metrics) RecordResidentEviction(ctx context.Context, reason string) {
 // AddResidentRuns moves the number of runs held right now by delta: +1 when a run is admitted, -1 when it leaves.
 func (m *Metrics) AddResidentRuns(ctx context.Context, delta int64) {
 	m.residentRuns.Add(ctx, delta, metric.WithAttributes(m.defaultAttrs...))
+}
+
+// AddResidentMemoryBudget records the held-run memory budget, once, when the set is built (cleat#4377).
+func (m *Metrics) AddResidentMemoryBudget(ctx context.Context, bytes int64) {
+	m.residentMemoryBudget.Add(ctx, bytes, metric.WithAttributes(m.defaultAttrs...))
+}
+
+// AddResidentMemoryCharged moves what the held runs are charged against the budget by delta bytes: +cost when a run is admitted, -cost when it leaves.
+func (m *Metrics) AddResidentMemoryCharged(ctx context.Context, delta int64) {
+	m.residentMemoryCharged.Add(ctx, delta, metric.WithAttributes(m.defaultAttrs...))
 }
 
 // RecordReplayShortHistory increments the replay-short-histories counter.
