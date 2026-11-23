@@ -134,9 +134,15 @@ var callStep = stepSpec{
 	// The guest decodes result<string, call-failure>: a divergence is answered in the durable-call layout (ABI.md, "Return packing" of cleat_call).
 	// AfterSuspend is left nil on purpose, as for every durable-call-family spec: the refusal after a suspension is the dispatcher's and answers the stop word.
 	Result: layoutDurableCall,
+	// The service, the operation AND the request body (cleat#4424). A call that asks the same service the same operation with a different body is not the recorded call, and until
+	// this compared the body it was handed the recorded answer for the old one with no divergence; fetch has always compared its body. The body is the string the record carries,
+	// compared exactly as fetch's is, and a divergence names each body by its size and a short hash and never prints it (redactedBody, cleat#4321).
 	Identity: func(a stepArgs, rec *EventRecord) string {
 		if rec.Service != a.s1 || rec.Op != a.s2 {
 			return fmt.Sprintf("call %s.%s, recorded %s.%s", a.s1, a.s2, rec.Service, rec.Op)
+		}
+		if rec.Request != a.s3 {
+			return fmt.Sprintf("call %s.%s with a different request: %s, recorded %s", a.s1, a.s2, redactedBody(a.s3), redactedBody(rec.Request))
 		}
 		return ""
 	},
