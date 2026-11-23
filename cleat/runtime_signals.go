@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"math"
 	"time"
+
+	"github.com/cleat-team/cleat/cleat/internal/redacted"
 )
 
 type SignalResult struct {
@@ -345,7 +347,7 @@ func (h *HostCallsImpl) WaitForEvent(pluginName, functionName, inputJSON string,
 		if !wellFormed {
 			return "", fmt.Errorf("WaitForEvent: %s/%s returned an output with no boolean \"found\" field, "+
 				"so this call cannot tell a claimed event from an unclaimed one. The awaited function must be "+
-				"claim-shaped; see this method's doc comment. Output was: %s", pluginName, functionName, out)
+				"claim-shaped; see this method's doc comment. Output was: %s", pluginName, functionName, redacted.Body(out))
 		}
 		if found {
 			return out, nil
