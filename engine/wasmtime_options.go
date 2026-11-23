@@ -1,6 +1,8 @@
 package engine
 
 import (
+	"errors"
+	"fmt"
 	"log/slog"
 	"time"
 )
@@ -174,6 +176,102 @@ type wasmtimeConfig struct {
 	// 0 means DefaultModuleCacheMaxBytes. Both bounds apply; see moduleLRU
 	// for why a count alone could not say what a hundred entries cost.
 	moduleCacheMaxBytes int64
+
+	// componentPrecompile, when non-nil, makes a component compile happen in a short-lived child process (see ComponentPrecompile).
+	componentPrecompile *ComponentPrecompile
+}
+
+// ComponentPrecompile turns on compiling a Component Model component in a CHILD process instead of in the worker (cleat-internal/component-precompile-design-2026-11-23.md, Option A).
+//
+// A component compile raises a process's resident memory by ~490 MiB (Python) of Cranelift scratch, most of which the allocator keeps after the compile, and the engine retains ~145 MiB of the
+// result for the life of the process. A child that compiles, serializes and exits returns all of it to the OS, and the worker loads the serialized artifact for ~27 MiB. EXPERIMENTAL, off by
+// default, and it does not remove the compile PEAK: the child shares the worker's cgroup, so the peak is the worker's baseline plus the child's.
+//
+// Every failure (the child cannot start, times out, exits nonzero, writes an artifact the worker will not accept) is logged and falls back to the in-process compile; it never fails a workflow.
+type ComponentPrecompile struct {
+	// Executable is the worker's own binary, resolved once at start-up to an absolute path. It is never looked up on PATH, so the child is the same build and runs the same config code.
+	// Empty disables the feature (the in-process compile is used and nothing is logged as a failure).
+	Executable string
+	// Timeout bounds one child. <= 0 takes DefaultComponentPrecompileTimeout.
+	Timeout time.Duration
+	// MemoryLimitBytes is the worker's memory limit as the worker read it, 0 if unknown. It is only REPORTED (in a refusal's message, log and metric); nothing here acts on it.
+	MemoryLimitBytes uint64
+	// RefusalWindow is how long this worker refuses to try a component again after its child was killed: one attempt per component per window, so a run released for retry cannot loop
+	// a doomed child. <= 0 takes DefaultComponentPrecompileRefusalWindow.
+	RefusalWindow time.Duration
+	// ParallelCompilation is wasmtime's parallel_compilation in the CHILD only. false lowers the compile's memory high-water and lengthens it; it does not bind the artifact. This is the Go zero value, so a caller that sets nothing gets the LOW-memory compile; the worker passes the value --component-precompile-parallel resolved (parallel unless its memory limit is under 1 GiB).
+	ParallelCompilation bool
+}
+
+// DefaultComponentPrecompileRefusalWindow is how long a component whose child was killed is refused on this worker before another child is tried.
+const DefaultComponentPrecompileRefusalWindow = 5 * time.Minute
+
+// ErrComponentCompileRefused is what a refused compile matches with errors.Is. It is NOT a failure of the workflow: the guest never ran, so there is no outcome to record. The worker releases the run
+// with a back-off (as it does for ErrLimitsUnavailable) so it retries, possibly on a worker with more memory.
+var ErrComponentCompileRefused = errors.New("component compile refused")
+
+// ComponentCompileRefusedError says why a component was not compiled, with what an operator needs to act: the memory limit the worker read, the compile mode, and when this worker will try again.
+type ComponentCompileRefusedError struct {
+	// MemoryLimitBytes is the worker's memory limit as it read it, 0 if unknown.
+	MemoryLimitBytes uint64
+	// ParallelCompilation is the child's compile mode.
+	ParallelCompilation bool
+	// RetryAfter is how long until this worker will try this component again. The run is released for at least this long.
+	RetryAfter time.Duration
+	// Window is the refusal window this worker is configured with: how long after a killed child it will not start another for the component.
+	Window time.Duration
+	// Repeat is true when the refusal was answered without trying: an earlier attempt within the window was killed.
+	Repeat bool
+	// Cause is what the child died of, nil for a repeat.
+	Cause error
+}
+
+func (e *ComponentCompileRefusedError) Error() string {
+	limit := "an unknown memory limit"
+	if e.MemoryLimitBytes > 0 {
+		limit = fmt.Sprintf("a %d MiB memory limit", e.MemoryLimitBytes>>20)
+	}
+	advice := "raise the memory limit, or compile the component outside the worker"
+	if e.ParallelCompilation {
+		advice = "set --component-precompile-parallel=false or raise the memory limit"
+	}
+	what := "the precompile child was killed"
+	if e.Cause != nil {
+		what += " (" + e.Cause.Error() + ")"
+	}
+	if e.Repeat {
+		what = "an earlier precompile child for this component was killed within the last " + e.Window.String() + ", so none was started"
+	}
+	return fmt.Sprintf("%s: %s, most likely by %s with parallel_compilation=%t. Compiling the component in the worker would need more memory than the child did, "+
+		"so it was not attempted; this run is released and will be retried in %s, possibly on another worker. To fix it: %s",
+		ErrComponentCompileRefused.Error(), what, limit, e.ParallelCompilation, e.RetryAfter.Round(time.Second), advice)
+}
+
+// Is makes errors.Is(err, ErrComponentCompileRefused) true, so the worker can tell this from a workflow's own failure.
+func (e *ComponentCompileRefusedError) Is(target error) bool {
+	return target == ErrComponentCompileRefused
+}
+
+func (e *ComponentCompileRefusedError) Unwrap() error { return e.Cause }
+
+// SerializeComponentArg is the argument that makes the worker binary act as the precompile child. It is matched against os.Args[1] BEFORE flag parsing, so no flag, workflow, HTTP route or
+// environment can reach it; only an exec of the binary with this exact first argument does. Declared here, untagged, because the worker's main reads it in every build.
+const SerializeComponentArg = "--serialize-component"
+
+// DefaultComponentPrecompileTimeout is the bound on one precompile child when none is set: the slowest measured Python compile with parallel_compilation off was 5.7 s on a loaded host, so this is
+// generous, and a child that exceeds it is killed and the worker compiles in-process.
+const DefaultComponentPrecompileTimeout = 5 * time.Minute
+
+// WithWasmtimeComponentPrecompile enables compiling components in a child process. See ComponentPrecompile. A zero Executable keeps the in-process compile.
+func WithWasmtimeComponentPrecompile(p ComponentPrecompile) WasmtimeOption {
+	return func(c *wasmtimeConfig) {
+		if p.Executable == "" {
+			c.componentPrecompile = nil
+			return
+		}
+		cp := p
+		c.componentPrecompile = &cp
+	}
 }
 
 // WasmtimeOption configures a wasmtimeBackend, applied at construction time

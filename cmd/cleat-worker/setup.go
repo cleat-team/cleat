@@ -4336,6 +4336,12 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 			w.releaseForLimitsUnavailable(wf, err)
 			return
 		}
+		// A component the precompile child could not compile for want of memory: the guest never ran, so this is not the workflow's failure either. Released with the
+		// refusal's own retry-after, so it is not claimed again every few seconds and does not respawn a child that was just killed.
+		if errors.Is(err, engine.ErrComponentCompileRefused) {
+			w.releaseForComponentCompileRefused(wf, err)
+			return
+		}
 		if deferPhase {
 			// A defer segment that could not run is still a terminate that
 			// has to complete. The outcome was decided and recorded before
@@ -8900,16 +8906,57 @@ func (w *Worker) releaseForLimitsUnavailable(wf *engine.WorkflowInstance, cause 
 	w.returnToQueueAfterBackoff(wf)
 }
 
+// releaseForComponentCompileRefused returns a run to the queue because the precompile child that would have compiled its component was killed, almost certainly by the container's
+// memory limit (engine.ErrComponentCompileRefused). The guest never ran, so there is no outcome to record; the run is released, not failed, and it may be served by a worker with more
+// memory. It is released for the refusal's retry-after, which is also how long THIS worker refuses to start another child for that component.
+//
+// ERROR, rate-limited per run, and counted on cleat_workflow_releases_total{check="component_compile_refused"} with the memory limit and the compile mode as labels: a deployment
+// whose limit is too small for its component stops running that workflow here, and has to be able to see it.
+func (w *Worker) releaseForComponentCompileRefused(wf *engine.WorkflowInstance, cause error) {
+	ctx := context.Background()
+	const op = "component_compile_refused"
+	var ref *engine.ComponentCompileRefusedError
+	retryAfter := time.Duration(0)
+	attrs := []attribute.KeyValue{}
+	if errors.As(cause, &ref) {
+		retryAfter = ref.RetryAfter
+		// STRINGS: the text exposition renders a label value with AsString, which is empty for an int or bool attribute.
+		attrs = append(attrs, attribute.String("memory_limit_mib", strconv.FormatUint(ref.MemoryLimitBytes>>20, 10)),
+			attribute.String("parallel_compilation", strconv.FormatBool(ref.ParallelCompilation)))
+	}
+	if w.Metrics != nil {
+		w.Metrics.RecordWorkflowRelease(ctx, op, attrs...)
+	}
+	level := slog.LevelDebug
+	if w.shouldWarnUnservable(wf.ID, op, time.Now()) {
+		level = slog.LevelError
+	}
+	w.logger.Log(ctx, level,
+		"could not compile this workflow's component for want of memory; returning it to the queue rather than failing it",
+		"worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID,
+		"def_name", wf.DefName, "def_version", wf.DefVersion, "retry_after", retryAfter.Round(time.Second), "error", cause)
+	w.returnToQueueAfter(wf, retryAfter)
+}
+
 // returnToQueueAfterBackoff is the release both of the above end in: next_wake_at
 // goes forward by the unservable backoff, so a run nothing can serve right now
 // costs one claim-and-release per interval across the pool rather than a spin.
 func (w *Worker) returnToQueueAfterBackoff(wf *engine.WorkflowInstance) {
+	w.returnToQueueAfter(wf, 0)
+}
+
+// returnToQueueAfter releases wf with next_wake_at forward by the LONGER of the unservable backoff and at: a caller that knows how long a retry is pointless for says so, and the
+// shared backoff is the floor so nothing releases with none.
+func (w *Worker) returnToQueueAfter(wf *engine.WorkflowInstance, at time.Duration) {
 	ctx := context.Background()
 	st, release := w.storeFor(wf)
 	defer release()
 	backoff := w.unservableBackoff
 	if backoff <= 0 {
 		backoff = defaultUnservableBackoff
+	}
+	if at > backoff {
+		backoff = at
 	}
 	err := st.ReleaseWorkflow(ctx, wf.ID, w.id, wf.Generation, time.Now().Add(backoff))
 	if errors.Is(err, engine.ErrFenceLost) {
