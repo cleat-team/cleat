@@ -45,6 +45,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/cleat-team/cleat/engine/testutil"
 )
 
 // holdTCPPort reserves a kernel-assigned TCP port and returns it WITH ITS
@@ -648,7 +650,9 @@ func buildWorkerBinaryOnce(t *testing.T) string {
 	}
 	workerBinaryBuilt = true
 
-	dir, err := os.MkdirTemp("", "cleat-worker-build-*")
+	// OwnedTempDir, so a run killed during this test does not leave the built worker (about 70 MB) behind: the next run sweeps it (cleat#4234).
+	// It is still removed by TestMain (vet_test.go) on a normal run.
+	dir, err := testutil.OwnedTempDir("cleat-worker-build-")
 	if err != nil {
 		workerBinaryErr = err
 		t.Fatalf("create temp dir for cleat-worker build: %v", err)

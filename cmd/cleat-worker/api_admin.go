@@ -287,7 +287,7 @@ func (s *apiServer) scopedStoreForTenant(w http.ResponseWriter, r *http.Request,
 	}
 	st, err := s.openTenantStore(r, tenant)
 	if err != nil {
-		s.writeError(w, http.StatusInternalServerError, err.Error())
+		s.writeStoreError(w, r, err)
 		return nil, false
 	}
 	return st, true
@@ -392,7 +392,7 @@ func (s *apiServer) handleAdminForceComplete(w http.ResponseWriter, r *http.Requ
 
 	op := operatorFromContext(r)
 	if err := engine.ForceComplete(r.Context(), st, id, req.Generation, op, req.Result); err != nil {
-		s.handleAdminOpError(w, err)
+		s.handleAdminOpError(w, r, err)
 		return
 	}
 
@@ -416,7 +416,7 @@ func (s *apiServer) handleAdminForceFail(w http.ResponseWriter, r *http.Request,
 
 	op := operatorFromContext(r)
 	if err := engine.ForceFail(r.Context(), st, id, req.Generation, op, req.ErrorMsg, req.ErrorCode); err != nil {
-		s.handleAdminOpError(w, err)
+		s.handleAdminOpError(w, r, err)
 		return
 	}
 
@@ -447,7 +447,7 @@ func (s *apiServer) handleAdminResolveStep(w http.ResponseWriter, r *http.Reques
 
 	op := operatorFromContext(r)
 	if err := engine.ResolveStep(r.Context(), st, id, step, req.Response, op); err != nil {
-		s.handleAdminOpError(w, err)
+		s.handleAdminOpError(w, r, err)
 		return
 	}
 
@@ -469,7 +469,7 @@ func (s *apiServer) handleAdminReReplay(w http.ResponseWriter, r *http.Request, 
 
 	op := operatorFromContext(r)
 	if err := engine.ReReplay(r.Context(), st, id, req.Generation, op); err != nil {
-		s.handleAdminOpError(w, err)
+		s.handleAdminOpError(w, r, err)
 		return
 	}
 
@@ -504,7 +504,7 @@ func (s *apiServer) handleAdminReReplay(w http.ResponseWriter, r *http.Request, 
 // The default is still 500, and that is the point of classifying: an
 // unclassified error is a genuine server fault, not a refusal nobody got round
 // to labelling.
-func (s *apiServer) handleAdminOpError(w http.ResponseWriter, err error) {
+func (s *apiServer) handleAdminOpError(w http.ResponseWriter, r *http.Request, err error) {
 	msg := err.Error()
 	switch {
 	case errors.Is(err, engine.ErrAdminOpNotImplemented):
@@ -521,7 +521,9 @@ func (s *apiServer) handleAdminOpError(w http.ResponseWriter, err error) {
 	case errors.Is(err, engine.ErrAdminBadRequest):
 		s.writeError(w, 400, msg)
 	default:
-		s.writeError(w, 500, msg)
+		// Not `writeError(w, 500, msg)`: msg is err.Error(), so this was the driver's text under another name,
+		// which the whole-message guard cannot see through an assignment (cleat#3883).
+		s.writeStoreError(w, r, err)
 	}
 }
 

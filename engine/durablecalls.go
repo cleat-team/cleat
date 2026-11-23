@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"sync/atomic"
@@ -54,7 +55,57 @@ func (s *execSession) stopBeforeNewWork() bool {
 	if s.engine.deferPhase && !s.inDeferDrain {
 		return true
 	}
+	// A recorded event that could not be written is a hole in the durable record; no further work goes on top of it (cleat#4160).
+	if s.eventWriteFailure != nil {
+		return true
+	}
 	return s.engine.shutdownObserved()
+}
+
+// callRefusedAfterSuspend is the message of a call that was refused because this execution has already suspended, for the calls whose answer is an
+// ordinary error and not a stop word (cleat#4285).
+const callRefusedAfterSuspend = "the workflow has suspended; this call was not run"
+
+// suspendedAlready reports whether this EXECUTION has already suspended: a call answered the guest with a suspension (a child await, a wait, a
+// stop), or ContinueAsNew set one, and the guest is still running. A guest is told to stop when that happens and some do not (an SDK returns the
+// suspension as an ordinary value, or the guest catches the exception or discards the error: cleat#4285), and every call it makes afterwards is
+// recorded AFTER the pending await and runs AGAIN when the workflow resumes. A defer drain is exempt when the HOST runs it (inDeferDrain), and when the
+// GUEST runs its own and says so (SetDeferPhase) only if that drain began BEFORE the suspension or the suspension is a continue-as-new (guestDrainIsExempt).
+func (s *execSession) suspendedAlready() bool {
+	return s.suspendErr != nil && !s.inDeferDrain && !s.guestDrainIsExempt()
+}
+
+// guestDrainIsExempt reports whether the guest is draining its own defer table in a way a post-suspension refusal must not stop. Two cases, and the narrowness
+// is the point: (1) the drain BEGAN BEFORE the suspension, a cleanup in progress whose body then awaited a child (cleat#3429); (2) the suspension IS the end
+// of the run, a continue-as-new, whose registered defers belong to this execution and must run (suspendedForContinueAsNew). A drain that began AFTER a wait
+// suspension is neither: it is a wrapper running the defers because the guest swallowed the suspension (Java's catch (Exception), C#'s EntryHost), and its
+// calls would be recorded after the pending await and run again on resume, which is cleat#4285. Reported by the reviewer of #4295.
+func (s *execSession) guestDrainIsExempt() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.inDeferPhase && (!s.deferPhaseBeganSuspended || s.suspendedForContinueAsNew())
+}
+
+// refuseIfSuspended is the host-side half of cleat#4285: when this execution has already suspended, a call that would start fresh work is refused,
+// runs nothing and records nothing, and answers `word`, the word its own SDK decoder recognises (callSuspendSentinel for every stop site, which
+// DurableCall's decoders and the other five layouts already test first). It returns the answer and true when it refused. One helper for every call
+// off the dispatcher, so that each later migration just moves its call from here to step(), where the same refusal is applied by the spec.
+func (s *execSession) refuseIfSuspended(call string, word int64) (int64, bool) {
+	return s.refuseIfSuspendedWith(call, func() int64 { return word })
+}
+
+// refuseIfSuspendedWith is refuseIfSuspended for a call whose answer is computed (an ordinary error with a message written to the guest's buffer, for a
+// call that is not a stop site and so has no stop word its decoders know). It logs a warning each time, so that a guest or an SDK that keeps running
+// after a suspension is visible to an operator and not only to a replay that later runs a call twice.
+func (s *execSession) refuseIfSuspendedWith(call string, answer func() int64) (int64, bool) {
+	if !s.suspendedAlready() {
+		return 0, false
+	}
+	if s.engine != nil {
+		s.engine.log().WarnContext(context.Background(), "a host call was made after the workflow had already suspended and was refused: the guest did not stop at the suspension (cleat#4285)",
+			"workflow_id", s.workflowID, "call", call, "suspension", s.suspendErr.Reason)
+	}
+	return answer(), true
 }
 
 // setDeferDrain brackets the host's own call to the guest's defer runner. It
@@ -62,17 +113,119 @@ func (s *execSession) stopBeforeNewWork() bool {
 // caller outside the engine can permit new work in a defer segment.
 func (s *execSession) setDeferDrain(on bool) { s.inDeferDrain = on }
 
-func (s *execSession) DurableCall(ctx context.Context, m api.Module, service, operation, requestJSON string, responsePtr, responseMaxLen uint32) int64 {
-	if s.isReplay {
-		return s.replayCall(ctx, m, service, operation, requestJSON, responsePtr, responseMaxLen)
-	}
-	if s.stopBeforeNewWork() {
-		return callSuspendSentinel
-	}
-	return s.freshCall(ctx, m, service, operation, requestJSON, responsePtr, responseMaxLen)
+// callRecordsNothing* name the paths on which a call answers WITHOUT recording the call's event, each by the reason its Fresh gives to RecordsNothing, so callStep
+// can list them (RecordsNothingOn) and a Fresh that records nothing for a reason that is not here is reported (cleat#4152, G3). The event cap is NOT one of them:
+// it records a continue_as_new event, which is counted through ContinueAsNewAtEventCap.
+const (
+	callRecordsNothingCancelled = "the workflow was cancelled: the call is not made and the guest is told so"
+	callRecordsNothingHeartbeat = "the worker's heartbeat is presumed lost: the call is not started and the guest is told so"
+	callRecordsNothingHardStop  = "the worker hard-stopped mid-call: its outcome is unknown, so none is recorded and the next worker replays from before it"
+	callRecordsNothingIntent    = "a write-ahead intent that could not be written, completed or honoured: nothing is recorded and the guest is told why"
+)
+
+// callStep is cleat_call as a dispatcher step (cleat#4152, G3): one call event, in the durable-call result layout. The refusals a stop or a suspension asks for,
+// the replay-to-fresh hand-off at the frontier, the divergence report and the consumption of the record are the dispatcher's; what stays in Fresh is
+// everything the call decides for itself (the cancellation poll, a worker presumed lost, the event cap, a hard stop, a write-ahead intent).
+var callStep = stepSpec{
+	Name:    "call",
+	Effect:  effectEffect,
+	Records: recordsOne,
+	Want:    EventTypeCall,
+	// The guest decodes result<string, call-failure>: a divergence is answered in the durable-call layout (ABI.md, "Return packing" of cleat_call).
+	// AfterSuspend is left nil on purpose, as for every durable-call-family spec: the refusal after a suspension is the dispatcher's and answers the stop word.
+	Result: layoutDurableCall,
+	// The service, the operation and the request body (callRequestIdentity, cleat#4424).
+	Identity:         func(a stepArgs, rec *EventRecord) string { return callRequestIdentity("call", a, rec) },
+	RecordsNothingOn: []string{callRecordsNothingCancelled, callRecordsNothingHeartbeat, callRecordsNothingHardStop, callRecordsNothingIntent},
+	// What the plain call printed on a divergence and docs/troubleshooting.md shows: the two request bodies (TestEngineReplayDivergence pins the labels).
+	DivergenceDetail: requestDivergenceDetail,
+	Decode: func(c *stepCtx, rec *EventRecord) int64 {
+		return c.s.answerRecordedCall(c.ctx, c.m, *rec, c.args.outPtr, c.args.outMaxLen)
+	},
+	Fresh: func(c *stepCtx) int64 { return c.s.freshCall(c) },
 }
 
-func (s *execSession) freshCall(ctx context.Context, m api.Module, service, operation, requestJSON string, responsePtr, responseMaxLen uint32) int64 {
+func init() { registerStepSpec(&callStep) }
+
+// DurableCall is cleat_call. A call made while the session is replaying is a replay step, and it is counted FIRST, before anything is read: the old
+// replayCall counted it before it read the record, so a replay that then diverged, quit or reached the frontier and handed off to a fresh call had been counted
+// too, and the dispatcher counts none of this for any call that goes through it. a_call_emits_the_same_counters_on_replay_and_fresh_before_the_dispatcher_test.go
+// pins the counts and this is what keeps them (cleat#4152, G3).
+func (s *execSession) DurableCall(ctx context.Context, m api.Module, service, operation, requestJSON string, responsePtr, responseMaxLen uint32) int64 {
+	if s.isReplay {
+		if s.engine.Metrics != nil {
+			s.engine.Metrics.RecordReplayStep(ctx, s.defName)
+		}
+		atomic.AddInt64(&replayStepCount, 1)
+	}
+	return s.step(ctx, m, &callStep, stepArgs{s1: service, s2: operation, s3: requestJSON, outPtr: responsePtr, outMaxLen: responseMaxLen})
+}
+
+// requestDivergenceDetail is the detail of a call that carries a request body: the plain call, the retried call and the heartbeat call all print these two lines
+// when they diverged, and docs/troubleshooting.md shows them. The bodies are named by their size and a short hash and never printed (redactedBody, cleat#4321); they were
+// truncated at 4096 bytes and printed whole under it, and the labels are the same.
+func requestDivergenceDetail(a stepArgs, rec *EventRecord) string {
+	return fmt.Sprintf("\n  actual request: %s\n  expected request: %s", redactedBody(a.s3), redactedBody(rec.Request))
+}
+
+// callRequestIdentity is the Identity of the four durable-call specs that carry a request (call, call_with_retry, call_with_heartbeat, durable_send): the service and the
+// operation, and then the request body (cleat#4424). A call that asks the same service the same operation with a different body is not the recorded call, and until the
+// body was compared it was handed the recorded answer for the old one with no divergence; fetch has always compared its body. The body is the string the record carries, compared
+// as the same bytes or the same JSON value (sameRequest: ABI.md §6.7 promises cross-language replay, and two SDKs do not serialise one request alike), and a divergence names each
+// body by its size and a short hash and never prints it (redactedBody, cleat#4321).
+//
+// THE BODY IS COMPARED ONLY ON A RECORD THAT CARRIES ONE, and that is a limit of what is recorded, not a choice here. A call event and a send event carry the request. A
+// call_attempt_failed event does not, a heartbeat event does not, and a call_retry_refused event deliberately does not ("a request body is exactly the kind of value the
+// sealed-payload machinery exists for", freshCallWithRetry). So in a multi-record run the body is checked at the call that ends it, and a history that stops INSIDE the run (a
+// worker lost mid-policy, mid-call) is accepted on its service and operation alone, as it always was.
+func callRequestIdentity(verb string, a stepArgs, rec *EventRecord) string {
+	if rec.Service != a.s1 || rec.Op != a.s2 {
+		return fmt.Sprintf("%s %s.%s, recorded %s.%s", verb, a.s1, a.s2, rec.Service, rec.Op)
+	}
+	if (rec.EventType == EventTypeCall || rec.EventType == EventTypeDurableSend) && !sameRequest(rec.Request, a.s3) {
+		return fmt.Sprintf("%s %s.%s with a different request: %s, recorded %s", verb, a.s1, a.s2, redactedBody(a.s3), redactedBody(rec.Request))
+	}
+	return ""
+}
+
+// atEventCap reports whether this session has recorded as many durable events as --max-quota-events allows.
+func (s *execSession) atEventCap() bool {
+	return s.engine.maxEventsPerWorkflow > 0 && s.eventCount >= s.engine.maxEventsPerWorkflow
+}
+
+// triggerEventCapContinueAsNew starts the continue-as-new that the event cap asks for. freshCall and the no-wait awaits share it, so
+// the cap is one rule with one implementation (cleat#4153): a recorded event that did not pass through here wrote into a quota the
+// flush refuses ("event quota exceeded"), retried the write for the whole flush window, and carried on.
+func (s *execSession) triggerEventCapContinueAsNew(ctx context.Context, m api.Module) {
+	s.autoContinueAsNewTriggered = true
+	if s.engine.Metrics != nil {
+		s.engine.Metrics.RecordContinueAsNew(ctx, "event_cap")
+	}
+	s.engine.log().InfoContext(ctx, "auto-ContinueAsNew triggered", "workflow_id", s.workflowID, "tenant_id", s.tenantID, "event_count", s.eventCount, "max", s.engine.maxEventsPerWorkflow)
+	s.ContinueAsNew(ctx, m, s.originalInput)
+}
+
+// refuseAtEventCap is the cap check for a recorded event that does not go through freshCall (the no-wait awaits). At the cap it
+// triggers the continue-as-new once and reports true, and the caller returns the stop the continue-as-new set: every SDK reads
+// suspendingAwaitResult as a stop and unwinds. Below the cap it counts the event it is about to record and reports false.
+func (s *execSession) refuseAtEventCap(c *stepCtx) bool {
+	if s.atEventCap() {
+		if !s.autoContinueAsNewTriggered {
+			c.ContinueAsNewAtEventCap()
+		}
+		return true
+	}
+	s.eventCount++
+	return false
+}
+
+// freshCall is the call's Fresh: it runs once the dispatcher has decided fresh work is allowed. The refusal for a stop (a defer segment, a shutdown, a refused
+// event write) and for a session that has already suspended is the dispatcher's, applied on BOTH ways in (a call that arrives fresh and one that reaches the
+// replay frontier), which is what freshCall used to apply itself for the second way after cleat#4143.
+func (s *execSession) freshCall(c *stepCtx) int64 {
+	ctx, m := c.ctx, c.m
+	service, operation, requestJSON := c.args.s1, c.args.s2, c.args.s3
+	responsePtr, responseMaxLen := c.args.outPtr, c.args.outMaxLen
 	atomic.AddInt64(&freshCallCount, 1)
 
 	if s.engine.Metrics != nil {
@@ -110,6 +263,7 @@ func (s *execSession) freshCall(ctx context.Context, m api.Module, service, oper
 		if err == nil && cancelled {
 			// Not retryable: the workflow was cancelled, so repeating the call
 			// is the one thing the caller must not do.
+			c.RecordsNothing(callRecordsNothingCancelled)
 			written, _ := s.writeResult(ctx, m, responsePtr, cancelledCallError, responseMaxLen)
 			return packDurableCallResult(int(written), callErrorUnknown, 1)
 		}
@@ -121,6 +275,7 @@ func (s *execSession) freshCall(ctx context.Context, m api.Module, service, oper
 	// cap (which itself starts new work -- a fresh run via ContinueAsNew --
 	// that a fenced-out worker has no business kicking off either).
 	if s.engine.canStartNewWork != nil && !s.engine.canStartNewWork() {
+		c.RecordsNothing(callRecordsNothingHeartbeat)
 		written, _ := s.writeResult(ctx, m, responsePtr, heartbeatPresumedLostCallError, responseMaxLen)
 		return packDurableCallResult(int(written), callFailureCode, 1)
 	}
@@ -129,12 +284,7 @@ func (s *execSession) freshCall(ctx context.Context, m api.Module, service, oper
 	// ContinueAsNew to start a fresh run with reset event_count. Events are
 	// tracked locally in the session (no DB query per call).
 	if s.engine.maxEventsPerWorkflow > 0 && s.eventCount >= s.engine.maxEventsPerWorkflow && !s.autoContinueAsNewTriggered {
-		s.autoContinueAsNewTriggered = true
-		if s.engine.Metrics != nil {
-			s.engine.Metrics.RecordContinueAsNew(ctx, "event_cap")
-		}
-		s.engine.log().InfoContext(ctx, "auto-ContinueAsNew triggered", "workflow_id", s.workflowID, "tenant_id", s.tenantID, "event_count", s.eventCount, "max", s.engine.maxEventsPerWorkflow)
-		s.ContinueAsNew(ctx, m, s.originalInput)
+		c.ContinueAsNewAtEventCap()
 		// Refuse the call rather than closing the module.
 		//
 		// This branch used to call m.CloseWithExitCode to stop the guest and
@@ -171,7 +321,15 @@ func (s *execSession) freshCall(ctx context.Context, m api.Module, service, oper
 	// see freshCallWithIntent for why it must not also flow through
 	// recordEvent -- so it returns here rather than falling through.
 	if s.engine.callSemantics(service, operation) == WriteAheadIntent {
-		resp, err := s.freshCallWithIntent(callCtx, service, operation, requestJSON, step)
+		resp, intentRec, intentChecksum, recorded, err := s.freshCallWithIntent(callCtx, service, operation, requestJSON, step)
+		if recorded {
+			c.RecordPersisted(intentRec, intentChecksum)
+		}
+		if err != nil && !recorded {
+			// The intent could not be written, completed or honoured: nothing reached the history. A service error that WAS recorded is an event like any
+			// other and is not this path.
+			c.RecordsNothing(callRecordsNothingIntent)
+		}
 		if DebugTiming {
 			s.engine.log().InfoContext(ctx, "TIMING: freshCallWithIntent", "workflow_id", s.workflowID, "step", step, "call_ms", time.Since(callStart).Milliseconds())
 		}
@@ -195,6 +353,7 @@ func (s *execSession) freshCall(ctx context.Context, m api.Module, service, oper
 		// from before it under the same idempotency key. The error handed to
 		// the guest unwinds its error path, draining its defer table.
 		s.suspendErr = &SuspendError{Reason: shutdownSuspendReason}
+		c.RecordsNothing(callRecordsNothingHardStop)
 		written, _ := s.writeResult(ctx, m, responsePtr, shutdownCallError, responseMaxLen)
 		return packDurableCallResult(int(written), callFailureCode, 1)
 	}
@@ -213,7 +372,7 @@ func (s *execSession) freshCall(ctx context.Context, m api.Module, service, oper
 		Response:  resp,
 		Err:       callErr,
 	}
-	s.recordEvent(rec)
+	c.Record(rec)
 
 	if DebugTiming {
 		s.engine.log().InfoContext(ctx, "TIMING: freshCall", "workflow_id", s.workflowID, "step", rec.Step, "call_ms", callElapsed.Milliseconds())
@@ -228,160 +387,91 @@ func (s *execSession) freshCall(ctx context.Context, m api.Module, service, oper
 	return packDurableCallResult(int(written), writeErrorClass(writtenEC), writtenEC)
 }
 
-// replayRetryAttempts consumes the call_attempt_failed events at the head of
-// the remaining history and reports how many attempts they account for.
-//
-// resume is true ONLY when the history ends on them -- attempts recorded with
-// no terminal call event after. Anything else (a terminal event follows, no
-// attempt events at all, a service/op mismatch) returns false and leaves the
-// record for replayCall, which already reports divergence with the better
-// message.
-func (s *execSession) replayRetryAttempts(ctx context.Context, service, operation string) (spent int64, firstStep int, resume bool) {
-	firstStep = -1
-	for s.stepCount < len(s.history) {
-		rec := s.history[s.stepCount]
-		if rec.EventType != EventTypeCallAttemptFailed {
-			return spent, firstStep, false
-		}
-		if rec.Service != service || rec.Op != operation {
-			return spent, firstStep, false
-		}
-		if firstStep < 0 {
-			firstStep = rec.Step
-		}
-		if !s.advanceReplayStep(ctx, &rec) {
-			return spent, firstStep, false
-		}
-		spent++
-	}
-	return spent, firstStep, spent > 0
-}
-
-func (s *execSession) replayCall(ctx context.Context, m api.Module, service, operation, requestJSON string, responsePtr, responseMaxLen uint32) int64 {
-
-	if s.engine.Metrics != nil {
-		s.engine.Metrics.RecordReplayStep(ctx, s.defName)
-	}
-	atomic.AddInt64(&replayStepCount, 1)
-
-	if s.stepCount < len(s.history) {
-		rec := s.history[s.stepCount]
-		if !s.advanceReplayStep(ctx, &rec) {
-			return 0
+// answerRecordedCall answers a call from the record that was consumed for it: a pending intent (the call was dispatched and the outcome was never
+// recorded) is resolved or reported ambiguous, a recorded failure is replayed as the failure it was and with the class it had, and anything else is the
+// call's recorded response. It is the half of replay that follows the divergence checks, so a call that does its own checking (the retried call, through
+// the step dispatcher, cleat#4152 G3) shares it with replayCall and the two cannot drift. It consumes nothing and records nothing of its own beyond what
+// the ambiguity handling already wrote.
+func (s *execSession) answerRecordedCall(ctx context.Context, m api.Module, rec EventRecord, responsePtr, responseMaxLen uint32) int64 {
+	// Detect a pending call intent: the external call was dispatched
+	// but the outcome was never persisted.  Return ErrAmbiguous so
+	// the caller can check the external service before retrying.
+	if rec.isPendingIntent() {
+		if s.engine.Metrics != nil {
+			s.engine.Metrics.RecordAmbiguousCall(ctx)
 		}
 
-		if rec.EventType != EventTypeCall {
+		// cleat#2897, decision (c) on cleat#1984: for an operation declared
+		// to support idempotency-key replay, try that FIRST -- re-dispatch
+		// under the SAME key and let the service's own key table resolve
+		// it, which is the default path a declared service gets. Disjoint
+		// from ambiguityResolver's configured operations by construction
+		// (cleat-worker boot validation), so this never races the lookup
+		// path below for the same operation; it is either one or the
+		// other, decided by which flag named this service.operation.
+		if resp, ok := s.resolveAmbiguityViaKeyReplay(ctx, rec); ok {
 			if s.engine.Metrics != nil {
-				s.engine.Metrics.RecordReplayFailure(ctx)
+				s.engine.Metrics.RecordAmbiguousCall(ctx, attribute.String("outcome", "key_replay_resolved"))
 			}
-			errMsg := fmt.Sprintf("replay divergence at step %d: expected call event, got %s.\n  actual request: %s\n  expected request: %s\nRun 'cleat vet' on your workflow code to check for common non-determinism issues (time.Now(), random values, map iteration, goroutines).",
-				rec.Step, rec.EventType,
-				truncateWithHash(requestJSON, maxPayloadLen),
-				truncateWithHash(rec.Request, maxPayloadLen))
-			// Not retryable: a divergence is a bug in the workflow code, and
-			// running the same call again produces the same divergence.
-			written, _ := s.writeResult(ctx, m, responsePtr, errMsg, responseMaxLen)
-			return packDurableCallResult(int(written), callErrorUnknown, 1)
+			written, writtenEC := s.writeOut(ctx, m, responsePtr, resp, responseMaxLen)
+			return packDurableCallResult(int(written), writeErrorClass(writtenEC), writtenEC)
 		}
 
-		if rec.Service != service || rec.Op != operation {
+		// Ask, before giving up. A resolver that can look the operation up
+		// by its idempotency key turns most ambiguities into non-events:
+		// the outcome is recorded and replay carries on as though the call
+		// had returned normally, which it did -- the crash lost the answer,
+		// not the effect. See IMPROVEMENT-PLAN 1.4 phase E.
+		switch resp, outcome := s.resolveAmbiguity(ctx, rec); outcome {
+		case AmbiguityResolved:
 			if s.engine.Metrics != nil {
-				s.engine.Metrics.RecordReplayFailure(ctx)
+				s.engine.Metrics.RecordAmbiguousCall(ctx, attribute.String("outcome", "resolved"))
 			}
-			errMsg := fmt.Sprintf("replay divergence at step %d: workflow called %s.%s but history has %s.%s.\n  actual request: %s\n  expected request: %s\nRun 'cleat vet' on your workflow code to check for common non-determinism issues (time.Now(), random values, map iteration, goroutines).",
-				rec.Step, service, operation, rec.Service, rec.Op,
-				truncateWithHash(requestJSON, maxPayloadLen),
-				truncateWithHash(rec.Request, maxPayloadLen))
-			// Not retryable: a divergence is a bug in the workflow code, and
-			// running the same call again produces the same divergence.
-			written, _ := s.writeResult(ctx, m, responsePtr, errMsg, responseMaxLen)
-			return packDurableCallResult(int(written), callErrorUnknown, 1)
-		}
-
-		// Detect a pending call intent: the external call was dispatched
-		// but the outcome was never persisted.  Return ErrAmbiguous so
-		// the caller can check the external service before retrying.
-		if rec.isPendingIntent() {
+			written, writtenEC := s.writeOut(ctx, m, responsePtr, resp, responseMaxLen)
+			return packDurableCallResult(int(written), writeErrorClass(writtenEC), writtenEC)
+		case AmbiguityNotSent:
+			// The service confirmed this call never arrived: a definite,
+			// retryable failure, not an ambiguity. Same packing as a fresh
+			// call failure (callFailureCode), so the guest sees an
+			// ordinary Retryable()==true error and its own retry handling
+			// takes it from there -- no engine-side re-dispatch needed.
 			if s.engine.Metrics != nil {
-				s.engine.Metrics.RecordAmbiguousCall(ctx)
+				s.engine.Metrics.RecordAmbiguousCall(ctx, attribute.String("outcome", "not_sent"))
 			}
-
-			// cleat#2897, decision (c) on cleat#1984: for an operation declared
-			// to support idempotency-key replay, try that FIRST -- re-dispatch
-			// under the SAME key and let the service's own key table resolve
-			// it, which is the default path a declared service gets. Disjoint
-			// from ambiguityResolver's configured operations by construction
-			// (cleat-worker boot validation), so this never races the lookup
-			// path below for the same operation; it is either one or the
-			// other, decided by which flag named this service.operation.
-			if resp, ok := s.resolveAmbiguityViaKeyReplay(ctx, rec); ok {
-				if s.engine.Metrics != nil {
-					s.engine.Metrics.RecordAmbiguousCall(ctx, attribute.String("outcome", "key_replay_resolved"))
-				}
-				written, writtenEC := s.writeOut(ctx, m, responsePtr, resp, responseMaxLen)
-				return packDurableCallResult(int(written), writeErrorClass(writtenEC), writtenEC)
-			}
-
-			// Ask, before giving up. A resolver that can look the operation up
-			// by its idempotency key turns most ambiguities into non-events:
-			// the outcome is recorded and replay carries on as though the call
-			// had returned normally, which it did -- the crash lost the answer,
-			// not the effect. See IMPROVEMENT-PLAN 1.4 phase E.
-			switch resp, outcome := s.resolveAmbiguity(ctx, rec); outcome {
-			case AmbiguityResolved:
-				if s.engine.Metrics != nil {
-					s.engine.Metrics.RecordAmbiguousCall(ctx, attribute.String("outcome", "resolved"))
-				}
-				written, writtenEC := s.writeOut(ctx, m, responsePtr, resp, responseMaxLen)
-				return packDurableCallResult(int(written), writeErrorClass(writtenEC), writtenEC)
-			case AmbiguityNotSent:
-				// The service confirmed this call never arrived: a definite,
-				// retryable failure, not an ambiguity. Same packing as a fresh
-				// call failure (callFailureCode), so the guest sees an
-				// ordinary Retryable()==true error and its own retry handling
-				// takes it from there -- no engine-side re-dispatch needed.
-				if s.engine.Metrics != nil {
-					s.engine.Metrics.RecordAmbiguousCall(ctx, attribute.String("outcome", "not_sent"))
-				}
-				written, _ := s.writeResult(ctx, m, responsePtr, ambiguityNotSentMessage, responseMaxLen)
-				return packDurableCallResult(int(written), callFailureCode, 1)
-			}
-
-			// Record the condition structurally before writing the message.
-			// The message is for the workflow author; this is for the
-			// operator, who needs to find these with a query rather than a
-			// substring search. See IMPROVEMENT-PLAN 3.24.
-			if s.engine.Metrics != nil {
-				s.engine.Metrics.RecordAmbiguousCall(ctx, attribute.String("outcome", "cannot_say"))
-			}
-			s.recordAmbiguity(rec)
-
-			ambiguousErr := fmt.Sprintf(
-				"[AMBIGUOUS] call outcome unknown at step %d: the external call to %s.%s was dispatched but the response was not recorded before a crash. Check the external service before retrying.",
-				rec.Step, rec.Service, rec.Op)
-			// Not retryable, and this is the case the old blanket "timeout"
-			// got most wrong: the call may well have succeeded. Telling the
-			// guest to retry is telling it to risk a duplicate side effect.
-			written, _ := s.writeResult(ctx, m, responsePtr, ambiguousErr, responseMaxLen)
-			return packDurableCallResult(int(written), callErrorUnknown, 1)
+			written, _ := s.writeResult(ctx, m, responsePtr, ambiguityNotSentMessage, responseMaxLen)
+			return packDurableCallResult(int(written), callFailureCode, 1)
 		}
 
-		if rec.Err != "" {
-			// The classification comes off the event now rather than being
-			// assumed, so a call the caller marked non-retryable replays as
-			// non-retryable. Events written before 2.35 carry no such key and
-			// read back false, which is the constant this used to hardcode.
-			written, _ := s.writeResult(ctx, m, responsePtr, rec.Err, responseMaxLen)
-			return packDurableCallResult(int(written), recordedFailureCode(rec.ErrNonRetryable), 1)
+		// Record the condition structurally before writing the message.
+		// The message is for the workflow author; this is for the
+		// operator, who needs to find these with a query rather than a
+		// substring search. See IMPROVEMENT-PLAN 3.24.
+		if s.engine.Metrics != nil {
+			s.engine.Metrics.RecordAmbiguousCall(ctx, attribute.String("outcome", "cannot_say"))
 		}
+		s.recordAmbiguity(rec)
 
-		written, writtenEC := s.writeOut(ctx, m, responsePtr, rec.Response, responseMaxLen)
-		return packDurableCallResult(int(written), writeErrorClass(writtenEC), writtenEC)
+		ambiguousErr := fmt.Sprintf(
+			"[AMBIGUOUS] call outcome unknown at step %d: the external call to %s.%s was dispatched but the response was not recorded before a crash. Check the external service before retrying.",
+			rec.Step, rec.Service, rec.Op)
+		// Not retryable, and this is the case the old blanket "timeout"
+		// got most wrong: the call may well have succeeded. Telling the
+		// guest to retry is telling it to risk a duplicate side effect.
+		written, _ := s.writeResult(ctx, m, responsePtr, ambiguousErr, responseMaxLen)
+		return packDurableCallResult(int(written), callErrorUnknown, 1)
 	}
 
-	// Past recorded history — switch to fresh execution.
-	s.exitReplay()
-	return s.freshCall(ctx, m, service, operation, requestJSON, responsePtr, responseMaxLen)
+	if rec.Err != "" {
+		// The classification comes off the event now rather than being
+		// assumed, so a call the caller marked non-retryable replays as
+		// non-retryable. Events written before 2.35 carry no such key and
+		// read back false, which is the constant this used to hardcode.
+		written, _ := s.writeResult(ctx, m, responsePtr, rec.Err, responseMaxLen)
+		return packDurableCallResult(int(written), recordedFailureCode(rec.ErrNonRetryable), 1)
+	}
+
+	written, writtenEC := s.writeOut(ctx, m, responsePtr, rec.Response, responseMaxLen)
+	return packDurableCallResult(int(written), writeErrorClass(writtenEC), writtenEC)
 }
 
 // retryPolicyFitsBudget reports whether a policy's WORST-CASE total backoff is
@@ -407,8 +497,8 @@ func retryPolicyFitsBudget(maxAttempts, initialIntervalMs, backoffCoefficient100
 		return true
 	}
 	total := time.Duration(0)
-	interval := time.Duration(initialIntervalMs) * time.Millisecond
-	maxInterval := time.Duration(maxIntervalMs) * time.Millisecond
+	interval := guestMsDuration(initialIntervalMs)
+	maxInterval := guestMsDuration(maxIntervalMs)
 
 	// maxAttempts attempts means maxAttempts-1 backoffs; the last failure is
 	// not followed by a wait.
@@ -427,16 +517,98 @@ func retryPolicyFitsBudget(maxAttempts, initialIntervalMs, backoffCoefficient100
 	return true
 }
 
+// retryStep is the retried call (cleat_call_retry) as a dispatcher step (cleat#4152, G3). It is a MULTI-RECORD step, like the heartbeat call: a run of
+// call_attempt_failed events, one per failed attempt that another attempt followed, then the call's outcome, which is a call event or, for a policy
+// refused for its length (cleat#4032), a call_retry_refused event. A history that ENDS inside the run of attempts is a worker lost while the policy was
+// running, and the policy is finished from the attempts already spent (cleat#1145) and not restarted. The service and operation identify the call, on
+// EVERY record of the run: the old replay loop compared them on the attempts only by stopping at the first mismatch, and left the record unread.
+var retryStep = stepSpec{
+	Name:             "call_with_retry",
+	DivergenceDetail: requestDivergenceDetail,
+	Effect:           effectEffect,
+	Records:          recordsMany,
+	Want:             EventTypeCall,
+	// The guest decodes result<string, call-failure>: a divergence is answered in the durable-call layout (ABI.md, "Return packing" of cleat_call_retry).
+	// AfterSuspend is left nil on purpose, as for every durable-call-family spec: the refusal after a suspension is the dispatcher's own, and answers the stop word.
+	Result: layoutDurableCall,
+	// The service and operation on EVERY record of the run, and the request body on the call that ends it (callRequestIdentity: an attempt record carries none, cleat#4424).
+	Identity: func(a stepArgs, rec *EventRecord) string { return callRequestIdentity("call", a, rec) },
+	Role: func(_ stepArgs, rec *EventRecord) recordRole {
+		switch rec.EventType {
+		case EventTypeCallAttemptFailed:
+			return rolePrefix
+		case EventTypeCall, EventTypeCallRetryRefused:
+			return roleFinal
+		}
+		return roleForeign
+	},
+	DecodeRun: func(c *stepCtx, run []EventRecord) int64 { return c.s.decodeRetryOutcome(c, run[len(run)-1]) },
+	Fresh:     func(c *stepCtx) int64 { return c.s.freshCallWithRetry(c) },
+}
+
+func init() { registerStepSpec(&retryStep) }
+
+// DurableCallWithRetry is cleat_call_retry. The ONE check that stays here, before the dispatcher, is a policy that allows no attempt, and it must: the
+// refusal records nothing, so on a replay the record at this step is the guest's NEXT call, and a step that read the history first would report that
+// call's record as a divergence (and a recorded terminal call or a resume would be replayed and not refused: two rows of the behaviour table pin both).
+// Everything else a retried call decides is the dispatcher's or the spec's.
 func (s *execSession) DurableCallWithRetry(ctx context.Context, m api.Module,
 	service, operation, requestJSON string,
 	maxAttempts, initialIntervalMs, backoffCoefficient100x, maxIntervalMs int64,
 	nonRetryableErrorsJSON string,
 	responsePtr, responseMaxLen uint32) int64 {
+	// A POLICY THAT ALLOWS NO ATTEMPT IS REFUSED, fresh and replay alike (cleat#4244). maxAttempts arrives across the ABI from every SDK and several
+	// pass it unvalidated: the Go SDK sends int64(policy.MaxAttempts), so a cleat.RetryPolicy with no MaxAttempts sent 0. The loop in
+	// freshCallWithRetry then never ran, lastErr stayed nil, and the terminal event dereferenced it: a host panic a guest could trigger with
+	// ordinary code. The engine is the one place that covers every SDK.
+	//
+	// FIRST STATEMENT OF THIS BLOCK, which only runs when nothing is stopping the call: bit 31 wins over any field (ABI.md) and a refusal is a field,
+	// so a defer segment, a shutdown or a refused event write with a zero policy answers the suspend sentinel below, as for any call. It sits BEFORE
+	// the replay branch on purpose, so a call whose terminal event is already recorded, and a resume, are refused too and not replayed. (A call with
+	// maxAttempts < 1 panicked before it could record a terminal event, so no such history exists to be broken by that.)
+	if !s.stopBeforeNewWork() && maxAttempts < 1 {
+		s.engine.log().WarnContext(ctx, "retry policy allows no attempt (maxAttempts < 1); refusing the call",
+			"service", service, "operation", operation, "max_attempts", maxAttempts)
+		return badParamDurableCall
+	}
+	return s.step(ctx, m, &retryStep, stepArgs{s1: service, s2: operation, s3: requestJSON, s4: nonRetryableErrorsJSON,
+		i1: maxAttempts, i2: initialIntervalMs, i3: backoffCoefficient100x, i4: maxIntervalMs, outPtr: responsePtr, outMaxLen: responseMaxLen})
+}
 
-	// Worker-enforced ceiling on retry attempts to prevent runaway retries
-	// from misconfigured WASM modules.  Use the engine-configured limit if
-	// set (it comes from --max-retries on the command line), otherwise the
-	// package-level constant.
+// decodeRetryOutcome answers a replayed retried call from its outcome record, the last of the run the dispatcher read. A recorded refusal is refused again;
+// anything else is the recorded call, answered as the plain call answers it (answerRecordedCall).
+func (s *execSession) decodeRetryOutcome(c *stepCtx, rec EventRecord) int64 {
+	if rec.EventType == EventTypeCallRetryRefused {
+		return s.refuseRetryPolicy(c.ctx, c.m, c.args.outPtr, c.args.outMaxLen,
+			"retry policy rejected: this policy was refused when this call was recorded, as its worst-case "+
+				"backoff exceeds the host-retry budget; run the policy in the guest, suspending between attempts")
+	}
+	return s.answerRecordedCall(c.ctx, c.m, rec, c.args.outPtr, c.args.outMaxLen)
+}
+
+// refuseRetryPolicy answers a guest's retry entry point with RetryPolicyTooLong and the reason, which is the code both
+// SDKs branch on to run the policy themselves. No event is recorded and no attempt is consumed: the guest's own loop
+// records the attempts, and that is what a replay of them replays.
+func (s *execSession) refuseRetryPolicy(ctx context.Context, m api.Module, responsePtr, responseMaxLen uint32, reason string) int64 {
+	written, _ := s.writeResult(ctx, m, responsePtr, reason, responseMaxLen)
+	return packDurableCallResult(int(written), callErrorRetryPolicyTooLong, 1)
+}
+
+// freshCallWithRetry runs the policy: the spec's Fresh. c.Prefix is the attempts a lost worker's FIRST incarnation recorded when the history ended inside
+// the policy, so the attempts already spent, the step its idempotency key was derived from and the error of the last one all come from it. The refusal for
+// a defer segment, a shutdown, a refused event write and a session that has already suspended is the dispatcher's, applied before this runs and on both
+// arrival paths.
+func (s *execSession) freshCallWithRetry(c *stepCtx) int64 {
+	ctx, m := c.ctx, c.m
+	service, operation, requestJSON := c.args.s1, c.args.s2, c.args.s3
+	nonRetryableErrorsJSON := c.args.s4
+	maxAttempts, initialIntervalMs, backoffCoefficient100x, maxIntervalMs := c.args.i1, c.args.i2, c.args.i3, c.args.i4
+	responsePtr, responseMaxLen := c.args.outPtr, c.args.outMaxLen
+	attemptsSpent, resumeStep, lastRecordedErr := int64(len(c.Prefix)), -1, ""
+	if len(c.Prefix) > 0 {
+		resumeStep, lastRecordedErr = c.Prefix[0].Step, c.Prefix[len(c.Prefix)-1].Err
+	}
+
 	// The policy the GUEST asked for, before the attempt ceiling below trims
 	// it. The budget check uses this rather than the clamped value so that the
 	// host reaches the same verdict the guest SDKs used to reach on their own
@@ -456,56 +628,61 @@ func (s *execSession) DurableCallWithRetry(ctx context.Context, m api.Module,
 	if maxAttempts > int64(ceiling) {
 		maxAttempts = int64(ceiling)
 	}
-	if s.isReplay {
-		spent, firstStep, resume := s.replayRetryAttempts(ctx, service, operation)
-		if !resume {
-			return s.replayCall(ctx, m, service, operation, requestJSON, responsePtr, responseMaxLen)
-		}
-		// History ended INSIDE the policy: attempts were recorded and no
-		// terminal call event follows, which happens exactly when the worker
-		// was lost while the policy was still running. Finish it from where it
-		// stopped rather than restarting it, which is what re-spent the
-		// caller's MaxAttempts (cleat#1145).
-		//
-		// The budget check below is not repeated: a policy that fitted on the
-		// first incarnation fits with fewer attempts left.
-		s.exitReplay()
-		if s.stopBeforeNewWork() {
-			return callSuspendSentinel
-		}
-		return s.freshCallWithRetry(ctx, m, service, operation, requestJSON,
-			maxAttempts, initialIntervalMs, backoffCoefficient100x, maxIntervalMs,
-			nonRetryableErrorsJSON, responsePtr, responseMaxLen, spent, firstStep)
-	}
-	if s.stopBeforeNewWork() {
-		return callSuspendSentinel
-	}
+	// A CALL AT THE REPLAY FRONTIER IS A FRESH CALL AND GETS ITS WHOLE POLICY (cleat#4152). The dispatcher leaves replay at the frontier before it gets here,
+	// so a retried call that follows the last replayed event directly arrives with replay off and is judged and run as a fresh one: the table's
+	// frontier_gets_its_whole_policy row. The history of this bug, kept because the next reader will wonder why the frontier is mentioned at all, is in
+	// IMPROVEMENT-PLAN and in that row's header: the old entry did this hand-off itself, and a retried call that skipped it ran ONE attempt.
 
-	// Refuse a policy too long to run in one segment, and refuse it HERE:
-	// after the stop sentinel (ABI.md requires bit 31 to win over any field,
-	// and a refusal is a field) and after the replay return (a refusal records
-	// no event, so replay must never reach this and find nothing).
+	// REFUSE A POLICY TOO LONG TO RUN IN ONE SEGMENT, AND RECORD THE REFUSAL. cleat#4032.
 	//
-	// No event, no attempt consumed, no call made. The guest runs the policy
-	// itself, suspending between attempts, which is what it used to do when it
-	// made this decision guest-side.
-	if budget := s.engine.hostRetryBudget(ctx); !retryPolicyFitsBudget(
-		requestedAttempts, initialIntervalMs, backoffCoefficient100x, maxIntervalMs, budget) {
-		msg := fmt.Sprintf("retry policy rejected: worst-case backoff exceeds the %s host-retry budget; "+
-			"run the policy in the guest, suspending between attempts", budget)
-		written, _ := s.writeResult(ctx, m, responsePtr, msg, responseMaxLen)
-		return packDurableCallResult(int(written), callErrorRetryPolicyTooLong, 1)
+	// This check used to sit AFTER the replay return, on the reasoning that "a refusal records no event, so
+	// replay must never reach this and find nothing". The premise was right and the conclusion was wrong: a guest
+	// that is refused does not stop. Both SDKs fall back to their own loop of ordinary DurableCalls, which DO
+	// record events, and on the next segment the guest asks this same question again. Answering from history gave
+	// `replayCall` the guest's first FAILED attempt -- the error its own loop was in the middle of retrying --
+	// because the replay of a retried call only resumed on call_attempt_failed records and an ordinary call event stopped the
+	// walk (replayRetryAttempts, removed when the call moved onto the dispatcher, cleat#4152 G3: the run is now read by retryStep's Role).
+	// The workflow died on the very error the policy existed to retry.
+	//
+	// THE REFUSAL IS NOW AN EVENT, and that is what makes the replay answerable. The two obvious alternatives both
+	// fail:
+	//
+	//   - asking the BUDGET again does not work, because the budget is TENANT STATE and is writable while a run is
+	//     in flight (TenantSettings.HostRetryBudget). Measured: a policy refused at 1ns and replayed at 1h fits on
+	//     the replay, which then takes the history path and reproduces the defect in the other direction.
+	//   - reading the SHAPE alone does not work either, because a host-run policy whose FIRST attempt succeeded also
+	//     leaves a lone plain call record. Refusing that one is wrong for every guest without a code-6 fallback --
+	//     the AssemblyScript, Java and Python SDKs have none -- and they get a hard failure on the replay of a call
+	//     that succeeded.
+	//
+	// So the refusing segment writes EventTypeCallRetryRefused, and only a replay that FINDS one refuses again. A
+	// history written before this change carries no such record: it keeps the old behaviour, which is #4032 itself
+	// and cannot be told apart after the fact. New histories are unambiguous in both directions.
+	//
+	// No attempt is consumed by the refusal itself: the guest's own loop makes the attempts, and recording them is
+	// what a replay of them replays.
+	//
+	// Skipped when the segment is being stopped, because ABI.md requires bit 31 to win over any field and a refusal
+	// IS a field: the stop paths below return the sentinel unchanged.
+	// A resume is not judged again: the budget was settled before the attempts it is resuming were recorded, and a policy that fitted then fits with fewer
+	// attempts left (the old code skipped the check on any session still replaying, which is exactly a resume).
+	if len(c.Prefix) == 0 {
+		if budget := s.engine.hostRetryBudget(ctx); !retryPolicyFitsBudget(
+			requestedAttempts, initialIntervalMs, backoffCoefficient100x, maxIntervalMs, budget) {
+			// The REQUEST is deliberately not recorded: nothing reads it back, and a request body is exactly the
+			// kind of value the sealed-payload machinery exists for. Service and Op are enough for a divergence
+			// report to name the call.
+			c.Record(EventRecord{
+				Step:      s.stepCount,
+				EventType: EventTypeCallRetryRefused,
+				Service:   service,
+				Op:        operation,
+			})
+			return s.refuseRetryPolicy(ctx, m, responsePtr, responseMaxLen,
+				fmt.Sprintf("retry policy rejected: worst-case backoff exceeds the %s host-retry budget; "+
+					"run the policy in the guest, suspending between attempts", budget))
+		}
 	}
-	return s.freshCallWithRetry(ctx, m, service, operation, requestJSON,
-		maxAttempts, initialIntervalMs, backoffCoefficient100x, maxIntervalMs,
-		nonRetryableErrorsJSON, responsePtr, responseMaxLen, 0, -1)
-}
-
-func (s *execSession) freshCallWithRetry(ctx context.Context, m api.Module,
-	service, operation, requestJSON string,
-	maxAttempts, initialIntervalMs, backoffCoefficient100x, maxIntervalMs int64,
-	nonRetryableErrorsJSON string,
-	responsePtr, responseMaxLen uint32, attemptsSpent int64, resumeStep int) int64 {
 
 	// Parse non-retryable error patterns.
 	//
@@ -535,12 +712,25 @@ func (s *execSession) freshCallWithRetry(ctx context.Context, m api.Module,
 		if err := json.Unmarshal([]byte(nonRetryableErrorsJSON), &nonRetryableErrors); err != nil {
 			s.engine.log().WarnContext(ctx, "unparseable non-retryable error list; refusing the call",
 				"service", service, "operation", operation, "error", err)
+			c.RecordsNothing("a non-retryable list that cannot be read is refused before any attempt: failing closed, and nothing is recorded")
 			return badParamDurableCall
 		}
 	}
 
 	var lastErr error
 	exhausted := true
+
+	// A resume whose recorded attempts already equal (or exceed) this incarnation's maxAttempts never enters the loop below, and lastErr stayed nil:
+	// the terminal event was then built from a nil error and the call panicked (cleat#4244). It is reachable when the resume's policy is shorter than
+	// the one recorded (a worker restarted with a lower --max-retries). The policy IS spent, so the honest outcome is the one it would have reached:
+	// the retries-exhausted failure, carrying the error of the last attempt that was recorded. The recorded class is not carried (only the message
+	// is read back here), so the terminal event's error class is empty.
+	if attemptsSpent >= maxAttempts && attemptsSpent > 0 {
+		if lastRecordedErr == "" {
+			lastRecordedErr = "the last recorded attempt carried no error text"
+		}
+		lastErr = errors.New(lastRecordedErr)
+	}
 
 	// One step for every attempt, so every attempt carries the same idempotency
 	// key. That is the intent: a retry of a call that may already have been
@@ -562,6 +752,14 @@ func (s *execSession) freshCallWithRetry(ctx context.Context, m api.Module,
 	// bound on how many times a side effect may be attempted, and a crash is
 	// not consent to exceed it.
 	for attempt := attemptsSpent + 1; attempt <= maxAttempts; attempt++ {
+		// Every attempt after the first is new work that goes on top of whatever the loop has recorded so far. A failed attempt's event is written
+		// BEFORE its backoff, and a refused write (cleat#4160) marks the session stopped, but that mark is only read at a host call's entry, and this
+		// loop makes several service attempts inside ONE host call. Without this check the loop performed the next attempt for real, reported it to
+		// the guest, and left no trace of it in event_history, so a reclaim performed it again (cleat#4210, found by the fault-injection harness).
+		// The first attempt was checked at the call's entry above; the backoff's own select already returns the stop on shutdown.
+		if attempt > attemptsSpent+1 && s.stopBeforeNewWork() {
+			return callSuspendSentinel
+		}
 		resp, callErr := s.callService(ctx, service, operation, requestJSON, retryStep)
 
 		if callErr == nil {
@@ -574,7 +772,7 @@ func (s *execSession) freshCallWithRetry(ctx context.Context, m api.Module,
 				Request:   requestJSON,
 				Response:  resp,
 			}
-			s.recordEvent(rec)
+			c.Record(rec)
 
 			written, writtenEC := s.writeOut(ctx, m, responsePtr, resp, responseMaxLen)
 			return packDurableCallResult(int(written), writeErrorClass(writtenEC), writtenEC)
@@ -609,7 +807,7 @@ func (s *execSession) freshCallWithRetry(ctx context.Context, m api.Module,
 			// by the terminal call event below, so a history never ends with an
 			// attempt event unless the run was interrupted -- which is the
 			// signal the replay path reads (cleat#1145).
-			s.recordEvent(EventRecord{
+			c.Record(EventRecord{
 				Step:      s.stepCount,
 				EventType: EventTypeCallAttemptFailed,
 				Service:   service,
@@ -635,7 +833,10 @@ func (s *execSession) freshCallWithRetry(ctx context.Context, m api.Module,
 			// intervals and could reject a policy as too long, while the
 			// executor would have run it in a millisecond per attempt. Zero
 			// means "no maximum" in one and "maximum of zero" in the other.
-			backoffMs := initialIntervalMs * int64(math.Pow(float64(backoffCoefficient100x)/100.0, float64(attempt-1)))
+			// The factor is truncated to a whole number BEFORE it multiplies, as it always was (a coefficient of 1.5 repeats the first interval), and the
+			// product is bounded: initialIntervalMs * int64(math.Pow(...)) overflowed int64, and int64() of an out-of-range float is
+			// implementation-defined (cleat#4105).
+			backoffMs := boundedBackoffMs(initialIntervalMs, math.Pow(float64(backoffCoefficient100x)/100.0, float64(attempt-1)))
 			if maxIntervalMs > 0 && backoffMs > maxIntervalMs {
 				backoffMs = maxIntervalMs
 			}
@@ -692,7 +893,7 @@ func (s *execSession) freshCallWithRetry(ctx context.Context, m api.Module,
 				// so the sentinel only has to make the guest unwind without
 				// doing anything more.
 				return callSuspendSentinel
-			case <-time.After(time.Duration(backoffMs) * time.Millisecond):
+			case <-time.After(guestMsDuration(backoffMs)):
 			}
 		}
 	}
@@ -730,7 +931,7 @@ func (s *execSession) freshCallWithRetry(ctx context.Context, m api.Module,
 		// That is what made the decision a substring match. cleat#902.
 		RetriesExhausted: exhausted,
 	}
-	s.recordEvent(rec)
+	c.Record(rec)
 
 	// Retries exhausted stays callFailureCode: the error was retryable, the
 	// attempts simply ran out, and calling again later may well work.
@@ -739,6 +940,11 @@ func (s *execSession) freshCallWithRetry(ctx context.Context, m api.Module,
 }
 
 func (s *execSession) DurableSleep(ctx context.Context, m api.Module, durationMs int64) int64 {
+	// A sleep after a suspension would REPLACE the first suspension with its own (suspendFor assigns), so a run waiting on a child would wake at the sleep's
+	// deadline instead. It answers its own suspend status, which its decoders already test (cleat#4285).
+	if res, ok := s.refuseIfSuspended("DurableSleep", packSleepResult(sleepStatusSuspend, durationMs)); ok {
+		return res
+	}
 	// Sleep is local: it records no event. So what tells us whether a sleep has
 	// already been served is not history but time.
 	//
@@ -776,15 +982,30 @@ func (s *execSession) DurableSleep(ctx context.Context, m api.Module, durationMs
 		// and no workflow run under `cleat run` or cleatctl would ever wait.
 		anchor = s.engine.realNowMs()
 	}
-	s.nowMs = anchor + durationMs
+	// clampGuestMs: anchor + i64::MAX wraps negative and reads as a deadline long past, so a sleep of "forever" completed at once (cleat#4105).
+	s.nowMs = anchor + clampGuestMs(durationMs)
 
 	if s.nowMs <= s.engine.realNowMs() {
 		return packSleepResult(sleepStatusCompleted, 0)
 	}
 
-	s.suspendErr = &SuspendError{
-		Reason: fmt.Sprintf("cleat_sleep(%dms)", durationMs),
-		Until:  time.UnixMilli(s.nowMs),
+	// The park-or-suspend choice is the helper's (cleat#4152, W2b). A refusal sets exactly the suspension this call set inline before.
+	//
+	// A timer's outcome is ADVISORY and the CLOCK decides. A sleep records nothing and is served by the clock on replay (above), so completing it
+	// before its deadline would let the run go on and record events after a sleep that a replay, reading the same clock, still finds waiting: the
+	// replay would suspend at the sleep with those events unread behind it. So a wake or a passed deadline completes the sleep only if the clock
+	// agrees; a wake that came early suspends with the same request, as a refusal would have.
+	req := parkRequest{
+		Kind:       wakeTimer,
+		DeadlineMs: s.nowMs,
+		Reason:     fmt.Sprintf("cleat_sleep(%dms)", durationMs),
+		Until:      time.UnixMilli(s.nowMs),
+	}
+	if s.parkOrSuspend(ctx, req) != parkRefused {
+		if s.nowMs <= s.engine.realNowMs() {
+			return packSleepResult(sleepStatusCompleted, 0)
+		}
+		s.suspendFor(req) // woken early: the clock says it is not time
 	}
 
 	return packSleepResult(sleepStatusSuspend, durationMs)
@@ -815,7 +1036,7 @@ func (s *execSession) ServeWasiSleep(ctx context.Context, durationMs int64) time
 		// as DurableSleep's own zero-anchor branch.
 		anchor = s.engine.realNowMs()
 	}
-	s.nowMs = anchor + durationMs
+	s.nowMs = anchor + clampGuestMs(durationMs)
 
 	remainingMs := s.nowMs - s.engine.realNowMs()
 	if remainingMs <= 0 {
@@ -829,60 +1050,72 @@ func (s *execSession) ServeWasiSleep(ctx context.Context, durationMs int64) time
 }
 
 func (s *execSession) DurableDefer(ctx context.Context, m api.Module, description string, deferIDPtr, deferIDMaxLen uint32) int64 {
-	if s.isReplay {
-		if s.stepCount < len(s.history) {
-			rec := s.history[s.stepCount]
-			if rec.EventType == EventTypeDefer {
-				// Recompute the ID before advanceReplayStep, which bumps
-				// stepCount. The fallback is what the fresh path below would
-				// have minted at this same step, so a history written before
-				// DeferID was recorded still reconstructs the ID the guest was
-				// originally handed.
-				deferID := rec.DeferID
-				if deferID == "" {
-					deferID = fmt.Sprintf("defer-%d", s.stepCount)
-				}
-				if !s.advanceReplayStep(ctx, &rec) {
-					return 0
-				}
-
-				// Re-register, do not just re-answer. This branch is the only
-				// one a defer registered in an earlier segment ever reaches
-				// again -- every later segment replays past its registration --
-				// so skipping the map write dropped the defer permanently. The
-				// fresh path below does both halves; replay must too.
-				desc := rec.DeferDescription
-				if desc == "" {
-					desc = description
-				}
-				s.mu.Lock()
-				s.deferrals[deferID] = desc
-				s.mu.Unlock()
-
-				written, writtenEC := s.writeOut(ctx, m, deferIDPtr, deferID, deferIDMaxLen)
-				return packSimpleResult(writtenEC, written)
-			}
-		}
-		s.exitReplay()
-	}
-
-	deferID := fmt.Sprintf("defer-%d", s.stepCount)
-
-	rec := EventRecord{
-		Step:             s.stepCount,
-		EventType:        EventTypeDefer,
-		DeferDescription: description,
-		DeferID:          deferID,
-	}
-	s.recordEvent(rec)
-
-	s.mu.Lock()
-	s.deferrals[deferID] = description
-	s.mu.Unlock()
-
-	written, writtenEC := s.writeOut(ctx, m, deferIDPtr, deferID, deferIDMaxLen)
-	return packSimpleResult(writtenEC, written)
+	return s.step(ctx, m, &deferStep, stepArgs{s1: description, outPtr: deferIDPtr, outMaxLen: deferIDMaxLen})
 }
+
+// deferStep is DurableDefer as a step (cleat#4152, G1a).
+//
+// REFUSED ONLY IN AN ARMED SEGMENT, NOT LIKE THE OTHER EFFECT CALLS. A segment over a killed run stops at a defer registration the same way it
+// stops at a call: the registration is in the history, so this is not a new one, it is the stop point. Only in that segment: an ordinary
+// segment's body past its frontier has always been allowed to register a defer, and refusing it is not this change's to do (cleat#4079). The
+// old code also registered after a refused event write and on shutdown, where SideEffect and every other effect call is refused; that is
+// recorded by the characterization table and kept (Refuse below), not decided here.
+//
+// A registration replayed from history RE-REGISTERS the defer, it does not just re-answer: this is the only branch a defer registered in an
+// earlier segment ever reaches again (every later segment replays past its registration), so skipping the map write dropped the defer
+// permanently. The id is recomputed before the step is consumed, and a record written before DeferID was recorded falls back to what the fresh
+// path would have minted at that step, so a history written long ago still hands the guest the id it was first given.
+//
+// Identity: NoIdentity. The description is a guest-chosen label that the record carries and replay re-registers from (the record's wins, the
+// argument is only the fallback for a record written before descriptions were recorded); it can legitimately differ between a run and its
+// replay, and the id is generated from the step. The reviewer decides (Revision 3 of the design).
+var deferStep = stepSpec{
+	Name:               "defer",
+	NoDivergenceDetail: "its old message was the shared one: the step and both event types; " + divergenceSweepNote,
+	Result:             layoutSimple,
+	Effect:             effectEffect,
+	Records:            recordsOne,
+	Want:               EventTypeDefer,
+	NoIdentity:         "the description is a guest-chosen label that the record carries and replay re-registers from; the id is generated from the step",
+	Refuse:             func(s *execSession) bool { return s.stopArmed && s.stopBeforeNewWork() },
+	Decode: func(c *stepCtx, rec *EventRecord) int64 {
+		s := c.s
+		// The step has been consumed when Decode runs, so the step the record held is stepCount-1; the fallback is what the fresh path below
+		// would have minted at that same step.
+		deferID := rec.DeferID
+		if deferID == "" {
+			deferID = fmt.Sprintf("defer-%d", s.stepCount-1)
+		}
+		desc := rec.DeferDescription
+		if desc == "" {
+			desc = c.args.s1
+		}
+		s.mu.Lock()
+		s.deferrals[deferID] = desc
+		s.mu.Unlock()
+
+		written, writtenEC := s.writeOut(c.ctx, c.m, c.args.outPtr, deferID, c.args.outMaxLen)
+		return packSimpleResult(writtenEC, written)
+	},
+	Fresh: func(c *stepCtx) int64 {
+		s := c.s
+		deferID := fmt.Sprintf("defer-%d", s.stepCount)
+		c.Record(EventRecord{
+			Step:             s.stepCount,
+			EventType:        EventTypeDefer,
+			DeferDescription: c.args.s1,
+			DeferID:          deferID,
+		})
+		s.mu.Lock()
+		s.deferrals[deferID] = c.args.s1
+		s.mu.Unlock()
+
+		written, writtenEC := s.writeOut(c.ctx, c.m, c.args.outPtr, deferID, c.args.outMaxLen)
+		return packSimpleResult(writtenEC, written)
+	},
+}
+
+func init() { registerStepSpec(&deferStep) }
 
 // DurableLog emits a guest log line. It is NOT durable, despite the name and
 // despite three documents saying otherwise. cleat#1308.
@@ -926,111 +1159,69 @@ func (s *execSession) DurableLog(ctx context.Context, m api.Module, message stri
 }
 
 func (s *execSession) DurableSend(ctx context.Context, m api.Module, service, operation, requestJSON string) int64 {
-	if s.isReplay {
-		// On replay, skip: fire-and-forget is recorded but not re-executed.
-		if s.stepCount < len(s.history) {
-			rec := s.history[s.stepCount]
-			// CHECK WHAT WE ARE CONSUMING. cleat#1507.
-			//
-			// This block used to advance past whatever record sat at this step
-			// and return success, without looking at its type. A divergence
-			// here was not merely unreported: the record belonging to some
-			// OTHER operation was consumed, so every subsequent step read the
-			// wrong history entry, and the run reported success throughout.
-			// That is worse than the silent re-execution cleat#1506 fixed for
-			// the child spawn, because the damage propagates rather than being
-			// confined to one duplicated call.
-			//
-			// Not retryable, as in replayCall: a divergence is a bug in the
-			// workflow code, and running it again diverges again.
-			if rec.EventType != EventTypeDurableSend {
-				if s.engine.Metrics != nil {
-					s.engine.Metrics.RecordReplayFailure(ctx)
-				}
-				s.engine.log().ErrorContext(ctx,
-					"replay divergence: expected durable_send, got a different event",
-					"workflow_id", s.workflowID, "step", rec.Step,
-					"expected", EventTypeDurableSend, "actual", rec.EventType,
-					"service", service, "operation", operation)
-				// errCode 1, not callErrorUnknown -- which is 0, i.e. SUCCESS.
-				// wasm/adapter_metadata.go decodes this return as
-				// `errCode := uint32(result)` and raises an error only when it
-				// is non-zero, so the guest would have been told the send
-				// succeeded. Matches the divergence code AwaitChild and
-				// AwaitAnyChild use.
-				return packSimpleResult(1)
-			}
-			if !s.advanceReplayStep(ctx, &rec) {
-				return 0
-			}
-			return 0
-		}
-		// Past recorded history -- switch to fresh execution.
-		//
-		// The `return 0` used to sit outside the bounds check, so a send whose
-		// step was past the end of history returned SUCCESS having recorded no
-		// event and dispatched nothing. Every send after a workflow's first
-		// suspension took that path, because the resumed segment replays the
-		// recorded steps and then runs on with isReplay still set until some
-		// other call crosses the frontier.
-		//
-		// Measured 2026-09-06: a workflow that sleeps and then sends reached
-		// the service 0 times in 3 runs, while the same send before the sleep
-		// arrived every time. A defer's send never arrived at all -- defers run
-		// at the end by definition, so they are always past the frontier.
-		//
-		// DurableDefer, two functions above, is the shape this should have had.
-		s.exitReplay()
-	}
-
-	// A fresh send is new work: it dispatches a request to an external service
-	// through s.engine.caller, in a goroutine that outlives this call. A
-	// terminated workflow would cause a side effect after its own end.
-	if s.stopBeforeNewWork() {
-		return callSuspendSentinel
-	}
-
-	rec := EventRecord{
-		Step:      s.stepCount,
-		EventType: EventTypeDurableSend,
-		Service:   service,
-		Op:        operation,
-		Request:   requestJSON,
-	}
-	s.recordEvent(rec)
-
-	// Capture the step before the goroutine starts. Reading s.stepCount from
-	// inside it would race with the session advancing, and would key the call to
-	// whatever step happened to be current when the goroutine was scheduled.
-	sendStep := rec.Step
-
-	// Execute the fire-and-forget call through the caller.
-	// Wrap in a timeout context to bound goroutine lifetime in case
-	// the external Call blocks indefinitely.
-	if s.engine.caller != nil {
-		go func() {
-			if ctx.Err() != nil {
-				return
-			}
-			// cleat#2020: ctx is context.Background()-derived, so ctx.Err()
-			// above can never observe a real worker shutdown; this is the
-			// channel that does. Checked once, like ctx.Err(), because this
-			// is a pre-dispatch guard, not a wait -- an event was already
-			// recorded above, so a shutdown after this point is the same
-			// unsent-request case the surrounding fire-and-forget contract
-			// already accepts.
-			select {
-			case <-s.engine.shutdownRequested:
-				return
-			default:
-			}
-			callCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
-			defer cancel()
-			_, _ = s.callService(callCtx, service, operation, requestJSON, sendStep)
-		}()
-	}
-	return 0
+	return s.step(ctx, m, &durableSendStep, stepArgs{s1: service, s2: operation, s3: requestJSON})
 }
+
+// durableSendStep is DurableSend as a step (cleat#4152, G1b). A fresh send is new work: it dispatches a request to an external service
+// through s.engine.caller, on a goroutine that outlives this call, and a terminated workflow would cause a side effect after its own
+// end, so the dispatcher refuses it where the call did.
+//
+// IDENTITY IS NEW. The old replay consumed any durable_send record, so a send to another service or operation replayed as the recorded
+// one. A send is identified by its service and operation (the design's "target and message name") and, since cleat#4424, by its request
+// text, which the old code did not compare either (callRequestIdentity). Its divergence reaches the guest as error code 1 and nothing else: a
+// send has no output buffer to carry a message.
+var durableSendStep = stepSpec{
+	Name:               "durable_send",
+	NoDivergenceDetail: "its old message was `replay divergence: expected durable_send, got a different event`: less than the shared one, and no request; " + divergenceSweepNote,
+	Result:             layoutSimple,
+	Effect:             effectEffect,
+	Records:            recordsOne,
+	Want:               EventTypeDurableSend,
+	Identity:           func(a stepArgs, rec *EventRecord) string { return callRequestIdentity("send", a, rec) },
+	// fire-and-forget is recorded and not re-executed: a replayed send answers success and dispatches nothing.
+	Decode: func(c *stepCtx, rec *EventRecord) int64 { return 0 },
+	Fresh: func(c *stepCtx) int64 {
+		s, ctx, service, operation, requestJSON := c.s, c.ctx, c.args.s1, c.args.s2, c.args.s3
+
+		rec := EventRecord{
+			Step:      s.stepCount,
+			EventType: EventTypeDurableSend,
+			Service:   service,
+			Op:        operation,
+			Request:   requestJSON,
+		}
+		c.Record(rec)
+
+		// Capture the step before the goroutine starts. Reading s.stepCount from inside it would race with the session advancing, and
+		// would key the call to whatever step happened to be current when the goroutine was scheduled.
+		sendStep := rec.Step
+
+		// Execute the fire-and-forget call through the caller. Wrapped in a timeout context to bound the goroutine's lifetime in case the
+		// external Call blocks indefinitely.
+		if s.engine.caller != nil {
+			go func() {
+				if ctx.Err() != nil {
+					return
+				}
+				// cleat#2020: ctx is context.Background()-derived, so ctx.Err() above can never observe a real worker shutdown; this is
+				// the channel that does. Checked once, like ctx.Err(), because this is a pre-dispatch guard, not a wait -- an event was
+				// already recorded above, so a shutdown after this point is the same unsent-request case the surrounding fire-and-forget
+				// contract already accepts.
+				select {
+				case <-s.engine.shutdownRequested:
+					return
+				default:
+				}
+				callCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+				defer cancel()
+				_, _ = s.callService(callCtx, service, operation, requestJSON, sendStep)
+			}()
+		}
+		return 0
+	},
+}
+
+func init() { registerStepSpec(&durableSendStep) }
 
 func (s *execSession) DurableScheduleInvoke(ctx context.Context, m api.Module, service, operation, requestJSON string, delayMs int64) int64 {
 	if s.isReplay {
@@ -1070,6 +1261,9 @@ func (s *execSession) DurableScheduleInvoke(ctx context.Context, m api.Module, s
 	if s.stopBeforeNewWork() {
 		return callSuspendSentinel
 	}
+	if res, ok := s.refuseIfSuspended("DurableScheduleInvoke", callSuspendSentinel); ok {
+		return res
+	}
 
 	rec := EventRecord{
 		Step:       s.stepCount,
@@ -1098,7 +1292,7 @@ func (s *execSession) DurableScheduleInvoke(ctx context.Context, m api.Module, s
 				// the delayed dispatch instead of waiting out the delay on a
 				// worker that is already going away.
 				return
-			case <-time.After(time.Duration(delayMs) * time.Millisecond):
+			case <-time.After(guestMsDuration(delayMs)):
 				callCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 				defer cancel()
 				_, _ = s.callService(callCtx, service, operation, requestJSON, scheduleStep)
@@ -1136,6 +1330,9 @@ func (s *execSession) DurableScheduleInvoke(ctx context.Context, m api.Module, s
 // trapped guest records nothing more.
 func (s *execSession) SetDeferPhase(_ context.Context, on bool) int64 {
 	s.mu.Lock()
+	if on && !s.inDeferPhase {
+		s.deferPhaseBeganSuspended = s.suspendErr != nil
+	}
 	s.inDeferPhase = on
 	s.mu.Unlock()
 	return 0

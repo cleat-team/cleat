@@ -29,20 +29,33 @@ const (
 	// Always followed by a terminal EventTypeCall for the same step unless the
 	// run was interrupted -- which is exactly the case replay has to read.
 	EventTypeCallAttemptFailed EventType = "call_attempt_failed"
-	EventTypeAwaitSignals      EventType = "await_signals"
-	EventTypeSignalReceived    EventType = "signal_received"
-	EventTypeDefer             EventType = "defer"
-	EventTypeChildWorkflow     EventType = "child_workflow"
-	EventTypeAwaitChild        EventType = "await_child"
-	EventTypeContinueAsNew     EventType = "continue_as_new"
-	EventTypeHeartbeat         EventType = "heartbeat"
-	EventTypeAwaitAllChildren  EventType = "await_all_children"
-	EventTypePluginCall        EventType = "plugin_call"
-	EventTypeCreatePromise     EventType = "create_promise"
-	EventTypeAwaitPromise      EventType = "await_promise"
-	EventTypePromiseResolved   EventType = "promise_resolved"
-	EventTypePromiseRejected   EventType = "promise_rejected"
-	EventTypeUpdateHandler     EventType = "update_handler"
+	// EventTypeCallRetryRefused records that the host DECLINED a retry policy
+	// as too long for one segment, before making any call. It exists so a
+	// replay can tell "the guest made this call itself, because we refused"
+	// from "the host ran the policy and this is its result": the first is
+	// followed by the guest's own EventTypeCall records, and without a marker
+	// of its own the refusal was indistinguishable from a host-run policy
+	// whose FIRST attempt succeeded. cleat#4032.
+	//
+	// Recording it costs one step, and it buys the property the refusals rely
+	// on: the answer a replay gives is the one the recording segment gave,
+	// even though the tenant's budget is writable in between. Histories
+	// written before it carry no such record and keep the older behaviour.
+	EventTypeCallRetryRefused EventType = "call_retry_refused"
+	EventTypeAwaitSignals     EventType = "await_signals"
+	EventTypeSignalReceived   EventType = "signal_received"
+	EventTypeDefer            EventType = "defer"
+	EventTypeChildWorkflow    EventType = "child_workflow"
+	EventTypeAwaitChild       EventType = "await_child"
+	EventTypeContinueAsNew    EventType = "continue_as_new"
+	EventTypeHeartbeat        EventType = "heartbeat"
+	EventTypeAwaitAllChildren EventType = "await_all_children"
+	EventTypePluginCall       EventType = "plugin_call"
+	EventTypeCreatePromise    EventType = "create_promise"
+	EventTypeAwaitPromise     EventType = "await_promise"
+	EventTypePromiseResolved  EventType = "promise_resolved"
+	EventTypePromiseRejected  EventType = "promise_rejected"
+	EventTypeUpdateHandler    EventType = "update_handler"
 	// EventTypeUpdateReceived records that a pending update request was
 	// delivered to the guest at this step. It is what makes an update
 	// replayable: on replay the poll reads this event rather than the
@@ -244,11 +257,38 @@ type EventRecord struct {
 	// eventRecordToPayload), so every event ever written keeps its checksum.
 	InDeferPhase bool `json:"in_defer_phase,omitempty"`
 
+	// InDeferSegment records that this event was recorded by a DEFER SEGMENT: a later execution of the run whose only job
+	// is to run its cleanup after the run was stopped (terminated, cancelled, or killed with defers owed). cleat#4079.
+	//
+	// HOST-OBSERVED, which is the difference from InDeferPhase above. That one is the guest's own claim that it was draining
+	// its table, and an ordinary failure does the same, so it cannot tell a segment from a run that simply cleaned up after
+	// itself. This one is set by the engine when its execution is a segment (WithDeferPhase) and the event is recorded
+	// fresh, so it is true for every event a segment writes, drain or not, and never for the guest's own ordinary drain.
+	//
+	// WHY IT EXISTS: a segment's events are appended after the last event the body recorded, so a redrive of the run
+	// (RetryWorkflow, ReReplay) replays the body into a step the segment already filled and fails with a replay divergence.
+	// Refusing that redrive up front needs to know which runs ran a segment, and no existing field says (cleat#4094).
+	//
+	// Emitted into the checksum payload only when true, so every event ever written keeps its checksum, and carried in the
+	// event's JSON like InDeferPhase, so there is no column and no migration. Absent on every event written before this
+	// field, which reads back false: an old segment's events are not marked, and that is a known limit, not a guess.
+	InDeferSegment bool `json:"in_defer_segment,omitempty"`
+
 	// Promise fields.
 	PromiseName   string `json:"promise_name,omitempty"`
 	PromiseID     string `json:"promise_id,omitempty"`
 	PromiseResult string `json:"promise_result,omitempty"`
 	PromiseError  string `json:"promise_error,omitempty"`
+
+	// FirstRead marks a promise_resolved or promise_rejected record that an await wrote because its FIRST read of the promise store found the promise
+	// settled, so no await record of THIS call precedes it (cleat#4277). Without it that record is byte-for-byte what an await records when it is
+	// answered on a wake, and a history [await P, promise_resolved P] could be either ONE call answered, or a first call that timed out followed by a
+	// second whose first read found P settled; a replay handed the first await the resolution in both cases.
+	//
+	// Emitted into the checksum payload only when true, so every event ever written keeps its checksum, and carried in the event's JSON, so there is no
+	// column and no migration. Absent on every event written before this field, which reads back false: such a history stays ambiguous and replays as it
+	// always did, resolved. That is a known limit and not a guess.
+	FirstRead bool `json:"first_read,omitempty"`
 
 	// Child workflow fields.
 	ChildName         string `json:"child_name,omitempty"`
@@ -294,6 +334,17 @@ type EventRecord struct {
 	// 2.35's plugin half, because callErrorUnknown is exactly what those
 	// failures reported when they were fresh.
 	StreamErrCode int `json:"stream_err_code,omitempty"`
+	// StreamData marks a chunk the plugin PRODUCED, as opposed to the one synthetic chunk recordStreamError writes for a stream-level failure
+	// (cleat#4117). Both are one chunk at index 0 with Finish true, and a stream function that sends a single final chunk writes the same
+	// record a failure does, so the chunk count cannot tell them apart on replay. Before this field replay read every one-chunk finished stream
+	// as a failure whose message was the chunk's content: a successful stream turned into an error the moment its run was resumed.
+	//
+	// It is set on the SUCCESS side, not the failure side, on purpose. A history written before this field holds failure chunks with no marker,
+	// and a marker on failures alone could not tell those from a successful chunk written after it. Marking the data keeps one rule for both
+	// eras: a lone finished chunk is a failure unless it says it is data, so every pre-existing record replays as it always did and only a
+	// chunk recorded from now on can replay as the success it was. (A one-chunk success recorded BEFORE this field still replays as a
+	// failure; nothing recorded then distinguishes it.)
+	StreamData bool `json:"stream_data,omitempty"`
 
 	// Update handler fields.
 	//
@@ -630,23 +681,44 @@ const (
 	sleepStatusSuspend   = 1
 )
 
+// unflushedEvent is an event the engine held back because per-step flush is off, with the checksum it chains from.
+type unflushedEvent struct {
+	rec  EventRecord
+	prev string
+}
+
 // execSession implements HostHandler for a single execution or replay.
 type execSession struct {
-	engine        *Engine
-	history       []EventRecord
-	stepCount     int
-	isReplay      bool
-	nowMs         int64
-	randomSeq     int64 // monotonic counter for deterministic Random()
-	suspendErr    *SuspendError
-	deferrals     map[string]string // registered defer callbacks (deferID -> description)
-	inDeferPhase  bool              // true while the guest is draining its defer table (cleat#1155)
-	awaitRejected bool              // the last AwaitPromise ended in a rejection (cleat#3425)
-	workflowID    string            // parent workflow instance ID (for child workflows)
-	defName       string            // workflow definition name (for metrics labels)
-	execRunID     string            // current execution run ID
-	queryState    map[string]string // key-value state set via SetQueryState
-	tenantID      string            // tenant ID injected into plugin function context
+	engine       *Engine
+	history      []EventRecord
+	stepCount    int
+	isReplay     bool
+	nowMs        int64
+	randomSeq    int64 // monotonic counter for deterministic Random()
+	suspendErr   *SuspendError
+	deferrals    map[string]string // registered defer callbacks (deferID -> description)
+	inDeferPhase bool              // true while the guest is draining its defer table (cleat#1155)
+	// deferPhaseBeganSuspended is whether the execution had ALREADY suspended when the guest's current drain began (SetDeferPhase(true)). A drain that began before
+	// the suspension is a cleanup that is still in progress (cleat#3429); one that began after it is a wrapper that ran its defers because the guest swallowed
+	// the suspension (cleat#4285). Meaningful only while inDeferPhase.
+	// unstampedRecords is how many records at the front of history were expanded from a compaction state by a build that did NOT carry the drain stamps
+	// (InDeferPhase, InDeferSegment), so a record below this index has no stamp to read: unknown, not absent (cleat#4285 step 3). CompactionState.StampedFrom says where
+	// the stamped events of a state begin, so this is that boundary and not the whole expanded prefix (cleat#4323); zero for a history that was not compacted.
+	unstampedRecords int
+
+	deferPhaseBeganSuspended bool
+	awaitRejected            bool // the last AwaitPromise ended in a rejection (cleat#3425)
+	// unflushed is every event this execution recorded that the engine did NOT write because per-step flush is off, in the order
+	// recorded, each with the predecessor checksum it was chained from. A successful or suspended segment hands these to the
+	// worker, which writes them at finalization. A FAILED one has no finalization: nothing wrote them, and the worker's
+	// terminal-failure write carries no events, so a killed run lost its whole history. flushUnflushedEvents writes them
+	// before Execute returns. cleat#4079.
+	unflushed  []unflushedEvent
+	workflowID string            // parent workflow instance ID (for child workflows)
+	defName    string            // workflow definition name (for metrics labels)
+	execRunID  string            // current execution run ID
+	queryState map[string]string // key-value state set via SetQueryState
+	tenantID   string            // tenant ID injected into plugin function context
 
 	// callerPluginName is read by pluginCallGuard.Check at both call_plugin
 	// sites in plugins.go, but nothing outside a _test.go file assigns it.
@@ -676,6 +748,12 @@ type execSession struct {
 	// are stopped -- see stopBeforeNewWork.
 	inDeferDrain bool
 
+	// stopIdx is the history index replay stops at in a stop-at-last-stoppable segment, or -1. See stop_at_last_stoppable.go.
+	stopIdx int
+
+	// stopArmed is true when this session is a stop-at-last-stoppable segment over a component guest.
+	stopArmed bool
+
 	// autoContinueAsNewTriggered is set to true after the event cap is hit
 	// to prevent repeated triggers during the same execution segment.
 	autoContinueAsNewTriggered bool
@@ -683,6 +761,31 @@ type execSession struct {
 	// lastCancellationCheck is the wall-clock time of the last cancellation
 	// poll. Used to throttle checks to at most once per interval.
 	lastCancellationCheck time.Time
+
+	// eventWriteFailure is the first failure to persist a recorded event that is not a lost fence (cleat#4160). While it is set the
+	// session is stopping: stopBeforeNewWork answers true, so the NEXT fresh host call refuses the guest instead of doing more work
+	// on top of a hole in the durable record. It is cleared by nothing: the run suspends and is reclaimed, and the segment-end write
+	// persists the event if the database is back.
+	eventWriteFailure error
+
+	// stepViolations are the spec disagreements step() noted (a spec that recorded other than it declared, a step that left replay with history
+	// unread). Production only logs them; the dispatcher's tests assert there are none. cleat#4152.
+	stepViolations []string
+	// parkViolations are the park requests parkOrSuspend found invalid and suspended anyway (park.go). Test-visible, like stepViolations.
+	parkViolations []string
+	// claimCheckFailures are the reasons a held run was suspended at its wake instead of resumed: the store no longer had it assigned to this worker, or could not
+	// be asked (park.go, cleat#4162). Test-visible, like parkViolations.
+	claimCheckFailures []string
+	// publishedQueryState is the query state the store was last given by a hold admission (park.go publishForHold), so the next admission writes only if the guest has changed it
+	// since. Nil until the first publish.
+	publishedQueryState map[string]string
+	// holdPublishFailures are the reasons a wait was NOT held because what a suspension would have written could not be written first: the publish failed, the handle cannot
+	// publish, or events are unflushed under noPerStepFlush (park.go, cleat#4162). The run suspended instead, and a suspension writes all of it. Test-visible, like claimCheckFailures.
+	holdPublishFailures []string
+
+	// handlingEventWriteFailure is set while stopAfterFailedEventWrite is acting on a failure, so the continue-as-new it triggers for a
+	// refused quota cannot re-enter it through its own failed write (the quota refuses that event too).
+	handlingEventWriteFailure bool
 
 	// eventCount tracks the number of durable call events in this session.
 	// Incremented per freshCall; compared against maxEventsPerWorkflow for
@@ -716,4 +819,10 @@ type execSession struct {
 	// stepCancel cancels the execution context when the step callback returns
 	// ReplayQuit.
 	stepCancel context.CancelFunc
+
+	// execCtx is the context this execution runs under, AFTER the workflow deadline and the wall-clock ceiling were applied to it. A host call does
+	// not receive it: the wasmtime paths call the handler with context.Background() (wasmtime_hostfuncs_core.go, component_callbacks.go), so a wait
+	// that holds a run on the worker (park.go) would otherwise never see the ceiling, a cancel or a terminate. nil means "not set", and then the
+	// host call's own context is used, which is what every test that builds a session by hand gets.
+	execCtx context.Context
 }

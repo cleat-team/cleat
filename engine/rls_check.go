@@ -22,10 +22,13 @@ type RLSBypassReason struct {
 // have Row-Level Security applied to it.
 //
 // This matters more here than the phrase "defence in depth" would suggest.
-// GetWorkflowByID and ListWorkflows carry no application-level tenant_id
-// filter at all, so for those paths the RLS policies are not one layer of
-// isolation among several -- they are the only one. A connection that bypasses
-// them sees every tenant's workflows, and nothing in the Go code will stop it.
+// The PLAIN workflow listing and count are scoped by row-level security alone:
+// engine/db.go and engine/workflow_list_query.go name the tenant only when the
+// published-state filter is set, so through a connection that bypasses the
+// policies a plain list returns every tenant's rows and nothing in the Go code
+// stops it. GetWorkflowByID (`l.tenant_id = $2`) and the published-state filter
+// do name their tenant in the SQL; this comment said none of them did until
+// cleat#3773's review checked the statements.
 //
 // PostgreSQL exempts a role from RLS in two ways, and neither can be closed
 // from inside the schema:
@@ -170,8 +173,9 @@ func FormatRLSBypass(reasons []RLSBypassReason) string {
 		b.WriteString("\n  - ")
 		b.WriteString(r.Detail)
 	}
-	b.WriteString("\n\nGetWorkflowByID and ListWorkflows have no application-level tenant filter, " +
-		"so on this connection they return every tenant's data.")
+	b.WriteString("\n\nThe plain workflow listing and count are scoped by row-level security alone, " +
+		"so on this connection a plain list returns every tenant's data. " +
+		"(GetWorkflowByID and the published-state filter name their tenant in the SQL.)")
 	b.WriteString("\n\n")
 	b.WriteString(rlsBypassFix)
 	return b.String()

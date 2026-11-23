@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"go/token"
 	"go/types"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/cleat-team/cleat/internal/analyzer"
@@ -132,4 +134,41 @@ func TestEntryPointSchemaAgreesWithTheBindingTableOnGo(t *testing.T) {
 			}
 		})
 	}
+}
+
+// The conformance table's shape and its loader. They lived in the AssemblyScript conformance test, which read the same table, and
+// moved here when that test was removed (cleat#4023): this test is the table's remaining reader in this package.
+type bindingDeclared struct {
+	Name            string `json:"name"`
+	Kind            string `json:"kind"`
+	OptionalDefault string `json:"optional_default"`
+}
+
+type bindingCase struct {
+	Name     string            `json:"name"`
+	Why      string            `json:"why"`
+	Declared []bindingDeclared `json:"declared"`
+	Payload  map[string]any    `json:"payload"`
+	Expect   map[string]string `json:"expect"`
+}
+
+func loadBindingTable(t *testing.T) []bindingCase {
+	t.Helper()
+	// Read through "..", which go test's caching CANNOT see: it keys on files
+	// opened INSIDE the package directory, so an edited fixture one level up
+	// leaves the package "(cached)" and the edit unmeasured (cleat#1136). CI
+	// passes -count=1; a local run is not sound, and the tell is the word
+	// "(cached)" where a duration should be.
+	path := filepath.Join(repoRoot(t), "tests", "conformance", "entry_point_binding_cases.json")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading the conformance table at %s: %v", path, err)
+	}
+	var doc struct {
+		Cases []bindingCase `json:"cases"`
+	}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatalf("parsing %s: %v", path, err)
+	}
+	return doc.Cases
 }

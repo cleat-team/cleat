@@ -46,13 +46,15 @@ func TestTheGuestOutputBufferMatchesWhatTheHostWillWrite(t *testing.T) {
 			"size, in which case it is using some other number and nothing checks it.\n\n"+
 			"generated source began:\n%s", head(src, 400))
 	}
-	if got != int64(DefaultOutBufSize) {
+	// Since cleat#4132 the ceiling is DefaultMaxHostCallResponseBytes (2 MiB), the default of --wasm-max-response-bytes, and no longer
+	// DefaultOutBufSize, which sizes the entry-point input and result regions and is a different quantity.
+	if got != int64(DefaultMaxHostCallResponseBytes) {
 		t.Errorf("the generated guest will grow a durable-call response buffer to at most "+
-			"%d bytes; the host writes up to DefaultOutBufSize = %d.\n\n"+
+			"%d bytes; the host's response ceiling is DefaultMaxHostCallResponseBytes = %d.\n\n"+
 			"The smaller of the two wins and the difference used to be truncated in "+
 			"silence. It is reported now, but a ceiling below the host's means a payload "+
 			"the host would have delivered can never be received at any size.",
-			got, DefaultOutBufSize)
+			got, DefaultMaxHostCallResponseBytes)
 	}
 
 	// And the floor must be below the ceiling, or there is nothing to grow and

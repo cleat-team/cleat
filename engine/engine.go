@@ -124,8 +124,20 @@ type Engine struct {
 
 	deferPassBudget time.Duration // total for one runDefers pass; see WithDeferPassBudget
 	deferPhase      bool          // this execution is a defer segment; see WithDeferPhase
-	nowFn           func() int64  // wall clock for sleep-deadline decisions; see WithClock
-	workflowStartMs int64         // workflow row's created_at; anchors an empty history, see WithWorkflowStartTime
+	// wakeSource resumes a parked run. nil means no wait parks: each suspends, which is every engine unless the worker has turned residency on and
+	// handed this run a handle (WithResidency, resident.go) and every engine in a test that does not assign one; see parkOrSuspend (park.go).
+	wakeSource wakeSource
+	// claimCheck is asked, from parkOrSuspend and nowhere else, every time a held run is about to return to its guest: is this execution still the one the store
+	// has the run assigned to? An error means it is not, OR that the answer could not be had, and the run is suspended instead of resumed. WithResidency sets it
+	// together with wakeSource, and installs neither without it, so a held run cannot exist without a way to revalidate (cleat#4162, PR 2c).
+	claimCheck func(ctx context.Context) error
+	// publishState writes the run's query state to the store before the run is HELD, from parkOrSuspend (park.go publishForHold): a held run does not return to the worker, and the
+	// worker writes query state only when an execution returns. nil means this handle cannot publish, so a run WITH query state is refused, not held. WithResidency sets it.
+	publishState         func(ctx context.Context, state map[string]string) error
+	stopAtLastStoppable  bool         // a defer segment over a killed run; see WithStopAtLastStoppable
+	killedWithDefersOwed atomic.Bool  // a component guest was stopped before its wrapper ran its defers; see KilledWithDefersOwed
+	nowFn                func() int64 // wall clock for sleep-deadline decisions; see WithClock
+	workflowStartMs      int64        // workflow row's created_at; anchors an empty history, see WithWorkflowStartTime
 
 	continueAsNewHandler func(ctx context.Context, currentRunID, workerID string, generation int64, defName string, defVersion int, newInput string, newEvents []EventRecord, result string, queryState map[string]string, priority int) (newRunID string, err error)
 
@@ -441,6 +453,22 @@ func WithShutdownSignal(ch <-chan struct{}) EngineOption {
 	return func(e *Engine) { e.shutdownRequested = ch }
 }
 
+// WithResidency gives this run the worker's resident set as its wake source, so a wait that is due soon may be held on the worker instead of
+// suspended (cleat#4162). nil, which is what a set that is not enabled hands out, changes nothing: every wait suspends as it always has.
+//
+// A handle whose ResidentRunInfo carries no ClaimCheck installs NOTHING, so nothing is held and every wait suspends. The check is what a held run uses to prove the
+// store still has it assigned to this worker before it goes back to the guest, and a hold without one is a run that can act after it has been terminated, cancelled
+// or reclaimed (measured on a real worker, cleat#4162): failing closed here means the omission cannot be a silent one.
+func WithResidency(r *ResidentRun) EngineOption {
+	return func(e *Engine) {
+		if r != nil && r.info.ClaimCheck != nil {
+			e.wakeSource = r
+			e.claimCheck = r.info.ClaimCheck
+			e.publishState = r.info.PublishState
+		}
+	}
+}
+
 // WithHardStopSignal wires a worker's hard-stop context into the engine so an
 // in-flight durable call aborts and its run suspends rather than riding out its
 // own timeout (cleat#2287). Fired at grace expiry, before the final w.cancel();
@@ -751,6 +779,29 @@ func WithDeferPhase() EngineOption {
 	return func(e *Engine) { e.deferPhase = true }
 }
 
+// WithStopAtLastStoppable makes a defer segment replay a KILLED run only as far as the last host call the engine can
+// refuse, and stop there (cleat#4079). It has no effect without WithDeferPhase.
+//
+// A killed run's history ends where its last call returned, not where the body was cut off, so an ordinary segment would
+// replay the whole history and then let the body carry on from there. Carrying on is the problem: a body killed in a loop
+// that makes no further call never reaches a fresh call to refuse, and runs until it is killed again. Stopping at the last
+// stoppable event instead makes the guest unwind at a call, where the defers can run.
+//
+// Only a component guest can be stopped this way: a core module drains its defers in place after a kill, so the worker
+// does not set this for one.
+func WithStopAtLastStoppable() EngineOption {
+	return func(e *Engine) { e.stopAtLastStoppable = true }
+}
+
+// KilledWithDefersOwed reports whether the last execution stopped a COMPONENT guest (a trap, the execution fence, an
+// instruction limit, a timeout) before the guest's own wrapper could run the defers it had registered (cleat#4079).
+//
+// It is false for a guest that failed through its own entry point, because that wrapper drains the defer table on the error
+// path, and false for a core module, which the engine drains in place. When it is true the cleanup has NOT happened and
+// cannot happen in this process: a trapped component instance cannot be re-entered. The worker routes such a run through a
+// defer segment on a fresh instance.
+func (e *Engine) KilledWithDefersOwed() bool { return e.killedWithDefersOwed.Load() }
+
 // WithContinueAsNewHandler sets a handler for atomic ContinueAsNew transitions.
 func WithContinueAsNewHandler(fn func(ctx context.Context, currentRunID, workerID string, generation int64, defName string, defVersion int, newInput string, newEvents []EventRecord, result string, queryState map[string]string, priority int) (newRunID string, err error)) EngineOption {
 	return func(e *Engine) { e.continueAsNewHandler = fn }
@@ -781,9 +832,12 @@ func WithBackend(language string, backend WasmBackend) EngineOption {
 //
 //   - go: the primary path and the backend of record (CLAUDE.md).
 //
-//   - assemblyscript, java: reached wasmtime for a long time by accident --
-//     DetectLanguage could not identify them and defaulted to "go" -- and were
+//   - java: reached wasmtime for a long time by accident --
+//     DetectLanguage could not identify it and defaulted to "go" -- and was
 //     confirmed to load and execute before being named explicitly. See 2.72.
+//     (AssemblyScript was in this entry too, and was removed with its SDK in
+//     cleat#4023: see removedGuestLanguages, which says what a module declaring it
+//     now gets.)
 //
 //   - rust: exercised by tests/cross-language, which builds the same
 //     wasm32-unknown-unknown cdylib that `cleat build --target rust` ships. All
@@ -831,7 +885,40 @@ func WithBackend(language string, backend WasmBackend) EngineOption {
 //     that nothing routes to is a liability rather than a safety net.
 //
 // See IMPROVEMENT-PLAN.md 2.72 and 1.5/2.28.
-var WasmtimeLanguages = []string{"go", "assemblyscript", "java", "rust", "python"}
+//
+// "javascript" is the TypeScript/JavaScript guest built on Javy (cleat#3825), and it is a
+// LABEL ahead of the build chain: it selects the wasmtime backend's direct-export path
+// (the one rust takes, and assemblyscript did until cleat#4023) and nothing else. The language is IN DEVELOPMENT,
+// and tiers.yaml grants it no support claim; the label was here first so that the module's
+// own declaration would be true, instead of a TypeScript module having to call itself "rust"
+// to be routed. The prototype measured that routing on its own branch (its Phase 0), not
+// here. It was deliberately kept OUT of deferSegmentLanguages below until the guest
+// decoded the sentinel and the plugin exported something to drain; cleat#3826 added it there,
+// and the verification is recorded beside that entry.
+//
+// "csharp" is the C# guest built with componentize-dotnet (cleat#4080; the spike is cleat#4077), and like "javascript" before it
+// it is a LABEL ahead of the build chain: it makes a module that declares itself C# routable to the wasmtime backend, and nothing
+// else. The language is IN DEVELOPMENT and tiers.yaml grants it no support claim. It is a component, not a core module, so it
+// reaches the component path (like python); the spike measured that a C# component that carries a cleat.metadata section naming
+// "csharp" ran as csharp once this label existed, and that one WITHOUT the section is detected as "python" and routed as a Python
+// guest, which is why the build chain's stamp is mandatory (C# PR 2). Whether it is a defer-segment language is decided at
+// deferSegmentLanguages below, with the test that earns it (C# PR 3), not by this label.
+var WasmtimeLanguages = []string{"go", "java", "rust", "python", "javascript", "csharp"}
+
+// removedGuestLanguages are guest languages cleat once built for and no longer does, mapped to what an operator is told. A module
+// that declares one is REFUSED, by name, rather than reaching resolveBackend's generic "no WASM backend registered for guest
+// language", which reads as a typo in the module's metadata when the truth is that the toolchain is gone.
+//
+// The refusal applies whether or not the engine has any backend registered. With none (cleatctl replay|debug, cleat run_embedded,
+// cleat-bench, cleat/wasmtest) the module would otherwise fall through to the wazero runtime and RUN, on the one runtime CLAUDE.md
+// records as unfenceable for a compute-bound guest, so "removed" would mean "removed from the worker" and nothing else.
+//
+// What counts as declaring it: wasm.DetectLanguage's answer, which is the module's own cleat.metadata Language field or, when that is
+// absent, the shape of its imports. DetectLanguage still identifies an AssemblyScript module on purpose. Forgetting the shape would
+// make an AssemblyScript module with no metadata default to "go" and run as one, which is a worse failure than the refusal.
+var removedGuestLanguages = map[string]string{
+	"assemblyscript": "AssemblyScript support was removed from cleat (cleat#4023): the SDK, `cleat build --target assemblyscript` and the engine's routing for it no longer exist",
+}
 
 // deferSegmentLanguages are the guest languages whose SDK decodes
 // callSuspendSentinel, and so can be run as a defer segment.
@@ -859,13 +946,6 @@ var WasmtimeLanguages = []string{"go", "assemblyscript", "java", "rust", "python
 //     engine/java_defer_segment_e2e_test.go, which builds the real TeaVM module
 //     and measures that a defer segment records the two cleanup calls and not
 //     the body's (3.105).
-//   - assemblyscript: examples/as-workflow's defer_order entry point +
-//     engine/as_defer_segment_e2e_test.go (3.106). Note this one does NOT stop
-//     by unwinding -- the SDK has no exceptions, so the body runs on past the
-//     stop with every further call refused, and what ends the segment is the
-//     transformer-generated wrapper checking isWorkflowSuspended() before it
-//     drains. Membership still means the same thing (the segment runs only the
-//     defers, measured), but read that test's comment for how it gets there.
 //   - rust: examples/rust-workflow's defer_order entry point +
 //     engine/rust_defer_segment_e2e_test.go (3.107). That fixture DISCARDS the
 //     error from its body call, which is the case worth having: six of the
@@ -916,7 +996,21 @@ var WasmtimeLanguages = []string{"go", "assemblyscript", "java", "rust", "python
 // backend language starts refused rather than silently running a segment it
 // cannot be stopped in. Do not delete it for being full.
 var deferSegmentLanguages = map[string]bool{
-	"go": true, "java": true, "assemblyscript": true, "rust": true, "python": true,
+	"go": true, "java": true, "rust": true, "python": true,
+	// javascript (cleat#3826): the Javy plugin's bindings are cleat-sdk's HostCalls, so they decode the sentinel and
+	// the stop bit, and a defer segment suspends correctly. What made it NOT work until now was not the decode: the host
+	// drains a suspended segment by calling the module's __cleat_run_deferred export, and a JavaScript module exported
+	// none, so runGuestDefersAfterSuspend found nothing to call and the segment recorded no defer calls at all. The
+	// plugin's cleat_run_drain, republished under that name by cmd cleat-js-link, is that export. Verified end to end by
+	// tests/typescript/typescript_defer_segment_test.go, which builds a real module and asserts the segment records only
+	// the defers on the same entry point whose control records the body's call.
+	"javascript": true,
+	// csharp (cleat#4077): a Component Model guest like python, so the stop is a case of the WIT return type
+	// (call-failure.suspended) and not a sentinel. Verified end to end by csharp_defer_segment_e2e_test.go, which runs a
+	// real C# component as a defer segment and asserts the segment records only its defer -- with a control, on the same
+	// entry point, that records the body's call when the defer phase is off. The guest there is a spike, not the SDK;
+	// the SDK has to pass that same test.
+	"csharp": true,
 }
 
 // RunsOnWasmtime reports whether a detected guest language is served by the

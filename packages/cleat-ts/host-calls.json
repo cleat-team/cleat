@@ -1,0 +1,62 @@
+{
+  "doc": [
+    "The host-call binding inventory for the TypeScript guest (cleat#3827). Every export in engine/imports.go is either",
+    "BOUND (the cleat-js plugin installs a __cleat_* global for it, index.ts declares and wraps it, and this file maps the",
+    "global to its ABI export name) or UNBOUND (listed here with a reason, so the gap is a checked-in decision rather than",
+    "a paragraph). tests/typescript/typescript_bindings_test.go reconciles this file with all three sources and fails on",
+    "any difference in either direction, so binding a call means removing its entry from unbound and adding one to bound.",
+    "",
+    "THE INVENTORY IS THE UNION OF THIS FILE AND host-calls.d/*.json. This file holds the calls bound before the layout was split,",
+    "the ABI plumbing, the naming pin and the three permanent entries. Every call still to be bound is listed in the file of the",
+    "group that will bind it (host-calls.d/<group>.json), so two groups written in parallel edit different files. A call listed in",
+    "two files, or bound in one and unbound in another, is a failure of the test, not a merge. See groups/README.md.",
+    "",
+    "The mapping is written out rather than derived from a naming rule, because the rule is false: the plugin's",
+    "__cleat_set_query_state binds the export set_query_state, which is unprefixed. A rule would report that global as",
+    "binding a call that does not exist and leave the real export looking unbound.",
+    "",
+    "A reason starts with 'pending:' (to be bound) or 'permanent:' (deliberately never bound, with the reason it cannot be)."
+  ],
+  "plumbing": [
+    "__cleat_args",
+    "__cleat_result",
+    "__cleat_fail",
+    "__cleat_suspended",
+    "__cleat_shims_off",
+    "__cleat_drain_done"
+  ],
+  "bound": {
+    "__cleat_call": "cleat_call",
+    "__cleat_sleep": "cleat_sleep",
+    "__cleat_await_signals": "cleat_await_signals",
+    "__cleat_child_workflow": "cleat_child_workflow",
+    "__cleat_await_child": "cleat_await_child",
+    "__cleat_now": "cleat_now",
+    "__cleat_random": "cleat_random",
+    "__cleat_uuid": "cleat_uuid",
+    "__cleat_log": "cleat_log",
+    "__cleat_json_stringify": "cleat_json_stringify",
+    "__cleat_workflow_id": "cleat_workflow_id",
+    "__cleat_set_query_state": "set_query_state",
+    "__cleat_side_effect": "cleat_side_effect",
+    "__cleat_side_effect_recorded": "cleat_side_effect_recorded",
+    "__cleat_version": "cleat_version",
+    "__cleat_min_version": "cleat_min_version",
+    "__cleat_run_id": "cleat_run_id",
+    "__cleat_poll_cancellation": "cleat_poll_cancellation",
+    "__cleat_get_scope": "cleat_get_scope",
+    "__cleat_set_scope": "cleat_set_scope",
+    "__cleat_create_promise": "cleat_create_promise",
+    "__cleat_await_promise": "cleat_await_promise",
+    "__cleat_resolve_promise": "cleat_resolve_promise",
+    "__cleat_reject_promise": "cleat_reject_promise",
+    "__cleat_defer": "cleat_defer",
+    "__cleat_defer_phase": "cleat_defer_phase"
+  },
+  "unbound": {
+    "cleat_poll_work": "permanent: the worker's work handshake; a workflow does not run the queue.",
+    "cleat_complete": "permanent: the worker's completion handshake, the pair of cleat_poll_work; not guest-reachable.",
+    "cleat_register_query_handler": "permanent: deliberately unbindable from a guest (ABI). A workflow may answer query state, not register the handler.",
+    "cleat_interrupt_requested": "permanent: polled by the plugin's own Rust QuickJS interrupt handler (crates/cleat-js-plugin/src/lib.rs), never through a __cleat_* global -- the guest's JavaScript never calls it, so there is nothing for index.ts to declare. It IS reached: this guest is the one SDK that stops cleanly and runs its defers after a kill (ABI.md 2.10b, cleat#3922). Unbound here means no TypeScript binding, not unused."
+  }
+}

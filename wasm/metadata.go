@@ -333,7 +333,20 @@ func readCustomSection(wasmBytes []byte, name string) ([]byte, error) {
 		// Not the section we want; skip payload.
 		offset = sectionEnd
 	}
-	return nil, fmt.Errorf("no %s section found in WASM binary", name)
+	return nil, &sectionNotFoundError{name: name}
+}
+
+// sectionNotFoundError reports an absent custom section.
+//
+// It exists so a reader can tell "this module has no such section" -- a
+// legitimate state for an optional section such as cleat.js-engine -- from
+// "this module has one and it is broken", without matching on the message
+// text. The message is byte-identical to the plain fmt.Errorf it replaced, so
+// every existing caller and test sees the same string.
+type sectionNotFoundError struct{ name string }
+
+func (e *sectionNotFoundError) Error() string {
+	return fmt.Sprintf("no %s section found in WASM binary", e.name)
 }
 
 func writeCustomSection(wasmBytes []byte, name string, payload []byte) ([]byte, error) {
@@ -579,7 +592,9 @@ func detectLanguageFromImports(wasmBytes []byte) string {
 		if imp.module == "teavm" {
 			return "java"
 		}
-		// AssemblyScript modules import env.abort for runtime error handling.
+		// AssemblyScript modules import env.abort for runtime error handling. AssemblyScript was removed (cleat#4023) and this is
+		// KEPT on purpose: the engine refuses what it recognises here by name (engine.removedGuestLanguages), whereas forgetting the
+		// shape would make a module with no metadata detect as "go" and run as one.
 		if imp.module == "env" && imp.field == "abort" {
 			return "assemblyscript"
 		}

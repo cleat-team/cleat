@@ -282,6 +282,11 @@ func (m *mockShardStore) FinalizeWorkflowSegment(ctx context.Context, runID, wor
 	return m.err
 }
 
+// PublishQueryState: the test double writes nothing and reports no fence loss (cleat#4162); a test that needs otherwise overrides it on its own type.
+func (m *mockShardStore) PublishQueryState(ctx context.Context, runID, workerID string, generation int64, queryState map[string]string) error {
+	return nil
+}
+
 func (m *mockShardStore) RequestCancellation(ctx context.Context, workflowID, reason string) error {
 	m.recordCall("RequestCancellation")
 	return m.err

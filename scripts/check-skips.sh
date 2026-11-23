@@ -343,11 +343,11 @@ stale_entries() {
 # stale:
 #
 #   grep -n "CLEAT_TEST_\|go test " .github/workflows/engine-race.yml
-#   sed -n '/name: cluster/,/check-skip-budget.sh cluster /p' .github/workflows/ci.yml \
-#     | grep -n "CLEAT_TEST_\|go test "
 #   grep -n "CLEAT_TEST_\|go test " .github/workflows/multi-db-ci.yml
+# (ci.yml's cluster job was a fourth until cleat#3935 removed its ./engine/... run; it no longer
+#  sweeps this suite, so it has no dialect to declare.)
 #
-# Deliberately just these four. ci.yml's "Test Go (core)" leg ALSO runs
+# Deliberately just these three. ci.yml's "Test Go (core)" leg ALSO runs
 # ./... (engine/ included) with the same postgres-only env, and is left out
 # -- nothing has hit it yet, and adding a job this guard cannot verify
 # against a real failure is the runtime-side mistake cleat#2759 documents,
@@ -395,7 +395,6 @@ with open(sys.argv[3], encoding='utf-8', errors='replace') as f:
             exempt.add((parts[0], parts[1]))
 
 JOB_DIALECT = {
-    "cluster": "postgres",
     "test-go/engine": "postgres",
     "multi-db/mysql": "mysql",
     "multi-db/mssql": "mssql",

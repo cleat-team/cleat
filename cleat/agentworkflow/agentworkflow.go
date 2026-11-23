@@ -35,6 +35,7 @@ import (
 	"time"
 
 	"github.com/cleat-team/cleat/cleat"
+	"github.com/cleat-team/cleat/cleat/internal/redacted"
 )
 
 // Tool kinds. A tool names one of the three ways a workflow can reach the
@@ -924,7 +925,9 @@ func awaitApproval(h cleat.HostCalls, t Tool, args string) (string, error) {
 			Found bool `json:"found"`
 		}
 		if err := json.Unmarshal([]byte(out), &claim); err != nil {
-			return "", fmt.Errorf("agent: approval tool %q returned unparsable JSON %q: %w", t.Name, out, err)
+			// The output is named by its size and a hash and not printed: it is whatever the approval plugin produced, and this error is the run's
+			// own (cleat#4390). err says what was wrong with it (an offending character), which is not the body.
+			return "", fmt.Errorf("agent: approval tool %q returned unparsable JSON %s: %w", t.Name, redacted.Body(out), err)
 		}
 		if claim.Found {
 			h.SetQueryState(QueryKeyStatus, QueryStatusApprovalReceived)

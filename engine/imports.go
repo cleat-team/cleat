@@ -114,6 +114,10 @@ type HostHandler interface {
 	// history on first execution and returns cached result on replay.
 	SideEffect(ctx context.Context, m api.Module, computedResult string, respPtr, respMaxLen uint32) int64
 
+	// SideEffectRecorded asks whether the history already holds the value for this side effect (cleat#4113). A recorded value is
+	// returned and the step consumed; otherwise the status is sideEffectNotRecorded and nothing changes. See the session's method.
+	SideEffectRecorded(ctx context.Context, m api.Module, respPtr, respMaxLen uint32) int64
+
 	// WorkflowID returns the current workflow's unique identifier.
 	WorkflowID(ctx context.Context, m api.Module, idPtr, idMaxLen uint32) int64
 
@@ -247,6 +251,20 @@ func registerHostFunctions(builder wazero.HostModuleBuilder, rt *Runtime) {
 	builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, on uint32) uint64 {
 		return uint64(handlerFromContext(ctx).SetDeferPhase(ctx, on != 0))
 	}).Export("cleat_defer_phase")
+
+	// cleat_interrupt_requested: () -> i32
+	//
+	// The soft kill's stop bit (cleat#3922). A guest's runtime polls it from its own loop and stops
+	// cleanly when it answers 1, so the host can run the workflow's deferred cleanup afterwards --
+	// which a hard trap makes impossible, because it kills the instance mid-borrow.
+	//
+	// This is the wazero side, and it always answers 0: wazero has no fuel and no epoch, so nothing
+	// here can ask a guest to stop early, and this backend is developer tooling (cleatctl, cleat
+	// run, wasmtest) rather than anything a worker runs. Registered so the two runtimes expose the
+	// same host ABI, which engine/hostabi_runtime_parity_test.go enforces.
+	builder.NewFunctionBuilder().WithFunc(func(context.Context) uint32 {
+		return 0
+	}).Export("cleat_interrupt_requested")
 
 	// cleat_poll_cancellation: (ptr,maxLen) -> i64
 	builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module,
@@ -641,7 +659,7 @@ func registerHostFunctions(builder wazero.HostModuleBuilder, rt *Runtime) {
 		h := handlerFromContext(ctx)
 		mem := m.Memory()
 		// Both empty is the documented "clear the scope" call -- see
-		// freshSetScope in scope.go.
+		// SetScope in scope.go.
 		objType, ok := readOptionalServiceName(mem, objTypePtr, objTypeLen)
 		if !ok {
 			return errBadParam
@@ -707,6 +725,12 @@ func registerHostFunctions(builder wazero.HostModuleBuilder, rt *Runtime) {
 		}
 		return uint64(h.SideEffect(ctx, m, result, outPtr, outMaxLen))
 	}).Export("cleat_side_effect")
+
+	// cleat_side_effect_recorded: (ptr,maxLen) -> i64   (cleat#4113)
+	builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module,
+		outPtr, outMaxLen uint32) uint64 {
+		return uint64(handlerFromContext(ctx).SideEffectRecorded(ctx, m, outPtr, outMaxLen))
+	}).Export("cleat_side_effect_recorded")
 
 	// cleat_workflow_id: (ptr,maxLen) -> i64
 	builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module,

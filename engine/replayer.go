@@ -37,8 +37,8 @@ func (e *Engine) Replay(ctx context.Context, wasmBytes []byte, entryPoint string
 }
 
 // ReplayCompiled is like Replay but takes a pre-compiled module.
-// Use this when the module has already been compiled and cached by a
-// WorkflowLoader, avoiding redundant compilation.
+// Use this when the module has already been compiled and cached by the
+// caller, avoiding redundant compilation.
 func (e *Engine) ReplayCompiled(ctx context.Context, compiled wazero.CompiledModule, entryPoint string, input json.RawMessage, history []EventRecord) (result string, resultHistory []EventRecord, suspended *SuspendResult, deferrals map[string]string, queryState map[string]string, err error) {
 	return e.replayCompiled(ctx, compiled, entryPoint, input, history, nil)
 }
@@ -64,7 +64,8 @@ func (s *execSession) advanceReplayStep(ctx context.Context, rec *EventRecord) b
 	// written by the database; event timestamps are written by the worker
 	// process. Measured 40ms apart with PostgreSQL in a container -- enough
 	// that a replay could read a LATER clock than the original execution did,
-	// which is a replay divergence and fails any SideEffect that read it.
+	// which is a replay divergence for anything that compares the clock. (A SideEffect no longer does: since cleat#4113 it returns what was
+	// recorded, whatever the guest computed.)
 	if rec != nil && rec.TimestampMs > 0 {
 		s.nowMs = rec.TimestampMs
 	}
@@ -95,6 +96,12 @@ func (s *execSession) advanceReplayStep(ctx context.Context, rec *EventRecord) b
 	// each event type.
 	if rec != nil {
 		s.lastChecksum = s.chainAnchor.next(*rec, s.lastChecksum)
+	}
+	// A segment over a killed run stops at the last stoppable event: once the event before it is consumed, skip the rest
+	// and leave replay, so the guest's next call takes its fresh path and is refused. stopIdx 0 is resolved when the session
+	// is armed, and a session that was never armed carries the zero value, which must not match here. cleat#4079.
+	if s.stopIdx > 0 && s.isReplay && s.stepCount == s.stopIdx {
+		s.fastForwardToStop()
 	}
 	if s.stepCallback == nil {
 		return true

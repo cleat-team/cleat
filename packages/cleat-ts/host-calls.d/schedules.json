@@ -1,0 +1,11 @@
+{
+  "doc": [
+    "The 'schedules' group of host calls (cleat#3827). Each call is listed here as unbound ('pending: ...') until its binding lands; the PR that binds a call moves its entry from 'unbound' to 'bound' in THIS file and touches no other inventory file. See packages/cleat-ts/groups/README.md."
+  ],
+  "bound": {
+    "__cleat_schedule_cron": "cleat_schedule_cron",
+    "__cleat_delete_cron": "cleat_delete_cron",
+    "__cleat_list_crons": "cleat_list_crons"
+  },
+  "unbound": {}
+}

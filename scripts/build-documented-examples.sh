@@ -56,7 +56,12 @@ cd "$(git rev-parse --show-toplevel)" || exit 2
 # NOT an associative array: macOS ships bash 3.2, which has none, and a script
 # the author cannot run locally is how this job would come to be trusted without
 # being exercised -- which is the failure this whole file exists to prevent.
-KNOWN_BROKEN=""
+# KNOWN_BROKEN is the only exclusion this script has, and examples/ts-workflow is NOT broken: it is built elsewhere. The entry's
+# text says so first, so the SKIP line is not read as a defect. It is here because THIS JOB cannot run its documented command: `cleat
+# build --target ts` needs Node, a pinned Javy and a wasm32-wasip1 Rust toolchain, and this job installs none of them. The
+# command IS run, on every pull request that touches the example, by examples/ts-workflow/workflow.test.ts in the
+# TypeScript tier-2 job (typescript-tier2.yml), which has the toolchain. Delete this entry if this job ever gains it.
+KNOWN_BROKEN="examples/ts-workflow\tBUILT ELSEWHERE, NOT BROKEN: the command works, and typescript-tier2.yml runs it via examples/ts-workflow/workflow.test.ts on every PR that touches the example. THIS JOB has no Node, Javy or wasm32-wasip1 toolchain and is deliberately not given one (it runs on many PRs)"
 
 known_broken_reason() {
   printf '%b\n' "$KNOWN_BROKEN" | while IFS="$(printf '\t')" read -r d reason; do
@@ -76,8 +81,57 @@ fi
 # long compiler diagnostic and small enough not to bury the other examples.
 FAIL_LOG_LINES="${BDE_FAIL_LOG_LINES:-400}"
 
+# A TRANSIENT DEPENDENCY FETCH IS RETRIED, AND NOTHING ELSE IS. cleat#4254.
+#
+# examples/java-workflow's Gradle build fetches the TeaVM plugin's own dependencies (teavm-core, teavm-tooling) through the Gradle Plugin
+# Portal, which reaches Maven Central. Measured 2026-11-20: four completed failures of this job in one day, all of them that example and those
+# two artifacts; one log says `Received status code 429 from server: Too Many Requests` from repo.maven.apache.org, three say `Could not find
+# org.teavm:teavm-core:0.10.2` at plugins.gradle.org with no status shown. Nothing in the repository changed between a green run and a red
+# one. Gradle does not retry these, and a cache cannot help (this job is excluded from the develop push, so nothing seeds one).
+#
+# THE SIGNATURE IS NARROW ON PURPOSE. A compile error, a vet failure, a determinism-gate refusal or a missing toolchain must fail on the first
+# attempt, exactly as before: retrying "any failure" would turn this job into one that cannot go red. The signature is a failed FETCH: an HTTP
+# 429 or 5xx status from a repository, or `Could not find <group>:<name>:<version>`. That second form also matches a dependency that really does
+# not exist (a typo in a version), which is retried and then fails after the cap -- the cost is the backoff, not a wrong answer.
+#
+# NO SILENT FLAKES. Every retry prints the lines that matched, so the cause of the first failure is in the log whether or not the build later
+# passes, and an example that needed a retry is listed in the summary even when it is OK. A run that recovered is not the same as a run that
+# never failed, and the job's output must not say they are.
+#
+# BDE_FETCH_RETRIES is the number of retries after the first attempt (0 disables them); BDE_RETRY_SLEEP is the base wait in seconds, DOUBLED
+# per retry and then given jitter (below). Defaults: 3 retries, 30s -- waits of 30, 60 and 120s before jitter, 210s in all and at most 315s
+# with it, per example, inside the job's 15 minute timeout.
+#
+# WHY THE WAIT WAS LENGTHENED, AND WHAT IS NOT KNOWN. cleat#4353, 2026-11-22, one head (a2b1dcab). The `edited` run 44995571470 failed on its
+# attempt 1 (06:59Z) and again on its attempt 2 (08:07Z), 68 minutes apart, each time on all three of this script's own attempts and each time on
+# `Received status code 429 from server: Too Many Requests` for teavm-core and teavm-tooling 0.10.2; its attempt 3 passed (08:27Z). A DIFFERENT run
+# on the same head, the `synchronize` run 44995553068, PASSED at 07:17Z, between the two failures. So each episode ended without help. The record
+# bounds each from both sides and no more: the 30s and 60s waits (90s in all) did not clear it, so it lasted AT LEAST about 1.5 minutes; and nothing
+# fetched between the first one's last failed fetch (07:02Z) and a clean one (07:17Z), or between the second's (08:10Z) and 08:27Z, so it lasted AT
+# MOST about 15 and about 17 minutes. Those are the times to the next observation, not durations. That is n = 2 episodes.
+#
+# WHAT THAT DOES NOT SAY. The waits below total 210s (315s at most, with jitter). Whether that is shorter or longer than either episode is UNKNOWN: both
+# lie between 1.5 minutes and 15 or 17, and so does 210s. No claim is made that this change would have cleared either; it helps if a throttle ends
+# inside the new waits and not if it outlasts them. The RETRY lines print every wait, so the next red run is more evidence. The defence against a
+# long one is the Gradle cache in ci.yml, which a re-run of the same pull request restores after one successful run, and an explained re-run of
+# this one job after a pause.
+#
+# JITTER, because two or more of these jobs start at once on a busy day (every PR, every merge-group entry) and a fixed 30/60/120 would send
+# them back to Maven Central in step: the same shape as scripts/fetch-wasm-tools.sh's backoff_wait (cleat#4347).
+FETCH_RETRIES="${BDE_FETCH_RETRIES:-3}"
+RETRY_SLEEP="${BDE_RETRY_SLEEP:-30}"
+
+# backoff_wait <delay>: sets WAIT_S to <delay> plus a random 0..delay/2 inclusive. A global and not `$(...)`: a command substitution is a
+# subshell and would draw from a copy of $RANDOM's state, so successive calls could repeat. The modulus makes the jitter 0 for a delay of 0,
+# which keeps BDE_RETRY_SLEEP=0 (the self-test) instantaneous.
+backoff_wait() {
+  WAIT_S=$(($1 + RANDOM % ($1 / 2 + 1)))
+}
+TRANSIENT_FETCH='Received status code (429|5[0-9][0-9])|Could not find [^[:space:]]+:[^[:space:]]+:[^[:space:]]+'
+
 examined=0 built=0 failed=0 skipped=0
 declare -a FAILURES=()
+declare -a RETRIED=()
 
 while IFS= read -r readme; do
   dir="$(dirname "$readme")"
@@ -108,11 +162,34 @@ while IFS= read -r readme; do
   out="$(mktemp -d)"
   run="${cmd/cleat build/$CLEAT_BIN build}"
   run="${run/-o \/tmp\/out/-o $out}"
-  if (cd "$workdir" && eval "$run") >/tmp/bde.log 2>&1; then
-    echo "OK    $dir"
+  attempt=1
+  while :; do
+    (cd "$workdir" && eval "$run") >/tmp/bde.log 2>&1 && ok=1 || ok=0
+    if (( ok == 1 )); then break; fi
+    if (( attempt <= FETCH_RETRIES )) && grep -qE "$TRANSIENT_FETCH" /tmp/bde.log; then
+      backoff_wait $((RETRY_SLEEP * (1 << (attempt - 1))))
+      wait_s=$WAIT_S
+      echo "RETRY $dir (attempt $((attempt + 1)) of $((FETCH_RETRIES + 1)), after ${wait_s}s): the build failed fetching a dependency, which is retried. The failure:"
+      grep -E "$TRANSIENT_FETCH" /tmp/bde.log | sed 's/^/      /' | head -4
+      sleep "$wait_s"
+      attempt=$((attempt + 1))
+      continue
+    fi
+    break
+  done
+  if (( ok == 1 )); then
+    if (( attempt > 1 )); then
+      echo "OK    $dir (after $((attempt - 1)) retry(ies): see the RETRY lines above)"
+      RETRIED+=("$dir")
+    else
+      echo "OK    $dir"
+    fi
     built=$((built + 1))
   else
     echo "FAIL  $dir"
+    if (( attempt > 1 )); then
+      echo "      failed after $attempt attempts; the last attempt's log follows (the first failure's cause is in the RETRY lines above)"
+    fi
     echo "      \$ $cmd"
     # The log, not its last eight lines (cleat#3592). Gradle prints the cause
     # ABOVE its own epilogue -- the compiler error, then `* What went wrong:` and
@@ -132,7 +209,11 @@ while IFS= read -r readme; do
 done < <(git ls-files 'examples/*/README.md')
 
 echo
-echo "examples with a documented build: $examined   built: $built   skipped: $skipped   failed: $failed"
+echo "examples with a documented build: $examined   built: $built   skipped: $skipped   failed: $failed   needed a retry: ${#RETRIED[@]}"
+if (( ${#RETRIED[@]} > 0 )); then
+  echo "RETRIED and then built (a transient dependency fetch failed; not a clean run for these):"
+  printf '  %s\n' "${RETRIED[@]}"
+fi
 
 # A run that examined nothing is a broken check, not a clean tree. Ten READMEs
 # document a build today; a scan finding none means the pattern or the path

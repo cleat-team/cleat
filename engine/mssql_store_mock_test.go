@@ -487,6 +487,9 @@ func TestMSSQLLoadWorkflowConfig_NotFound(t *testing.T) {
 	if !strings.Contains(err.Error(), "workflow def not found") {
 		t.Errorf("expected 'workflow def not found', got: %v", err)
 	}
+	if !errors.Is(err, ErrWorkflowDefNotFound) {
+		t.Errorf("the not-found is not ErrWorkflowDefNotFound (cleat#3883): %v", err)
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -523,6 +526,9 @@ func TestMSSQLLoadDAGSpec_NotFound(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "workflow def not found") {
 		t.Errorf("expected 'workflow def not found', got: %v", err)
+	}
+	if !errors.Is(err, ErrWorkflowDefNotFound) {
+		t.Errorf("the not-found is not ErrWorkflowDefNotFound (cleat#3883): %v", err)
 	}
 }
 

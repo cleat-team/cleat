@@ -14,18 +14,18 @@ on:
     # It was silent, too: an untriggered job is absent from the PR's check list
     # rather than pending, so the PR reads as fully green with four fewer checks
     # than it should have. Caught on #432, which changes the AssemblyScript and
-    # Python SDKs and ran neither of their jobs.
+    # Python SDKs and ran neither of their jobs. (The AssemblyScript SDK was removed
+    # by cleat#4023.)
     #
-    # Only python-sdk consumes cmd/cleat; rust, java and assemblyscript test
-    # their own tree alone. GitHub filters paths per workflow, not per job, so
-    # this is the union -- an AS change runs all four. That is the cost of
-    # keeping them in one file, and it is cheaper than the gap was.
+    # Only python-sdk consumes cmd/cleat; rust and java test their own tree
+    # alone. GitHub filters paths per workflow, not per job, so this is the
+    # union -- a Rust change runs all three. That is the cost of keeping them in
+    # one file, and it is cheaper than the gap was.
     paths:
       - "cleat/**"
       - "internal/**"
       - "cmd/**"
       - "crates/**"
-      - "packages/cleat-as/**"
       - "python-sdk/**"
       - "go.mod"
       - "go.sum"
@@ -104,22 +104,3 @@ jobs:
       - name: Test Java SDK
         working-directory: crates/cleat-java
         run: gradle test
-
-  assemblyscript-sdk:
-    name: AssemblyScript SDK Integration
-    # continue-on-error removed 2026-08-07, for the same reason as ci.yml's
-    # AssemblyScript WASM Build: measured on develop, its only substantive step
-    # ("Test AS SDK") reported success. The flag was forgiving a job that had nothing
-    # to forgive.
-    runs-on: ubuntu-latest
-    timeout-minutes: 10  # max 0.5m over 60 successful runs (develop push + pull_request samples), 2026-10-27; cleat#3479
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v7
-        with:
-          node-version: "20"
-      - name: Test AS SDK
-        working-directory: packages/cleat-as
-        run: |
-          npm ci
-          npm test

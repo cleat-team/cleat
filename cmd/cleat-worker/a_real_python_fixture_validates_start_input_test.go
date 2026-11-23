@@ -64,7 +64,7 @@ func toolchainRequired(name string) bool {
 // workflow, or "" if it can.
 func pythonWASMUnavailable() string {
 	if _, err := exec.LookPath("componentize-py"); err != nil {
-		return "componentize-py is not on PATH (pip install componentize-py)"
+		return "componentize-py is not on PATH (pip install componentize-py==0.25.1)"
 	}
 	if _, err := exec.LookPath("python3"); err != nil {
 		return "python3 is not on PATH"

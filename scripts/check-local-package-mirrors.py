@@ -5,13 +5,17 @@ local npm package has drifted from that package's own package.json.
 cleat#2455 / cleat#2506: `examples/widget-store-as/package-lock.json` pinned
 `@cleat/sdk@0.1.0` with `peerDependencies.assemblyscript ^0.27.0` while
 `packages/cleat-as/package.json` had moved to `0.3.2` / `^0.28.19`, and
-`npm ci` refused. Nothing in CI ran `npm ci` there, so nothing noticed.
+`npm ci` refused. Nothing in CI ran `npm ci` there, so nothing noticed. (Both directories were removed
+with the AssemblyScript SDK, cleat#4023. As of 42223c71 no tracked lock carries a `file:` entry -- 0 of 5
+tracked package-lock.json files -- so the guard checks nothing today; it stays so the next one is checked.)
 
 Two guards existed before this one and neither reaches the case above:
 `.github/workflows/plugin-harness-ci.yml`'s "Tests did not rewrite their own
 fixtures" step diffs `tests/plugin-harness/testdata` for files a TEST RUN
 changed -- it only sees drift a job's own steps introduce, in a job that
-never touches `examples/` or `packages/cleat-as` in the first place. And
+never touches `examples/` or `packages/cleat-as` in the first place (both
+since removed with the AssemblyScript SDK, cleat#4023; the mechanism below
+is unchanged and is exercised by `--self-test`'s synthetic trees). And
 nothing else reads a lockfile's `file:` entries at all.
 
 This script needs no npm and no network: it parses package.json/

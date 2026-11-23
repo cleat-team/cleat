@@ -54,6 +54,18 @@ If the workflow needs to suspend (e.g., for a timer or signal), the export retur
 
 The host must check for this value before decoding the normal result. Suspension is not an error — the host will resume the workflow later by calling the export again with the same input and full event history.
 
+**After a suspension the host refuses fresh work (cleat#4285).** A suspended execution is meant to stop, and a guest is told to. A guest that does not (its SDK returned the suspension as an ordinary value, or the guest caught the exception or discarded the error) goes on making calls, and every such call is recorded after the pending await and runs again when the workflow resumes. So once an execution has suspended, any host call that would start fresh work is **refused**: it runs nothing, records nothing, leaves the first suspension in place, and returns the word that call's own decoder already recognises. The word is the call's own:
+
+| call | answers once the execution has suspended |
+|---|---|
+| `cleat_await_child`, `cleat_await_all_children`, `cleat_await_any_child` | `0x4000000000000000` (`1 << 62`), the word they return while a child runs |
+| `cleat_sleep` | its own suspend status |
+| `cleat_list_crons` | an ordinary error result: `the workflow has suspended; this call was not run` |
+| `cleat_release_lock`, `cleat_register_update_handler` | the ordinary error code `1` |
+| every other call that records or runs something (service calls, plugin calls, child workflows, `cleat_side_effect`, locks, signals, updates, `cleat_continue_as_new`, and the rest) | the stop word `1 << 31`, which those calls' decoders already test first |
+
+Reads that start nothing (`cleat_now`, `cleat_random`, `cleat_uuid`, the polls, the JSON helpers, version and id reads, query state) are not refused. A **defer drain is exempt** when the host runs it, and when the guest runs its own and reports it with `cleat_defer_phase` **only if that drain began before the suspension** (a cleanup in progress whose body awaited a child) **or the suspension is a `cleat_continue_as_new`** (the end of the run, whose defers must run). A drain that begins **after** a wait suspension is not exempt: it is an SDK wrapper running the defers because the guest swallowed the suspension, and its calls are refused like any other. A suspended workflow has not exited, so its cleanup is still pending and runs when the workflow ends. Nothing in this changes what a well-behaved guest sees, because it has already returned.
+
 ### Input/Output format
 
 All arguments are JSON-serialized into a single object. The export function deserializes them, calls the workflow logic, and writes the result as JSON into the output buffer.
@@ -64,8 +76,8 @@ object.**
 Stated this way on purpose. There is no "object" at this boundary — it carries a
 length and a byte range — so "return an object" is a per-language notion the ABI
 cannot express, and every SDK that tried to express it invented a different
-answer. A string containing a JSON object is the same rule for Go, Rust, Java,
-Python and AssemblyScript.
+answer. A string containing a JSON object is the same rule for Go, Rust, Java
+and Python.
 
 The consequence for an SDK: the returned string **is** the serialized form, not a
 value awaiting serialization. Re-encoding it produces a JSON string containing
@@ -170,10 +182,10 @@ fills its fields before testing the sentinel.
 | host call | result layout | bit 31 lands in |
 |---|---|---|
 | `cleat_call`, `cleat_call_retry`, `cleat_call_heartbeat`, `plugin_call`, `plugin_call_streaming`, `cleat_wait_for_event` | `responseLen` 40-63, `callErrorCode` 8-39, `errCode` 0-7 | `callErrorCode` |
-| `cleat_child_workflow`, `cleat_child_workflow_with_options`, `cleat_side_effect`, `cleat_fetch`, `cleat_schedule_cron`, `cleat_start_detached` | upper field 32-63, `errCode` 0-31 | `errCode` (top bit) |
+| `cleat_child_workflow`, `cleat_child_workflow_with_options`, `cleat_side_effect`, `cleat_side_effect_recorded`, `cleat_fetch`, `cleat_schedule_cron`, `cleat_start_detached`, `cleat_create_promise`, `cleat_set_scope` | upper field 32-63, `errCode` 0-31 | `errCode` (top bit) |
 | `cleat_await_signals` | `sigNameLen` 48-63, `payloadLen` 32-47, `timedOut` 16-31, `errCode` 0-15 | `timedOut` |
 | `cleat_await_promise` | `resultLen` 32-63, `timedOut` 16-31, `errCode` 0-15 | `timedOut` |
-| `cleat_send`, `cleat_schedule_invoke`, `cleat_signal_workflow`, `cleat_run_detached`, `cleat_complete_update` | `errCode` 0-31 | `errCode` (top bit) |
+| `cleat_send`, `cleat_schedule_invoke`, `cleat_signal_workflow`, `cleat_run_detached`, `cleat_complete_update`, `cleat_delete_cron`, `cleat_continue_as_new`, `cleat_continue_as_new_versioned` | `errCode` 0-31 | `errCode` (top bit) |
 | `cleat_poll_update` | `written` 32-63, `found` bit 8, `errCode` 0-7 | no field |
 | `cleat_acquire_lock` | `acquired` bit 8, `errCode` 0-7 | no field |
 
@@ -601,6 +613,85 @@ and then runs a defer that touches the host is classified `failed` rather than
 `dead_lettered`, and so is deleted by retention rather than retained for an
 operator. See cleat#1155.
 
+#### 2.10b `cleat_interrupt_requested`
+
+Ask the host whether the guest should stop now, so that it can stop **cleanly** rather than be
+killed by a trap.
+
+```
+(func (import "env" "cleat_interrupt_requested")
+  (result i32))
+```
+
+**Return:** `1` when the host is asking the guest to stop, `0` otherwise.
+
+**Why it exists.** A guest that loops for ever is stopped by wasmtime's fuel or epoch trap, at
+whatever instruction it happens to be on. That kills the *instance* mid-borrow: a runtime that
+holds a borrow across the trap never runs its destructor, and the host's subsequent attempt to run
+the workflow's deferred cleanup then traps too, so no defer body runs. A guest that polls this call
+from its own loop can stop through its runtime's own unwinding instead, and the host can then run
+the defers — which is the difference between "the cleanup happened" and "the cleanup was lost".
+
+**Polling frequency and the stop policy.** The host answers `1` only when the budget is nearly
+spent. The two arms have different rules:
+
+- **Epoch arm** (the remaining instance timeout — always armed, and the only arm a default operator
+  has): margin = the smaller of **250 ms**, **a tenth of the budget**, and **half the budget**, but
+  never below **120 ms** (two 50 ms epoch ticks plus a poll gap) unless half the budget is smaller
+  still. The floor exists because the epoch deadline is armed in whole ticks and a reserve under two
+  ticks can be overtaken by the hard trap before any poll sees it.
+- **Fuel arm** (`--wasm-instruction-limit` set): margin = the smaller of **33,554,432 fuel units**
+  (32 × 1024 × 1024, `DefaultWasmtimeInterruptMarginFuel`) and **a tenth of the instruction limit**.
+  There is no floor and no half-cap: fuel is spent in counted increments, so the tick rounding that
+  forces the epoch floor does not apply. Fuel units are wasmtime's own count, not bytes.
+
+**The kill can therefore arrive EARLY** — the workflow is stopped with part of its budget unspent.
+That is up to the epoch margin for a budget above about a second, and **up to HALF the budget** on
+a sub-second one, where the floor is what binds. It is the price of stopping while the guest can
+still clean up.
+
+**There is a cliff below about 200 ms, and it is measured.** At an instance timeout of 100 ms the
+soft kill reached the guest 0 times in 20 runs, at 150 ms 18 of 20, and at 200 ms and 240 ms 20 of
+20 (cleat#3922 review, 2026-11-18). Below that range the hard trap wins the race to a poll, so a
+workflow's cleanup is not reliable — an operator who needs defers to run should leave the instance
+timeout well above 200 ms.
+The worker refuses `--wasm-instance-timeout` above 0 and under 250 ms at startup, `cleatctl
+set-tenant-setting` refuses a tenant's `wasm_instance_timeout_ms` in the same range, and a start
+request whose per-run `wasm_instance_timeout_ms` is in that range is a `400` (cleat#3922). Values
+already stored for a tenant are not rewritten. A direct SQL write, the engine option, context
+deadlines and the epoch tick are not checked.
+
+**It is best-effort, and the host does not promise it will be asked.** The margin is sized from the
+longest gap measured between two consecutive polls, but a single operation that burns more budget
+than the margin — a very large `JSON.parse`, or a loop dominated by native string allocation — can
+still reach the hard trap first. Some runtimes never reach a polling point at all in such a loop
+(measured for one in `packages/cleat-ts/DIVERGENCES.md`). An SDK that relies on deferred cleanup
+should poll often enough that its own loops stay well inside the margin.
+
+**It is answered `0` for the whole of a deferred drain**, so a drain can never be interrupted by
+its own stop bit.
+
+**The epoch deadline can expire up to one tick (50ms) early**, because it is armed in whole
+`epochTickInterval` ticks of 50ms and a deadline of N ticks expires between 50*(N-1) and 50*N ms
+after it is set. The effective epoch margin is therefore the margin minus up to 50ms, and a
+workflow with a budget small enough that the margin falls under 100ms is stopped up to a tick
+before the reserve.
+
+**The stop gives the guest back a little budget before it unwinds.** A host-call bracket re-arms the
+epoch deadline from whatever the guest has left, and at the reserve that is a single 50ms tick whose
+expiry is 0-50ms away; an unwind that lost that race would be killed mid-borrow and its cleanup lost
+again. So the first `1` is accompanied by 100ms of granted budget, ONCE per execution, and the
+projected worst case a runaway workflow can occupy a worker becomes the instance timeout, plus that
+100ms, plus the defer budget.
+
+**Replay and determinism.** The answer depends on how much budget is left, which depends on machine
+speed, so it is **not deterministic** and an SDK must not make a *durable* decision on it — no event
+may be recorded conditionally on this value. It is for stopping, and stopping happens after the
+durable history it belongs to has already been written.
+
+**SDK obligation.** Poll it from any loop that can run long. An SDK that does not import it is
+unaffected: the host answers nothing, and the hard trap is the only stop, exactly as before.
+
 #### 2.11 `cleat_poll_cancellation`
 
 Check if workflow cancellation has been requested.
@@ -664,7 +755,7 @@ Wait for one or more external signals, with a timeout.
 |---|---|---|
 | `names_ptr` | `i32` | JSON array of signal names, e.g. `["payment_received","order_cancelled"]` |
 | `names_len` | `i32` | JSON array length |
-| `timeout_ms` | `i64` | Timeout in milliseconds |
+| `timeout_ms` | `i64` | Timeout in milliseconds. Zero or negative means do not wait: an already-waiting signal is returned and otherwise `timedOut` is reported at once (cleat#1331). That outcome is recorded as one `await_signals` event and a replay returns it from the record (cleat#4153), so a loop of such polls records one event per iteration: prefer a positive timeout to a zero-timeout poll loop. |
 | `sig_name_ptr` | `i32` | Output buffer for received signal name |
 | `sig_name_max_len` | `i32` | Output buffer capacity (1048576) |
 | `payload_ptr` | `i32` | Output buffer for signal payload |
@@ -716,6 +807,30 @@ Send a fire-and-forget signal to another workflow.
 |---|---|
 | 0-31 | `errCode` — 0 = success |
 
+**Return values.** Every non-zero value is a failure and every SDK reads it as one; the named values below are the ones the engine
+returns. The high 32 bits of a named value are all ones (the same convention as `errBadParam`), so a value is `0xFFFFFFFF_0000000N`.
+
+| `errCode` | Meaning | Retry? |
+|---|---|---|
+| 0 | The signal was handed to the signal store. | n/a |
+| 2 | Signal authorization refused the target (`requireSignalAuth`). | No |
+| 3 | The signal store returned an error: nothing was delivered. | Yes. Nothing was delivered, and a later attempt may succeed. |
+| 4 | The target does not exist **or belongs to another tenant**. | No. The engine reports one outcome for both, on purpose (cleat#2218, cleat#2227): a guest cannot tell which, so it cannot enumerate other tenants' run ids. |
+
+Before cleat#4102 the call returned 0 whatever the store said, so codes 3 and 4 are new to a guest and a workflow that ignored the
+result keeps running, but the call now fails where it used to report success. **v0.5.0 behaves the old way.** A guest that must keep
+the old behaviour has to catch the failure.
+
+**Delivery is at-least-once.** The engine delivers the signal first and records the outcome after. A crash between the two replays the
+call, which delivers again: the target can receive the same signal twice. The other order loses the signal on a crash with the event
+saying it was sent, and that is the defect cleat#4102 fixed. Effectively-once delivery is not built. The stores already have an idempotent delivery path (`DeliverSignalIdempotent`, cleat#1121, which writes the key and the delivery in one transaction), used today only by the HTTP signal endpoint; calling it from this host call with a key derived from the sender run and step would absorb the duplicate, and needs no new index.
+
+**The outcome is recorded and replayed.** The event is a `signal_received` carrying `Service = "signal"`, `Op = "send"` and the outcome in
+`Response` (empty for a delivered signal), which is also what tells a send from the delivery of a signal the workflow awaits. Replay
+returns the recorded outcome without delivering again or checking authorization again, so a guest that handled a failure sees the same
+failure on replay. The outcome is inside the event checksum and survives compaction. A send recorded before cleat#4102 has no `Op` and
+replays as the success it was reported as.
+
 ### Workflow continuation and children
 
 #### 2.17 `cleat_continue_as_new`
@@ -738,6 +853,8 @@ Start a new workflow run with fresh input (history compaction).
 | Bits | Meaning |
 |---|---|
 | 0-31 | `errCode` — 0 = success |
+
+The stop sentinel (bit 31) is returned in a defer segment, where the workflow's body must not continue as new (cleat#4159); check it first, as for every other call. Read as an error code it is a failure, and a guest that ignores it goes on into its own defer drain, where the cleanup's call is refused and the defer table consumed.
 
 After this call, the workflow should return the suspension sentinel.
 
@@ -762,6 +879,8 @@ Start a new workflow run with fresh input and a new version (history compaction 
 | Bits | Meaning |
 |---|---|
 | 0-31 | `errCode` — 0 = success |
+
+The stop sentinel (bit 31) is returned in a defer segment, where the workflow's body must not continue as new (cleat#4159); check it first, as for every other call. Read as an error code it is a failure, and a guest that ignores it goes on into its own defer drain, where the cleanup's call is refused and the defer table consumed.
 
 After this call, the workflow should return the suspension sentinel.
 
@@ -844,7 +963,11 @@ Wait for a child workflow to complete.
 | 0-31 | `errCode` |
 | 32-63 | `resultLen` — bytes written to result buffer |
 
-If the child is not complete, the workflow should suspend.
+If the child is not complete, the workflow must suspend.
+
+**Suspension word.** While the child has not finished, the call returns exactly `0x4000000000000000` (`1 << 62`), the same word the workflow export returns to suspend (see *Suspension sentinel*), **not** the stop word `1 << 31` that a refused call returns (see the stop-bit note under `cleat_call`). The two are different bits for a reason: bit 62 is a 1 GiB `resultLen` in this layout, so a decoder that reads the fields before testing the word hands the guest a 1 GiB result. Test `result == 1 << 62` (or mask bit 62) **before** decoding anything else. The same word is returned by `cleat_await_all_children` (§2.23) and `cleat_await_any_child` (§2.53), and the host records the await as an empty `await_*` event and sets the run's suspension before it returns it.
+
+**The guest must stop.** Receiving the word, a guest must unwind and return the suspension from its export. A guest that carries on, because its SDK returned the suspension as an ordinary value or the guest caught the exception or discarded the error, makes calls the host records AFTER the pending await, and before 0.6.0 those calls ran again on the next resume (cleat#4285). That is an exactly-once violation in the guest, not a property of the call. From 0.6.0 the host refuses such a call when it is made, and a history already written that way is refused when it replays: the child await finds a call the body recorded after its pending record and answers a replay divergence that says what to do (terminate or reset the workflow). A defer drain's own records after a pending await are not affected. `scripts/find-histories-with-a-call-after-a-pending-await.sql` lists the in-flight workflows on PostgreSQL that will hit it.
 
 #### 2.23 `cleat_await_all_children`
 
@@ -869,6 +992,8 @@ Batch await for multiple child workflows. Returns a JSON array of child results.
 |---|---|
 | 0-7 | `errCode` |
 | 32-63 | `resultLen` — bytes written to results buffer |
+
+**Suspension word:** while ANY child in the list is still running, the call returns `1 << 62`, exactly as `cleat_await_child` does (§2.22), and the host records the await empty. The same obligations hold: test the word before decoding, and stop. The request (the JSON list of run IDs) is compared as TEXT on replay: the same IDs in another order are a different request.
 
 #### 2.24 `cleat_run_detached`
 
@@ -1122,7 +1247,7 @@ Wait for a promise to be resolved by an external caller. Blocks until resolved o
 |---|---|---|
 | `promise_id_ptr` | `i32` | Promise ID pointer |
 | `promise_id_len` | `i32` | Promise ID length |
-| `timeout_ms` | `i64` | Timeout in milliseconds |
+| `timeout_ms` | `i64` | Timeout in milliseconds. **Zero or negative means do not wait** (cleat#4144): a promise that is already settled is reported, and a pending one returns `timedOut` at once. It never suspends the run. The outcome is RECORDED as one `await_promise` event carrying the timeout, and a replay returns the timeout from that record without asking the store (cleat#4153), as `cleat_await_signals` now does. A loop of these records one event per iteration, so prefer a positive timeout to a zero-timeout poll loop. |
 | `result_out_ptr` | `i32` | Output buffer for result |
 | `result_out_max` | `i32` | Output buffer capacity (1048576) |
 
@@ -1306,7 +1431,9 @@ Release a previously acquired distributed lock.
 
 #### 2.43 `cleat_side_effect`
 
-Record a non-deterministic computation result. On first execution, the result is stored in event history; on replay, the cached result is returned.
+Record a non-deterministic computation result. On first execution, the result is stored in event history; on replay, **the recorded result is returned, whatever the guest passed** (cleat#4113: a side effect freezes a value). Before cleat#4113 a replay compared the two and failed the run when they differed, which made every value that is not reproducible (a uuid, a clock read, an API answer) fail its first replay.
+
+A guest that wants its function not to run at all on replay asks [`cleat_side_effect_recorded`](#243a-cleat_side_effect_recorded) first.
 
 ```
 (func (import "env" "cleat_side_effect")
@@ -1327,6 +1454,33 @@ Record a non-deterministic computation result. On first execution, the result is
 |---|---|
 | 0-31 | `errCode` — 0 = success |
 | 32-63 | `outputLen` — bytes written to output buffer |
+
+#### 2.43a `cleat_side_effect_recorded`
+
+Ask whether the history already holds the value of the side effect at this step (cleat#4113). **Additive**: no existing import changes, so a component built before it keeps running, and it now gets the recorded value on replay from `cleat_side_effect` instead of a failure.
+
+```
+(func (import "env" "cleat_side_effect_recorded")
+  (param i32 i32)
+  (result i64))
+```
+
+| Param | Type | Description |
+|---|---|---|
+| `out_ptr` | `i32` | Output buffer for the recorded value |
+| `out_max_len` | `i32` | Output buffer capacity (1048576) |
+
+**Return packing** (simple layout): the low byte is the status, bits 32-63 the number of bytes written.
+
+| Status (bits 0-7) | Meaning |
+|---|---|
+| `0` | A value is recorded: it is in the output buffer, the step is consumed, and the guest must **not** run its function or call `cleat_side_effect`. |
+| `1` | An error with its message in the buffer: the next record is not a `side_effect` (a replay divergence). The step is **not** consumed. |
+| `2` | Nothing is recorded (a fresh run, or a replay past the end of the history). Nothing changes: the guest computes the value and calls `cleat_side_effect`, which records it. |
+
+The stop sentinel (bit 31) is returned by a lookup that would be **new work** in a workflow the host has stopped: a fresh lookup, and the lookup at the replay frontier of a defer segment (a segment over a run with history starts in replay, so its body's first new side effect arrives there; cleat#4143). A lookup that finds a recorded value is answered, because reading history is not new work. The guest's function never runs for a value that could not be recorded; check it first, as for every other call. The function the guest runs between the two calls must make no host call: a host call consumes a step, and the `cleat_side_effect` that follows would then record at the wrong one.
+
+An SDK implements a side effect as `recorded = lookup(); if recorded: return it; v = fn(); return side_effect(v)`. Measured on a real worker, an SDK that does this runs `fn` exactly once across a first run and its replays.
 
 ### Workflow identity
 
@@ -1692,6 +1846,8 @@ Companion to `cleat_await_all_children` (§2.23), which waits for all of them.
 `resultLen`. Implemented in `engine/children.go`
 (`(*execSession).AwaitAnyChild`).
 
+**Suspension word:** while NO listed child has finished, the call returns `1 << 62`, exactly as `cleat_await_child` does (§2.22), and the host records the await empty. The same obligations hold: test the word before decoding, and stop.
+
 #### 2.54 `cleat_poll_child`
 
 Non-blocking check for whether a single child workflow has completed, without
@@ -1772,9 +1928,13 @@ List the calling tenant's registered cron schedules as a JSON array.
 | `out_ptr` | `i32` | Output buffer for the JSON array |
 | `out_max_len` | `i32` | Output buffer capacity |
 
-**Return packing:** `errCode` / bytes written, in the same shape as
-`cleat_call`. Implemented in `engine/schedules.go`
-(`(*execSession).ListCrons`).
+**Return packing:** the simple layout: `errCode` 0-31 and `resultLen` 32-63 (bytes
+written).
+
+This said "in the same shape as `cleat_call`" until cleat#4297, which was wrong: that is the
+other layout. The engine packs it with `packSimpleResult`, and the Rust and Java guests
+decode it with `decode_simple_result` and `decodeSimpleErrCode` / `decodeSimpleExtra`.
+Implemented in `engine/schedules.go` (`(*execSession).ListCrons`).
 
 #### 2.58 `cleat_poll_work` (internal — Go `wasip1` dispatch protocol)
 
@@ -1828,8 +1988,8 @@ inputOffset  = scratchBase
 outputOffset = scratchBase + OutBufSize
 ```
 
-The 10 MiB floor exists because some SDKs (Java/TeaVM, AssemblyScript) hardcode that
-convention and break if the region moves below it. A module whose heap already exceeds
+The 10 MiB floor exists because the Java/TeaVM SDK hardcodes that
+convention and breaks if the region moves below it. A module whose heap already exceeds
 10 MiB gets a correspondingly higher base.
 
 | Offset | Size | Use |
@@ -1884,6 +2044,10 @@ The Rust implementation at `examples/rust-workflow/src/` serves as a reference f
 
 | Version | Date | Changes |
 |---|---|---|
+| — | 2026-11-19 | **`cleat_signal_workflow` now reports a refused delivery** (cleat#4102). The signal store's error used to be logged and dropped and the call returned 0. It now returns `errCode` 3 (delivery failed, retryable) or 4 (target not found, terminal, identical for a foreign and a nonexistent target) in the existing result word, delivers BEFORE recording, and records the outcome so replay returns it; the authorization refusal (`errCode` 2) is recorded the same way. Delivery is at-least-once. No signature changes. |
+| — | 2026-11-19 | **`cleat_await_promise`: a `timeout_ms` of zero or less now means do not wait** (cleat#4144). It used to suspend the run with a deadline of now, so every wake suspended again (the cleat#1331 loop). An already-settled promise is still returned; a pending one reports `timedOut` at once. The outcome is recorded as one event and a replay returns it from the record, never from a fresh look at the store; the same now holds for a `cleat_await_signals` of zero or less, which used to record nothing and, on replay, ran every durable call recorded after the poll a second time (cleat#4153; both defects are in v0.5.0). No signature change. |
+| — | 2026-11-18 | **`cleat_delete_cron` now returns the stop sentinel** (cleat#4083). A defer segment's workflow body, past recorded history, deleted a schedule from a real store; `DeleteCron` now consults `stopBeforeNewWork` like `ScheduleCron`. Its layout is `errCode` only, so bit 31 is the top bit of `errCode` and a guest that decodes first reads a refused delete as an error code, or, in a one-byte decoder, as success. §2.56 is unchanged. Added to the table above; re-derived with the query below, which differed from the table by exactly this one call. |
+| — | 2026-11-18 | **`cleat_create_promise` and `cleat_set_scope` now return the stop sentinel** (cleat#4091). A defer segment's workflow body, past recorded history, wrote a promise row and took a 24-hour scope key on a real store; both now consult `stopBeforeNewWork`. Both pack `packSimpleResult` (upper field 32-63, `errCode` 0-31), so they join the second row of the table above and no layout is added. §2.34 and §2.38 are unchanged. Re-derived with the query below, which differed from the table by exactly these two calls. |
 | — | 2026-10-26 | **`cleat_await_promise` joins the stop-sentinel table in §2 (cleat#3383).** A fresh await that has to wait now returns the sentinel instead of `timedOut = 1` with `errCode = 0`, which is byte-identical to a genuine timeout and which no SDK's `await_promise` binding distinguished from one: the guest took its timeout branch and made a durable call before the run suspended. The word is unchanged for every other case, including a deadline that has really passed, so an SDK that has not added the stop check reads a suspend as it always did. The three suspend sites are the first await, a wake on an await recorded with no timeout, and an early wake; the deadline-passed return is the one genuine timeout and stays. Same shape as the `cleat_await_signals` change in cleat#3378. |
 | — | 2026-09-11 | **Added `cleat_start_detached`** (§2.24a), which is `cleat_run_detached` with the run id written back — `engine/children.go` already computed it and discarded it, leaving a detached run unaddressable from the guest that started it (cleat#1154). **`cleat_run_detached` is unchanged and both stay registered**, because a host call's arity is part of its import type: widening the existing one is a hard link error that stops every already-deployed binary instantiating, measured for `cleat_create_promise` in IMPROVEMENT-PLAN §3.55. Same shape as `cleat_poll_update`/`cleat_complete_update` in #868. Documented count 52 → **54 exports total**. Both calls share one host body, so a history written by either replays against the other, and on replay the id comes from the recorded `run_detached` event rather than a fresh start. The stop-sentinel table in §2 goes 18 → **19**: `StartDetached` reaches `callSuspendSentinel` only through the shared body, so the transitive closure in that section's query is what finds it — a one-level scan would miss it exactly as it missed both child-workflow calls. Bound in Go, Rust (`start_detached`), Java (`startDetached`) and AssemblyScript (`startDetached`); **not Python**, because a string return cannot use the `-> u64` WIT shape `durable-run-detached` has and an out-pointer does not survive component dispatch, which writes into a host buffer — recorded in `sdkUnreachedBaseline`. |
 | — | 2026-09-07 | **Corrected the stop-sentinel table in §2, which was wrong in both directions.** It named `cleat_plugin_call` and `cleat_plugin_call_streaming` — neither is a WASM import name. The imports are `plugin_call` and `plugin_call_streaming`, unprefixed, as §2.49 and §2.50 have always said; the `cleat_`-prefixed forms are the *Rust* function names in `crates/cleat-sdk/src/host_calls.rs`, which carry `#[link_name = "plugin_call"]`. A binding written from that table alone fails to instantiate. This is the prefix assumption CLAUDE.md §Build warns about, reaching a document whose own headings had it right. And the table was incomplete: **18** host calls return the sentinel across **six** result layouts, not the 7 across 4 that were listed. The eleven missing were `cleat_call_heartbeat`, `cleat_send`, `cleat_schedule_invoke`, `cleat_run_detached`, `cleat_poll_update`, `cleat_complete_update`, `cleat_side_effect`, `cleat_fetch`, `cleat_acquire_lock`, `cleat_schedule_cron` and `cleat_signal_workflow` — and bit 31 falls inside a live field for all but two of the eighteen, so the "check the sentinel first" ordering requirement applied to sixteen calls while being stated for one. Six layouts independently matches `engine/memory.go`, which states the free window over "all six layouts that can start fresh work" with `packSleepResult` as the seventh. §2 now carries the query that regenerates the list, with a negative control (`cleat_sleep`) and a known-positive (deleting the sentinel from `DurableCallWithHeartbeat` must drop 18 to 17); the first draft of that query read one level of function body and returned **16**, silently missing both child-workflow calls, whose sentinel is reached only through `childWorkflowWithVersion`. Also retired the note claiming seven entries describe removed host calls — true when written, false since #767 and #582, and cited by a `grep -c` that counts retractions. |
@@ -1892,6 +2056,7 @@ The Rust implementation at `examples/rust-workflow/src/` serves as a reference f
 | — | 2026-08-09 | Documentation-only: added §2.53-2.59 for seven host functions (`cleat_await_any_child`, `cleat_poll_child`, `cleat_schedule_cron`, `cleat_delete_cron`, `cleat_list_crons`, `cleat_poll_work`, `cleat_complete`) that were registered in `engine/imports.go` and the wasmtime backend with no ABI entry at all. Updated documentation count from 52 to 59. As with the version-number note at the top of this file: no `CurrentABIVersion` bump, because nothing about the wire contract changed -- only what this document said about it. |
 | 5 | 2026-05-15 | Added Section 6: Cross-Language Determinism specification covering IEEE 754 floats, map iteration order, JSON canonicalization, GC timing, and RNG. Added cross-language replay guarantee. |
 | 4 | 2026-05-13 | Added `cleat_json_parse` (2.51) and `cleat_json_stringify` (2.52) host functions for JSON validation and normalization via the host runtime. Bumped ABI_VERSION to 4. |
+| — | 2026-11-19 | **Added `cleat_side_effect_recorded`** (§2.43a) and changed `cleat_side_effect` on replay to return the recorded value instead of failing when the guest computed a different one (cleat#4113, owner decision: a side effect freezes a value). Additive: no existing import changes. |
 | 3 | 2026-05-09 | Expanded from 22 to 50 documented host functions. Added all missing imports: `cleat_continue_as_new_versioned`, `cleat_child_workflow_with_options`, `cleat_child_workflow_in_schema`, `cleat_send_signal_and_wait`, `cleat_reply_to_signal`, `cleat_signal_workflow`, `cleat_set_scope`, `cleat_get_scope`, `cleat_uuid`, `cleat_acquire_lock`, `cleat_release_lock`, `cleat_side_effect`, `cleat_workflow_id`, `cleat_run_id`, `cleat_resolve_promise`, `cleat_reject_promise`, `cleat_send`, `cleat_schedule_invoke`, `cleat_register_query_handler`, `cleat_run_detached`, `cleat_set_state`, `cleat_get_state`, `cleat_delete_state`, `cleat_incr_state`, `cleat_has_state`, `cleat_list_state`, `cleat_fetch`, `plugin_call_streaming`. Reorganized into logical groups. Updated documentation count from 18 to 50. |
 | 2 | 2026-05-06 | Added `cleat_call_retry`, `cleat_call_heartbeat`, `cleat_await_all_children`, and `plugin_call` host functions. Updated documentation count. |
 | 1 | 2026-05-05 | Initial ABI specification. 15 host function imports, export convention, memory layout. |
@@ -1930,7 +2095,6 @@ When workflow behavior depends on map iteration order (e.g., iterating over a `H
 | Go | `map[key]value` + `sort.Strings(keys)` before iteration | Raw `for k, v := range m` iteration |
 | Rust | `BTreeMap<K, V>` (default for `serde_json::Map`) | `HashMap<K, V>` when used with non-default hasher or when order-dependent logic is applied |
 | Python | `dict` + `sorted(d.keys())` or `sort_keys=True` | Raw `for k in d` (insertion-order in 3.7+ but not guaranteed across implementations) |
-| AssemblyScript | Sort keys before iteration | Raw `Map.forEach` / `for (k in map)` |
 
 **When this matters**: Map iteration order only matters when the workflow logic depends on it. If a map is only used for lookups (get by key), iteration order is irrelevant. If iteration order affects which host call is made next or what JSON is produced, use sorted iteration.
 
@@ -1992,7 +2156,6 @@ All random values used in workflows MUST come from `cleat_random` (ABI 2.6). The
 - Go: `math/rand`, `crypto/rand`
 - Rust: `rand::random()`, `rand::thread_rng()`
 - Python: `random.random()`, `secrets.*`
-- AssemblyScript: `Math.random()`
 
 These are non-deterministic and will cause replay divergence errors.
 
@@ -2011,29 +2174,29 @@ Use `cleat_uuid` (ABI 2.40) for deterministic UUID generation from a seed.
 
 ### 6.6 SDK Compliance Matrix
 
-| Requirement | Go SDK | Rust SDK | Python SDK | AssemblyScript SDK |
-|---|---|---|---|---|
-| IEEE 754 floats | ✅ Go float64 | ✅ f64 | ✅ float | ✅ f64 |
-| NaN canonicalization | ⚠️ via host json_stringify | ⚠️ via host json_stringify (added in cleat-207) | ⚠️ verify | ⚠️ verify |
-| Map iteration order | ⚠️ manual sort required | ✅ BTreeMap default for serde_json::Map | ⚠️ sort_keys=True required | ⚠️ manual sort required |
-| JSON canonical output | ✅ encoding/json | ⚠️ via host json_stringify (added in cleat-207) | ⚠️ verify componentize-py | ✅ via host json_stringify |
-| GC-timing independence | ✅ manual defer | ✅ manual defer | ✅ manual defer | ✅ manual defer |
-| RNG via cleat_random | ✅ | ✅ | ✅ | ✅ |
-| cleat_json_parse (2.51) | ✅ host import | ✅ added in cleat-207 | ✅ via WIT bindings | ✅ host import |
-| cleat_json_stringify (2.52) | ✅ host import | ✅ added in cleat-207 | ✅ via WIT bindings | ✅ host import |
+| Requirement | Go SDK | Rust SDK | Python SDK |
+|---|---|---|---|
+| IEEE 754 floats | ✅ Go float64 | ✅ f64 | ✅ float |
+| NaN canonicalization | ⚠️ via host json_stringify | ⚠️ via host json_stringify (added in cleat-207) | ⚠️ verify |
+| Map iteration order | ⚠️ manual sort required | ✅ BTreeMap default for serde_json::Map | ⚠️ sort_keys=True required |
+| JSON canonical output | ✅ encoding/json | ⚠️ via host json_stringify (added in cleat-207) | ⚠️ verify componentize-py |
+| GC-timing independence | ✅ manual defer | ✅ manual defer | ✅ manual defer |
+| RNG via cleat_random | ✅ | ✅ | ✅ |
+| cleat_json_parse (2.51) | ✅ host import | ✅ added in cleat-207 | ✅ via WIT bindings |
+| cleat_json_stringify (2.52) | ✅ host import | ✅ added in cleat-207 | ✅ via WIT bindings |
 
 ✅ = compliant by default or already implemented  
 ⚠️ = requires explicit use of the recommended pattern (manual or verified)
 
 ### 6.7 Cross-Language Replay Guarantee
 
-When a workflow is compiled from two different languages (e.g., Go and Rust) using SDKs that comply with this section, and both implementations make the same sequence of host calls with the same service/operation pairs:
+When a workflow is compiled from two different languages (e.g., Go and Rust) using SDKs that comply with this section, and both implementations make the same sequence of host calls with the same service/operation pairs and the same requests (as JSON values; see below):
 
 1. **Execution**: Both produce the same event history (same events in same order)
 2. **Replay**: History from language A can be replayed against WASM from language B
 3. **Output**: Both produce bit-identical result JSON
 
-The cleat engine matches replay events by step index, checking `EventType`, `Service`, and `Op` for equality. Request JSON is not compared during replay matching.
+The cleat engine matches replay events by step index, checking `EventType`, `Service`, and `Op` for equality, and then the request (cleat#4424): a call's request, a plugin call's input, a send's request and a fetch's body. A request is compared as the same bytes or **the same JSON value**: key order, insignificant whitespace and the way a number is written (`1`, `1.0`, `1e0`) are not significant, because two SDKs do not serialise one request alike (the Go SDK's struct fields come out in declaration order, the Rust SDK's `serde_json` sorts every level), and a request that differs in any value diverges. Numbers are compared by exact value, so two integers beyond 2^53 are not confused. A request that is not JSON, has anything after its JSON value, or repeats a key in one object (which parser wins is not defined) is compared as bytes. Request bodies are never printed: a divergence names each by its size and a short hash.
 
 **Guarantee scope**: This guarantee applies to workflows that (a) use only the host functions listed in this ABI, (b) avoid language-specific non-deterministic features (raw map iteration, GC-based cleanup, language-native RNG), and (c) produce results serializable through the host's JSON normalization.
 

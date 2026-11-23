@@ -2100,6 +2100,23 @@ func TestClosure_SideEffect(t *testing.T) {
 	s.expectCall(t, "SideEffect")
 }
 
+func TestClosure_SideEffectRecorded(t *testing.T) {
+	// cleat_side_effect_recorded: (respPtr,respMaxLen) -> i64 (cleat#4113)
+	ft := wasmFunctype([]byte{wasmValI32, wasmValI32}, []byte{wasmValI64})
+	s := newClosureSetup(t, []struct {
+		name string
+		ft   []byte
+	}{{"cleat_side_effect_recorded", ft}}, func(b *wasmtimeBackend, l *wasmtime.Linker) error {
+		return b.registerCleatSideEffectRecorded(l)
+	})
+
+	got := s.call(t, "test_cleat_side_effect_recorded", i32(900), i32(256))
+	if got != 0 {
+		t.Errorf("got %v, want 0", got)
+	}
+	s.expectCall(t, "SideEffectRecorded")
+}
+
 func TestClosure_Fetch(t *testing.T) {
 	// cleat_fetch: (methodPtr,methodLen, urlPtr,urlLen, headersPtr,headersLen, bodyPtr,bodyLen, respPtr,respMaxLen) -> i64
 	ft := wasmFunctype([]byte{wasmValI32, wasmValI32, wasmValI32, wasmValI32, wasmValI32, wasmValI32, wasmValI32, wasmValI32, wasmValI32, wasmValI32}, []byte{wasmValI64})

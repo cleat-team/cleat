@@ -1,0 +1,14 @@
+# A node drain evicts the workers one at a time instead of all at once (cleat#4439); the same default as
+# charts/cleat/values.yaml's podDisruptionBudget. It limits VOLUNTARY disruptions only (a drain, a node-pool
+# upgrade): a node that dies takes its pods regardless. With a single replica, maxUnavailable 1 allows the drain.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: cleat-worker
+  labels:
+    app: cleat-worker
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app: cleat-worker

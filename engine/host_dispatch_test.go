@@ -343,7 +343,7 @@ func TestSetScopeReplayPastEnd(t *testing.T) {
 
 	result := s.SetScope(context.Background(), nil, "account", "acct-123", 0, 0)
 
-	// Past end: exitReplay then freshSetScope.
+	// Past end: the step leaves replay and runs fresh.
 	if s.isReplay {
 		t.Error("expected isReplay=false after exitReplay")
 	}
@@ -435,7 +435,7 @@ func TestAcquireLockReplayDivergence(t *testing.T) {
 	}}
 	result := s.AcquireLock(context.Background(), nil, "my-lock", 5000)
 
-	// replayAcquireLock returns error directly without calling exitReplay.
+	// The dispatcher reports the divergence without calling exitReplay.
 	if !s.isReplay {
 		t.Error("expected isReplay to remain true (mismatch does not call exitReplay)")
 	}
@@ -456,7 +456,7 @@ func TestAcquireLockReplayPastEnd(t *testing.T) {
 	if s.isReplay {
 		t.Error("expected isReplay=false after exitReplay")
 	}
-	// Past-end: exitReplay, then freshAcquireLock with nil store → acquired=false
+	// Past-end: exitReplay, then the step's fresh half with a nil store → acquired=false
 	// but event is recorded.
 	if len(s.history) != 1 {
 		t.Fatalf("expected 1 history entry, got %d", len(s.history))

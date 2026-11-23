@@ -736,14 +736,31 @@ type UpdateRequestInfo struct {
 	WorkflowID string `json:"workflow_id"`
 	// RequestID identifies this request. UpdateName does NOT: cleat#1416 made a
 	// name reusable, so a workflow can hold several requests that share one.
-	RequestID  string    `json:"request_id"`
-	UpdateName string    `json:"update_name"`
-	Payload    string    `json:"payload"`
-	PromiseID  string    `json:"promise_id,omitempty"`
-	Status     string    `json:"status"`
-	Result     string    `json:"result,omitempty"`
-	ErrorMsg   string    `json:"error_msg,omitempty"`
-	CreatedAt  time.Time `json:"created_at"`
+	RequestID  string `json:"request_id"`
+	UpdateName string `json:"update_name"`
+
+	// Payload is the CALLER'S BYTES, handed to the update handler as sent. A
+	// value that is not JSON arrives as it was passed (cleat#3903), which is why
+	// the readers run it through decodeJSONPayload: that unwraps a JSON string
+	// and returns its content verbatim, rather than re-serializing it.
+	Payload string `json:"payload"`
+
+	PromiseID string `json:"promise_id,omitempty"`
+	Status    string `json:"status"`
+
+	// Result is JSON TEXT handed onward, NOT the caller's bytes: it is
+	// compacted (canonical spacing) and a string result KEEPS its quotes, so a
+	// caller can always unmarshal it. The readers therefore compact
+	// (compactJSONString) rather than unwrap -- the same convention GetPromise
+	// uses (cleat#3807, cleat#3929).
+	//
+	// DO NOT "make Payload and Result consistent". They sit side by side and
+	// their contracts differ: unwrapping a result would turn `"yes"` into
+	// `yes`, which is not JSON. See Payload's comment for the other half.
+	Result string `json:"result,omitempty"`
+
+	ErrorMsg  string    `json:"error_msg,omitempty"`
+	CreatedAt time.Time `json:"created_at"`
 }
 
 // WorkflowMemoryStats holds distribution statistics for per-definition memory usage.

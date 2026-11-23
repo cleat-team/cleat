@@ -177,6 +177,11 @@ func runSetTenantSetting(ctx context.Context, db *sql.DB, args []string) {
 			osExit(1)
 			return
 		}
+		if errors.Is(err, engine.ErrWasmInstanceTimeoutBelowFloor) {
+			fmt.Fprintf(os.Stderr, "refused: %v\n\nNothing was written.\n", err)
+			osExit(1)
+			return
+		}
 		fmt.Fprintf(os.Stderr, "writing the settings: %v\n", err)
 		osExit(1)
 		return
@@ -213,11 +218,16 @@ Writes one tenant's overrides in tenant_settings. Each value is a CEILING the
 tenant may lower and can never raise: the operator's flag is the maximum, and a
 larger value here is clamped to it at execution time rather than rejected.
 
-  --wasm-instance-timeout-ms N    guest EXECUTION time ceiling
+  --wasm-instance-timeout-ms N    guest EXECUTION time ceiling (N must be 0, or at least 250)
   --wasm-wall-clock-ceiling-ms N  WALL CLOCK ceiling for one invocation
   --host-retry-budget-ms N        worst-case host retry backoff ceiling
   --max-workflow-duration-ms N    wall-clock ceiling for one execution segment
   --show                          print the current settings and exit
+
+A --wasm-instance-timeout-ms above 0 and under 250 is REFUSED: below about 200ms the
+hard trap beats the soft kill to a poll, so a killed workflow's defers do not
+reliably run (ABI.md, "There is a cliff below about 200 ms"). A value the tenant
+already has under 250 is left alone and does not block changing its other settings.
 
 Omitting a flag leaves that value unchanged. Passing 0 CLEARS it, which means
 "use the operator's flag" -- so "leave alone" and "clear" stay distinguishable.

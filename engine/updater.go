@@ -72,72 +72,97 @@ type updateDelivery struct {
 // flags in the low 32, with 0x0100 meaning found. A guest that gets found=false
 // must not call DurableCompleteUpdate.
 func (s *execSession) DurablePollUpdate(ctx context.Context, m api.Module, outPtr, outMaxLen uint32) int64 {
-	if s.isReplay {
-		if s.stepCount < len(s.history) {
-			rec := s.history[s.stepCount]
-			if rec.EventType == EventTypeUpdateReceived {
-				if !s.advanceReplayStep(ctx, &rec) {
-					return 0
-				}
-				return s.writeUpdateDelivery(ctx, m, outPtr, outMaxLen, updateDelivery{
-					Name:      rec.UpdateHandlerName,
-					Payload:   rec.UpdatePayload,
-					RequestID: rec.UpdateRequestID,
-				})
-			}
-			// Anything else at this step means no update was delivered here on
-			// the original run. Report nothing found WITHOUT advancing and
-			// WITHOUT leaving replay: the guest polls at every suspension, so
-			// most polls legitimately find nothing, and treating that as a
-			// history mismatch would end replay at the first one.
+	return s.step(ctx, m, &pollUpdateStep, stepArgs{outPtr: outPtr, outMaxLen: outMaxLen})
+}
+
+// pollUpdateStep is DurablePollUpdate as a step (cleat#4152, W1), and it carries three things the old code did that a naive move would change:
+//
+//   - A record that is ANOTHER call's at this step means no update was delivered here on the original run: it answers "nothing found" WITHOUT consuming the record and
+//     WITHOUT leaving replay (ForeignFirst, which a single-record step may now use). The guest polls at every suspension and most polls find nothing, so a divergence, or
+//     leaving replay, at the first one would be wrong.
+//   - With no update store it answers 0 BEFORE any refusal, so the refusal (Refuse) and the after-suspension answer (AfterSuspend) both ask for a store first: a poll
+//     with nothing to poll is not newly refused by a move.
+//   - It records ONLY when it finds a request; every other path answers 0 and records nothing (RecordsNothing), which is what lets a guest that polls on every wake not
+//     grow its history.
+//
+// It has no identity: a poll names nothing, it asks for whatever is next, so there is no field a replay could compare.
+// The three paths on which poll_update records nothing, each named once and used both where Fresh announces it (c.RecordsNothing) and in RecordsNothingOn, so the
+// reason a path gives and the reason the spec lists cannot differ by a character (the dispatcher accepts only an exact match).
+const (
+	pollNothingNoStore    = "no update store: nothing to poll"
+	pollNothingUnreadable = "the pending requests could not be read: the guest is told nothing was found"
+	pollNothingPending    = "no update is pending"
+)
+
+var pollUpdateStep = stepSpec{
+	Name:    "poll_update",
+	Result:  layoutSimple,
+	Effect:  effectEffect,
+	Records: recordsOne,
+	Want:    EventTypeUpdateReceived,
+	// A poll records an update_received only when it finds one: with no store, with a store it cannot read, and with nothing pending it answers and records nothing.
+	RecordsNothingOn:   []string{pollNothingNoStore, pollNothingUnreadable, pollNothingPending},
+	NoIdentity:         "a poll names nothing: it asks for whatever update is next, so there is no field to compare",
+	NoDivergenceDetail: "it had no divergence message: a record of another type at its step was answered with nothing found, WITHOUT advancing and WITHOUT leaving replay, so there was never a message to lose; " + divergenceSweepNote,
+	// A fresh delivery is new work: it runs guest code that can start calls, children and timers. A defer segment exists to run a terminated workflow's cleanup, not to
+	// service new requests (the same reasoning as DurableAwaitSignals and IMPROVEMENT-PLAN 3.84). Not asked when there is no store: that answered 0 first.
+	Refuse: func(s *execSession) bool { return s.engine.updateStore != nil && s.stopBeforeNewWork() },
+	AfterSuspend: func(c *stepCtx) int64 {
+		if c.s.engine.updateStore == nil {
 			return 0
 		}
-		s.exitReplay()
-	}
-
-	if s.engine.updateStore == nil {
-		return 0
-	}
-
-	// A fresh delivery is new work: it runs guest code that can start calls,
-	// children and timers. A defer segment exists to run a terminated
-	// workflow's cleanup, not to service new requests. Same reasoning as
-	// DurableAwaitSignals and IMPROVEMENT-PLAN 3.84.
-	if s.stopBeforeNewWork() {
 		return callSuspendSentinel
-	}
+	},
+	ForeignFirst: func(stepArgs) (int64, bool) { return 0, true },
+	Decode: func(c *stepCtx, rec *EventRecord) int64 {
+		return c.s.writeUpdateDelivery(c.ctx, c.m, c.args.outPtr, c.args.outMaxLen, updateDelivery{
+			Name:      rec.UpdateHandlerName,
+			Payload:   rec.UpdatePayload,
+			RequestID: rec.UpdateRequestID,
+		})
+	},
+	Fresh: func(c *stepCtx) int64 {
+		s, ctx := c.s, c.ctx
+		if s.engine.updateStore == nil {
+			c.RecordsNothing(pollNothingNoStore)
+			return 0
+		}
+		pending, err := s.engine.updateStore.GetPendingUpdateRequests(ctx, s.engine.workflowID)
+		if err != nil {
+			s.engine.log().ErrorContext(ctx, "poll_update: reading pending update requests",
+				"workflow_id", s.engine.workflowID, "error", err)
+			c.RecordsNothing(pollNothingUnreadable)
+			return 0
+		}
+		if len(pending) == 0 {
+			c.RecordsNothing(pollNothingPending)
+			return 0
+		}
+		upd := pending[0]
 
-	pending, err := s.engine.updateStore.GetPendingUpdateRequests(ctx, s.engine.workflowID)
-	if err != nil {
-		s.engine.log().ErrorContext(ctx, "poll_update: reading pending update requests",
-			"workflow_id", s.engine.workflowID, "error", err)
-		return 0
-	}
-	if len(pending) == 0 {
-		return 0
-	}
-	upd := pending[0]
+		// Record BEFORE the guest runs the handler, and before anything settles.
+		// A crash after this point leaves the event in history and the row still
+		// pending, so the next replay finds the delivery here and never re-reads
+		// the table -- at-least-once delivery with idempotent replay. Recording
+		// after would lose the update entirely on a crash, and the caller would
+		// wait forever on a promise nothing settles.
+		c.Record(EventRecord{
+			Step:              s.stepCount,
+			EventType:         EventTypeUpdateReceived,
+			UpdateHandlerName: upd.UpdateName,
+			UpdatePayload:     upd.Payload,
+			UpdateRequestID:   updateRequestKey(upd),
+		})
 
-	// Record BEFORE the guest runs the handler, and before anything settles.
-	// A crash after this point leaves the event in history and the row still
-	// pending, so the next replay finds the delivery here and never re-reads
-	// the table -- at-least-once delivery with idempotent replay. Recording
-	// after would lose the update entirely on a crash, and the caller would
-	// wait forever on a promise nothing settles.
-	s.recordEvent(EventRecord{
-		Step:              s.stepCount,
-		EventType:         EventTypeUpdateReceived,
-		UpdateHandlerName: upd.UpdateName,
-		UpdatePayload:     upd.Payload,
-		UpdateRequestID:   updateRequestKey(upd),
-	})
-
-	return s.writeUpdateDelivery(ctx, m, outPtr, outMaxLen, updateDelivery{
-		Name:      upd.UpdateName,
-		Payload:   upd.Payload,
-		RequestID: updateRequestKey(upd),
-	})
+		return s.writeUpdateDelivery(ctx, c.m, c.args.outPtr, c.args.outMaxLen, updateDelivery{
+			Name:      upd.UpdateName,
+			Payload:   upd.Payload,
+			RequestID: updateRequestKey(upd),
+		})
+	},
 }
+
+func init() { registerStepSpec(&pollUpdateStep) }
 
 // DurableCompleteUpdate records the handler's outcome and settles the caller's
 // promise.
@@ -146,71 +171,73 @@ func (s *execSession) DurablePollUpdate(ctx context.Context, m api.Module, outPt
 // handler that returns an empty string and no error completes successfully with
 // an empty result, which is a legitimate outcome and not a missing one.
 func (s *execSession) DurableCompleteUpdate(ctx context.Context, m api.Module, requestID, result, errMsg string) int64 {
-	if s.isReplay {
-		if s.stepCount < len(s.history) {
-			rec := s.history[s.stepCount]
-			if rec.EventType == EventTypeUpdateCompleted {
-				if !s.advanceReplayStep(ctx, &rec) {
-					return 0
-				}
-				// Deliberately does NOT settle again. The promise was settled
-				// on the original run; re-settling would report not-found
-				// (#818) and turn every replay into an error.
-				return 0
-			}
-		}
-		s.exitReplay()
-	}
-
-	if s.stopBeforeNewWork() {
-		return callSuspendSentinel
-	}
-
-	name, rowID, promiseID := splitUpdateRequestKey(requestID)
-	if rowID == "" {
-		// A key written before cleat#1416, replayed across the upgrade. The
-		// migrations backfilled request_id from update_name, so the name
-		// addresses exactly the row this key was written for.
-		rowID = name
-	}
-
-	s.recordEvent(EventRecord{
-		Step:              s.stepCount,
-		EventType:         EventTypeUpdateCompleted,
-		UpdateHandlerName: name,
-		UpdateRequestID:   requestID,
-		UpdateResponse:    result,
-		UpdateError:       errMsg,
-	})
-
-	if s.engine.updateStore == nil {
-		return 0
-	}
-
-	if err := s.engine.updateStore.CompleteUpdateRequest(ctx, s.engine.workflowID, rowID, result, errMsg); err != nil {
-		s.engine.log().ErrorContext(ctx, "complete_update: recording the outcome on the request row",
-			"workflow_id", s.engine.workflowID, "update_name", name, "error", err)
-	}
-
-	// A request with no promise has no caller blocked on it -- the promise_id
-	// column is nullable and the HTTP API is not the only way a request can be
-	// made. Completing the row is still right; settling nothing is too.
-	if promiseID == "" {
-		return 0
-	}
-	var settleErr error
-	if errMsg != "" {
-		settleErr = s.engine.updateStore.RejectPromise(ctx, promiseID, errMsg)
-	} else {
-		settleErr = s.engine.updateStore.ResolvePromise(ctx, promiseID, result)
-	}
-	if settleErr != nil {
-		s.engine.log().ErrorContext(ctx, "complete_update: settling the caller's promise",
-			"workflow_id", s.engine.workflowID, "update_name", name,
-			"promise_id", promiseID, "error", settleErr)
-	}
-	return 0
+	return s.step(ctx, m, &completeUpdateStep, stepArgs{s1: requestID, s2: result, s3: errMsg})
 }
+
+// completeUpdateStep is DurableCompleteUpdate as a step. It refuses like any call that starts new work (stopBeforeNewWork) and answers the stop word after a suspension, as
+// the old code did. On a replay it consumes the record and DELIBERATELY does not settle again: the promise was settled on the original run, and re-settling would report
+// not-found (#818) and turn every replay into an error (Decode touches nothing, which is what the dispatcher requires of it). It records BEFORE the store writes, and a store
+// that is missing, or a write that fails, is logged and still answers success: the outcome is in the history either way.
+var completeUpdateStep = stepSpec{
+	Name:               "complete_update",
+	Result:             layoutSimple,
+	Effect:             effectEffect,
+	Records:            recordsOne,
+	Want:               EventTypeUpdateCompleted,
+	NoIdentity:         "the old code consumed any update_completed record at the step without comparing the request id; comparing it is a tightening, and a separate ruling (cleat#4152 W1)",
+	NoDivergenceDetail: "its old message was the shared one: the step and both event types; " + divergenceSweepNote,
+	Decode:             func(*stepCtx, *EventRecord) int64 { return 0 },
+	Fresh: func(c *stepCtx) int64 {
+		s, ctx := c.s, c.ctx
+		requestID, result, errMsg := c.args.s1, c.args.s2, c.args.s3
+		name, rowID, promiseID := splitUpdateRequestKey(requestID)
+		if rowID == "" {
+			// A key written before cleat#1416, replayed across the upgrade. The
+			// migrations backfilled request_id from update_name, so the name
+			// addresses exactly the row this key was written for.
+			rowID = name
+		}
+
+		c.Record(EventRecord{
+			Step:              s.stepCount,
+			EventType:         EventTypeUpdateCompleted,
+			UpdateHandlerName: name,
+			UpdateRequestID:   requestID,
+			UpdateResponse:    result,
+			UpdateError:       errMsg,
+		})
+
+		if s.engine.updateStore == nil {
+			return 0
+		}
+
+		if err := s.engine.updateStore.CompleteUpdateRequest(ctx, s.engine.workflowID, rowID, result, errMsg); err != nil {
+			s.engine.log().ErrorContext(ctx, "complete_update: recording the outcome on the request row",
+				"workflow_id", s.engine.workflowID, "update_name", name, "error", err)
+		}
+
+		// A request with no promise has no caller blocked on it -- the promise_id
+		// column is nullable and the HTTP API is not the only way a request can be
+		// made. Completing the row is still right; settling nothing is too.
+		if promiseID == "" {
+			return 0
+		}
+		var settleErr error
+		if errMsg != "" {
+			settleErr = s.engine.updateStore.RejectPromise(ctx, promiseID, errMsg)
+		} else {
+			settleErr = s.engine.updateStore.ResolvePromise(ctx, promiseID, result)
+		}
+		if settleErr != nil {
+			s.engine.log().ErrorContext(ctx, "complete_update: settling the caller's promise",
+				"workflow_id", s.engine.workflowID, "update_name", name,
+				"promise_id", promiseID, "error", settleErr)
+		}
+		return 0
+	},
+}
+
+func init() { registerStepSpec(&completeUpdateStep) }
 
 func (s *execSession) writeUpdateDelivery(ctx context.Context, m api.Module, outPtr, outMaxLen uint32, d updateDelivery) int64 {
 	b, err := json.Marshal(d)

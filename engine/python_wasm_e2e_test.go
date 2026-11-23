@@ -28,7 +28,7 @@ import (
 // TestPythonWasmEndToEnd validates the full Python WASM execution path.
 //
 // Prerequisites (skipped with clear message when not found):
-//   - componentize-py >= 0.12.0   (pip install componentize-py)
+//   - componentize-py ==0.25.1      (pip install componentize-py==0.25.1)
 //   - wasm-tools                   (cargo install wasm-tools)
 //   - Python 3.10+
 //   - cleat-sdk installed          (pip install -e python-sdk/)
@@ -411,7 +411,7 @@ func (h *pythonWasmTestHelper) toolsAvailable() bool {
 
 	// Check componentize-py.
 	if _, err := exec.LookPath("componentize-py"); err != nil {
-		h.missing = append(h.missing, "componentize-py (pip install componentize-py)")
+		h.missing = append(h.missing, "componentize-py (pip install componentize-py==0.25.1)")
 	}
 
 	// Check wasm-tools (needed to decompose component model -> core module).
@@ -561,6 +561,16 @@ var pythonUnboundBaseline = []string{
 	// explicitly denied for Python.
 	"cleat_json_parse",
 	"cleat_json_stringify",
+
+	// cleat_interrupt_requested (cleat#3922) is bound by ONE guest: the TypeScript
+	// plugin, which polls it from the JavaScript engine's interrupt handler so a kill can unwind
+	// the guest cleanly and the host can then run its defers. It is recorded
+	// rather than called "not workflow-facing", because it is workflow-facing and
+	// this list exists to show the gap. It is OPTIONAL: a guest that never imports
+	// it keeps the hard kill, unaffected, and the poll is what buys deferred
+	// cleanup after a kill. Python reaches the same guarantee today by keeping the
+	// hard kill; when it grows a soft one, delete this entry -- shrink-only.
+	"cleat_interrupt_requested",
 
 	// A real gap, and the only one here (cleat#1154). cleat_start_detached is
 	// bound by Go, Rust, Java and AssemblyScript. Python needs more than a

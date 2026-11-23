@@ -130,13 +130,15 @@ func main() {
 		var runtime string
 		var buildChannel string
 		var workflowVersion int
+		var allowUnmeasuredComponentizePy bool
 		fs.StringVar(&outDir, "o", "", "output directory for generated files")
 
 		fs.IntVar(&workflowVersion, "version", 1, "workflow version number embedded in WASM metadata")
-		fs.StringVar(&target, "target", "go", "compilation target: go (standard Go, default), rust, java, assemblyscript, python")
-		fs.StringVar(&entry, "entry", "", "entry point in 'file.py:func_name' format (for Python target)")
+		fs.StringVar(&target, "target", "go", "compilation target: go (standard Go, default), rust, java, python, ts or csharp (tier 2: see tiers.yaml for what is claimed). csharp builds a project directory or .csproj in a pinned linux docker container (amd64, or arm64 natively on an arm64 host)")
+		fs.StringVar(&entry, "entry", "", "entry point in 'file.py:func_name' format (for Python target) or 'file.ts:entry_name[,entry_name]' (for the ts target)")
 		fs.StringVar(&runtime, "runtime", "", "WASM runtime: wasmtime, wazero (default: the component, as for wasmtime)")
 		fs.StringVar(&buildChannel, "channel", "", "child version resolution channel: stable, latest, canary, or custom tag name")
+		fs.BoolVar(&allowUnmeasuredComponentizePy, "allow-unmeasured-componentize-py", false, "python target only: build even when the installed componentize-py is not 0.25.1, the version the Python SDK was measured on (a build with another version is refused, because a standard-library module can be missing only when the workflow runs); CLEAT_ALLOW_UNMEASURED_COMPONENTIZE_PY=1 does the same")
 		fs.BoolVar(&jsonOut, "json", false, "output diagnostics as JSON")
 		fs.BoolVar(&diffOut, "diff", false, "output unified diff of each file before and after transformation")
 		fs.BoolVar(&sizeReport, "size-report", false, "output WASM binary size breakdown by package")
@@ -146,7 +148,11 @@ func main() {
 			os.Exit(1)
 		}
 		if !isValidTarget(target) {
-			fmt.Fprintf(os.Stderr, "Error: unknown target %q. Valid targets: go, rust, java, assemblyscript, python\n", target)
+			fmt.Fprintf(os.Stderr, "Error: unknown target %q. Valid targets: go, rust, java, python, ts, csharp\n", target)
+			os.Exit(1)
+		}
+		if err := applyAllowUnmeasuredComponentizePy(allowUnmeasuredComponentizePy, target); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
 		}
 		// Default channel: when --db is provided, default to "stable".
@@ -163,6 +169,11 @@ func main() {
 		if len(remainder) > 0 {
 			pattern = remainder[0]
 		}
+		if target == "csharp" && entry != "" {
+			// --entry would silently REPLACE the project path below (it doubles as the Python build's pattern), so refuse it.
+			fmt.Fprintf(os.Stderr, "Error: --entry does not apply to the csharp target: the entry points are the [CleatEntry] methods the project declares.\n")
+			os.Exit(1)
+		}
 		if entry != "" {
 			// Use --entry as the pattern for Python builds.
 			runBuild(entry, outDir, target, runtime, buildChannel, jsonOut, diffOut, sizeReport, workflowVersion)
@@ -171,7 +182,7 @@ func main() {
 		}
 	case "vet":
 		fs := flag.NewFlagSet("vet", flag.ExitOnError)
-		vetLang := fs.String("lang", "", "language target: go, rust, java, as, python (auto-detected if empty)")
+		vetLang := fs.String("lang", "", "language target: go, rust, java, csharp, python (auto-detected if empty)")
 		vetJSON := fs.Bool("json", false, "output results as JSON")
 		vetCI := fs.Bool("ci", false, "output in GitHub Actions annotation format (takes precedence over --json)")
 		vetChannel := fs.String("channel", "", "child version resolution channel, as for build: only frozen changes the verdict (Go)")
@@ -200,12 +211,12 @@ func main() {
 			code = runVetRust(pattern)
 		case "java":
 			code = runVetJava(pattern)
+		case "csharp":
+			code = runVetCSharp(pattern, useJSON, os.Stdout, os.Stderr)
 		case "python":
 			code = runVetPython(pattern, useJSON)
-		case "as":
-			code = runVetAS(pattern)
 		default:
-			fmt.Fprintf(os.Stderr, "Error: unknown vet language %q. Valid: go, rust, java, as, python\n", lang)
+			fmt.Fprintf(os.Stderr, "Error: unknown vet language %q. Valid: go, rust, java, csharp, python\n", lang)
 			os.Exit(1)
 		}
 		os.Exit(code)
@@ -253,25 +264,33 @@ func main() {
 	}
 }
 
+// ensureOutDir creates the -o directory for the targets that write their .wasm
+// into it themselves. The Go build creates what it needs; the Java, Rust
+// and Python builds compiled for minutes and then failed at the
+// last step with `open <dir>/<name>.wasm: no such file or directory`, after the
+// Python build had printed `Build SUCCESS` (cleat#3792). Making it first also
+// means a directory that cannot be created fails before the compile, not after.
+func ensureOutDir(outDir string) {
+	if err := os.MkdirAll(outDir, 0o755); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: could not create the output directory %s: %v\n", outDir, err)
+		os.Exit(1)
+	}
+}
+
 func runBuild(pattern, outDir, target, runtime, channel string, jsonOut bool, diffOut bool, sizeReport bool, workflowVersion int) {
 	if target == "java" {
 		if outDir == "" {
 			outDir = "."
 		}
+		ensureOutDir(outDir)
 		runBuildJava(pattern, outDir, channel, workflowVersion)
-		return
-	}
-	if target == "assemblyscript" {
-		if outDir == "" {
-			outDir = "."
-		}
-		runBuildAssemblyScript(pattern, outDir, channel, workflowVersion)
 		return
 	}
 	if target == "rust" {
 		if outDir == "" {
 			outDir = "."
 		}
+		ensureOutDir(outDir)
 		runBuildRust(pattern, outDir, channel, workflowVersion)
 		return
 	}
@@ -279,7 +298,24 @@ func runBuild(pattern, outDir, target, runtime, channel string, jsonOut bool, di
 		if outDir == "" {
 			outDir = "."
 		}
+		ensureOutDir(outDir)
 		runBuildPython(pattern, outDir, runtime, channel, workflowVersion)
+		return
+	}
+	if target == "ts" {
+		if outDir == "" {
+			outDir = "."
+		}
+		ensureOutDir(outDir)
+		runBuildTS(pattern, outDir, channel, workflowVersion)
+		return
+	}
+	if target == "csharp" {
+		if outDir == "" {
+			outDir = "."
+		}
+		ensureOutDir(outDir)
+		runBuildCSharp(pattern, outDir, workflowVersion)
 		return
 	}
 	result, cg, cr, threadingErrs, usage, tr := analyze(pattern)
@@ -866,6 +902,11 @@ func detectVetLang(dir string) (string, error) {
 		return "java", nil
 	}
 
+	// Check for a C# project: exactly one .csproj, as `cleat build --target csharp` requires.
+	if m, _ := filepath.Glob(filepath.Join(dir, "*.csproj")); len(m) == 1 {
+		return "csharp", nil
+	}
+
 	// Check for Python files.
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -880,11 +921,6 @@ func detectVetLang(dir string) (string, error) {
 	}
 	if hasPy {
 		return "python", nil
-	}
-
-	// Check for AssemblyScript (package.json).
-	if _, err := os.Stat(filepath.Join(dir, "package.json")); err == nil {
-		return "as", nil
 	}
 
 	// Fallback: check source file extensions.
@@ -1053,91 +1089,6 @@ func runVetPython(dir string, jsonOut bool) int {
 	}
 
 	return exitCode
-}
-
-// runVetAS performs a basic vet check on AssemblyScript source files.
-// AssemblyScript vetting is currently limited; full AST analysis is planned.
-// runVetAS vets an AssemblyScript workflow by compiling it with the cleat
-// transform and no code generation.
-//
-// It used to vet nothing. It walked the tree counting .as/.ts files, resolved
-// node and the transform path, discarded both (`_ = nodePath`, and a
-// `transformFile` candidate search whose result was never read), printed
-// "Scanned N file(s)" and returned 0 -- on every path, for every input. A
-// workflow calling Math.random() inside a durable function passed vet, and so
-// did one with no AssemblyScript in it at all. See IMPROVEMENT-PLAN.md 2.43.
-//
-// What makes vetting possible now is 2.42: the transform's E001-E005
-// determinism checks used to be console.error() and nothing else, so even
-// `cleat build` exited 0 on a violation. They throw from afterParse now, which
-// is what makes asc fail. Running asc with --noEmit gets the whole check --
-// parse, transform, diagnostics -- without writing a .wasm.
-//
-// A missing toolchain is an error rather than a pass. `cleat build` already
-// exits 1 when npx is absent, and a vet that returns 0 because it could not
-// look is the exact defect being fixed here.
-func runVetAS(dir string) int {
-	if dir == "" {
-		dir = "."
-	}
-
-	if _, err := os.Stat(filepath.Join(dir, "package.json")); os.IsNotExist(err) {
-		fmt.Fprintf(os.Stderr, "Error: no package.json found in %s\n", dir)
-		fmt.Fprintf(os.Stderr, "AssemblyScript workflows are npm projects; run 'cleat vet' from the project root or pass its path.\n")
-		return 1
-	}
-
-	entry := filepath.Join(dir, "assembly", "index.ts")
-	if _, err := os.Stat(entry); os.IsNotExist(err) {
-		fmt.Fprintf(os.Stderr, "Error: no assembly/index.ts found in %s\n", dir)
-		fmt.Fprintf(os.Stderr, "This is the entry point 'cleat build --target assemblyscript' compiles; vet checks the same one.\n")
-		return 1
-	}
-
-	if _, err := exec.LookPath("npx"); err != nil {
-		fmt.Fprintf(os.Stderr, "Error: npx not found, so the AssemblyScript vet cannot run. Install Node.js: https://nodejs.org\n")
-		fmt.Fprintf(os.Stderr, "Reporting this rather than passing: a vet that cannot run its checks has not vetted anything.\n")
-		return 1
-	}
-
-	// Mirrors runBuildAssemblyScript: the transform is resolved from
-	// node_modules as @cleat/transform, so it has to be installed to run.
-	if _, err := os.Stat(filepath.Join(dir, "node_modules")); os.IsNotExist(err) {
-		fmt.Fprintf(os.Stderr, "Installing npm dependencies...\n")
-		cmd := exec.Command("npm", "install")
-		cmd.Dir = dir
-		cmd.Stdout = os.Stderr
-		cmd.Stderr = os.Stderr
-		if err := cmd.Run(); err != nil {
-			fmt.Fprintf(os.Stderr, "Error: npm install failed: %v\n", err)
-			return 1
-		}
-	}
-
-	fmt.Fprintf(os.Stderr, "Vetting AssemblyScript project in %s...\n", dir)
-
-	// --noEmit runs parse and the transform, including the E001-E005
-	// determinism diagnostics, without producing a .wasm. Everything else
-	// matches the build invocation so vet and build agree about what compiles.
-	cmd := exec.Command("npx", //nolint:gosec // G204: fixed binary, arguments passed as an array, no shell. The variable part is a project path the developer just typed.
-		"asc", filepath.Join("assembly", "index.ts"),
-		"--runtime", "stub",
-		"--transform", "@cleat/transform",
-		"--noEmit",
-	)
-	cmd.Dir = dir
-	cmd.Stdout = os.Stderr
-	cmd.Stderr = os.Stderr
-	cmd.Env = os.Environ()
-
-	if err := cmd.Run(); err != nil {
-		fmt.Fprintf(os.Stderr, "\nAssemblyScript vet failed: %v\n", err)
-		fmt.Fprintf(os.Stderr, "Determinism violations are reported above as E001-E005.\n")
-		return 1
-	}
-
-	fmt.Fprintf(os.Stderr, "AssemblyScript vet passed.\n")
-	return 0
 }
 
 // runDeploy deploys a compiled WASM workflow to the database.
@@ -2048,6 +1999,9 @@ func checkEntryPointsAgainstManifest(srcDir string, exported []string) {
 	fmt.Fprintf(os.Stderr,
 		"Error: cleat.yaml's entry_points: (%s) does not match what cleat build "+
 			"actually found (%s).\n"+
+			"The Go build names an entry point by its exported function in snake case "+
+			"(SigEcho is sig_echo); a `// @cleatEntry(name=...)` comment is not read, so "+
+			"changing its name= does not rename anything.\n"+
 			"Update cleat.yaml, or the entry point's exported Go function, so they "+
 			"agree -- a caller starting a run by the manifest's stale name would "+
 			"otherwise fail at start time, after the run id has already been handed "+
@@ -2551,7 +2505,9 @@ func runSchedule(args []string) {
 func isValidTarget(t string) bool {
 	valid := map[string]bool{
 		"go": true, "rust": true,
-		"java": true, "assemblyscript": true, "python": true,
+		"java": true, "python": true,
+		"ts":     true, // tier 2, in development, not supported: see cmd/cleat/build_ts.go and tiers.yaml
+		"csharp": true, // tier 2 (owner decision 2026-11-19): see cmd/cleat/build_csharp.go and tiers.yaml (cleat#4080)
 	}
 	return valid[t]
 }

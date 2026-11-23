@@ -239,12 +239,12 @@ func (s *apiServer) handleDeadLettersList(w http.ResponseWriter, r *http.Request
 
 	total, err := st.CountWorkflows(r.Context(), filter)
 	if err != nil {
-		s.writeError(w, 500, err.Error())
+		s.writeStoreError(w, r, err)
 		return
 	}
 	workflows, err := st.ListWorkflows(r.Context(), filter)
 	if err != nil {
-		s.writeError(w, 500, err.Error())
+		s.writeStoreError(w, r, err)
 		return
 	}
 
@@ -304,7 +304,7 @@ func (s *apiServer) handleDeadLetterReprocess(w http.ResponseWriter, r *http.Req
 	// Create a new run from the dead-lettered workflow's definition and input.
 	versions, verr := st.ListVersions(r.Context(), wf.DefName)
 	if verr != nil {
-		s.writeError(w, 500, verr.Error())
+		s.writeStoreError(w, r, verr)
 		return
 	}
 	if len(versions) == 0 {
@@ -331,7 +331,7 @@ func (s *apiServer) handleDeadLetterReprocess(w http.ResponseWriter, r *http.Req
 	idempotencyKey := r.Header.Get("Idempotency-Key")
 	runID, alreadyExisted, serr := st.StartNewRun(r.Context(), "", wf.DefName, versions[0], wf.Input, idempotencyKey, s.tenantFor(r), 0)
 	if serr != nil {
-		s.writeError(w, 500, serr.Error())
+		s.writeStoreError(w, r, serr)
 		return
 	}
 	// The original response plus the flag, same as start -- cleat#1169. These
@@ -390,7 +390,10 @@ func (s *apiServer) handleDeadLetterTerminate(w http.ResponseWriter, r *http.Req
 			return
 		}
 	}
-	if err := st.TerminateWorkflow(r.Context(), id, req.Reason); err != nil {
+	rec, err := settleWithReceipt(st, func(rs engine.SettleReceiptStore) (engine.SettleReceipt, error) {
+		return rs.TerminateWorkflowReceipt(r.Context(), id, req.Reason)
+	}, func() error { return st.TerminateWorkflow(r.Context(), id, req.Reason) }, id)
+	if err != nil {
 		// 3.92: the store now reports a terminate that matched nothing rather
 		// than returning nil. callerOwnsTarget above has already answered 404
 		// for an id this tenant does not own, so reaching here means the row
@@ -404,10 +407,10 @@ func (s *apiServer) handleDeadLetterTerminate(w http.ResponseWriter, r *http.Req
 		// dead_lettered -> terminated transition this route exists to do --
 		// now comes back as engine.ErrAdminStateConflict. handleAdminOpError
 		// is the one place that maps it to 409, the same class re-replay uses.
-		s.handleAdminOpError(w, err)
+		s.handleAdminOpError(w, r, err)
 		return
 	}
-	s.writeJSON(w, 200, map[string]string{"status": "terminated"})
+	s.writeJSON(w, 200, settleReply("terminated", id, rec))
 }
 
 func (s *apiServer) handleWorkflowRetry(w http.ResponseWriter, r *http.Request, id string) {
@@ -441,7 +444,7 @@ func (s *apiServer) handleWorkflowRetry(w http.ResponseWriter, r *http.Request, 
 	// handleAdminOpError maps its ErrAdminStateConflict to 409, the same class
 	// terminate and re-replay use above.
 	if err := engine.RetryWorkflow(r.Context(), st, id); err != nil {
-		s.handleAdminOpError(w, err)
+		s.handleAdminOpError(w, r, err)
 		return
 	}
 	s.writeJSON(w, 200, map[string]string{"id": id, "status": "retried"})

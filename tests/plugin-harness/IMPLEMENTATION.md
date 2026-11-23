@@ -2,7 +2,7 @@
 
 ## Summary
 
-A comprehensive integration test harness that exercises every plugin host function from workflows written in Go, Rust, AssemblyScript, Python, and Java. Tests can run against PostgreSQL, MySQL, and MSSQL backends. External services (LLM APIs, PagerDuty, Slack, Kafka) are mocked by default with optional real-service validation via environment variables.
+A comprehensive integration test harness that exercises every plugin host function from workflows written in Go, Rust, Python, and Java. Tests can run against PostgreSQL, MySQL, and MSSQL backends. External services (LLM APIs, PagerDuty, Slack, Kafka) are mocked by default with optional real-service validation via environment variables.
 
 **Branch:** `feature/plugin-harness-tests`
 
@@ -35,8 +35,6 @@ A comprehensive integration test harness that exercises every plugin host functi
 | `testdata/goworkflow/go.mod` | Go module with replace directive to repo root |
 | `testdata/rustworkflow/Cargo.toml` | Rust crate targeting `wasm32-wasip1` |
 | `testdata/rustworkflow/src/lib.rs` | Rust workflow calling all 16 plugin functions via `h.plugin_call` |
-| `testdata/asworkflow/package.json` | AssemblyScript package with `@cleat/sdk` dependency |
-| `testdata/asworkflow/assembly/index.ts` | AS workflow calling all 16 plugin functions via `h.pluginCall` |
 | `testdata/pythonworkflow/plugin_harness_workflow.py` | Python workflow calling all 16 + 1 functions via `h.plugin_call` / `h.plugin_call_streaming` |
 | `testdata/javaworkflow/.../PluginHarnessWorkflow.java` | Java workflow calling all 16 functions via `h.pluginCall` (TeaVM AOT) |
 | `testdata/javaworkflow/.../WorkflowEntry.java` | TeaVM analysis root referencing the workflow |
@@ -80,7 +78,7 @@ Layer 3: Multi-DB (real databases, compiled WASM, mock services)
 ### Call Chain Tested
 
 ```
-Workflow (Go/Rust/AS)
+Workflow (Go/Rust)
   → h.PluginCall("blobstore", "put", json)
     → WASM plugin_call host import
       → host.Engine.freshPluginCall
@@ -134,7 +132,6 @@ make tools-tinygo    # TinyGo (Go → WASM)
 make tools-rust      # Rust + wasm32-wasip1 target
 make tools-python    # Python + componentize-py + cleat_sdk
 make tools-java      # JDK 11+ + Gradle
-make tools-as        # Node.js + AssemblyScript compiler (asc)
 
 # Install everything available (checks only — does NOT auto-install)
 make tools
@@ -152,18 +149,17 @@ These targets are informational — they report what's installed and print copy-
 
 ### Known limitations
 1. **Go→WASM requires TinyGo** — `go build` with `GOOS=wasip1` is not supported; TinyGo must be installed
-2. **Python, Java, Rust, AS WASM tests are placeholders** — Workflow source files exist for all 5 languages, but only Go is wired end-to-end in CI. The other toolchains are checked via `make tools-*` but not yet integrated into the CI workflow
+2. **Python, Java, Rust WASM tests are placeholders** — Workflow source files exist for all 4 languages, but only Go is wired end-to-end in CI. The other toolchains are checked via `make tools-*` but not yet integrated into the CI workflow
 3. **Streaming (llm/chat_stream) is not WASM-tested** — Layer 1 tests the streaming API shape; Layer 2 does not currently verify streaming through WASM
 4. **Some plugin functions return benign errors** — `event-triggers/await_event` and `webhook-ingest/await_webhook` return `{"found":false}` when no events are pending; this is expected behavior but not a full behavioral test
 5. **pgvector is PostgreSQL-only** — Multi-DB tests skip pgvector on MySQL and MSSQL
 
 ### Next steps
 1. **Wire Rust WASM tests** — Add `cargo` + `wasm32-wasip1` setup to CI and enable `TestPluginCalls_Wasm_Rust`
-2. **Wire AS WASM tests** — Add `npm` + `asc` setup to CI and enable `TestPluginCalls_Wasm_AS`
-3. **Wire Python WASM tests** — Complete the Python WASM FFI and enable `TestPluginCalls_Wasm_Python`
-4. **Wire Java WASM tests** — Integrate TeaVM + Gradle into CI and enable `TestPluginCalls_Wasm_Java`
-5. **Add real-API smoke test jobs** — Optional CI jobs that run when API keys are available via GitHub Secrets
-6. **Add DB side-effect assertions** — Verify specific rows in `blob_index`, `webhook_delivery`, etc. after workflow execution
+2. **Wire Python WASM tests** — Complete the Python WASM FFI and enable `TestPluginCalls_Wasm_Python`
+3. **Wire Java WASM tests** — Integrate TeaVM + Gradle into CI and enable `TestPluginCalls_Wasm_Java`
+4. **Add real-API smoke test jobs** — Optional CI jobs that run when API keys are available via GitHub Secrets
+5. **Add DB side-effect assertions** — Verify specific rows in `blob_index`, `webhook_delivery`, etc. after workflow execution
 
 ## How to Run
 

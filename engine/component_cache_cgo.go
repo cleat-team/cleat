@@ -33,9 +33,13 @@ import (
 // The entries live in the same moduleLRU as compiled modules, under a distinct
 // key prefix, so the entry bound and the byte bound a deployment sets
 // (--wasm-module-cache-max-* / WithWasmtimeModuleCache*) are ONE set of limits.
-// A component's cost is CompiledSizeEstimate over its wasm like any module's;
-// that estimate is 4x, which gives 77 MB for the Python component against about
-// 45 MB held, so it over-counts, which is the safe direction.
+// A component's cost is CompiledComponentSizeEstimate over its SERIALIZED
+// artifact, not CompiledSizeEstimate over its wasm: a component's wasm is mostly
+// a memory snapshot, not code, so its length does not predict the compiled cost.
+// This said "over-counts, which is the safe direction" until cleat#4389, when
+// the live cost of five components was measured against it and the wasm-based
+// estimate turned out to under-count Python by 1.35 to 1.5x and C# by up to
+// 2.2x. The table is on CompiledComponentSizeEstimate.
 //
 // # Ownership: the cache holds a reference, every execution holds its own
 //
@@ -132,20 +136,44 @@ func (b *wasmtimeBackend) acquireComponent(wasmBytes []byte) (*C.wasmtime_compon
 		return held.(*C.wasmtime_component_t), nil
 	}
 
-	compiled, err := componentCompile(b.engine, wasmBytes)
+	compiled, inProcess, err := b.compileComponentMiss(key, wasmBytes)
 	if err != nil {
 		// A failed compile is not cached: the next call compiles again and gets
 		// the same error, rather than a stale refusal outliving a fixed engine.
 		return nil, err
 	}
-	cc.compiles.Add(1)
+	if inProcess {
+		// compiles counts compiles IN THIS PROCESS. A component a child process compiled is counted by the precompiler, so a test that asserts on both can tell "served from a child" from "compiled here".
+		cc.compiles.Add(1)
+	}
 
 	// The caller's reference is taken BEFORE the cache is given the compiled
 	// one: once stored, the cache may evict and release it at any moment, and
 	// the caller must already hold its own by then.
 	mine := C.wasmtime_component_clone(compiled)
-	cc.lru.storeHeld(key, compiled, func() { C.wasmtime_component_delete(compiled) }, len(wasmBytes))
+	cc.lru.storeHeld(key, compiled, func() { C.wasmtime_component_delete(compiled) }, componentCost(compiled, len(wasmBytes)))
 	return mine, nil
+}
+
+// componentSerializedLen is the length of the component's serialized artifact, or false if it cannot be serialized.
+func componentSerializedLen(c *C.wasmtime_component_t) (int, bool) {
+	var vec C.wasm_byte_vec_t
+	if e := C.wasmtime_component_serialize(c, &vec); e != nil {
+		C.wasmtime_error_delete(e)
+		return 0, false
+	}
+	n := int(vec.size)
+	C.wasm_byte_vec_delete(&vec)
+	return n, true
+}
+
+// componentCost is what the cache charges for a compiled component: CompiledComponentSizeEstimate over its serialized length, and where it cannot
+// be serialized the estimate over its wasm that every entry was charged before, so a failure here degrades to the old figure and not to a free entry.
+func componentCost(c *C.wasmtime_component_t, wasmLen int) int64 {
+	if n, ok := componentSerializedLen(c); ok && n > 0 {
+		return CompiledComponentSizeEstimate(n)
+	}
+	return CompiledSizeEstimate(wasmLen)
 }
 
 // close releases every component the cache holds. A module is reclaimed by the

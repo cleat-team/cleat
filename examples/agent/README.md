@@ -30,7 +30,6 @@ single call that starts this child and awaits it:
 | Python | `cleat_sdk.agent.run_agent(h, cfg, msg)` |
 | Rust | `cleat_sdk::agent::run_agent(h, cfg, msg)` |
 | Java | `cleat.Agent.runAgent(host, cfg, msg)` |
-| AssemblyScript | `runAgent(h, cfg, msg)` from `@cleat/sdk` |
 
 ## Every step is durable
 

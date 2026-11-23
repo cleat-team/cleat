@@ -1636,7 +1636,10 @@ func TestCreatePromiseReplayMatch(t *testing.T) {
 	s.history = []EventRecord{{
 		Step:      0,
 		EventType: EventTypeCreatePromise,
-		PromiseID: "abc-123",
+		// The record CreatePromise writes names the promise (every released version does), and replay compares it (cleat#4211). This record
+		// used to omit the name, which the engine never produced, and passed only because replay matched by type alone.
+		PromiseName: "my-promise",
+		PromiseID:   "abc-123",
 	}}
 	result := s.CreatePromise(context.Background(), nil, "my-promise", 0, 0)
 
@@ -1652,6 +1655,8 @@ func TestCreatePromiseReplayMatch(t *testing.T) {
 	}
 }
 
+// A foreign event at the step, with history unread: a divergence, not a hand-off to fresh. This asserted the opposite (isReplay=false and a
+// create_promise appended after the foreign event at a colliding step) until cleat#4157, which is the defect.
 func TestCreatePromiseReplayDivergence(t *testing.T) {
 	s := newTestExecSession()
 	s.isReplay = true
@@ -1660,29 +1665,7 @@ func TestCreatePromiseReplayDivergence(t *testing.T) {
 		EventType: "call", // wrong type
 	}}
 	result := s.CreatePromise(context.Background(), nil, "my-promise", 0, 0)
-
-	if s.isReplay {
-		t.Error("expected isReplay=false after exitReplay")
-	}
-	if s.isReplay {
-		t.Error("expected replay to have ended")
-	}
-	// Fresh path runs after exitReplay, recording a create_promise event.
-	if len(s.history) < 2 {
-		t.Fatalf("expected at least 2 history entries (original + fresh event), got %d", len(s.history))
-	}
-	if s.history[1].EventType != EventTypeCreatePromise {
-		t.Errorf("expected fresh event type create_promise, got %q", s.history[1].EventType)
-	}
-	if s.history[1].PromiseID == "" {
-		t.Error("expected non-empty PromiseID in fresh event")
-	}
-	// newTestExecSession has NO promise store. This asserted success, which is
-	// what let 3.231 survive: a create that reaches no store produces an ID the
-	// guest proceeds with and a promise nobody can ever settle.
-	if errCode := uint32(result) & 0xFF; errCode != 1 {
-		t.Errorf("expected errCode 1 with no promise store, got %d (raw %d)", errCode, result)
-	}
+	wantReplayDivergence(t, s, result, 1)
 }
 
 func TestCreatePromiseReplayPastEnd(t *testing.T) {
@@ -1888,12 +1871,10 @@ func TestAwaitPromiseReplayAwaitThenFreshResolved(t *testing.T) {
 
 func TestAwaitPromiseReplayDivergence(t *testing.T) {
 	s := newTestExecSession()
-	// A PENDING store, not a nil one. This test is about replay divergence, and
-	// it used to reach the fresh path with no store at all -- so it asserted
-	// suspend for a reason that has nothing to do with divergence, and broke
-	// when a missing store started reporting an error (IMPROVEMENT-PLAN 3.231).
-	// A pending promise suspends legitimately, which is what this wants.
-	s.engine.promiseStore = &mockPromiseStore{}
+	// A PENDING store, not a nil one: with no store the answer is the no-store error and has nothing to do with divergence (IMPROVEMENT-PLAN 3.231,
+	// and the no-store rows of an_await_promise_behaves_as_recorded_before_the_dispatcher_test.go).
+	mock := &mockPromiseStore{}
+	s.engine.promiseStore = mock
 	s.isReplay = true
 	s.history = []EventRecord{{
 		Step:      0,
@@ -1902,22 +1883,21 @@ func TestAwaitPromiseReplayDivergence(t *testing.T) {
 
 	result := s.AwaitPromise(context.Background(), nil, "abc-123", 5000, 0, 0)
 
-	// Divergence: exitReplay is NOT called (unlike CreatePromise).
-	// isReplay stays true, fresh path runs which records await_promise and suspends.
-	if !s.isReplay {
-		t.Error("expected isReplay to remain true (exitReplay not called on mismatch)")
+	// A first record that is none of the call's own types is a replay DIVERGENCE (the cleat#4157 class; cleat#947 was the await_signals case). This test used to assert the opposite and said so in its
+	// comment: "exitReplay is NOT called (unlike CreatePromise). isReplay stays true, fresh path runs which records await_promise and suspends". That
+	// was the defect it pinned: the call ran its fresh path with the history unread and replay still on, and recorded at a step that already held an
+	// event (the cleat#4157 class). Since the move onto the step dispatcher (cleat#4152, W4) it reports a divergence and consumes nothing.
+	if result != packSimpleResult(1, 0) {
+		t.Errorf("expected a divergence (error code 1, nothing written: this call passed no output buffer), got %#x", result)
 	}
-	// Fresh path suspends because the promise is pending.
-	expected := callSuspendSentinel
-	if result != expected {
-		t.Errorf("expected the stop sentinel %#x (suspend), got %#x -- a suspend must not "+
-			"return a word the guest reads as a timeout (cleat#3383)", expected, result)
+	if !s.isReplay || s.stepCount != 0 || len(s.history) != 1 {
+		t.Errorf("a divergence consumes nothing and leaves replay on: isReplay %v, stepCount %d, history %d events; want true, 0, 1", s.isReplay, s.stepCount, len(s.history))
 	}
-	if s.suspendErr == nil {
-		t.Fatal("expected suspendErr non-nil")
+	if s.suspendErr != nil {
+		t.Errorf("expected no suspension, got %+v: a divergence does not wait", s.suspendErr)
 	}
-	if !strings.Contains(s.suspendErr.Reason, "await_promise(abc-123)") {
-		t.Errorf("expected suspendErr reason containing 'await_promise(abc-123)', got %q", s.suspendErr.Reason)
+	if mock.lastGetPromiseID != "" {
+		t.Errorf("the promise store was read (%q): a divergence is decided from the history alone", mock.lastGetPromiseID)
 	}
 }
 
@@ -2244,30 +2224,10 @@ func TestContinueAsNewReplayDivergence(t *testing.T) {
 		Step:      0,
 		EventType: "call", // wrong type — should be EventTypeContinueAsNew
 	}}
-
 	result := s.ContinueAsNew(context.Background(), nil, `{"v":1}`)
-
-	if result != 0 {
-		t.Errorf("expected result 0, got %d", result)
-	}
-	if s.isReplay {
-		t.Error("expected isReplay=false after exitReplay")
-	}
-	if s.isReplay {
-		t.Error("expected replay to have ended")
-	}
-	if s.stepCount != 1 {
-		t.Errorf("expected stepCount=1 after recordEvent, got %d", s.stepCount)
-	}
-	if len(s.history) != 2 {
-		t.Fatalf("expected history len=2 (original + new ContinueAsNew), got %d", len(s.history))
-	}
-	last := s.history[len(s.history)-1]
-	if last.EventType != EventTypeContinueAsNew {
-		t.Errorf("expected EventTypeContinueAsNew, got %s", last.EventType)
-	}
-	if last.NewInput != `{"v":1}` {
-		t.Errorf("expected NewInput='{\"v\":1}', got %q", last.NewInput)
+	wantReplayDivergence(t, s, result, 1)
+	if s.suspendErr != nil {
+		t.Errorf("a divergent continue_as_new restarted the run: %+v", s.suspendErr)
 	}
 }
 
@@ -2406,30 +2366,10 @@ func TestContinueAsNewWithVersionReplayDivergence(t *testing.T) {
 		Step:      0,
 		EventType: "call", // wrong type
 	}}
-
 	result := s.ContinueAsNewWithVersion(context.Background(), nil, `{"v":1}`, 2)
-
-	if result != 0 {
-		t.Errorf("expected result 0, got %d", result)
-	}
-	if s.isReplay {
-		t.Error("expected isReplay=false after exitReplay")
-	}
-	if s.isReplay {
-		t.Error("expected replay to have ended")
-	}
-	if s.stepCount != 1 {
-		t.Errorf("expected stepCount=1 after recordEvent, got %d", s.stepCount)
-	}
-	if len(s.history) != 2 {
-		t.Fatalf("expected history len=2 (original + new ContinueAsNew), got %d", len(s.history))
-	}
-	last := s.history[len(s.history)-1]
-	if last.EventType != EventTypeContinueAsNew {
-		t.Errorf("expected EventTypeContinueAsNew, got %s", last.EventType)
-	}
-	if last.NewVersion != 2 {
-		t.Errorf("expected NewVersion=2 in event, got %d", last.NewVersion)
+	wantReplayDivergence(t, s, result, 1)
+	if s.suspendErr != nil {
+		t.Errorf("a divergent continue_as_new restarted the run: %+v", s.suspendErr)
 	}
 }
 
@@ -2588,23 +2528,7 @@ func TestSignalWorkflowReplayDivergence(t *testing.T) {
 		EventType: "call", // wrong type
 	}}
 	result := s.SignalWorkflow(context.Background(), nil, "target-run-123", "my-signal", `{"x":1}`)
-
-	if s.isReplay {
-		t.Error("expected isReplay=false after exitReplay")
-	}
-	if s.isReplay {
-		t.Error("expected replay to have ended")
-	}
-	// Fresh path records EventTypeSignalReceived.
-	if len(s.history) < 2 {
-		t.Fatalf("expected at least 2 history entries, got %d", len(s.history))
-	}
-	if s.history[1].EventType != EventTypeSignalReceived {
-		t.Errorf("expected EventTypeSignalReceived, got %q", s.history[1].EventType)
-	}
-	if result != 0 {
-		t.Errorf("expected 0, got %d", result)
-	}
+	wantReplayDivergence(t, s, result, 1)
 }
 
 func TestSignalWorkflowReplayPastEnd(t *testing.T) {
@@ -2675,6 +2599,11 @@ func TestSignalWorkflowFreshWithStore(t *testing.T) {
 	}
 }
 
+// TestSignalWorkflowStoreError used to assert that a store error was "logged, not surfaced": result 0, event recorded. It came in with the
+// bulk coverage commit ac77f2c3 (#183, "add unit tests for SignalWorkflow, DurableScheduleInvoke, ...") as a description of what the code
+// did then, with no rationale in the test or the message, and it pinned the defect cleat#4102 reports: the guest was told a signal was
+// recorded that was never delivered, and replay never tried again. It now asserts the reverse. The full set of cases is in
+// signal_workflow_reports_a_failed_delivery_test.go.
 func TestSignalWorkflowStoreError(t *testing.T) {
 	mock := &mockSignalStore{deliverErr: fmt.Errorf("db down")}
 	s := newTestExecSession()
@@ -2682,13 +2611,13 @@ func TestSignalWorkflowStoreError(t *testing.T) {
 
 	result := s.SignalWorkflow(context.Background(), nil, "target-run-123", "my-signal", `{"x":1}`)
 
-	// Store error is logged, not surfaced.
-	if result != 0 {
-		t.Errorf("expected 0 (error logged, not surfaced), got %d", result)
+	// The store error reaches the guest.
+	if result != errSignalDeliveryFailedInt {
+		t.Errorf("expected errSignalDeliveryFailedInt (%d), got %d", errSignalDeliveryFailedInt, result)
 	}
-	// Event still recorded.
-	if len(s.history) != 1 || s.history[0].EventType != EventTypeSignalReceived {
-		t.Error("expected event recorded despite store error")
+	// The event is still recorded, now carrying the outcome, so replay returns the same failure.
+	if len(s.history) != 1 || s.history[0].EventType != EventTypeSignalReceived || s.history[0].Response != signalOutcomeDeliveryFailed {
+		t.Errorf("expected one signal_received event recording the failed delivery, got %+v", s.history)
 	}
 }
 
@@ -2704,9 +2633,11 @@ func TestSignalWorkflowAuthDenied(t *testing.T) {
 	if result != errSignalAuthRequiredInt {
 		t.Errorf("expected errSignalAuthRequiredInt (%d), got %d", errSignalAuthRequiredInt, result)
 	}
-	// No event should be recorded on auth failure.
-	if len(s.history) != 0 {
-		t.Errorf("expected 0 history entries on auth failure, got %d", len(s.history))
+	// The refusal is recorded (cleat#4102). This asserted that NO event was recorded, from the same bulk commit as
+	// TestSignalWorkflowStoreError, and that left the live outcome out of history: a replay re-ran the authorization check, which could
+	// answer differently from the one the guest was told about.
+	if len(s.history) != 1 || s.history[0].Response != signalOutcomeAuthRequired {
+		t.Errorf("expected one event recording the authorization refusal, got %+v", s.history)
 	}
 }
 
@@ -2858,22 +2789,7 @@ func TestRegisterUpdateHandlerReplayDivergence(t *testing.T) {
 		EventType: "call", // wrong type
 	}}
 	result := s.RegisterUpdateHandler(context.Background(), nil, "my-handler")
-
-	if s.isReplay {
-		t.Error("expected isReplay=false after exitReplay")
-	}
-	if s.isReplay {
-		t.Error("expected replay to have ended")
-	}
-	if len(s.history) < 2 {
-		t.Fatalf("expected at least 2 history entries, got %d", len(s.history))
-	}
-	if s.history[1].EventType != EventTypeUpdateHandler {
-		t.Errorf("expected EventTypeUpdateHandler, got %q", s.history[1].EventType)
-	}
-	if result != 0 {
-		t.Errorf("expected 0, got %d", result)
-	}
+	wantReplayDivergence(t, s, result, 1)
 }
 
 func TestRegisterUpdateHandlerReplayPastEnd(t *testing.T) {
@@ -3188,25 +3104,7 @@ func TestRegisterUpdateHandlerReplay_Mismatch(t *testing.T) {
 		EventType: "call", // wrong type
 	}}
 	result := s.RegisterUpdateHandler(context.Background(), nil, "my-handler")
-
-	if s.isReplay {
-		t.Error("expected isReplay=false after exitReplay")
-	}
-	if s.isReplay {
-		t.Error("expected replay to have ended")
-	}
-	if len(s.history) < 2 {
-		t.Fatalf("expected at least 2 history entries, got %d", len(s.history))
-	}
-	if s.history[1].EventType != EventTypeUpdateHandler {
-		t.Errorf("expected fresh event type update_handler, got %q", s.history[1].EventType)
-	}
-	if s.history[1].UpdateHandlerName != "my-handler" {
-		t.Errorf("expected UpdateHandlerName='my-handler', got %q", s.history[1].UpdateHandlerName)
-	}
-	if result != 0 {
-		t.Errorf("expected 0, got %d", result)
-	}
+	wantReplayDivergence(t, s, result, 1)
 }
 
 func TestRegisterUpdateHandlerReplay_PastEnd(t *testing.T) {
@@ -3267,9 +3165,9 @@ func TestPluginCallStreamingReplay_MultipleChunks(t *testing.T) {
 	s := newTestExecSession()
 	s.isReplay = true
 	s.history = []EventRecord{
-		{Step: 0, EventType: EventTypePluginCallStreamChunk,
+		{Step: 0, EventType: EventTypePluginCallStreamChunk, PluginName: "test-plugin", PluginFunc: "Echo",
 			PluginOutput: "chunk1", StreamChunkIndex: 0},
-		{Step: 1, EventType: EventTypePluginCallStreamChunk,
+		{Step: 1, EventType: EventTypePluginCallStreamChunk, PluginName: "test-plugin", PluginFunc: "Echo",
 			PluginOutput: "chunk2", StreamChunkIndex: 1, StreamFinish: true},
 	}
 	result := s.PluginCallStreaming(context.Background(), nil, "test-plugin", "Echo", `{}`, 0, 0)
@@ -3298,6 +3196,8 @@ func TestPluginCallStreamingReplay_StreamError(t *testing.T) {
 	s.history = []EventRecord{{
 		Step:             0,
 		EventType:        EventTypePluginCallStreamChunk,
+		PluginName:       "test-plugin",
+		PluginFunc:       "Echo",
 		PluginOutput:     "plugin_call_streaming: boom",
 		StreamChunkIndex: 0,
 		StreamFinish:     true,

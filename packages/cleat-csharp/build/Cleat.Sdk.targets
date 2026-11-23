@@ -1,0 +1,35 @@
+<Project>
+  <!--
+    The entry-point list. The source generator writes the names of every [CleatEntry] method to
+    $(CleatEntryPointsFile) as it generates the dispatch table, so the list and the table come from one pass and
+    cannot disagree. The csharp target of `cleat build` reads the file into cleat.metadata.entry_points
+    (cleat#4080).
+
+    Why the generator writes it: a build task that read the compiled assembly's metadata was tried first and
+    dropped. The inline-task compiler does not reference System.Reflection.Metadata, and no consistent set of
+    references made it compile (the runtime's implementation assemblies and the reference pack each lost
+    System.Object). A generator already holds the names, and the path reaches it as a compiler-visible property.
+
+    The default is obj/cleat-entry-points.txt: BaseIntermediateOutputPath, because IntermediateOutputPath is not
+    defined yet where a project imports this file, and the path should not depend on configuration or runtime anyway.
+    Ask MSBuild for the path rather than rebuilding it from the layout:
+        dotnet msbuild -getProperty:CleatEntryPointsFile
+    Format: UTF-8 without a BOM, LF line endings, one entry name per line, in the compiler's declaration order,
+    no blank lines, a final newline. A name never contains a comma or a line break (the generator refuses one), so
+    the file can be split on lines or joined with commas without ambiguity.
+  -->
+  <PropertyGroup>
+    <CleatEntryPointsFile Condition="'$(CleatEntryPointsFile)' == ''">$(MSBuildProjectDirectory)/$(BaseIntermediateOutputPath)cleat-entry-points.txt</CleatEntryPointsFile>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <CompilerVisibleProperty Include="CleatEntryPointsFile" />
+  </ItemGroup>
+
+  <!-- The file is written when the compiler runs the generator. If the compiler was skipped as up to date and the
+       file has since been deleted, there is nothing to read, and the failure should name the cause. -->
+  <Target Name="CleatCheckEntryPoints" AfterTargets="CoreCompile">
+    <Error Condition="!Exists('$(CleatEntryPointsFile)')"
+           Text="cleat: $(CleatEntryPointsFile) was not written. The generator writes it while compiling; rebuild with --no-incremental." />
+  </Target>
+</Project>

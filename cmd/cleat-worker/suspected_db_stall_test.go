@@ -504,6 +504,42 @@ func TestReapOnceTreatsEachShardsProbeFailureIndependently(t *testing.T) {
 	}
 }
 
+// driveReaperUntilBound runs reapOnce in a loop for the first `bound` of an episode and fails on a reclaim that provably came BEFORE the bound.
+//
+// "Before the bound" is judged AFTER the call returns, not before it (cleat#4262). The loop used to ask `time.Now().Before(deadline)` and THEN call
+// reapOnce, but the reaper reads its own clock inside that call, later: a preempted goroutine, a GC pause or a loaded runner made the last iteration
+// that passed the check read the reaper's clock past the bound, so the reaper correctly reclaimed while the test still believed it was early. A check
+// made before an act says nothing about when the act happened.
+//
+// What a reclaim observed AFTER the call can prove, and the reason this is sound: the episode's clock (`since`) is set at the reaper's first tick, so
+// since >= t0 (the instant before the first call), and the reaper reclaims only once its own read t_r satisfies t_r - since >= bound, so t_r >= t0+bound.
+// The call returns after that read, so a reclaim seen while the clock AFTER the call is still before t0+bound is impossible for a reaper that honours
+// its bound, and is a real early reclaim. A reclaim seen at or after t0+bound is not evidence of anything: it is a legitimate one, and it ends this phase
+// (the next phase checks that reclaiming resumes). The check is therefore exactly as strong as the old one wherever the old one was right, and silent
+// only where the old one was racing. It cannot see an early reclaim by less than (first tick - t0), which is microseconds, not scheduling noise.
+//
+// beforeCall, when non-nil, runs between the loop's check and the call, on iteration i, and is told how long is left before the deadline: it is how a
+// test FORCES the delay the race needs.
+func driveReaperUntilBound(t *testing.T, w *Worker, reapCount *atomic.Int64, bound time.Duration, beforeCall func(i int, untilDeadline time.Duration)) {
+	t.Helper()
+	t0 := time.Now()
+	deadline := t0.Add(bound)
+	for i := 0; time.Now().Before(deadline); i++ {
+		if beforeCall != nil {
+			beforeCall(i, time.Until(deadline))
+		}
+		w.reapOnce()
+		after := time.Now()
+		if reapCount.Load() != 0 {
+			if after.Before(deadline) {
+				t.Fatalf("ReapStaleInstances was called before the suppression bound (%v) elapsed: it had run by %v after the episode began, which is under the bound", bound, after.Sub(t0))
+			}
+			return
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+}
+
 // TestReapOnceReclaimsOnceTheSuppressionBoundIsReached drives real reaper
 // ticks (short real sleeps, ms-scale reclaimTimeout) until the suppression
 // bound elapses, and checks both halves: nothing is reclaimed before the
@@ -529,14 +565,7 @@ func TestReapOnceReclaimsOnceTheSuppressionBoundIsReached(t *testing.T) {
 	w.reclaimTimeout = bound
 	seedRecentlyConfirmedHealthy(w)
 
-	deadline := time.Now().Add(bound)
-	for time.Now().Before(deadline) {
-		w.reapOnce()
-		if reapCount.Load() != 0 {
-			t.Fatalf("ReapStaleInstances was called before the suppression bound (%v) elapsed", bound)
-		}
-		time.Sleep(2 * time.Millisecond)
-	}
+	driveReaperUntilBound(t, w, &reapCount, bound, nil)
 
 	// Poll past the bound; a persistent stall must eventually resume
 	// reclaiming rather than suppress forever.
@@ -552,6 +581,66 @@ func TestReapOnceReclaimsOnceTheSuppressionBoundIsReached(t *testing.T) {
 	if !ok {
 		t.Fatal("ReapStaleInstances was never called even well past the suppression bound -- a persistent stall-shaped stale set must not suppress forever")
 	}
+}
+
+// TestTheBeforeBoundPhaseDoesNotCountAReclaimTheReaperMadeAfterTheBound FORCES the delay the flake needed, so the race no longer depends on the
+// machine being loaded (cleat#4262). On the one iteration whose check passes within 2.5ms of the deadline, the hook holds the call until just PAST the
+// deadline, so the reaper reads its own clock after t0+bound and correctly reclaims: a loop that judged "still before the bound" by its own earlier
+// check calls that a violation, and this one does not, because the clock after the call is not before the deadline.
+//
+// Three constraints found by measuring, not assumed. The hold must be SHORT: reapingIsSafe trusts a DB contact only if it is within
+// 2*(heartbeat+dbCallDeadline) = 30ms here, so a hold of the bound itself made the reaper decline for a different reason (its own recovery grace) and
+// reclaim nothing, which is why the test asserts that the reaper DID reclaim. And the loop's ticks are ~2ms apart, so whether one check lands in the last
+// 2.5ms depends on scheduling; an attempt where none did is retried on a fresh worker (a precondition that was not established is not a pass), and 30
+// failed attempts is a failure that says so.
+//
+// And the hold must outlast the reaper's FIRST TICK too: the episode's clock starts there (since = t1 >= t0), so the reaper reclaims only at t1+bound, and a
+// first tick that runs later than the hold's margin makes the reaper CORRECTLY decline (cleat-review2 proved it: a first tick 1.5ms slow failed 5 of 5 runs
+// with a 1ms margin). That is the same unestablished precondition as a check that missed the window, so it is retried too, and the margin is 5ms so ordinary
+// first-tick lag is absorbed rather than retried. The hold stays far inside the 30ms recency window.
+func TestTheBeforeBoundPhaseDoesNotCountAReclaimTheReaperMadeAfterTheBound(t *testing.T) {
+	const bound = 40 * time.Millisecond
+	var missedWindow, reaperDeclined int
+	for attempt := 1; attempt <= 30; attempt++ {
+		var reapCount atomic.Int64
+		store := &stallProbeMockStore{
+			mockStore: &mockStore{
+				reapStaleInstancesFn: func(ctx context.Context, timeout time.Duration) (int, error) {
+					reapCount.Add(1)
+					return 5, nil
+				},
+			},
+			staleSetShapeFn: func(ctx context.Context, timeout, missedBeatTimeout time.Duration) (engine.StaleSetShape, error) {
+				return stallShapedShape(), nil
+			},
+		}
+		w := newTestWorkerFromStore(store)
+		withDBCallDeadlineFloor(t, time.Millisecond)
+		w.reclaimTimeout = bound
+		seedRecentlyConfirmedHealthy(w)
+
+		start := time.Now()
+		fired := false
+		driveReaperUntilBound(t, w, &reapCount, bound, func(i int, untilDeadline time.Duration) {
+			if !fired && untilDeadline <= 2500*time.Microsecond {
+				fired = true
+				time.Sleep(untilDeadline + 5*time.Millisecond) // past the deadline by more than a slow first tick, and far inside the 30ms recency window
+			}
+		})
+		if !fired {
+			missedWindow++
+			continue // no check landed in the last 2.5ms; the delay was never forced, so nothing was tested
+		}
+		if reapCount.Load() == 0 {
+			reaperDeclined++
+			continue // the delay was forced but the reaper's episode began later than the hold's margin, so it correctly did not reclaim: not established either
+		}
+		if elapsed := time.Since(start); elapsed < bound {
+			t.Fatalf("the reaper reclaimed %v after the phase began, under the %v bound: a real early reclaim", elapsed, bound)
+		}
+		return
+	}
+	t.Fatalf("the test could not establish its precondition in 30 attempts: %d where no loop check landed within 2.5ms of the deadline, and %d where the delay was forced but the reaper did not reclaim (its first tick ran later than the 5ms hold margin, or it declined for another reason such as the 30ms recency window)", missedWindow, reaperDeclined)
 }
 
 // TestReapOnceTreatsEachShardIndependently is the per-shard-independence

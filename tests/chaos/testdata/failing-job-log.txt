@@ -1,0 +1,5 @@
+Test Go (commands cleat 2 of 2) on 1.26	UNKNOWN STEP	﻿2026-11-19T19:24:46.5715428Z Current runner version: '2.338.2'
+Test Go (commands cleat 2 of 2) on 1.26	UNKNOWN STEP	2026-11-19T19:24:46.5743820Z ##[group]Runner Image Provisioner
+Test Go (commands cleat 2 of 2) on 1.26	UNKNOWN STEP	2026-11-19T19:24:46.5744865Z Hosted Compute Agent
+Test Go (commands cleat 2 of 2) on 1.26	UNKNOWN STEP	2026-11-19T19:30:13.0593874Z {"Time":"2026-11-19T19:30:13.058636175Z","Action":"fail","Package":"github.com/cleat-team/cleat/cmd/cleat","Test":"TestEveryGoFixtureMatchesItsExpectedVerification","Elapsed":82.59}
+Test Go (commands cleat 2 of 2) on 1.26	UNKNOWN STEP	2026-11-19T19:33:01.9586305Z {"Time":"2026-11-19T19:33:01.958078135Z","Action":"fail","Package":"github.com/cleat-team/cleat/cmd/cleat","Elapsed":382.992}

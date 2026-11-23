@@ -8,7 +8,8 @@ workflow it compiles, and nothing reads those values except a consumer
 inspecting a compiled module. cleat#2454 is the gap: `release-process.md`'s
 step-3 search is `--include="*.go" --include="*.rs" --include="*.mod"`, which
 reaches ONE of the six places a version lives -- the only `.rs` stamper -- and
-is structurally blind to the Python, Java and AssemblyScript ones, and to
+is structurally blind to the Python and Java ones (and was to the AssemblyScript one, until
+cleat#4023 removed that SDK), and to
 `pyproject.toml` (TOML). `publish-pypi.yml`'s tag-vs-pyproject guard reads
 another one. So the prescribed sequence is: run a grep that cannot see four of
 the files, bump the one file the guard reads, tag, and publish a package that
@@ -72,7 +73,13 @@ from pathlib import Path
 # because all three spellings are in use, and a case-sensitive name pattern
 # reports the third as an ABSENCE -- which is how this script's first run
 # reported version.py as carrying no version at all.
-SDK_VERSION_FIELD = re.compile(r'sdk_version"?\s*[:=]\s*"([^"]+)"', re.IGNORECASE)
+#
+# The name must not start in the MIDDLE of a longer word: `(?<![A-Za-z0-9])`. Unanchored, `CLEAT_CS_WASISDK_VERSION="29.0"` (the C#
+# build's wasi-sdk pin, passed to a container) matched because WASI*SDK_VERSION* contains SDK_VERSION (cleat#4096), and the guard
+# demanded that a shell script which stamps no SDK version be declared as a stamper. Only letters and digits are excluded in front,
+# not `_`, on purpose: `CLEAT_SDK_VERSION="x"` and `_SDK_VERSION = "x"` are real stamper spellings and must still be found, and an
+# over-match fails loudly here (it asks for a declaration) where a missed stamper would pass.
+SDK_VERSION_FIELD = re.compile(r'(?<![A-Za-z0-9])sdk_version"?\s*[:=]\s*"([^"]+)"', re.IGNORECASE)
 
 # Gradle is not a data format anything here can parse, so `.kts` is matched at
 # the line start -- precise enough that a dependency constraint cannot match.
@@ -95,10 +102,6 @@ SDKS: dict[str, tuple[str, list[str]]] = {
         "crates/cleat-java/build.gradle.kts",
         ["crates/cleat-java/scripts/inject-metadata.sh"],
     ),
-    "assemblyscript": (
-        "packages/cleat-as/package.json",
-        ["packages/cleat-as/scripts/inject-metadata.js"],
-    ),
 }
 
 # Synthetic files for --self-test, one per site above. The Java stamper
@@ -112,8 +115,6 @@ SITES: dict[str, str] = {
     "crates/cleat-sdk/src/bin/inject_metadata.rs": '        "sdk_version": "%s",\n',
     "crates/cleat-java/build.gradle.kts": 'plugins { id("java") }\nversion = "%s"\n',
     "crates/cleat-java/scripts/inject-metadata.sh": '  "sdk_version": "%s",\n  "sdk_version": "%s",\n',
-    "packages/cleat-as/package.json": '{\n  "name": "cleat-as",\n  "version": "%s"\n}\n',
-    "packages/cleat-as/scripts/inject-metadata.js": '    sdk_version: "%s",\n',
 }
 
 
@@ -274,13 +275,13 @@ def self_test() -> int:
     # that stops detecting it reports 0 problems -- exactly what a healthy run
     # reports, so nothing would ever say so.
     run(
-        "assemblyscript manifest bumped without its stamper",
-        {"packages/cleat-as/package.json":
-            SITES["packages/cleat-as/package.json"].replace("%s", "0.9.9")},
+        "rust manifest bumped without its stamper",
+        {"crates/cleat-sdk/Cargo.toml":
+            SITES["crates/cleat-sdk/Cargo.toml"].replace("%s", "0.9.9")},
         "",
         1,
-        ["packages/cleat-as/scripts/inject-metadata.js stamps 0.3.0 but "
-         "packages/cleat-as/package.json is 0.9.9"],
+        ["crates/cleat-sdk/src/bin/inject_metadata.rs stamps 0.3.0 but "
+         "crates/cleat-sdk/Cargo.toml is 0.9.9"],
     )
 
     # KNOWN-POSITIVE: the Java stamper carries the version TWICE, so only the
@@ -301,7 +302,7 @@ def self_test() -> int:
         "release version expected, tree still on the old one",
         {},
         "0.4.0",
-        4,
+        3,
         ["is 0.3.0, expected 0.4.0"],
     )
 
@@ -382,6 +383,31 @@ def self_test() -> int:
                 "discovered although it is not excluded -- the exclusion is swallowing "
                 "files it should not, which would silently hide a real, un-checked stamper"
             )
+
+    # THE FIELD PATTERN ITSELF (cleat#4096): a name that merely CONTAINS sdk_version is not a version assignment, and every spelling a
+    # real stamper uses still is. One file per spelling so a miss names itself. The negative is the line that broke this guard.
+    cases += 1
+    spellings = {
+        "positive_json.py": '"sdk_version": "1.2.3"\n',
+        "positive_upper.py": 'SDK_VERSION = "1.2.3"\n',
+        "positive_bare.sh": 'sdk_version="1.2.3"\n',
+        "positive_prefixed.sh": 'CLEAT_SDK_VERSION="1.2.3"\n',
+        "positive_private.py": '_SDK_VERSION = "1.2.3"\n',
+        "negative_wasisdk.sh": '  -e CLEAT_CS_WASISDK_VERSION="29.0" \\\n',
+        "negative_word.py": 'mysdk_version = "9"\n',
+    }
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        for name, text in spellings.items():
+            path = root / "packages" / "fieldcheck" / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(text)
+        found = {Path(f).name for f in discovered_sites(root)}
+    for name in spellings:
+        if name.startswith("positive_") and name not in found:
+            failures.append(f"field-pattern case: {name} ({spellings[name].strip()!r}) is not discovered, so a real stamper spelled like it would escape this guard")
+        if name.startswith("negative_") and name in found:
+            failures.append(f"field-pattern case: {name} ({spellings[name].strip()!r}) IS discovered, but it only contains sdk_version inside a longer name")
 
     if failures:
         for f in failures:

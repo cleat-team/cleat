@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/go-sql-driver/mysql"
@@ -107,6 +108,12 @@ type MySQLStore struct {
 	encryption               *PayloadEncryption
 	encryptSensitivePayloads bool
 
+	// lockConflictRetries, when a TEST sets it, counts the whole-transaction retries retryingLockConflict makes on this store: each time InnoDB refused a transaction as
+	// a deadlock victim (1213) or a lock wait timeout (1205) and it was run again. It is nil in production and then costs one nil check. A pointer and not an
+	// atomic.Int64 value because this struct is copied by value (per-tenant clones). It exists because the only server-side evidence of a deadlock, INNODB_METRICS
+	// lock_deadlocks, is server-wide and moves for any session, so a test that engineers a deadlock could not tell its own from another test's (cleat#4444).
+	lockConflictRetries *atomic.Int64
+
 	// perTenantDatabase records that this store was built by
 	// MySQLStoreFactory, whose topology gives each tenant its own physical
 	// database (cleat_<tenant_id>). It existed for ClaimWorkflowsAcrossTenants
@@ -151,14 +158,30 @@ func (s *MySQLStore) WithIdempotencyKeyTTL(ttl time.Duration) *MySQLStore {
 	return &cp
 }
 
-// WithEncryption returns a copy of the store with encryption at rest enabled.
-// NOTE: Encryption at rest is not yet supported on MySQL backends. This method
-// is present for forward compatibility so that StreamEventHistory can contain
-// the same decryption guard as the Postgres variant.
+// WithEncryption returns a copy of the store carrying the given payload
+// encryption, with encryption at rest off.
+//
+// It refuses to enable encryption: MySQL cannot seal payloads, and a store
+// that believes it can is only HALF sealed. StartChildWorkflowAtomic routes
+// its event through encodeEventForStorage with this flag (cleat#3906), so it
+// would seal a child's start event while AppendEventHistoryBatch keeps every
+// ordinary event beside it plaintext -- and MySQL's populateFromPayload reads
+// this column with no decryption at all, so the sealed row comes back as
+// silent field loss rather than an error. See engine/event_storage_encoding.go
+// for why MySQL and SQL Server are deliberately not routed through that
+// encoder.
+//
+// The method is present, and keeps its disabled form, for forward
+// compatibility: StreamEventHistory carries the same decryption guard as the
+// PostgreSQL variant.
 func (s *MySQLStore) WithEncryption(enc *PayloadEncryption, enabled bool) *MySQLStore {
+	if enabled {
+		panic("engine: payload encryption at rest cannot be enabled on MySQL; " +
+			"only PostgreSQL can seal payloads (cleat#3906)")
+	}
 	cp := *s
 	cp.encryption = enc
-	cp.encryptSensitivePayloads = enabled
+	cp.encryptSensitivePayloads = false
 	return &cp
 }
 
@@ -286,11 +309,45 @@ func (s *MySQLStore) taskQueueClause() (string, []any) {
 
 // RequestCancellation sets the cancellation flag on a workflow.
 func (s *MySQLStore) RequestCancellation(ctx context.Context, workflowID, reason string) error {
+	return s.requestCancellationTo(ctx, workflowID, reason, nil)
+}
+
+// requestCancellationTo sets the flag on the END of workflowID's continue-as-new chain, under the lock that orders it against that run's continue (cleat#4340). A flag set on a run
+// that then continues is carried to its successor by ContinueAsNew.
+func (s *MySQLStore) requestCancellationTo(ctx context.Context, workflowID, reason string, settled *string) error {
+	return s.retryingLockConflict("request cancellation", func() error {
+		return s.requestCancellationOnceTo(ctx, workflowID, reason, settled)
+	})
+}
+
+func (s *MySQLStore) requestCancellationOnceTo(ctx context.Context, workflowID, reason string, settled *string) error {
+	hint, err := latestRunInChain(ctx, workflowID, s.successorOfRun)
+	if err != nil {
+		return fmt.Errorf("request cancellation: resolve the chain: %w", err)
+	}
 	tx, err := s.beginTx(ctx)
 	if err != nil {
 		return fmt.Errorf("request cancellation: begin: %w", err)
 	}
 	defer tx.Rollback()
+	end, err := s.lockChainEndTx(ctx, tx, workflowID, hint)
+	if err != nil {
+		return fmt.Errorf("request cancellation: lock: %w", err)
+	}
+	if settled != nil {
+		*settled = end
+	}
+	// The end's status, under the lock lockChainEndTx took; see PostgresStore.requestCancellationTo.
+	var endStatus string
+	switch err := tx.QueryRowContext(ctx, `SELECT status FROM workflow_instances WHERE id = ? AND tenant_id = ?`, end, s.tenantID).Scan(&endStatus); {
+	case err == nil:
+		if refusal := cooperativeRefusal(workflowID, end, endStatus); refusal != nil {
+			return refusal
+		}
+	case !errors.Is(err, sql.ErrNoRows):
+		return fmt.Errorf("request cancellation: read the end's status: %w", err)
+	}
+	workflowID = end
 
 	_, err = tx.ExecContext(ctx, `
 		UPDATE workflow_instances
@@ -403,11 +460,12 @@ func (s *MySQLStore) StartChildWorkflowAtomic(ctx context.Context, childID, pare
 
 	// The same encoder every other event_history writer calls (cleat#2328;
 	// see PostgresStore.StartChildWorkflowAtomic). MySQL does not support
-	// encryption at rest -- s.encryptSensitivePayloads is always false here,
-	// so this is a no-op transform today -- but routing through it anyway
-	// means there is exactly one place that builds the payload column and
-	// the payload_encoding column, rather than a second hand-rolled copy
-	// that would need to be found again if MySQL ever gains encryption.
+	// encryption at rest: WithEncryption refuses to enable it (cleat#3906),
+	// so s.encryptSensitivePayloads is false here and this is a no-op
+	// transform. Routing through it anyway means there is exactly one place
+	// that builds the payload column and the payload_encoding column, rather
+	// than a second hand-rolled copy that would need to be found again if
+	// MySQL ever gains encryption.
 	// The checksum above is computed BEFORE this call, over the plaintext
 	// event, for the same reason encodeEventForStorage's doc gives: it must
 	// match what VerifyWorkflowEvents recomputes from the decrypted record.
@@ -438,15 +496,17 @@ func (s *MySQLStore) StartChildWorkflowAtomic(ctx context.Context, childID, pare
 func (s *MySQLStore) GetChildResult(ctx context.Context, runID string) (ChildOutcome, error) {
 	// Resolve the chain first -- see PostgresStore.GetChildResult for why: a
 	// child that continued as new leaves its first run 'done' with an empty
-	// result, and that is the run the parent holds the id of (cleat#955).
-	runID, err := terminalRunID(ctx, runID, s.successorOfRun)
-	if err != nil {
-		return ChildOutcome{}, err
-	}
+	// result, and that is the run the parent holds the id of (cleat#955). And
+	// ask for a successor again after the row is read (cleat#4069).
+	return readChildOutcomeFollowingTheChain(ctx, runID, s.successorOfRun, s.readChildOutcome)
+}
+
+// readChildOutcome reads ONE run's row and says what it settled as. It does not follow the chain.
+func (s *MySQLStore) readChildOutcome(ctx context.Context, runID string) (ChildOutcome, error) {
 	var result string
 	var status string
 	var errMsg sql.NullString
-	err = s.db.QueryRowContext(ctx, `
+	err := s.db.QueryRowContext(ctx, `
 		SELECT COALESCE(result, '{}'), status, error_msg FROM workflow_instances WHERE id = ? AND tenant_id = ?
 	`, runID, s.tenantID).Scan(&result, &status, &errMsg)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -513,15 +573,8 @@ func (s *MySQLStore) ListQueryState(ctx context.Context, workflowID string) (map
 // second signal of the same name silently replace the first. The clause is
 // gone because the duplicate key is gone.
 func (s *MySQLStore) DeliverSignal(ctx context.Context, workflowID, signalName, payload string) error {
-	tx, err := s.beginTx(ctx)
-	if err != nil {
-		return fmt.Errorf("deliver signal: begin: %w", err)
-	}
-	defer tx.Rollback()
-	if err := s.deliverSignalTx(ctx, tx, workflowID, signalName, payload); err != nil {
-		return err
-	}
-	return tx.Commit()
+	_, err := s.DeliverSignalReceipt(ctx, workflowID, signalName, payload, "")
+	return err
 }
 
 // DeliverSignalIdempotent implements SignalIdempotencyStore. See the
@@ -531,50 +584,101 @@ func (s *MySQLStore) DeliverSignal(ctx context.Context, workflowID, signalName, 
 // RETURNING: MySQL has neither of the latter. A zero-row insert is the
 // duplicate, which is the same decision by a different spelling.
 func (s *MySQLStore) DeliverSignalIdempotent(ctx context.Context, workflowID, signalName, payload, idempotencyKey string) (bool, error) {
-	if idempotencyKey == "" {
-		return false, s.DeliverSignal(ctx, workflowID, signalName, payload)
+	r, err := s.DeliverSignalReceipt(ctx, workflowID, signalName, payload, idempotencyKey)
+	return r.Replay, err
+}
+
+// DeliverSignalReceipt implements SignalReceiptStore: a delivery, keyed when idempotencyKey is not empty, that says where the signal went (cleat#4340). The signal goes to the END of the
+// addressed run's chain; see signal_forward.go and PostgresStore.DeliverSignalReceipt.
+func (s *MySQLStore) DeliverSignalReceipt(ctx context.Context, workflowID, signalName, payload, idempotencyKey string) (SignalReceipt, error) {
+	// An UNLOCKED read of the chain's end, before the transaction so its second connection is not held while this call holds one; lockChainEnd checks it again under the lock.
+	hint, err := latestRunInChain(ctx, workflowID, s.successorOfRun)
+	if err != nil {
+		return SignalReceipt{}, fmt.Errorf("deliver signal: resolve the chain: %w", err)
 	}
 
 	tx, err := s.beginTx(ctx)
 	if err != nil {
-		return false, fmt.Errorf("deliver signal: begin: %w", err)
+		return SignalReceipt{}, fmt.Errorf("deliver signal: begin: %w", err)
 	}
 	defer tx.Rollback()
 
-	// expires_at from the CONFIGURED TTL, not the column default.
-	//
-	// idempotency_keys.expires_at defaults to now() + 7 days, and the
-	// store's idempotencyKeyTTL defaults to 720 hours. The start path sets
-	// it explicitly; this one did not when it was added in cleat#1266, so a
-	// SIGNAL token silently stopped working after 7 days while the
-	// configured and documented lifetime was 30 -- a retry on day 8 would
-	// be delivered a second time, which is the whole thing the token exists
-	// to prevent.
-	//
-	// Same shape as cleat#1261, where cleanup deleted at created_at + 7
-	// days against the same 720h default and swept LIVE keys 23 days early:
-	// idempotency that stops working long before it says it does, silently,
-	// because nothing compares the two numbers.
-	res, err := tx.ExecContext(ctx, `
+	if idempotencyKey != "" {
+
+		// expires_at from the CONFIGURED TTL, not the column default.
+		//
+		// idempotency_keys.expires_at defaults to now() + 7 days, and the
+		// store's idempotencyKeyTTL defaults to 720 hours. The start path sets
+		// it explicitly; this one did not when it was added in cleat#1266, so a
+		// SIGNAL token silently stopped working after 7 days while the
+		// configured and documented lifetime was 30 -- a retry on day 8 would
+		// be delivered a second time, which is the whole thing the token exists
+		// to prevent.
+		//
+		// Same shape as cleat#1261, where cleanup deleted at created_at + 7
+		// days against the same 720h default and swept LIVE keys 23 days early:
+		// idempotency that stops working long before it says it does, silently,
+		// because nothing compares the two numbers.
+		res, err := tx.ExecContext(ctx, `
 		INSERT IGNORE INTO idempotency_keys (key_hash, workflow_id, expires_at, tenant_id)
 		VALUES (?, ?, DATE_ADD(NOW(6), INTERVAL ? SECOND), ?)
 	`, signalIdempotencyHash(idempotencyKey), workflowID,
-		int(s.idempotencyKeyTTL.Seconds()), s.tenantID)
-	if err != nil {
-		return false, fmt.Errorf("deliver signal: claim idempotency key: %w", err)
-	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return false, fmt.Errorf("deliver signal: rows affected: %w", err)
-	}
-	if n == 0 {
-		return true, tx.Commit()
+			int(s.idempotencyKeyTTL.Seconds()), s.tenantID)
+		if err != nil {
+			return SignalReceipt{}, fmt.Errorf("deliver signal: claim idempotency key: %w", err)
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return SignalReceipt{}, fmt.Errorf("deliver signal: rows affected: %w", err)
+		}
+		if n == 0 {
+			return SignalReceipt{Replay: true}, tx.Commit()
+		}
 	}
 
-	if err := s.deliverSignalTx(ctx, tx, workflowID, signalName, payload); err != nil {
-		return false, err
+	to, err := s.deliverForwardedTx(ctx, tx, workflowID, hint, signalName, payload)
+	if err != nil {
+		// The idempotency key claimed above rolls back with this transaction, so a refused delivery does not spend the token.
+		return SignalReceipt{}, err
 	}
-	return false, tx.Commit()
+	// The key is recorded against the run that HOLDS the signal (cleat#4340). It was claimed above against the addressed run, which for a forwarded signal is a completed run the retention sweep
+	// deletes, and a sweep deletes the keys of the runs it removes: the key would go while the signal still sits on a live run, and a retry under it would deliver the signal a second time.
+	if idempotencyKey != "" && to != workflowID {
+		if _, err := tx.ExecContext(ctx, `UPDATE idempotency_keys SET workflow_id = ? WHERE key_hash = ? AND tenant_id = ?`, to, signalIdempotencyHash(idempotencyKey), s.tenantID); err != nil {
+			return SignalReceipt{}, fmt.Errorf("deliver signal: record the key against the run that holds the signal: %w", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return SignalReceipt{}, err
+	}
+	return receiptFor(workflowID, to), nil
+}
+
+// deliverForwardedTx stores a signal on the END of the chain the addressed run belongs to, under the lock that orders it against that run's continue-as-new (cleat#4340). The run's row is
+// read FOR UPDATE, and the successor read is a locking read too: under REPEATABLE READ a plain read would use the snapshot the transaction's first plain read took, which may predate a continue
+// that committed while this call waited for the lock.
+func (s *MySQLStore) deliverForwardedTx(ctx context.Context, tx *sql.Tx, workflowID, hint, signalName, payload string) (string, error) {
+	end, err := lockChainEnd(workflowID, hint,
+		func(run string) (string, bool, error) {
+			var status string
+			switch err := tx.QueryRowContext(ctx, `SELECT status FROM workflow_instances WHERE id = ? AND tenant_id = ? FOR UPDATE`, run, s.tenantID).Scan(&status); {
+			case errors.Is(err, sql.ErrNoRows):
+				return "", false, nil
+			case err != nil:
+				return "", false, fmt.Errorf("deliver signal: lock the run: %w", err)
+			}
+			return status, true, nil
+		},
+		func(run string) (string, error) {
+			return successorScan(tx.QueryRowContext(ctx, `SELECT id FROM workflow_instances WHERE continued_from = ? AND tenant_id = ? FOR SHARE`, run, s.tenantID))
+		})
+	if err != nil {
+		return "", err
+	}
+	if err := s.deliverSignalTx(ctx, tx, end, signalName, payload); err != nil {
+		return "", refusalFor(err, workflowID, end)
+	}
+	return end, nil
 }
 
 // deliverSignalTx is the body of a delivery, inside a caller's transaction.
@@ -607,7 +711,7 @@ func (s *MySQLStore) deliverSignalTx(ctx context.Context, tx *sql.Tx, workflowID
 	res, err := tx.ExecContext(ctx, `
 		INSERT INTO workflow_signals (workflow_id, signal_name, payload, tenant_id)
 		SELECT ?, ?, ?, ?
-		WHERE EXISTS (SELECT 1 FROM workflow_instances WHERE id = ? AND tenant_id = ?)
+		WHERE EXISTS (SELECT 1 FROM workflow_instances WHERE id = ? AND tenant_id = ? AND status NOT IN ('done', 'cancelled'))
 	`, workflowID, signalName, encodeJSONPayload(payload), s.tenantID, workflowID, s.tenantID)
 	if err != nil {
 		if isSignalsWorkflowFKViolation(err) {
@@ -618,7 +722,15 @@ func (s *MySQLStore) deliverSignalTx(ctx context.Context, tx *sql.Tx, workflowID
 	if n, err := res.RowsAffected(); err != nil {
 		return fmt.Errorf("deliver signal: rows affected: %w", err)
 	} else if n == 0 {
-		return ErrWorkflowNotFound
+		// Nothing was written: no run of this tenant by this id, or a SETTLED one (cleat#4340). See signalRefusal.
+		var status string
+		switch err := tx.QueryRowContext(ctx, `SELECT status FROM workflow_instances WHERE id = ? AND tenant_id = ?`, workflowID, s.tenantID).Scan(&status); {
+		case errors.Is(err, sql.ErrNoRows):
+			return ErrWorkflowNotFound
+		case err != nil:
+			return fmt.Errorf("deliver signal: classify refusal: %w", err)
+		}
+		return signalRefusal(workflowID, status, true)
 	}
 	// This UPDATE only runs once the INSERT above has proven the EXISTS
 	// predicate true, under this same tenant, in this same transaction, so

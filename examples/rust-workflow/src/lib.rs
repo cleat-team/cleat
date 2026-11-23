@@ -235,6 +235,20 @@ fn suspend_probe(_h: &HostCalls, _input: PlaceOrderInput) -> Result<String, Stri
     Ok("{\"unreachable\":true}".to_string())
 }
 
+/// cleat#4113: one frozen value and a count of how often its function ran. The count is a local the closure captures, not a static: every
+/// execution is a fresh WASM instance, so a first run reports 1 and a replay that returns the recorded value without calling the function reports
+/// 0, and `cleat build --target rust` refuses a static atomic (R007, global mutable state) in an entry point. Keep this entry point;
+/// `engine/rust_side_effect_test.go` is its only caller.
+#[cleat_entry]
+fn side_effect_probe(h: &HostCalls, _input: PlaceOrderInput) -> Result<String, String> {
+    let mut ran = 0usize;
+    let value = h.side_effect_with(|| {
+        ran += 1;
+        format!("\"computed-in-run-{}\"", ran)
+    })?;
+    Ok(format!("{{\"value\":{},\"ran\":{}}}", value, ran))
+}
+
 /// The ordinary shape: a real sleep, propagated with `?`.
 #[cleat_entry]
 fn sleep_probe(h: &HostCalls, _input: PlaceOrderInput) -> Result<String, String> {
@@ -324,4 +338,24 @@ fn retry_long_probe(h: &HostCalls, _input: PlaceOrderInput) -> Result<String, St
     let _: serde_json::Value =
         h.cleat_call_with_retry("always-fails", "op", &serde_json::json!({}), &policy)?;
     Ok("{\"unreachable\":true}".to_string())
+}
+
+/// Two calls to a service that answers with a response larger than the SDK's starting 64 KiB buffer (cleat#4132).
+///
+/// The first call is truncated by the host (code 7) and fails, and that is the SDK growing its buffer for the calls after it: the failed call
+/// has already run and recorded its effect, so it cannot be rescued. The second call, to the same service, then receives the whole response.
+/// This is the behaviour the Go adapter has had since cleat#1384, and `engine/rust_big_response_test.go` is the evidence for the Rust side.
+///
+/// Keep this entry point: it has no other caller.
+#[cleat_entry]
+fn big_response_probe(h: &HostCalls, _input: PlaceOrderInput) -> Result<String, String> {
+    let (first, e1) = h.cleat_call("big", "op", "{}");
+    let (second, e2) = h.cleat_call("big", "op", "{}");
+    Ok(format!(
+        "{{\"first_failed\":{},\"first_len\":{},\"second_failed\":{},\"second_len\":{}}}",
+        e1.is_some(),
+        first.len(),
+        e2.is_some(),
+        second.len()
+    ))
 }

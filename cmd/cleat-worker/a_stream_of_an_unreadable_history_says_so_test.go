@@ -32,10 +32,12 @@ func TestAStreamOfAnUnreadableHistoryGetsASentenceNotTheDecryptError(t *testing.
 			wantAbsent: "message authentication",
 		},
 		{
-			name:       "any other failure keeps its text",
+			// It kept its text until cleat#3878: a driver's message can name hosts, statements and roles, so the
+			// client now gets a sentence and the error is in the worker log.
+			name:       "any other failure does not send its text",
 			loadErr:    errors.New("load history: connection reset by peer"),
-			wantSubstr: "connection reset by peer",
-			wantAbsent: "does not hold the payload encryption key",
+			wantSubstr: "could not read this workflow's history",
+			wantAbsent: "connection reset by peer",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

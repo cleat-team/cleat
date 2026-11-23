@@ -204,6 +204,15 @@ func (w *Worker) reloadKeyRingsOnSIGHUP(ctx context.Context) {
 			"worker_id", workerID, "dropped_versions", droppedSecrets)
 	}
 
+	// cleat#3853: the ring has changed on the success path only (a refused or
+	// reverted reload returned above), so a run whose sealed compaction state
+	// this worker could not open may now be openable. Retry those on the next
+	// compaction tick instead of waiting out compactionSkipWindow.
+	if n := w.compactionSkipSetFor().clear(); n > 0 {
+		logger.InfoContext(ctx, "SIGHUP: payload keys reloaded; the runs whose compaction state this worker could not open will be retried",
+			"worker_id", workerID, "compaction_skips_cleared", n)
+	}
+
 	logger.InfoContext(ctx, "SIGHUP: key reload complete", "worker_id", workerID, "secret_key_versions", candidateSecrets.Versions())
 	record(true)
 }

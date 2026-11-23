@@ -87,6 +87,14 @@ package engine
 //     v->of.u64 = val;
 // }
 //
+// // The WIT's `s64` is a different component type from `u64`, and wasmtime
+// // checks a callback's result against the declared type: a u64 where the
+// // function says s64 traps with "type mismatch: expected s64, found u64".
+// static void component_val_set_s64(wasmtime_component_val_t *v, int64_t val) {
+//     v->kind = WASMTIME_COMPONENT_S64;
+//     v->of.s64 = val;
+// }
+//
 // static wasmtime_component_val_t make_component_val_string(const char *s, size_t len) {
 //     wasmtime_component_val_t val;
 //     val.kind = WASMTIME_COMPONENT_STRING;
@@ -182,6 +190,25 @@ package engine
 //     v->of.record.data = fields;
 // }
 //
+// // tuple<u64, u64>
+// //
+// // wasi:random/insecure-seed returns one, and a u64 where the component expects a tuple traps with "type mismatch: expected tuple, found
+// // u64" (cleat#4396). Same ownership as every other result here: wasmtime drops the tuple's elements and its vec recursively, so both are
+// // C-allocator heap.
+// static void component_val_set_u64_pair(wasmtime_component_val_t *v, uint64_t a, uint64_t b) {
+//     wasmtime_component_val_t *items =
+//         (wasmtime_component_val_t *)malloc(2 * sizeof(*items));
+//     if (items == NULL) { abort(); }   // dereferenced on the next line
+//     items[0].kind = WASMTIME_COMPONENT_U64;
+//     items[0].of.u64 = a;
+//     items[1].kind = WASMTIME_COMPONENT_U64;
+//     items[1].of.u64 = b;
+//
+//     v->kind = WASMTIME_COMPONENT_TUPLE;
+//     v->of.tuple.size = 2;
+//     v->of.tuple.data = items;
+// }
+//
 // // list<u8>
 // //
 // // A component list is a vec of wasmtime_component_val_t, not a byte buffer:
@@ -272,6 +299,39 @@ package engine
 //         payload.of.string.size = len;
 //         variant.of.variant.discriminant.data = cleat_dup(name, name_len);
 //         variant.of.variant.discriminant.size = name_len;
+//         variant.of.variant.val = wasmtime_component_val_new(&payload);
+//     }
+//     v->kind = WASMTIME_COMPONENT_RESULT;
+//     v->of.result.is_ok = true;
+//     v->of.result.val = wasmtime_component_val_new(&variant);
+// }
+//
+// // ok(side-effect-lookup): whether the history holds the value of a side effect (cleat#4113).
+// // `found` != 0 = recorded(s); otherwise not-recorded (no payload).
+// //
+// // PRECONDITION on `s`: as component_val_set_call_ok's -- C-allocator storage,
+// // ownership passes to `v`, not copied here. Ignored when `found` is 0.
+// static void component_val_set_side_effect_lookup(wasmtime_component_val_t *v,
+//                                                  int found,
+//                                                  const char *s, size_t len) {
+//     static const char recorded_name[] = "recorded";
+//     static const char not_recorded_name[] = "not-recorded";
+//
+//     wasmtime_component_val_t variant;
+//     variant.kind = WASMTIME_COMPONENT_VARIANT;
+//     if (!found) {
+//         variant.of.variant.discriminant.data =
+//             cleat_dup(not_recorded_name, sizeof(not_recorded_name) - 1);
+//         variant.of.variant.discriminant.size = sizeof(not_recorded_name) - 1;
+//         variant.of.variant.val = NULL;
+//     } else {
+//         wasmtime_component_val_t payload;
+//         payload.kind = WASMTIME_COMPONENT_STRING;
+//         payload.of.string.data = (char *)s;
+//         payload.of.string.size = len;
+//         variant.of.variant.discriminant.data =
+//             cleat_dup(recorded_name, sizeof(recorded_name) - 1);
+//         variant.of.variant.discriminant.size = sizeof(recorded_name) - 1;
 //         variant.of.variant.val = wasmtime_component_val_new(&payload);
 //     }
 //     v->kind = WASMTIME_COMPONENT_RESULT;
@@ -455,16 +515,6 @@ package engine
 //     return (wasmtime_context_t *)ctx_ptr;
 // }
 //
-// // Save memory data pointer after instantiation. Initialized by
-// // save_first_memory_data which is called once after instantiation.
-// static uint8_t *saved_memory_ptr = NULL;
-// static size_t saved_memory_len = 0;
-//
-// static uint8_t *get_saved_memory_ptr(void) { return saved_memory_ptr; }
-// static size_t get_saved_memory_len(void) { return saved_memory_len; }
-//
-// // Memory scan disabled - not needed with WIT string ABI.
-// static void save_first_memory_data(wasmtime_context_t *ctx, uint64_t store_id) {}
 //// // Trampoline for cleat host functions.
 // extern wasmtime_error_t *goComponentCallback(
 //     void *env, wasmtime_context_t *ctx,
@@ -724,6 +774,7 @@ const (
 	cbTypeWasiWallClockResolution // () -> datetime
 	cbTypeWasiRandomU64           // () -> u64
 	cbTypeWasiRandomBytes         // (u64) -> list<u8>
+	cbTypeWasiRandomSeed          // () -> tuple<u64, u64>  (wasi:random/insecure-seed)
 	cbTypeDurableLog              // (string) -> u64
 
 	// durable-version interface
@@ -731,7 +782,7 @@ const (
 	cbTypeMinVersion // () -> u64
 
 	// durable-lifecycle interface
-	cbTypeDurableDefer     // (string) -> string
+	cbTypeDurableDefer     // (string) -> result<string, call-failure>
 	cbTypeContinueAsNew    // (string) -> u64
 	cbTypePollCancellation // () -> string
 	cbTypeDeferPhase       // (bool) -> ()
@@ -795,6 +846,7 @@ const (
 	// durable-extended-lifecycle interface
 	cbTypeContinueAsNewVersioned // (string,u32) -> u64
 	cbTypeSideEffect             // (string) -> string
+	cbTypeSideEffectRecorded     // () -> result<side-effect-lookup, call-failure>
 	cbTypeRunDetached            // (string,string) -> u64
 
 	// durable-fetch interface
@@ -811,19 +863,56 @@ type cbEntry struct {
 	typ     cbType
 }
 
+// cbRegistry maps the id each linked host function carries (as its C env pointer) to the backend and callback type that serve it.
+//
+// IDS ARE MINTED FROM A COUNTER AND NEVER FROM THE MAP'S SIZE. They used to be len(entries)+1, which was only unique because nothing was ever
+// removed: with entries {1,2,3}, removing 1 makes the next id 3 and overwrites a LIVE entry, so the callback that id belongs to would be
+// served by another execution's backend. An execution now removes its own entries (cbScope), so the id must not depend on how many are left.
+// A removed id is never reused, which also means a callback that somehow fired after its execution ended finds nothing and not a stranger.
 var cbRegistry = struct {
 	sync.Mutex
 	entries map[uintptr]cbEntry
-	store   wasmtime.Storelike
-	storeID uint64
+	next    uintptr
 }{entries: make(map[uintptr]cbEntry)}
 
+// registerCB adds one entry and returns its id. An execution registers through a cbScope, which remembers the ids so it can remove them.
 func registerCB(b *wasmtimeBackend, typ cbType) uintptr {
 	cbRegistry.Lock()
 	defer cbRegistry.Unlock()
-	id := uintptr(len(cbRegistry.entries) + 1)
+	cbRegistry.next++
+	id := cbRegistry.next
 	cbRegistry.entries[id] = cbEntry{backend: b, typ: typ}
 	return id
+}
+
+// cbScope is the set of registry entries ONE execution registered, so that execution can remove exactly those and no other's (cleat#4257).
+// Before it, nothing ever removed an entry: every component execution kept its per-execution backend, and with it the whole execution
+// session, reachable from this package-level map for the life of the process (57 entries per execution on a minimal guest).
+//
+// It is not safe for concurrent use and does not need to be: an execution registers its imports on one goroutine before the guest runs.
+type cbScope struct {
+	ids []uintptr
+}
+
+func (sc *cbScope) register(b *wasmtimeBackend, typ cbType) uintptr {
+	id := registerCB(b, typ)
+	sc.ids = append(sc.ids, id)
+	return id
+}
+
+// release removes every entry this scope registered. It must run AFTER nothing can call back: the linker, the store and the component are
+// released by the execution's own defers, so the scope's release is deferred FIRST and therefore runs LAST. Calling it earlier would leave a
+// live instance whose callbacks find no entry; goComponentCallback answers that with a silent success that writes no results.
+func (sc *cbScope) release() {
+	if len(sc.ids) == 0 {
+		return
+	}
+	cbRegistry.Lock()
+	defer cbRegistry.Unlock()
+	for _, id := range sc.ids {
+		delete(cbRegistry.entries, id)
+	}
+	sc.ids = nil
 }
 
 func lookupCB(id uintptr) cbEntry {
@@ -891,6 +980,29 @@ func setResultU64(results *C.wasmtime_component_val_t, nresults C.size_t, val ui
 	}
 	r := (*C.wasmtime_component_val_t)(unsafe.Pointer(results))
 	C.component_val_set_u64(r, C.uint64_t(val))
+}
+
+// setResultU64Pair sets the first result value to a WIT `tuple<u64, u64>`, which is what wasi:random/insecure-seed returns. Registering that
+// function with setResultU64 instead trapped every guest that called it ("type mismatch: expected tuple, found u64", cleat#4396).
+func setResultU64Pair(results *C.wasmtime_component_val_t, nresults C.size_t, a, b uint64) {
+	if int(nresults) < 1 {
+		return
+	}
+	r := (*C.wasmtime_component_val_t)(unsafe.Pointer(results))
+	C.component_val_set_u64_pair(r, C.uint64_t(a), C.uint64_t(b))
+}
+
+// setResultS64 sets the first result value to an s64. Use it for a function the
+// WIT declares `-> s64`; setResultU64 on one traps (cleat#4081). Today that is
+// exactly durable-acquire-lock and durable-release-lock -- every other import
+// returns u64 -- which is why the defect went unseen: nothing had ever called
+// either on a component.
+func setResultS64(results *C.wasmtime_component_val_t, nresults C.size_t, val int64) {
+	if int(nresults) < 1 {
+		return
+	}
+	r := (*C.wasmtime_component_val_t)(unsafe.Pointer(results))
+	C.component_val_set_s64(r, C.int64_t(val))
 }
 
 // setResultString sets the first result value to a WIT string.
@@ -966,7 +1078,7 @@ type callOutcome struct {
 //
 // extractString differs per layout -- packDurableCallResult puts the length at
 // bits 40-63 and packSimpleResult at bits 32-63 -- so the caller passes the
-// extractor that matches the handler it called. Getting that wrong returns ""
+// layout of the handler it called, which also decides how the failure code is read. Getting that wrong returns ""
 // for any response under 256 bytes rather than failing, which is why the two
 // are not merged.
 //
@@ -984,7 +1096,7 @@ type callOutcome struct {
 // timed-out field. A decoder that read its fields first would read a stop as an
 // ordinary result and carry on, which is the whole defect deferSegmentLanguages
 // exists to prevent.
-func decodeCallOutcome(packed int64, buf []byte, extractString func(int64, []byte) string) callOutcome {
+func decodeCallOutcome(packed int64, buf []byte, layout hostWordLayout) callOutcome {
 	if uint64(packed)&uint64(callSuspendSentinel) != 0 {
 		return callOutcome{suspended: true}
 	}
@@ -992,11 +1104,39 @@ func decodeCallOutcome(packed int64, buf []byte, extractString func(int64, []byt
 	if byte(u&0xFF) != 0 {
 		return callOutcome{
 			failed:  true,
-			code:    uint32((u >> 8) & 0xFFFFFFFF),
-			payload: extractString(packed, buf),
+			code:    layout.failureCode(u),
+			payload: layout.extractString(packed, buf),
 		}
 	}
-	return callOutcome{payload: extractString(packed, buf)}
+	return callOutcome{payload: layout.extractString(packed, buf)}
+}
+
+// hostWordLayout is which packed layout a handler returned. It replaces a parameter that was only the string extractor, because the
+// extractor and the way the failure CODE is read must agree, and passing one without the other was the defect in cleat#4107: a simple
+// word's bits 8-39 are 24 zero bits and the LOW BYTE OF THE MESSAGE LENGTH, so reading them as a code gave the guest
+// (len(message) & 0xFF) << 24. With one value choosing both, the mismatched pair cannot be written.
+type hostWordLayout int
+
+const (
+	// durableCallLayout is packDurableCallResult: responseLen<<40 | callErrorCode<<8 | errCode. The code is a classification.
+	durableCallLayout hostWordLayout = iota
+	// simpleLayout is packSimpleResult: extra<<32 | errCode. A failure carries no classification, so its code is 0 (unclassified); the
+	// errCode byte is a different taxonomy (4 is "quota", where call error 4 is "invalid request") and is not mapped onto it.
+	simpleLayout
+)
+
+func (l hostWordLayout) extractString(packed int64, buf []byte) string {
+	if l == simpleLayout {
+		return extractStringFromSimplePacked(packed, buf)
+	}
+	return extractStringFromPacked(packed, buf)
+}
+
+func (l hostWordLayout) failureCode(u uint64) uint32 {
+	if l == simpleLayout {
+		return 0
+	}
+	return uint32((u >> 8) & 0xFFFFFFFF)
 }
 
 // setResultCallOutcome writes a callOutcome into the first result slot as a
@@ -1055,6 +1195,40 @@ func invalidNameMessage(call, param string) string {
 	return "cleat: " + call + ": " + param + " is not a valid name (it must match [a-zA-Z0-9._-]+)"
 }
 
+// readPayloadArg returns the i-th string argument and whether it is within MaxWasmStringLen (cleat#4130). readStrArg copies an argument whole
+// with no bound, which let a component guest hand the host a request as large as its own memory while the core-module path refused anything over
+// the limit. Names already had the bound (readNameArg); this gives every other guest-supplied string the same one, and the limit is the CONFIGURED
+// MaxWasmStringLen (--wasm-max-string-len), not a constant, so an operator who needs more can raise it.
+func readPayloadArg(args *C.wasmtime_component_val_t, i int, nargs C.size_t) (string, bool) {
+	s := readStrArg(args, i, nargs)
+	return s, uint64(len(s)) <= uint64(MaxWasmStringLen)
+}
+
+// oversizeMessage is the text a guest sees when a dispatcher refuses a payload for its size.
+func oversizeMessage(call, param string, n int) string {
+	return fmt.Sprintf("cleat: %s: %s is %d bytes, over the configured limit of %d (--wasm-max-string-len)", call, param, n, MaxWasmStringLen)
+}
+
+// refuseOversizeWithCallFailure is refuseNameWithCallFailure for a payload over the limit: err(failed) classified invalid-request, no handler
+// method runs, so no event is recorded and replay sees nothing.
+func refuseOversizeWithCallFailure(
+	results *C.wasmtime_component_val_t, nresults C.size_t, call, param string, n int,
+) *C.wasmtime_error_t {
+	setResultCallOutcome(results, nresults, callOutcome{
+		failed:  true,
+		code:    uint32(callErrorInvalidRequest),
+		payload: oversizeMessage(call, param, n),
+	})
+	return nil
+}
+
+// refuseOversizeWithoutAResult is refuseNameWithoutAResult for a payload over the limit, with the same trap-or-empty-string rule.
+func (b *wasmtimeBackend) refuseOversizeWithoutAResult(
+	call, param string, n int, results *C.wasmtime_component_val_t, nresults C.size_t,
+) *C.wasmtime_error_t {
+	return b.refuseWithoutAResult(oversizeMessage(call, param, n), results, nresults)
+}
+
 // refuseNameWithCallFailure answers a `result<_, call-failure>` import with
 // err(failed) classified callErrorInvalidRequest -- the classification
 // badParamDurableCall gives the same refusal on the core path -- and returns nil,
@@ -1090,8 +1264,15 @@ func refuseNameWithBadParam(results *C.wasmtime_component_val_t, nresults C.size
 func (b *wasmtimeBackend) refuseNameWithoutAResult(
 	call, param string, results *C.wasmtime_component_val_t, nresults C.size_t,
 ) *C.wasmtime_error_t {
+	return b.refuseWithoutAResult(invalidNameMessage(call, param), results, nresults)
+}
+
+// refuseWithoutAResult is the trap-or-empty-string refusal shared by names and oversize payloads.
+func (b *wasmtimeBackend) refuseWithoutAResult(
+	text string, results *C.wasmtime_component_val_t, nresults C.size_t,
+) *C.wasmtime_error_t {
 	if !b.deferPhase && !b.guestIsDrainingDefers() {
-		msg := C.CString(invalidNameMessage(call, param))
+		msg := C.CString(text)
 		defer C.free(unsafe.Pointer(msg))
 		return C.wasmtime_error_new(msg)
 	}
@@ -1190,6 +1371,45 @@ func refuseStaleSignalScope(typ cbType, ty *C.wasmtime_component_func_type_t) *C
 	return C.wasmtime_error_new(msg)
 }
 
+// staleDurableDeferMessage is what a component built before cleat#4079 gets when
+// it calls durable-defer. That import returned a bare string, which has no bits
+// to carry a stop, so the engine could not cut a killed run short at a defer
+// registration; it now returns result<string, call-failure>.
+//
+// It is refused on the call, BEFORE the host runs, for the reason the signal and
+// scope refusal above is: wasmtime checks a dynamically-typed host function
+// against its caller only when it RETURNS, after the host has recorded the
+// registration. Refusing first leaves the history untouched.
+const staleDurableDeferMessage = "cleat: this component was built against a cleat SDK whose durable-defer " +
+	"import returned a bare string, which cannot carry a stop (cleat#4079); it now returns " +
+	"result<string, call-failure>. Rebuild the workflow against cleat >= 0.6.0."
+
+// refuseStaleDurableDefer returns a trap for a component whose durable-defer
+// import does not declare `result<...>`, nil otherwise. The declared type is the
+// guest's (see component_func_result_is_result).
+func refuseStaleDurableDefer(ty *C.wasmtime_component_func_type_t) *C.wasmtime_error_t {
+	if C.component_func_result_is_result(ty) == 1 {
+		return nil
+	}
+	msg := C.CString(staleDurableDeferMessage)
+	defer C.free(unsafe.Pointer(msg))
+	return C.wasmtime_error_new(msg)
+}
+
+// setResultSideEffectLookup writes `ok(side-effect-lookup.recorded(value))`, or `ok(side-effect-lookup.not-recorded)` when found is false.
+// It allocates nothing for the payload in the second case: the C helper ignores the string for it.
+func setResultSideEffectLookup(results *C.wasmtime_component_val_t, nresults C.size_t, found bool, value string) {
+	if int(nresults) < 1 {
+		return
+	}
+	r := (*C.wasmtime_component_val_t)(unsafe.Pointer(results))
+	if !found {
+		C.component_val_set_side_effect_lookup(r, 0, nil, 0)
+		return
+	}
+	C.component_val_set_side_effect_lookup(r, 1, C.CString(value), C.size_t(len(value)))
+}
+
 // setResultSignalReceived writes `ok(signal-outcome.received({name, payload}))`
 // into the first result slot.
 func setResultSignalReceived(results *C.wasmtime_component_val_t, nresults C.size_t, name, payload string) {
@@ -1245,6 +1465,13 @@ func goComponentCallback(
 	if entry.backend == nil || entry.backend.handler == nil {
 		return nil
 	}
+	// The guest is not running while the host is, so what the host does on its behalf (a service call, a plugin call, a retry's backoff, a
+	// database write) is not charged to --wasm-instance-timeout. The core-module path brackets every host function this way
+	// (hostBudget, engine/wasmtime_hostbudget.go); the component path did not, so a durable call that took longer than the instance
+	// timeout killed a Python or C# workflow with "execution time limit exceeded" while the flag's help said host time is not charged
+	// (cleat#4174). One bracket here covers every callback, as hostFunc does for core. A nil budget (the fence disabled) is a no-op.
+	entry.backend.budget.enterHost()
+	defer entry.backend.budget.leaveHost()
 	// Before the switch, not in its arm: the stop-correspondence guard reads the
 	// arms as `case cbTypeX: return ...dispatchX(`, and this check needs `ty`.
 	if entry.typ == cbTypeAwaitPromise {
@@ -1254,6 +1481,11 @@ func goComponentCallback(
 	}
 	if entry.typ == cbTypeAwaitSignals || entry.typ == cbTypeGetScope {
 		if err := refuseStaleSignalScope(entry.typ, ty); err != nil {
+			return err
+		}
+	}
+	if entry.typ == cbTypeDurableDefer {
+		if err := refuseStaleDurableDefer(ty); err != nil {
 			return err
 		}
 	}
@@ -1278,6 +1510,8 @@ func goComponentCallback(
 		return entry.backend.dispatchWasiRandomU64(args, nargs, results, nresults)
 	case cbTypeWasiRandomBytes:
 		return entry.backend.dispatchWasiRandomBytes(args, nargs, results, nresults)
+	case cbTypeWasiRandomSeed:
+		return entry.backend.dispatchWasiInsecureSeed(args, nargs, results, nresults)
 	case cbTypeDurableLog:
 		return entry.backend.dispatchDurableLog(args, nargs, results, nresults)
 	case cbTypeVersion:
@@ -1352,6 +1586,8 @@ func goComponentCallback(
 		return entry.backend.dispatchContinueAsNewVersioned(args, nargs, results, nresults)
 	case cbTypeSideEffect:
 		return entry.backend.dispatchSideEffect(args, nargs, results, nresults)
+	case cbTypeSideEffectRecorded:
+		return entry.backend.dispatchSideEffectRecorded(args, nargs, results, nresults)
 	case cbTypeRunDetached:
 		return entry.backend.dispatchRunDetached(args, nargs, results, nresults)
 	case cbTypeDeferPhase:
@@ -1436,6 +1672,11 @@ func withCleatEntryKey(input []byte, entryPoint string) ([]byte, error) {
 func (b *wasmtimeBackend) ExecuteComponentCGo(
 	ctx context.Context, wasmBytes []byte, entryPoint string, input []byte, outBufSz uint32,
 ) (*ExecResult, error) {
+	// THE FIRST DEFER, SO THE LAST TO RUN. Every callback this execution registers is removed when it returns, by any path, and only after the
+	// store, linker and component below have been released: see cbScope.release (cleat#4257).
+	scope := &cbScope{}
+	defer scope.release()
+
 	// A cache hit and a fresh compile both hand back a reference this call owns,
 	// so the delete below is right for either (cleat#3748). It stays BEFORE
 	// configureStore, as the compile always was: a hit leaves more of the
@@ -1459,6 +1700,23 @@ func (b *wasmtimeBackend) ExecuteComponentCGo(
 	if err != nil {
 		return nil, err
 	}
+	// Guest execution time, not wall clock: see the bracket in goComponentCallback (cleat#4174). Armed below, immediately before the guest runs.
+	b.budget = newHostBudget(store, execTimeout)
+	// THIS BUILDER DOES NOT REGISTER THE FENCE RESTART, and that is deliberate: a run held through a wait gets fresh limits when it wakes, and this fence is one of them,
+	// but Execute (backend_wasmtime.go) registers the restart BEFORE it dispatches here, and its closure reads b.budget when it runs, by which time that is the budget built
+	// on the line above. There used to be a second registration here. It was redundant: removing it changed nothing, which is how it was found to be an equivalent mutant
+	// and why no test could ever have shown it was needed. Two registrations also made every wake restart the fence twice.
+	//
+	// That puts a requirement on every caller, and it is checked and not trusted: TestEveryFunctionThatBuildsTheFenceBudgetRegistersItsRestartOrNamesWhyNot lists this
+	// function as registered by its caller, and TestTheComponentPathIsOnlyReachedThroughExecuteWhichRegistersFirst fails if any other non-test code calls it, or if Execute
+	// stops registering before the dispatch. The tests that call it directly (a_component_is_compiled_once, a_spent_deadline_is_not_a_one_millisecond_budget,
+	// a_component_execution_releases_its_callbacks) hold no run, so a restart is meaningless to them.
+	//
+	// WHAT IS AND IS NOT SHOWN (a_real_component_is_held_through_a_sleep_and_charged_its_language_test.go): a real component held through a sleep completes in place; a C# run
+	// held longer than the fence is not charged for the hold; a runaway loop after a hold is stopped about one fence after the wake. NOT shown by those rows: that the fence
+	// is RESTARTED and not merely re-armed, because their guests use almost no guest time before the hold. The row that tells them apart is
+	// a_held_component_restarts_the_fence_on_real_wasmtime_timing_test.go (a guest that computes before and after the hold, sized to the machine; nightly, behind the timing
+	// tag, PYTHON ONLY); it goes red when restartFence is neutered and when Execute's registration is removed.
 	wasiConfig := wasmtime.NewWasiConfig()
 	wasiConfig.InheritStderr()
 	wasiConfig.SetEnv([]string{"PYTHONHOME", "PYTHONPATH"}, []string{"/", "/"})
@@ -1478,10 +1736,10 @@ func (b *wasmtimeBackend) ExecuteComponentCGo(
 	// Shadow the WASI clock and entropy interfaces before cleat's own, inside
 	// the allow_shadowing bracket opened above and after add_wasip2 supplied
 	// the real ones. cleat#1410.
-	if err := b.registerWasiDeterminismImports(linker); err != nil {
+	if err := b.registerWasiDeterminismImports(linker, wasiDeterminismVersionsOf(wasmBytes), scope); err != nil {
 		return nil, fmt.Errorf("register wasi determinism imports: %w", err)
 	}
-	if err := b.registerCleatComponentImports(linker); err != nil {
+	if err := b.registerCleatComponentImports(linker, scope); err != nil {
 		return nil, fmt.Errorf("cleat component imports: %w", err)
 	}
 
@@ -1510,13 +1768,6 @@ func (b *wasmtimeBackend) ExecuteComponentCGo(
 		return nil, err
 	}
 
-	// Save store info and scan for memory once.
-	cbRegistry.Lock()
-	cbRegistry.store = store
-	cbRegistry.storeID = uint64(instance.store_id)
-	cbRegistry.Unlock()
-	C.save_first_memory_data(C.store_context(unsafe.Pointer(store.Context())), instance.store_id)
-
 	fn, err := componentGetFunc(instance, store, componentRunExport)
 	if err != nil {
 		return nil, fmt.Errorf("component get func: %w", err)
@@ -1527,6 +1778,7 @@ func (b *wasmtimeBackend) ExecuteComponentCGo(
 		return nil, fmt.Errorf("component %s: %w", componentRunExport, err)
 	}
 
+	b.budget.arm()
 	outcome, resultStr, callErr := componentCallRun(fn, store, string(dispatchInput))
 	if callErr != nil {
 		// Name the limit that stopped it, the same way the core-module and
@@ -1562,7 +1814,18 @@ func (b *wasmtimeBackend) ExecuteComponentCGo(
 		// has to be the one to call the drain, because only the host can
 		// bracket it so the defer bodies' calls are permitted while the
 		// workflow body's are stopped.
-		b.componentRunGuestDefersAfterSuspend(store, instance, entryPoint)
+		//
+		// ONLY in a defer segment, exactly as the core-module path guards the same call (backend_wasmtime.go,
+		// `if b.deferPhase`). In an ordinary run a suspension means the workflow is still alive and WAITING; draining
+		// there ran its cleanup early (the defer body's calls are permitted during a drain and are recorded), and the
+		// resume then diverged at the step the cleanup had taken (cleat#4194).
+		//
+		// And when the suspension is a CONTINUE-AS-NEW: that ends the run rather than pausing it, and a component guest that raises its suspend
+		// sentinel after continue_as_new does not drain (the wrapper only drains on completion), so the host drain is the only thing that runs
+		// the cleanup. Measured by cleat-review on the real component path: without this the cleanup of such a run never ran at all.
+		if b.deferPhase || suspendedForContinueAsNew(b.handler) {
+			b.componentRunGuestDefersAfterSuspend(store, instance, entryPoint)
+		}
 		return &ExecResult{Suspended: true}, nil
 	}
 
@@ -1570,6 +1833,14 @@ func (b *wasmtimeBackend) ExecuteComponentCGo(
 		return &ExecResult{Result: `"ok"`, Suspended: false}, nil
 	}
 	return &ExecResult{Result: resultStr, Suspended: false}, nil
+}
+
+// suspendedForContinueAsNew asks the session (when the backend has one) whether the suspension it is returning is a continue-as-new.
+func suspendedForContinueAsNew(h HostHandler) bool {
+	if s, ok := h.(interface{ suspendedForContinueAsNew() bool }); ok {
+		return s.suspendedForContinueAsNew()
+	}
+	return false
 }
 
 // componentRunGuestDefersAfterSuspend drains a suspended component guest's

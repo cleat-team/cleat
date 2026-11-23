@@ -1,39 +1,32 @@
-// TestAssemblyScriptBuildRefusesAStaleManifest and
-// TestJavaBuildRefusesAStaleManifest are the known-positive falsification for
+// TestJavaBuildRefusesAStaleManifest is the known-positive falsification for
 // a risk cleat#2145's sidecar-manifest design has that Rust's original
 // linker-merged cleat_entry_points section does not: unlike a WASM custom
 // section, which exists only if THIS compile produced it,
-// dist/cleat-entry-points.txt (AS) and cleat-entry-points.txt under build/
-// (Java) are ordinary files on disk that can survive from a PRIOR build. If a
-// build whose SDK-side manifest write fails or is silently skipped then falls
-// through to a leftover file from an earlier compile, cleat build would embed
-// entry points that do not match the artifact it just produced -- exactly the
-// "wrong entry point, silently" failure cleat#2113 exists to kill, reopened
-// through a path verifyEntryPointsAreExports cannot see: a stale manifest can
-// easily still name real exports, just the wrong build's.
+// cleat-entry-points.txt under build/ (Java) is an ordinary file on disk that
+// can survive from a PRIOR build. If a build whose SDK-side manifest write
+// fails or is silently skipped then falls through to a leftover file from an
+// earlier compile, cleat build would embed entry points that do not match the
+// artifact it just produced -- exactly the "wrong entry point, silently"
+// failure cleat#2113 exists to kill, reopened through a path
+// verifyEntryPointsAreExports cannot see: a stale manifest can easily still
+// name real exports, just the wrong build's.
 //
-// build_as.go and build_java.go guard against this by deleting the manifest
-// path(s) before invoking the compiler and requiring exactly one freshly
-// written manifest afterward (Java: exactly one across the whole build/ tree,
-// since Gradle's own output layout is a convention rather than a guarantee --
-// see the WalkDir comment in build_java.go). Both tests below prove that
-// guard actually fires, not just that it compiles: each copies a real example
-// to a scratch tree, PATCHES ITS OWN COPY of the SDK-side writer (the AS
-// transform / the Java annotation processor) to skip the write -- simulating
-// exactly the "write silently returned false" failure the AS half of this
-// issue hit for real during development, see index.js's
-// _writeEntryPointManifest doc comment -- plants a stale manifest naming an
-// entry point that must never surface, and asserts the build refuses rather
-// than embedding it.
+// build_java.go guards against this by requiring exactly one freshly written
+// manifest across the whole build/ tree, since Gradle's own output layout is a
+// convention rather than a guarantee -- see the WalkDir comment in
+// build_java.go. The tests below prove that guard actually fires, not just that
+// it compiles: each copies a real example to a scratch tree, PATCHES ITS OWN
+// COPY of the SDK-side writer (the Java annotation processor) to skip the
+// write, plants a stale manifest naming an entry point that must never
+// surface, and asserts the build refuses rather than embedding it. (The
+// AssemblyScript half of this file was removed with the AssemblyScript SDK,
+// cleat#4023.)
 //
-// The shared repo's own transform/processor sources are never touched: each
-// test patches an independent copy (AS: node_modules/@cleat/transform
-// re-materialized as real files rather than the symlink examples/as-workflow
-// normally has, so patching it cannot reach packages/cleat-as/transform;
-// Java: crates/cleat-java copied alongside examples/java-workflow at the same
-// two-levels-up relative layout settings.gradle.kts's projectDir expects, so
-// no path rewriting is needed). That makes both tests safe to run
-// concurrently with anything else building the real examples.
+// The shared repo's own processor sources are never touched: crates/cleat-java
+// is copied alongside examples/java-workflow at the same two-levels-up relative
+// layout settings.gradle.kts's projectDir expects, so no path rewriting is
+// needed. That makes the tests safe to run concurrently with anything else
+// building the real examples.
 package main
 
 import (
@@ -43,153 +36,6 @@ import (
 	"strings"
 	"testing"
 )
-
-func TestAssemblyScriptBuildRefusesAStaleManifest(t *testing.T) {
-	if testing.Short() || cleatBinary == "" {
-		t.Skip("needs the cleat binary, which TestMain does not build in short mode")
-	}
-	if _, err := exec.LookPath("npx"); err != nil {
-		t.Skip("npx not available")
-	}
-	if _, err := exec.LookPath("rsync"); err != nil {
-		t.Skip("rsync not available")
-	}
-
-	repoRoot, err := filepath.Abs("../..")
-	if err != nil {
-		t.Fatalf("resolve repo root: %v", err)
-	}
-	srcDir := filepath.Join(repoRoot, "examples", "as-workflow")
-	transformSrcDir := filepath.Join(repoRoot, "packages", "cleat-as", "transform")
-	sdkSrcDir := filepath.Join(repoRoot, "packages", "cleat-as")
-	if _, statErr := os.Stat(filepath.Join(srcDir, "package.json")); statErr != nil {
-		t.Fatalf("computed AS example dir %s has no package.json: %v", srcDir, statErr)
-	}
-
-	// node_modules is gitignored, so on a checkout that has never built this
-	// example it does not exist, and this test's rsync below would then copy
-	// nothing into it: not just the @cleat symlinks, but also the
-	// AssemblyScript compiler itself (asc) from srcDir's devDependencies, so
-	// the later `cleat build` would fail with "npm error could not determine
-	// executable to run" -- a real defect found on cleat#3301's shard split,
-	// where this had been silently relying on
-	// TestAssemblyScriptExampleEntryPointResolutionLive (a different test,
-	// now possibly a different process entirely) having already triggered
-	// this exact install as a side effect of building srcDir for real. Run
-	// the same install build_as.go itself runs lazily (see its "Run npm
-	// install if node_modules doesn't exist" comment) so this test is
-	// self-sufficient regardless of ordering, sharding, or which other tests
-	// ran first.
-	if _, statErr := os.Stat(filepath.Join(srcDir, "node_modules")); os.IsNotExist(statErr) {
-		cmd := exec.Command("npm", "install", "--no-audit", "--no-fund")
-		cmd.Dir = srcDir
-		if out, installErr := cmd.CombinedOutput(); installErr != nil {
-			t.Fatalf("npm install in %s: %v\n%s", srcDir, installErr, out)
-		}
-	}
-
-	asDir := filepath.Join(t.TempDir(), "as-workflow")
-	if out, cpErr := exec.Command("rsync", "-a", srcDir+"/", asDir+"/").CombinedOutput(); cpErr != nil {
-		t.Fatalf("copying %s to %s: %v\n%s", srcDir, asDir, cpErr, out)
-	}
-
-	// examples/as-workflow/node_modules/@cleat/{transform,sdk} are real
-	// filesystem symlinks into packages/cleat-as -- an ordinary recursive
-	// copy preserves them as symlinks POINTING AT THE SAME SHARED FILES, so
-	// patching what looks like this test's own copy would actually mutate
-	// the real repo source. Replace both with independent, real copies
-	// before patching either.
-	//
-	// The install above guarantees node_modules itself exists by this point,
-	// but not that node_modules/@cleat does too -- @cleat's two entries are
-	// npm `file:` dependencies, materialized as symlinks only as a side
-	// effect of that install, and an empty node_modules (e.g. the first time
-	// this ever ran, before anything populated npm's local cache) has
-	// neither. The rsync below then has to create
-	// node_modules/@cleat/transform from nothing -- two missing levels --
-	// which real rsync (3.2.7, the GitHub runner's) refuses with "mkdir ...
-	// failed: No such file or directory", exactly the failure
-	// TestJavaBuildRefusesAStaleManifest already documents above for the
-	// same reason. macOS's bundled rsync (openrsync) creates the whole
-	// chain, which is why this was invisible locally. mkdir the destination
-	// first so the later rsync lands on an existing (empty) directory
-	// regardless of whether @cleat pre-existed or which rsync runs it.
-	nodeModulesCleat := filepath.Join(asDir, "node_modules", "@cleat")
-	if mkErr := os.MkdirAll(nodeModulesCleat, 0o755); mkErr != nil {
-		t.Fatalf("mkdir %s: %v", nodeModulesCleat, mkErr)
-	}
-	if rmErr := os.RemoveAll(filepath.Join(nodeModulesCleat, "transform")); rmErr != nil {
-		t.Fatalf("removing symlinked transform: %v", rmErr)
-	}
-	if rmErr := os.RemoveAll(filepath.Join(nodeModulesCleat, "sdk")); rmErr != nil {
-		t.Fatalf("removing symlinked sdk: %v", rmErr)
-	}
-	if out, cpErr := exec.Command("rsync", "-a", transformSrcDir+"/",
-		filepath.Join(nodeModulesCleat, "transform")+"/").CombinedOutput(); cpErr != nil {
-		t.Fatalf("copying %s: %v\n%s", transformSrcDir, cpErr, out)
-	}
-	if out, cpErr := exec.Command("rsync", "-a", "--exclude=transform", sdkSrcDir+"/",
-		filepath.Join(nodeModulesCleat, "sdk")+"/").CombinedOutput(); cpErr != nil {
-		t.Fatalf("copying %s: %v\n%s", sdkSrcDir, cpErr, out)
-	}
-
-	transformPath := filepath.Join(nodeModulesCleat, "transform", "index.js")
-	original, readErr := os.ReadFile(transformPath)
-	if readErr != nil {
-		t.Fatalf("reading copied transform at %s: %v", transformPath, readErr)
-	}
-	const marker = "this._writeEntryPointManifest(allNames);"
-	if got := strings.Count(string(original), marker); got != 1 {
-		t.Fatalf("expected exactly one occurrence of %q in the copied transform, got %d -- "+
-			"this test's patch no longer matches transform/index.js's current shape", marker, got)
-	}
-	patched := strings.Replace(string(original), marker,
-		"/* manifest write suppressed by TestAssemblyScriptBuildRefusesAStaleManifest */", 1)
-	if writeErr := os.WriteFile(transformPath, []byte(patched), 0o644); writeErr != nil {
-		t.Fatalf("patching copied transform: %v", writeErr)
-	}
-
-	distDir := filepath.Join(asDir, "dist")
-	if mkErr := os.MkdirAll(distDir, 0o755); mkErr != nil {
-		t.Fatalf("mkdir %s: %v", distDir, mkErr)
-	}
-	manifestPath := filepath.Join(distDir, "cleat-entry-points.txt")
-	// A REAL export of this build -- not a nonsense name. A nonsense stale
-	// name would be caught by verifyEntryPointsAreExports regardless of
-	// whether the staleness guard runs at all (it isn't an export of
-	// anything), which was this test's first version and went red for the
-	// wrong reason when falsified: it "failed" even with the pre-build
-	// delete removed, because the pre-existing check caught it by accident.
-	// examples/as-workflow genuinely exports cancel_order, just not as the
-	// ONLY entry point -- so a stale manifest containing only this name is
-	// exactly the silent-wrong-subset case the guard exists to prevent, and
-	// nothing else in the pipeline can catch it.
-	const staleEntry = "cancel_order"
-	if writeErr := os.WriteFile(manifestPath, []byte(staleEntry+"\n"), 0o644); writeErr != nil {
-		t.Fatalf("planting stale manifest: %v", writeErr)
-	}
-
-	outDir := t.TempDir()
-	buildCmd := exec.Command(cleatBinary, "build", "--target", "assemblyscript", "-o", outDir, asDir)
-	buildCmd.Dir = repoRoot
-	out, buildErr := buildCmd.CombinedOutput()
-	if buildErr == nil {
-		t.Fatalf("build with a suppressed manifest write and a stale one planted must fail, but exited 0 -- "+
-			"it silently embedded the stale, incomplete entry point list instead of refusing:\n%s", out)
-	}
-	if !strings.Contains(string(out), "no entry-point manifest") {
-		t.Fatalf("build failed, but not with the expected \"no entry-point manifest\" error -- the "+
-			"pre-build delete should make a suppressed write look identical to an old @cleat/transform "+
-			"that never had this mechanism; got:\n%s", out)
-	}
-	if _, statErr := os.Stat(manifestPath); statErr == nil {
-		t.Errorf("the stale manifest file is still present after a refused build -- " +
-			"the pre-build delete in build_as.go did not run")
-	}
-	if matches, _ := filepath.Glob(filepath.Join(outDir, "*.wasm")); len(matches) != 0 {
-		t.Errorf("build refused entry-point resolution but still wrote a .wasm output: %v", matches)
-	}
-}
 
 func TestJavaBuildRefusesAStaleManifest(t *testing.T) {
 	if testing.Short() || cleatBinary == "" {

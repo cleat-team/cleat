@@ -654,6 +654,11 @@ func (m *mockCompactStore) ContinueAsNew(ctx context.Context, currentRunID, work
 func (m *mockCompactStore) FinalizeWorkflowSegment(ctx context.Context, runID, workerID string, generation int64, newEvents []EventRecord, finalStatus string, result string, errorCode string, errorOp string, queryState map[string]string, nextWakeAt time.Time) error {
 	return nil
 }
+
+// PublishQueryState: the test double writes nothing and reports no fence loss (cleat#4162); a test that needs otherwise overrides it on its own type.
+func (m *mockCompactStore) PublishQueryState(ctx context.Context, runID, workerID string, generation int64, queryState map[string]string) error {
+	return nil
+}
 func (m *mockCompactStore) TerminateWorkflow(ctx context.Context, workflowID, reason string) error {
 	return nil
 }

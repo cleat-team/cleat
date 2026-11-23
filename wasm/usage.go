@@ -5,8 +5,10 @@
 //   - "go"           — Standard Go wasip1 (go build with GOOS=wasip1 GOARCH=wasm)
 //   - "rust"         — Rust via cargo + wasm32-wasip1
 //   - "java"         — Java via Gradle + TeaVM
-//   - "assemblyscript" — AssemblyScript via asc
 //   - "python"       — Python via componentize-py
+//
+// "assemblyscript" was a target until cleat#4023 removed it. DetectLanguage still recognises an AssemblyScript module, so that the engine
+// can refuse it by name (engine.removedGuestLanguages) instead of running it as Go.
 package wasm
 
 import (
@@ -165,6 +167,9 @@ var hostFunctions = []HostFunction{
 	{"cleat_release_lock", "ReleaseLock"},
 	// SideEffect
 	{"cleat_side_effect", "SideEffect"},
+	// cleat#4113: the lookup SideEffect makes first. Its field is wired from compositeRequires["SideEffect"], because the method the workflow
+	// names is SideEffect and no workflow names this one.
+	{"cleat_side_effect_recorded", "SideEffectRecorded"},
 	// Identity
 	{"cleat_workflow_id", "WorkflowID"},
 	{"cleat_run_id", "RunID"},
@@ -319,7 +324,9 @@ var compositeRequires = map[string][]string{
 	// cleat_now is enough: info.Funcs is hostFunctions filtered by Used, so
 	// marking the import used pulls in {"cleat_now", "Now"} and the emitted Now
 	// field is what populates h.now. IMPROVEMENT-PLAN 3.234.
-	"NowMs":          {"cleat_now"},
+	"NowMs": {"cleat_now"},
+	// HostCallsImpl.SideEffect asks the host whether the value is recorded before it runs the user's function (cleat#4113).
+	"SideEffect":     {"cleat_side_effect_recorded"},
 	"NewUUID":        {"cleat_random"},
 	"NewUUIDv7":      {"cleat_random", "cleat_now"},
 	"UUID":           {"cleat_workflow_id"},

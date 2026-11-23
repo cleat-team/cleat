@@ -141,3 +141,30 @@ func TestAwaitConditionClampsASubMillisecondPollInterval(t *testing.T) {
 		}
 	}
 }
+
+// cleat#4144. A timeout of zero or less does not wait in any SDK, and waiting without a limit is explicit. Go's AwaitSignals refuses a
+// zero (above); WaitForever is the explicit form, and must reach the host as a very large POSITIVE count, never 0 or a wrapped negative.
+func TestWaitForeverReachesTheHostAsAVeryLargePositiveCount(t *testing.T) {
+	h, seen := sawHost(t)
+	h.AwaitSignals([]string{"never"}, WaitForever)
+	if len(*seen) != 1 {
+		t.Fatalf("AwaitSignals(WaitForever) made %d host calls, want 1", len(*seen))
+	}
+	if got := (*seen)[0]; got < 100*365*24*60*60*1000 {
+		t.Errorf("AwaitSignals(WaitForever) reached the host as %d ms, want a count past the host's 100-year clamp", got)
+	}
+}
+
+// A quorum computes a shrinking budget, and a deadline that has already passed must time out without reaching the host, not wait.
+func TestAQuorumWhoseDeadlineHasPassedTimesOutWithoutWaiting(t *testing.T) {
+	for _, timeout := range []time.Duration{0, -time.Second} {
+		h, seen := sawHost(t)
+		results, err := h.AwaitSignalsWithQuorum([]string{"a", "b"}, 1, 0, timeout)
+		if err == nil || !strings.Contains(err.Error(), "quorum timeout") {
+			t.Errorf("timeout %v: err = %v (results %v), want a quorum timeout", timeout, err, results)
+		}
+		if len(*seen) != 0 {
+			t.Errorf("timeout %v: the host was asked to wait %v: a passed deadline reached the await", timeout, *seen)
+		}
+	}
+}

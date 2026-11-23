@@ -155,7 +155,7 @@ func (s *PostgresStore) LoadWorkflowConfig(ctx context.Context, defName string, 
 		SELECT max_history_length FROM workflow_defs WHERE name = $1 AND version = $2 AND tenant_id = $3
 	`, defName, defVersion, s.tenantID).Scan(&maxHistoryLength)
 	if errors.Is(err, sql.ErrNoRows) {
-		return 0, fmt.Errorf("workflow def not found: %s v%d", defName, defVersion)
+		return 0, fmt.Errorf("%w: %s v%d", ErrWorkflowDefNotFound, defName, defVersion)
 	}
 	if err != nil {
 		return 0, fmt.Errorf("load workflow config: %w", err)
@@ -190,7 +190,7 @@ func (s *PostgresStore) LoadDAGSpec(ctx context.Context, defName string, defVers
 		SELECT dag_spec FROM workflow_defs WHERE name = $1 AND version = $2 AND tenant_id = $3
 	`, defName, defVersion, s.tenantID).Scan(&raw)
 	if errors.Is(err, sql.ErrNoRows) {
-		return nil, fmt.Errorf("workflow def not found: %s v%d", defName, defVersion)
+		return nil, fmt.Errorf("%w: %s v%d", ErrWorkflowDefNotFound, defName, defVersion)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("load dag_spec: %w", err)

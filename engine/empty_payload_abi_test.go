@@ -37,7 +37,7 @@ func TestABISetScopeEmptyPairClearsScope(t *testing.T) {
 	}
 	if got == errBadParam {
 		t.Fatal("cleat_set_scope refused the empty pair; clearing the scope is " +
-			"documented behaviour (scope.go freshSetScope) and must be reachable")
+			"documented behaviour (scope.go SetScope) and must be reachable")
 	}
 	if s.scopeSet || s.scopePrefix != "" || s.scopeObjType != "" || s.scopeInstKey != "" {
 		t.Errorf("scope not cleared: set=%v prefix=%q objType=%q instKey=%q",
@@ -66,7 +66,7 @@ func TestReadOptionalServiceNameAllowsEmptyOnly(t *testing.T) {
 // contract that had no test: the guest must be able to READ the previous scope,
 // not merely have it written somewhere.
 //
-// freshSetScope writes prevScope into the guest buffer and discards the length
+// SetScope (freshSetScope, until cleat#4211) wrote prevScope into the guest buffer and discarded the length
 // (`_, _ = s.writeResult(...)`), then returns 0 on every success path. The
 // bytes land in guest memory and nothing reports how many. Every SDK that binds
 // this call decodes the length out of the high 32 bits -- Rust's clear_scope

@@ -91,7 +91,7 @@ once.
 | Terminal errors | `TerminalError` stops compensation chain | Not supported |
 | Best for | Multi-step workflows with complex compensation | Simple single-level cleanup |
 
-See the [fooddash example](../examples/fooddash/order.go) for a full Saga
+See the [fooddash example](../../examples/fooddash/order.go) for a full Saga
 implementation with typed calls, signals, and polling.
 
 ## Fan-out (parallel execution)
@@ -161,7 +161,7 @@ if err := s.Run(h); err != nil {
 }
 ```
 
-See the [travel booking example](../examples/travel/booking.go) for a complete
+See the [travel booking example](../../examples/travel/booking.go) for a complete
 parallel booking workflow with cancellation handling.
 
 ## Cron / scheduled workflows
@@ -242,7 +242,7 @@ a workflow needs a nested field under its own name, either publish the event
 with that field already at the top level, or have the workflow's own code
 read it out of the nested value it receives.
 
-See the [event-driven example](../examples/event-driven/subscription_workflow.go)
+See the [event-driven example](../../examples/event-driven/subscription_workflow.go)
 for a complete signup workflow.
 
 ## Signals (external events)
@@ -320,7 +320,7 @@ how you tell a request that wants an answer from a notification that does not.
 `Payload` is unaffected either way — the reply address travels in an envelope
 that `AwaitSignals` and `PollSignals` strip before you see it.
 
-See the [onboarding example](../examples/onboarding/signup.go) for a complete
+See the [onboarding example](../../examples/onboarding/signup.go) for a complete
 signal-based email verification workflow.
 
 ## Child workflows
@@ -397,7 +397,7 @@ results, err := h.AwaitAllChildren(runIDs)
 
 Each `ChildResult` has `RunID`, `Result` (JSON), and `Error` fields.
 
-See the [data pipeline example](../examples/datapipeline/pipeline.go) for a
+See the [data pipeline example](../../examples/datapipeline/pipeline.go) for a
 complete fan-out/fan-in pipeline with heartbeating and typed child workflows.
 
 ## Activity heartbeating
@@ -467,7 +467,7 @@ func ManageSubscription(h cleat.HostCalls, input SubscriptionInput) (string, err
 - **Event history limits** -- event history grows unbounded without it
 - **Worker memory** -- replaying a very long history consumes memory and time
 
-See the [subscription billing example](../examples/subscription/billing.go) for
+See the [subscription billing example](../../examples/subscription/billing.go) for
 a complete implementation with grace periods, retries, and cancellation.
 
 ```go

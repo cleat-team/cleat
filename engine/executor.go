@@ -70,10 +70,19 @@ func (e *Engine) backendForWasm(wasmBytes []byte) WasmBackend {
 //	          two never got.
 //
 // tiers.yaml grants no language outside WasmtimeLanguages (tier 1 is
-// [go, python], tier 2 adds rust, java, assemblyscript), so failing closed here
+// [go, python], tier 2 adds rust, java), so failing closed here
 // can only reject what was never claimed to work.
 func (e *Engine) resolveBackend(wasmBytes []byte) (WasmBackend, error) {
 	e.warnIfModuleWantsANewerABI(wasmBytes)
+	e.warnIfModuleCarriesAnUnknownJSEnginePin(wasmBytes)
+	// BEFORE the "no backends registered" return below, deliberately: see removedGuestLanguages for why an engine with no backends
+	// must refuse too.
+	if lang := wasm.DetectLanguage(wasmBytes); removedGuestLanguages[lang] != "" {
+		return nil, fmt.Errorf(
+			"host: refusing a module built with %s: the guest language %q was removed and cannot be run. %s. "+
+				"Rebuild the workflow in a supported guest language (see tiers.yaml) and deploy it again",
+			guestLanguageDisplayName(lang), lang, removedGuestLanguages[lang])
+	}
 	if backend := e.backendForWasm(wasmBytes); backend != nil {
 		return backend, nil
 	}
@@ -128,6 +137,51 @@ func (e *Engine) warnIfModuleWantsANewerABI(wasmBytes []byte) {
 		"workflow_name", meta.WorkflowName,
 		"workflow_version", meta.WorkflowVersion,
 		"language", meta.Language,
+	)
+}
+
+// warnIfModuleCarriesAnUnknownJSEnginePin reports a TypeScript module whose
+// cleat.js-engine pin schema is newer than this worker parses. cleat#3830.
+//
+// WARNS, AND DELIBERATELY DOES NOT REFUSE, for the reason its ABI sibling
+// gives: CurrentJSEnginePinVersion is 1, no module can declare a higher one
+// today, and a rejection path would ship having never run. A warning exercises
+// the comparison on every execution and cannot break a guest that works.
+//
+// ONLY pin_version IS COMPARED, and that is the finding rather than a
+// shortcut. The other fields describe the module's own embedded runtime (Javy
+// and rquickjs are linked INTO the module) and hash artefacts the worker does
+// not carry (the JS plugin and the TypeScript SDK). The worker therefore has
+// no value to compare any of them against, and pretending otherwise would mean
+// embedding a second copy of build-time facts in the binary just to make a
+// comparison possible -- a mechanism that would exist to satisfy a warning.
+// They are still reported below, because they are what a person needs in order
+// to understand a mismatch once one is real.
+//
+// Checked at the worker rather than at deployment for the same reason as the
+// ABI check: the question is a property of a PAIR, and only the worker knows
+// its own side.
+//
+// A module with no pin section is silent. That covers every non-TypeScript
+// module and every TypeScript module built before the pin existed; neither is
+// a defect, and warning on them would make the one case that matters
+// unreadable.
+func (e *Engine) warnIfModuleCarriesAnUnknownJSEnginePin(wasmBytes []byte) {
+	pin, found, err := wasm.ReadJSEnginePin(wasmBytes)
+	if err != nil || !found {
+		return
+	}
+	if pin.PinVersion <= wasm.CurrentJSEnginePinVersion {
+		return
+	}
+	e.log().Warn(
+		"this module was built against a newer cleat.js-engine pin than this worker parses; "+
+			"it is being executed anyway, and a field it carries may be ignored",
+		"module_pin_version", pin.PinVersion,
+		"worker_pin_version", wasm.CurrentJSEnginePinVersion,
+		"module_javy", pin.Javy,
+		"module_rquickjs_core", pin.RQuickJSCore,
+		"language", wasm.DetectLanguage(wasmBytes),
 	)
 }
 
@@ -212,27 +266,26 @@ func (e *Engine) executeWithBackend(
 	}
 	// If compaction state is set, merge virtual compacted events with tail
 	// history to produce a complete replay history for deterministic replay.
-	compactedStep := 0
-	replayHistory := history
-	if e.compactionState != nil && len(history) > 0 {
-		replayHistory = buildFullHistoryFromCompaction(history, e.compactionState)
-		compactedStep = e.compactionState.CompactedStep
-	}
+	replayHistory, compactedStep := e.replayHistoryFor(history)
+	// How many records at the front were expanded from a state compacted by a build that did NOT carry the drain stamps (cleat#4323): those have an unknown
+	// stamp. Records from a state that carries them are judged by their stamps like any other.
+	unstampedRecords := e.compactionState.unstampedRecords()
 
 	now := e.seedNowMs(replayHistory)
 
 	session := &execSession{
-		engine:       e,
-		history:      replayHistory,
-		isReplay:     len(replayHistory) > 0,
-		nowMs:        now,
-		deferrals:    make(map[string]string),
-		workflowID:   e.workflowID,
-		defName:      e.defName,
-		execRunID:    e.workflowID,
-		tenantID:     e.tenantID,
-		stepCallback: e.stepCallback,
-		chainAnchor:  e.chainAnchor(),
+		engine:           e,
+		history:          replayHistory,
+		unstampedRecords: unstampedRecords,
+		isReplay:         len(replayHistory) > 0,
+		nowMs:            now,
+		deferrals:        make(map[string]string),
+		workflowID:       e.workflowID,
+		defName:          e.defName,
+		execRunID:        e.workflowID,
+		tenantID:         e.tenantID,
+		stepCallback:     e.stepCallback,
+		chainAnchor:      e.chainAnchor(),
 		// originalInput and eventCount were set only in executeCompiled, the
 		// wazero path that CLI tooling uses. This is the backend path -- the
 		// one a worker runs -- and without them the event cap did two wrong
@@ -244,10 +297,17 @@ func (e *Engine) executeWithBackend(
 		originalInput: string(input),
 		eventCount:    e.initialEventCount,
 	}
+	// A deferred tail on the NAMED results, not a branch at one kill site: every terminal error return of this function goes
+	// through it. It runs after every other deferred function registered below it (LIFO), and before the caller sees err.
+	defer session.flushUnflushedEvents(&err)
+
+	session.armStopAtLastStoppable(ctx, isComponentWasm(wasmBytes))
 
 	execCtx, stepCancel := context.WithCancel(ctx)
 	session.stepCancel = stepCancel
 	execCtx = withHandler(execCtx, session)
+	// The registry the restartable limits below put themselves in, so a run that is held can pause them and a wake can restart them (execution_limits.go).
+	execCtx = withExecutionLimits(execCtx, &executionLimits{})
 
 	execCtx, workflowSpan := telemetry.WorkflowSpan(execCtx,
 		e.workflowID, e.defName, e.defVersion, e.tenantID, e.traceID)
@@ -268,9 +328,11 @@ func (e *Engine) executeWithBackend(
 	// and at the same moment.
 	if ceiling := e.wallClockCeiling(execCtx); ceiling > 0 {
 		var cancel context.CancelFunc
-		execCtx, cancel = context.WithTimeout(execCtx, ceiling)
+		execCtx, cancel = withRestartableTimeout(execCtx, ceiling)
 		defer cancel()
 	}
+	// The limits are all on execCtx now. A wait that holds the run needs to see them (see execSession.execCtx), and a host call does not get this context.
+	session.execCtx = execCtx
 
 	// If replaying, verify event history integrity (checksums) and
 	// validate version compatibility before proceeding.
@@ -422,6 +484,13 @@ func (e *Engine) executeWithBackend(
 		// stopped before its wrapper returned, so nothing ran its defers and
 		// this pass is the only chance they have.
 		if len(session.deferrals) > 0 && !guestCompleted {
+			// A COMPONENT guest stopped here still owes its defers, and nothing in this process can run them: the instance
+			// is trapped and cannot be re-entered. Say so, so the worker can route the run through a defer segment on a
+			// fresh instance (cleat#4079). Recorded here and not in runDefers, which is also reached by a guest that
+			// returned normally past a deadline and had already drained its own table.
+			if isComponentWasm(wasmBytes) {
+				e.killedWithDefersOwed.Store(true)
+			}
 			e.runDefers(context.Background(), wasmBytes, session.deferrals)
 		}
 		session.releaseHeldScopes(context.Background())
@@ -540,34 +609,35 @@ func (e *Engine) executeCompiled(ctx context.Context, compiled wazero.CompiledMo
 
 	// If compaction state is set, merge virtual compacted events with tail history
 	// to produce a complete replay history for deterministic replay.
-	compactedStep := 0
-	replayHistory := history
-	if e.compactionState != nil && len(history) > 0 {
-		replayHistory = buildFullHistoryFromCompaction(history, e.compactionState)
-		compactedStep = e.compactionState.CompactedStep
-	}
+	replayHistory, compactedStep := e.replayHistoryFor(history)
+	// How many records at the front were expanded from a state compacted by a build that did NOT carry the drain stamps (cleat#4323): those have an unknown
+	// stamp. Records from a state that carries them are judged by their stamps like any other.
+	unstampedRecords := e.compactionState.unstampedRecords()
 
 	now := e.seedNowMs(replayHistory)
 
 	session := &execSession{
-		engine:        e,
-		history:       replayHistory,
-		isReplay:      len(replayHistory) > 0,
-		nowMs:         now,
-		deferrals:     make(map[string]string),
-		workflowID:    e.workflowID,
-		defName:       e.defName,
-		execRunID:     e.workflowID,
-		tenantID:      e.tenantID,
-		originalInput: string(input),
-		eventCount:    e.initialEventCount,
-		stepCallback:  e.stepCallback,
-		chainAnchor:   e.chainAnchor(),
+		engine:           e,
+		history:          replayHistory,
+		unstampedRecords: unstampedRecords,
+		isReplay:         len(replayHistory) > 0,
+		nowMs:            now,
+		deferrals:        make(map[string]string),
+		workflowID:       e.workflowID,
+		defName:          e.defName,
+		execRunID:        e.workflowID,
+		tenantID:         e.tenantID,
+		originalInput:    string(input),
+		eventCount:       e.initialEventCount,
+		stepCallback:     e.stepCallback,
+		chainAnchor:      e.chainAnchor(),
 	}
 
 	execCtx, stepCancel := context.WithCancel(ctx)
 	session.stepCancel = stepCancel
 	execCtx = withHandler(execCtx, session)
+	// The registry the restartable limits below put themselves in, so a run that is held can pause them and a wake can restart them (execution_limits.go).
+	execCtx = withExecutionLimits(execCtx, &executionLimits{})
 
 	execCtx, workflowSpan := telemetry.WorkflowSpan(execCtx,
 		e.workflowID, e.defName, e.defVersion, e.tenantID, e.traceID)
@@ -588,9 +658,11 @@ func (e *Engine) executeCompiled(ctx context.Context, compiled wazero.CompiledMo
 	// and at the same moment.
 	if ceiling := e.wallClockCeiling(execCtx); ceiling > 0 {
 		var cancel context.CancelFunc
-		execCtx, cancel = context.WithTimeout(execCtx, ceiling)
+		execCtx, cancel = withRestartableTimeout(execCtx, ceiling)
 		defer cancel()
 	}
+	// The limits are all on execCtx now. A wait that holds the run needs to see them (see execSession.execCtx), and a host call does not get this context.
+	session.execCtx = execCtx
 
 	// If replaying, verify event history integrity (checksums) and
 	// validate version compatibility before proceeding.
@@ -1032,7 +1104,30 @@ func (e *Engine) invokePerDeferExports(ctx context.Context, mod api.Module, defe
 // caller can defer unconditionally.
 func (e *Engine) withResolvedWorkflowDeadline(ctx context.Context) (context.Context, context.CancelFunc) {
 	if limit := e.maxWorkflowDuration(ctx); limit > 0 {
-		return context.WithTimeout(ctx, limit)
+		return withRestartableTimeout(ctx, limit)
 	}
 	return ctx, func() {}
+}
+
+// guestLanguageDisplayName is the name an operator knows a removed language by. The label is lower-case metadata ("assemblyscript");
+// the refusal leads with the name people use, and keeps the label too so the two can be matched.
+func guestLanguageDisplayName(lang string) string {
+	if lang == "assemblyscript" {
+		return "AssemblyScript"
+	}
+	return lang
+}
+
+// replayHistoryFor is the history a replay runs against: the tail the store handed back, preceded by the compacted prefix when the run has been compacted, and the step
+// the compaction covers (what stripCompactedEvents removes again from the history the execution returns). BOTH executor paths (the backend path and the wazero dev
+// path) call it, so the rule below exists once and a test through one covers the other.
+//
+// A compaction state means the run HAS been compacted, so the replay history is the expanded prefix followed by whatever tail remains, and the tail may be EMPTY: a
+// limit of 1 compacts the whole history. This used to require a non-empty tail, so an empty one skipped the expansion and the workflow started over, repeating every
+// call it had made (cleat#4314: a run of ten calls compacted after its fourth sent the service ten calls, not six).
+func (e *Engine) replayHistoryFor(history []EventRecord) (replayHistory []EventRecord, compactedStep int) {
+	if e.compactionState == nil {
+		return history, 0
+	}
+	return buildFullHistoryFromCompaction(history, e.compactionState), e.compactionState.CompactedStep
 }

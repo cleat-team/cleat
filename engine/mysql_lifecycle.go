@@ -111,6 +111,9 @@ func (s *MySQLStore) ClaimWorkflows(ctx context.Context, workerID string, limit 
 	selArgs := make([]any, 0, len(tqArgs)+2)
 	selArgs = append(selArgs, tqArgs...)
 	selArgs = append(selArgs, s.tenantID, limit)
+	//nolint:gosec // G701: tqClause is MySQLStore.taskQueueClause(): one "?" per configured task queue, joined with ", " (mysql_store.go); the queue names
+	// are returned separately and bound through selArgs, so the only text interpolated into the query is placeholders. This is the cleat#3247 non-determinism
+	// (gosec's capped, map-ordered caller examination): the finding fires on some runs of an unmodified tree and not on others (cleat#4252).
 	rows, err := tx.QueryContext(ctx, fmt.Sprintf(`
 		SELECT w.id, w.tenant_id, w.concurrency_key, w.concurrency_key_hash,
 		       (q.name IS NOT NULL) AS registered
@@ -776,6 +779,9 @@ func (s *MySQLStore) StartNewRunWithConcurrencyKey(ctx context.Context, runID, d
 // StartNewRunWithOptions records every per-run value a start can set, in the
 // INSERT that creates the run. See StartOptions.
 func (s *MySQLStore) StartNewRunWithOptions(ctx context.Context, runID, defName string, defVersion int, input json.RawMessage, idempotencyKey string, tenantID string, priority int, opts StartOptions) (string, bool, error) {
+	if err := opts.Validate(); err != nil {
+		return "", false, err
+	}
 	return s.startNewRun(ctx, runID, defName, defVersion, input, idempotencyKey, tenantID, priority, opts)
 }
 
@@ -923,6 +929,21 @@ func (s *MySQLStore) ContinueAsNew(ctx context.Context, currentRunID, workerID s
 		// a lost fence leaves no orphaned, unreachable continuation run
 		// behind.
 		return "", ErrFenceLost
+	}
+
+	// Carry the signals the old run had not consumed to the run that continues the workflow (cleat#4340). After the old run's row was updated above, so every delivery that held it has committed.
+	if _, err := tx.ExecContext(ctx, `UPDATE workflow_signals SET workflow_id = ? WHERE workflow_id = ? AND tenant_id = ?`, newRunID, currentRunID, s.tenantID); err != nil {
+		return "", fmt.Errorf("continue as new: carry the pending signals: %w", err)
+	}
+	// A cooperative cancel requested on the old run and not yet seen belongs to the WORKFLOW too (cleat#4340); see PostgresStore.ContinueAsNew. Read after the old run's row was updated
+	// above, which holds it, so a RequestCancellation (which locks that row first) cannot change it before this commits.
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE workflow_instances n
+		JOIN workflow_instances o ON o.id = ? AND o.tenant_id = ?
+		SET n.cancellation_requested = true, n.cancellation_reason = o.cancellation_reason
+		WHERE n.id = ? AND n.tenant_id = ? AND o.cancellation_requested
+	`, currentRunID, s.tenantID, newRunID, s.tenantID); err != nil {
+		return "", fmt.Errorf("continue as new: carry the cancellation request: %w", err)
 	}
 
 	if err := tx.Commit(); err != nil {
@@ -1402,6 +1423,18 @@ func (s *MySQLStore) enforceParentClosePolicy(ctx context.Context, parentWorkflo
 
 // enforceParentClosePolicyAt is enforceParentClosePolicy with the recursion
 // depth carried explicitly. See cascadeIntoClosedChildren.
+//
+// THE TRANSACTION IS RUN AGAIN WHEN InnoDB REFUSES IT AS A DEADLOCK VICTIM (cleat#4410). This runs after the verb that closed the parent has already
+// committed, and it returns nothing, so a 1213 that ended it was logged at WARN and dropped: every child of the closing parent was left as it was, a
+// TERMINATE child kept running under a parent that was gone, and nothing re-applied the policy later (no other code reads parent_close_policy to
+// enforce it). Measured with a deterministic victim, MySQL 8.4.11: both TERMINATE children were still `ready` after the call, and the log carried
+// exactly the line the issue quoted. The first UPDATE reads the tenant's rows through idx_instances_tenant_queue_ready and locks every row it scans,
+// so what it can deadlock with is not limited to the closing parent's own children.
+//
+// retryingLockConflict is the pattern the cancel and terminate verbs use for the same refusal (cleat#4340): the server rolled the victim back
+// entirely, so the whole transaction can run again, and the lock it needed is already released. A lock wait timeout (1205) is retried by the same
+// helper, and each such attempt has already waited out innodb_lock_wait_timeout, so a run that keeps timing out costs its caller that wait up to
+// eight times; that is the helper's behaviour for every verb that uses it and is not narrowed here.
 func (s *MySQLStore) enforceParentClosePolicyAt(ctx context.Context, parentWorkflowID string, depth int, outcomeMsg string) {
 	// Collected before the transaction: see releaseTerminatedChildren.
 	terminated, err := s.childrenClosedByTerminate(ctx, parentWorkflowID)
@@ -1410,11 +1443,44 @@ func (s *MySQLStore) enforceParentClosePolicyAt(ctx context.Context, parentWorkf
 			"parent_workflow_id", parentWorkflowID, "error", err)
 	}
 
+	if err := s.retryingLockConflict("enforce parent close policy", func() error {
+		return s.enforceParentClosePolicyOnce(ctx, parentWorkflowID, outcomeMsg)
+	}); err != nil {
+		msg := "enforceParentClosePolicy: failed; children of a closed parent are unaffected by its close policy"
+		var step *closePolicyStepError
+		if errors.As(err, &step) {
+			msg = step.msg
+		}
+		s.log().WarnContext(ctx, msg, "parent_workflow_id", parentWorkflowID, "error", err)
+		return
+	}
+
+	releaseTerminatedChildren(s.log(), s, terminated)
+	// Every child this cascade closed was just TERMINATEd, so its own
+	// children hear "parent workflow was terminated" regardless of what
+	// closed the root parent -- see PostgresStore's identical comment.
+	childOutcomeMsg := parentOutcomeMessage(statusTerminated)
+	cascadeIntoClosedChildren(s.log(), depth, terminated, func(id string, d int) {
+		s.enforceParentClosePolicyAt(ctx, id, d, childOutcomeMsg)
+	})
+}
+
+// closePolicyStepError carries which step of enforceParentClosePolicyOnce failed and the log message that has always named it, so that running the
+// transaction again does not cost the diagnostics: the final WARN says the same thing it said before, with the error underneath it.
+type closePolicyStepError struct {
+	msg string
+	err error
+}
+
+func (e *closePolicyStepError) Error() string { return e.msg + ": " + e.err.Error() }
+func (e *closePolicyStepError) Unwrap() error { return e.err }
+
+// enforceParentClosePolicyOnce is one attempt of the transaction enforceParentClosePolicyAt runs: begin, the three arms, commit. Every failure is a
+// *closePolicyStepError so retryingLockConflict can classify the cause through it with errors.As.
+func (s *MySQLStore) enforceParentClosePolicyOnce(ctx context.Context, parentWorkflowID, outcomeMsg string) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		s.log().WarnContext(ctx, "enforceParentClosePolicy: begin failed; children of a closed parent are unaffected by its close policy",
-			"parent_workflow_id", parentWorkflowID, "error", err)
-		return
+		return &closePolicyStepError{"enforceParentClosePolicy: begin failed; children of a closed parent are unaffected by its close policy", err}
 	}
 	defer tx.Rollback()
 
@@ -1437,12 +1503,10 @@ func (s *MySQLStore) enforceParentClosePolicyAt(ctx context.Context, parentWorkf
 		  AND tenant_id = ?
 		  AND NOT `+deferPhaseOwedSQL+`
 	`, outcomeMsg, parentWorkflowID, s.tenantID); err != nil {
-		s.log().WarnContext(ctx, "enforceParentClosePolicy: TERMINATE children not failed",
-			"parent_workflow_id", parentWorkflowID, "error", err)
-		return
+		return &closePolicyStepError{"enforceParentClosePolicy: TERMINATE children not failed", err}
 	}
 
-	//nolint:gosec // G202: the concatenated fragments are compile-time constants -- statusTerminating and deferPhaseOwedSQL are consts in defer_phase.go, deferPhaseDeadlineMySQL is a Sprintf over a duration const. No caller-controlled string reaches this.
+	//nolint:gosec // G202: the concatenated fragments are compile-time constants -- statusTerminating and deferPhaseOwedSQL are consts in defer_phase.go, deferPhaseDeadlineMySQL is a Sprintf o
 	if _, err := tx.ExecContext(ctx, `
 		UPDATE workflow_instances
 		SET status = '`+statusTerminating+`',
@@ -1458,9 +1522,7 @@ func (s *MySQLStore) enforceParentClosePolicyAt(ctx context.Context, parentWorkf
 		  AND tenant_id = ?
 		  AND `+deferPhaseOwedSQL+`
 	`, outcomeMsg, parentWorkflowID, s.tenantID); err != nil {
-		s.log().WarnContext(ctx, "enforceParentClosePolicy: TERMINATE children with defers not moved to their defer phase",
-			"parent_workflow_id", parentWorkflowID, "error", err)
-		return
+		return &closePolicyStepError{"enforceParentClosePolicy: TERMINATE children with defers not moved to their defer phase", err}
 	}
 
 	// Request cancellation for children with REQUEST_CANCEL policy.
@@ -1472,25 +1534,13 @@ func (s *MySQLStore) enforceParentClosePolicyAt(ctx context.Context, parentWorkf
 		  AND status NOT IN ('done', 'failed', 'dead_lettered', 'terminated', 'cancelled')
 		  AND tenant_id = ?
 	`, parentWorkflowID, s.tenantID); err != nil {
-		s.log().WarnContext(ctx, "enforceParentClosePolicy: REQUEST_CANCEL children not flagged",
-			"parent_workflow_id", parentWorkflowID, "error", err)
-		return
+		return &closePolicyStepError{"enforceParentClosePolicy: REQUEST_CANCEL children not flagged", err}
 	}
 
 	if err := tx.Commit(); err != nil {
-		s.log().WarnContext(ctx, "enforceParentClosePolicy: commit failed; children of a closed parent are unaffected by its close policy",
-			"parent_workflow_id", parentWorkflowID, "error", err)
-		return
+		return &closePolicyStepError{"enforceParentClosePolicy: commit failed; children of a closed parent are unaffected by its close policy", err}
 	}
-
-	releaseTerminatedChildren(s.log(), s, terminated)
-	// Every child this cascade closed was just TERMINATEd, so its own
-	// children hear "parent workflow was terminated" regardless of what
-	// closed the root parent -- see PostgresStore's identical comment.
-	childOutcomeMsg := parentOutcomeMessage(statusTerminated)
-	cascadeIntoClosedChildren(s.log(), depth, terminated, func(id string, d int) {
-		s.enforceParentClosePolicyAt(ctx, id, d, childOutcomeMsg)
-	})
+	return nil
 }
 
 // terminateChildrenQuery selects the children the TERMINATE arm is about to

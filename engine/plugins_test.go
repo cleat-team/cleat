@@ -376,7 +376,7 @@ func TestPluginCall_ReInvokingOnReplayDoesNotAppendToHistory(t *testing.T) {
 		PluginInput: `{"key":"val"}`, PluginOutput: `{"cached":"old"}`,
 	}}
 
-	result := s.replayPluginCall(context.Background(), nil, "test-plugin", "my-func", `{"key":"val"}`, 0, 0)
+	result := s.PluginCall(context.Background(), nil, "test-plugin", "my-func", `{"key":"val"}`, 0, 0)
 
 	errCode := byte(result & 0xFF)
 	if errCode != 0 {

@@ -49,9 +49,9 @@
 # Contexts are job *display names* (`name:`), not job ids, and not workflow
 # names. Blank lines and #-comments are ignored.
 
-AssemblyScript Tests
 Blobstore S3 Round-Trip
 Build
+Chaos sample
 Closing References
 Cluster Integration Tests
 Contributor License Agreement
