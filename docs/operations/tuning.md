@@ -225,14 +225,15 @@ What a worker uses, measured on 2026-11-22/23 (arm64 Linux; cleat#4377 and cleat
 | idle worker, no workflows | about 35 MiB resident |
 | process baseline after one guest has compiled and run | Go about 207 MiB, C# about 112 MiB, **Python about 565 MiB** |
 | the first compile of a distinct Python component | peaks about 475 to 525 MiB **above** the baseline, once per component per worker |
-| each held run (residency) | Go about 1.5 MiB; Python 1.3 MiB (12 before cleat#4382); C# 17 MiB (49 before cleat#4378) |
+| each held run (residency), idle instance | Go about 1.5 MiB; Python 1.3 MiB (12 before cleat#4382); C# 17 MiB (49 before cleat#4378). **After a guest has churned large objects:** Python about 9.5 MiB, C# about 57. The budget charges that figure (Python 11, C# 59, Go 24) |
 | a cached compiled component | about 100 MiB (Python), 10 to 17 MiB (C#) |
 
 Under a cgroup limit the Python compile was killed at 512 MiB and completed at 768 MiB and above, so the old 512Mi
 default could not run a Python workflow at all; and at a 0.5 CPU limit it took 11.4 s against 1.2 to 2.4 s
 unconstrained. Two things scale with the limit: the worker stops claiming new work at `--memory-soft-limit` of the
-container limit (1.6 GiB of 2Gi at the default 0.80), and the residency budget defaults to 8 held runs x the dearest
-per-run charge (528 MiB, because C# is charged 66 MiB), so it is about a quarter of 2Gi.
+container limit (1.6 GiB of 2Gi at the default 0.80), and the residency budget defaults to 20% of the container limit
+(`--resident-memory-percent`), 410 MiB at 2Gi, about a fifth of it. When the limit cannot be read it falls back to 8 held runs x the dearest
+per-run charge (472 MiB, because C# is charged 59 MiB).
 
 **Why the autoscaler does not scale on memory by default.** The HPA's memory metric is a percentage of the *request*,
 and per-pod memory does not fall as replicas are added: it is dominated by the compiled-component cache, held runs
