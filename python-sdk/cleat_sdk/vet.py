@@ -23,6 +23,8 @@ import json
 import sys
 from typing import Any
 
+from ._stdlib_preload import PRELOADED_MODULES
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
@@ -691,6 +693,10 @@ INTERPRETER_BUILTIN_MODULES: frozenset[str] = frozenset(
     }
 )
 
+#: THE PY015 TABLES BELOW NOW WARN ABOUT NOTHING that they list, because ``cleat_sdk._stdlib_preload`` imports every module they name and every
+#: workflow imports the SDK (cleat#4266). They stay as the record of what was measured, and the machinery stays for the next row: a call whose
+#: module is NOT preloaded still warns, so a row added here without adding the module to ``PRELOADED_MODULES`` is a live warning again.
+#:
 #: PY015 table, calls that import a module on first use, by METHOD NAME. Each row
 #: was measured (2026-11-22, same guest as above): in a guest that does not
 #: import the module at top level the call raises ModuleNotFoundError, and a
@@ -861,7 +867,8 @@ class RuntimeImportChecker(ast.NodeVisitor):
             self._check_function_import(node, node.module, f"from {node.module} import ...")
 
     def _missing(self, modules: tuple[str, ...]) -> list[str]:
-        return [m for m in modules if m not in self._at_module_level]
+        # A module the SDK preloads is in every component (cleat#4266), so a workflow that does not import it is fine.
+        return [m for m in modules if m not in self._at_module_level and m not in PRELOADED_MODULES]
 
     def visit_Call(self, node: ast.Call) -> None:
         if self._functions:
