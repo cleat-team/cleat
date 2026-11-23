@@ -65,6 +65,14 @@ MONOTONIC_CLOCK_CALLS: tuple[str, ...] = (
     "perf_counter_ns",
 )
 
+#: The ``time`` functions that read the process's CPU-time clock. Measured 2026-11-23: two runs of one workflow id read -2.0412 and -2.0397 seconds
+#: (``process_time_ns``: -2041199250 and -2039663875), negative on both, so the value means nothing and differs between a run and its replay. Same
+#: warning as the monotonic reads, with a message that says what these actually read.
+PROCESS_TIME_CALLS: tuple[str, ...] = (
+    "process_time",
+    "process_time_ns",
+)
+
 #: SDK durable leaf function names --- HostCalls methods that the runtime
 #: journalises (i.e. they create events in the workflow history).
 DURABLE_LEAVES: set[str] = {
@@ -812,6 +820,9 @@ def _codec_module(name: str) -> str:
 class RealTimeClockChecker(ast.NodeVisitor):
     """Warns about a real-time clock read or sleep in the code a workflow executes (cleat#4396).
 
+    The calls are ``MONOTONIC_CLOCK_CALLS`` and ``PROCESS_TIME_CALLS`` (``process_time`` reads a CPU-time clock that returned negative values and
+    differed between two runs), plus ``time.sleep`` through an alias.
+
     The host's monotonic clock is real elapsed time and replay does not reproduce it: ``wasi:clocks/monotonic-clock`` is not shadowed, because a
     shadow replaces the whole interface and its ``subscribe-*`` functions return pollables the host cannot supply. So ``time.monotonic()``,
     ``monotonic_ns``, ``perf_counter`` and ``perf_counter_ns`` return a different value on a replay, and so does anything computed from one (an
@@ -831,7 +842,7 @@ class RealTimeClockChecker(ast.NodeVisitor):
         # Names that mean the ``time`` module, and local names bound to one of its functions (``from time import x as y``).
         self._modules: set[str] = {"time"}
         self._functions: dict[str, str] = {}
-        interesting = set(MONOTONIC_CLOCK_CALLS) | {"sleep"}
+        interesting = set(MONOTONIC_CLOCK_CALLS) | set(PROCESS_TIME_CALLS) | {"sleep"}
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):
                 for alias in node.names:
@@ -862,6 +873,15 @@ class RealTimeClockChecker(ast.NodeVisitor):
                 "and it is not durable. PY004 refuses `time.sleep` written plainly; this is the same call through an alias."
             )
             suggestion = "Use h.sleep(seconds) for a durable sleep"
+        elif function in PROCESS_TIME_CALLS:
+            message = (
+                f"time.{function}() reads the host's process-time clock, which replay does not reproduce: its value differs between a run and its replay "
+                "(measured: two runs of one workflow id read -2.0412 and -2.0397 seconds, negative on both, so it does not even measure CPU time here) (cleat#4396)."
+            )
+            suggestion = (
+                "Use h.now() for a replayable clock (milliseconds since the epoch; subtract two readings for an elapsed time) "
+                "and h.sleep(seconds) for a durable sleep"
+            )
         else:
             message = (
                 f"time.{function}() reads the host's real monotonic clock, which replay does not reproduce: its value, and anything computed from it "
@@ -896,7 +916,7 @@ class RealTimeClockChecker(ast.NodeVisitor):
 
     def visit_Attribute(self, node: ast.Attribute) -> None:
         if self._depth and isinstance(node.value, ast.Name) and node.value.id in self._modules:
-            if node.attr in MONOTONIC_CLOCK_CALLS:
+            if node.attr in MONOTONIC_CLOCK_CALLS or node.attr in PROCESS_TIME_CALLS:
                 self._warn(node, node.attr)
             elif node.attr == "sleep" and node.value.id != "time":
                 self._warn(node, "sleep")
