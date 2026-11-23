@@ -1,0 +1,5 @@
+Live cost of a cached compiled component, measured 2026-11-23 for cleat#4389. NOT FOR MERGE; measurement only.
+
+`zz_measure_cc_test.go` + `zz_measure_cgo.go` (build tag `zzmeasure`, copy into a worktree's `engine/`): `TestMeasureComponentLiveCost` compiles K distinct copies of a component (one custom section differs) through `acquireComponent` into one engine and prints, after each, the RssAnon delta raw and after `malloc_trim`; `TestMeasureSerialized` prints the serialized artifact length. Adapted from cleat-77's harness (`cleat-internal/measurements/component-cache-marginal-2026-11-23`), which fixed one artifact per language.
+`live-cost-raw.txt`: two repetitions x five components x five entries (`cc_run.sh`). `ser.sh`: the serialized sizes. Components: py_orig (componentize-py as built, 18,474,147 B), py_dense (the same after #4382, 30,052,390 B), py_harness (plugin-harness fixture, 19,300,914 B), cs_defer (1,056,780 B), cs_conf8 (conformance, 2,959,070 B).
+Known-positive in the harness: 64 MiB of touched Go memory must read within 48 to 80 MiB of RssAnon. The first entry is excluded from the per-entry figure (it carries the engine and the compile scratch).
