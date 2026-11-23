@@ -1153,7 +1153,9 @@ on every call.
 
 | Type | Default | Description |
 |------|---------|-------------|
-| bool | `false` | **EXPERIMENTAL (0.6.0).** Compile a Component Model component (a Python or C# workflow) in a short-lived child process of this binary, and load the serialized result |
+| bool | `true` | **ON by default since 0.6.0; `--component-precompile=false` turns it off.** Compile a Component Model component (a Python or C# workflow) in a short-lived child process of this binary, and load the serialized result, one component at a time per worker |
+
+**Why it is the default.** Measured 2026-11-23 on a real worker in a container limited to 2 GiB, the stock flags, nine distinct Python components (one run of each configuration, one arm64 machine, x86-64 not measured; the components differ in code and data but share the CPython runtime, so each is a different cache key with a near-identical compile cost). **Compiling in the worker** retained 198 to 308 MiB for each of the first four further distinct components and 44 to 76 for each of the next three (mean 175) (anonymous memory after each of eight fills: 533, 836, 1034, 1277, 1585, 1661, 1716 and 1760 MiB) and the container was **killed by the out-of-memory killer** when it then compiled a ninth (peak 2013 of 2048 MiB); the same limit with a fresh worker and six distinct components arriving at once was killed within 17 seconds, because six first compiles ran at once. **With this flag** the same nine components, 60 held-eligible runs and a ninth compile all completed, with a container peak of **1159 MiB** and no kill, and the six-at-once start completed in 41 seconds at a peak of 1425 MiB.
 
 **A worker compiles one component at a time**, in the child or in the worker (a fallback below), so a burst of runs of distinct components queues instead of compiling together. Before 0.6.0 only runs of the *same* component waited for each other.
 
