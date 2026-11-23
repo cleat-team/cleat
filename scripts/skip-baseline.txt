@@ -49,6 +49,7 @@ cmd/cleat	TestSignalsTutorialExpenseIsApprovedAndRejected	2
 cmd/cleat	TestTheGuardSeesAFlagAfterAPositional	1
 cmd/cleat	TestTheJavaScanActuallyUsesJavaCodeOnly	1
 cmd/cleat	TestTheJavaScanSkipsTestSources	1
+cmd/cleat	TestTheOverrideFlagIsRegisteredAndRefusedOffTheListedTarget	1
 cmd/cleat	TestThePythonVetSaysWhetherItRan	3
 cmd/cleat	TestTheRollbackPinIsWhatVersionResolutionReads	1
 cmd/cleat	TestTutorialQuickStartReachesADoneWorkflow	2
