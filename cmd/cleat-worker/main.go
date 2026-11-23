@@ -3246,6 +3246,7 @@ func componentPrecompileOptionFromFlags(logger *slog.Logger) []engine.WasmtimeOp
 	return []engine.WasmtimeOption{engine.WithWasmtimeComponentPrecompile(engine.ComponentPrecompile{
 		Executable:          exe,
 		Timeout:             *componentPrecompileTimeout,
+		RefusalWindow:       *componentPrecompileRefusalWindow,
 		MemoryLimitBytes:    total,
 		ParallelCompilation: parallel,
 	})}

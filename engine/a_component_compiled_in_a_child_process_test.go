@@ -524,6 +524,10 @@ func TestAComponentWhoseChildWasKilledIsNotTriedAgainInsideTheRefusalWindow(t *t
 	if got := p.spawns.Load(); got != 1 {
 		t.Errorf("spawns = %d after a refusal inside the window, want still 1: a child was started for a component refused moments ago\n%s", got, logs.String())
 	}
+	// The message names the window THIS worker is configured with (10m here), not the package default (5m): it used to print the default whatever was set.
+	if ref == nil || ref.Window != 10*time.Minute || !strings.Contains(err.Error(), "within the last 10m0s") || strings.Contains(err.Error(), "within the last 5m0s") {
+		t.Errorf("the repeat refusal says %q (window %v), want the configured 10m window named", err, ref)
+	}
 
 	// KNOWN NEGATIVE: a different component has its own window.
 	if err := exec(1); !errors.Is(err, ErrComponentCompileRefused) || p.spawns.Load() != 2 {

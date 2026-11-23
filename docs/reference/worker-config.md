@@ -1191,6 +1191,14 @@ MiB against about 565 MiB) and lengthens the compile. It does not change what
 the worker can load. The worker logs which it chose and why. The 1 GiB threshold is a
 judgement, not a measured boundary.
 
+### --component-precompile-refusal-window
+
+| Type | Default | Description |
+|------|---------|-------------|
+| duration | `5m` | After a precompile child is OOM-killed compiling a component, how long this worker refuses to start another child for **that component** |
+
+A run refused inside the window is released for the rest of it (it stays `ready`) and may be served by a worker with more memory; it is not failed, and the worker does not compile the component itself. A different component has its own window. One attempt per component per window means a released run cannot loop a child that was just killed.
+
 ### --component-precompile-timeout
 
 | Type | Default | Description |

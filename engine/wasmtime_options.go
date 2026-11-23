@@ -218,6 +218,8 @@ type ComponentCompileRefusedError struct {
 	ParallelCompilation bool
 	// RetryAfter is how long until this worker will try this component again. The run is released for at least this long.
 	RetryAfter time.Duration
+	// Window is the refusal window this worker is configured with: how long after a killed child it will not start another for the component.
+	Window time.Duration
 	// Repeat is true when the refusal was answered without trying: an earlier attempt within the window was killed.
 	Repeat bool
 	// Cause is what the child died of, nil for a repeat.
@@ -238,7 +240,7 @@ func (e *ComponentCompileRefusedError) Error() string {
 		what += " (" + e.Cause.Error() + ")"
 	}
 	if e.Repeat {
-		what = "an earlier precompile child for this component was killed within the last " + DefaultComponentPrecompileRefusalWindow.String() + ", so none was started"
+		what = "an earlier precompile child for this component was killed within the last " + e.Window.String() + ", so none was started"
 	}
 	return fmt.Sprintf("%s: %s, most likely by %s with parallel_compilation=%t. Compiling the component in the worker would need more memory than the child did, "+
 		"so it was not attempted; this run is released and will be retried in %s, possibly on another worker. To fix it: %s",

@@ -363,7 +363,7 @@ func (p *componentPrecompiler) refuse(key string, cause error, left time.Duratio
 		left = p.window
 	}
 	p.refusals.Add(1)
-	return &ComponentCompileRefusedError{MemoryLimitBytes: p.memLimit, ParallelCompilation: p.parallel, RetryAfter: left, Repeat: repeat, Cause: cause}
+	return &ComponentCompileRefusedError{MemoryLimitBytes: p.memLimit, ParallelCompilation: p.parallel, RetryAfter: left, Window: p.window, Repeat: repeat, Cause: cause}
 }
 
 // compileComponentMiss is acquireComponent's compile step. It returns the component and whether it was compiled IN THIS PROCESS, which is what componentCache.compiles counts. With a precompiler
