@@ -175,12 +175,13 @@ func awaitPromiseIdentity(a stepArgs, rec *EventRecord) string {
 //     on, and recorded at a step that already held an event (the cleat#4157 class; the await_signals analogue was cleat#947). It is a divergence, except for the engine with no
 //     promise store (AwaitPromise, above).
 //
-// A KNOWN AMBIGUITY, deliberately resolved toward resolved, and carried over from the old code (the paragraph above its look-ahead; the move dropped it
-// and this puts it back, cleat#4277): [await_promise p, promise_resolved p], neither carrying the Service/Op discriminator, is also what a TIMED-OUT
-// await followed IMMEDIATELY by a second await of the same already-settled promise records. The two shapes are only both possible when the promise
-// settles in the instant between the timeout and the guest's next call, and an await followed by anything else, which is every shape a retry loop makes,
-// is unambiguous. A replay of the ambiguous pair hands the first await the resolution where the original run was told it timed out; it converges unless
-// the timeout branch kept guest-local state. Telling the two apart needs a history-format change and is not decided here (cleat#4277).
+// A TIMED-OUT AWAIT FOLLOWED BY A SECOND AWAIT THAT FINDS THE PROMISE SETTLED (cleat#4277). Until FirstRead, [await_promise p, promise_resolved p] was
+// both what ONE await records when it is answered on a wake and what a timed-out await followed IMMEDIATELY by a second await of the already-settled
+// promise records, and a replay handed the first await the resolution where the original run had been told it timed out (an await followed by anything
+// else, which is every shape a retry loop makes, was never ambiguous). The second await's settlement, the one its FIRST read of the store produces, is now
+// recorded with FirstRead, and OpensACall ends the first await's run before it: the first replays as the timeout it was and the second as the resolution.
+// A history written before that field has no marker, so such a pair still replays as it always did, resolved: that is a limit of the old format and not
+// a guess, and it converges unless the timeout branch kept guest-local state.
 //
 // NEVER REFUSED: Refuse is neverRefuse. The old code had no stopBeforeNewWork check, so a defer body, a worker that is shutting down and a session
 // that has already suspended all recorded the await and suspended as usual (four rows of the characterization table), and that is kept.
@@ -197,6 +198,11 @@ var awaitPromiseStep = stepSpec{
 	MaxPrefix:        1,
 	Refuse:           neverRefuse,
 	Identity:         awaitPromiseIdentity,
+	// A settlement that an await wrote because its FIRST read found the promise settled belongs to the call that wrote it. After an await it is the
+	// NEXT call's answer, and the await before it timed out (cleat#4277).
+	OpensACall: func(rec *EventRecord) bool {
+		return rec.FirstRead && (rec.EventType == EventTypePromiseResolved || rec.EventType == EventTypePromiseRejected)
+	},
 	Role: func(a stepArgs, rec *EventRecord) recordRole {
 		switch rec.EventType {
 		case EventTypePromiseResolved, EventTypePromiseRejected:
@@ -243,27 +249,30 @@ var awaitPromiseStep = stepSpec{
 			return s.awaitPromiseWithoutAStore(ctx, m, c.args.outPtr, c.args.outMaxLen)
 		}
 
-		// deliverIfSettled is the ONE read of the promise store an await makes, on the first poll, at the replay frontier and after a wake. A settled
-		// promise is recorded and THEN delivered. A store error is read as still pending, as it always was. It is a closure and not a function
-		// because every Record call must sit inside a spec's Fresh.
-		deliverIfSettled := func() (int64, bool) {
+		// deliver is the ONE read of the promise store an await makes, on the first poll, at the replay frontier and after a wake. A settled promise is
+		// recorded and THEN delivered. A store error is read as still pending, as it always was. firstRead is true only for the first poll, which writes
+		// no await record of its own, and marks what it records (cleat#4277). It is a closure and not a function because every Record call must sit
+		// inside a spec's Fresh.
+		deliver := func(firstRead bool) (int64, bool) {
 			status, result, errMsg, err := s.engine.promiseStore.GetPromise(ctx, s.workflowID, promiseID)
 			if err != nil {
 				return 0, false
 			}
 			switch status {
 			case "resolved":
-				c.Record(EventRecord{Step: s.stepCount, EventType: EventTypePromiseResolved, PromiseID: promiseID, PromiseResult: result})
+				c.Record(EventRecord{Step: s.stepCount, EventType: EventTypePromiseResolved, PromiseID: promiseID, PromiseResult: result, FirstRead: firstRead})
 				written, writtenEC := s.writeOut(ctx, m, c.args.outPtr, result, c.args.outMaxLen)
 				return packAwaitPromiseResult(written, false, uint16(writtenEC)), true
 			case "rejected":
-				c.Record(EventRecord{Step: s.stepCount, EventType: EventTypePromiseRejected, PromiseID: promiseID, PromiseError: errMsg})
+				c.Record(EventRecord{Step: s.stepCount, EventType: EventTypePromiseRejected, PromiseID: promiseID, PromiseError: errMsg, FirstRead: firstRead})
 				written, _ := s.writeResult(ctx, m, c.args.outPtr, errMsg, c.args.outMaxLen)
 				s.setAwaitRejected(true)
 				return packAwaitPromiseResult(written, false, 1), true
 			}
 			return 0, false
 		}
+		// Every read but the FIRST answers an await that was already recorded, and records its answer unmarked: that pair is one call (cleat#4277).
+		deliverIfSettled := func() (int64, bool) { return deliver(false) }
 
 		if len(c.Prefix) > 0 {
 			// The history ENDED INSIDE this run: the await was recorded and not answered, and replay has just ended. The promise may have settled
@@ -300,7 +309,8 @@ var awaitPromiseStep = stepSpec{
 		}
 
 		// Fresh: the store first, so a promise that is already settled is returned and no await is recorded for it.
-		if r, ok := deliverIfSettled(); ok {
+		// MARKED: no await of this call precedes the record, so a replay must not pair it with an await that came before (cleat#4277).
+		if r, ok := deliver(true); ok {
 			return r
 		}
 		// A timeout of 0 (or less) has no deadline to expire, so it must not suspend (cleat#4144, the cleat#1331 loop that await_signals guards

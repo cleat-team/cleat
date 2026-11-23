@@ -40,6 +40,11 @@ read:
 		role := sp.Role(args, &rec)
 		switch role {
 		case rolePrefix, roleFinal:
+			// A record that opens a call ends the run before anything else is asked of it (cleat#4277): it is the next call's, whatever it matches.
+			if len(run) > 0 && sp.OpensACall != nil && sp.OpensACall(&rec) {
+				foreign = i
+				break read
+			}
 			// For a spec whose run can end without a final, Identity finds the end: a record that names another call, after at least one record
 			// of this run, belongs to the next call and is not read here.
 			if (sp.EndsWithoutFinal || sp.ResumesFreshAtForeign) && len(run) > 0 && sp.Identity != nil && sp.Identity(args, &rec) != "" {

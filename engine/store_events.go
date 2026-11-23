@@ -660,6 +660,11 @@ func eventRecordToPayload(rec EventRecord) ([]byte, error) {
 	if rec.InDeferSegment {
 		payload["in_defer_segment"] = true
 	}
+	// Replay reads it (an await's pair is one call or two, cleat#4277), so it is inside the checksum, and only when true: every event written before it
+	// keeps its checksum.
+	if rec.FirstRead {
+		payload["first_read"] = true
+	}
 	return sortedJSONMarshal(payload)
 }
 
@@ -1133,5 +1138,8 @@ func populateFromPayload(rec *EventRecord, payload []byte) {
 	}
 	if v, ok := m["in_defer_segment"].(bool); ok {
 		rec.InDeferSegment = v
+	}
+	if v, ok := m["first_read"].(bool); ok {
+		rec.FirstRead = v
 	}
 }

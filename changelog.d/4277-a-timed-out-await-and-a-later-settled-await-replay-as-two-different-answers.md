@@ -1,0 +1,4 @@
+---
+section: fixed
+---
+- **A timed-out `await_promise` followed by a second await that finds the promise settled now replays as two answers (cleat#4277).** A workflow awaits a promise with a timeout, the await times out, and the very next call awaits the same promise and finds it already settled. The history was `[await_promise, promise_resolved]`, which is byte for byte what ONE await records when it is answered on a wake, so a replay handed the FIRST await the resolution where the original run had been told it timed out (a rejection was the same). A workflow that counts its timeouts or branches on one then took a different path on replay. The settlement that an await's first read of the promise produces is now recorded with a marker, and a replay ends the first await's run before it: the first replays as the timeout it was and the second as the resolution. A pair recorded without the marker still replays as it always did.
