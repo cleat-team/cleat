@@ -81,8 +81,9 @@ func TestAFireAndForgetReplayChecksWhatItConsumes(t *testing.T) {
 			// The record carries the Service and Op the call asked for, as the real producer always writes them (DurableSend's fresh half and
 			// DurableScheduleInvoke's both set them). This fixture used to be {Step: 0, EventType: tc.right} alone, a record no engine ever
 			// produced; it only passed while replay ignored the record's identity. DurableSend now compares it (cleat#4152, G1b), and a record
-			// with no Service is, correctly, not the send the call asked for.
-			s.history = []EventRecord{{Step: 0, EventType: tc.right, Service: "svc", Op: "op"}}
+			// with no Service is, correctly, not the send the call asked for. Nor is a record with no Request the send that passed `{}`
+			// (cleat#4424): the real producer records the request as well.
+			s.history = []EventRecord{{Step: 0, EventType: tc.right, Service: "svc", Op: "op", Request: `{}`}}
 
 			if result := tc.call(s); uint32(result&0xFFFFFFFF) != 0 {
 				t.Errorf("refused its OWN event type (errCode=%d); the guard is rejecting "+

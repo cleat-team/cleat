@@ -31,6 +31,14 @@ func idReplay(opts []EngineOption, history []EventRecord, call func(ctx context.
 
 func isDivergence(msg string) bool { return strings.HasPrefix(msg, "replay divergence at step ") }
 
+// trimMsg keeps a failure message readable when the body in it is 100 KB.
+func trimMsg(s string) string {
+	if len(s) > 160 {
+		return s[:160] + "..."
+	}
+	return s
+}
+
 // idPluginRegistry registers one plain function and one that declares a secret-only field.
 func idPluginRegistry(t *testing.T) []EngineOption {
 	t.Helper()
@@ -157,5 +165,109 @@ func TestAPluginCallToAFunctionWithSecretOnlyFieldsReplaysWhetherItsInputWasReco
 				t.Errorf("the divergence message prints a literal that was in a secret-only field:\n%s", msg)
 			}
 		})
+	}
+}
+
+// The three siblings of the plain call carry a request too, and until cleat#4424 each served the recorded answer to a different body exactly as the plain call did (measured with a
+// throwaway probe on develop): call_with_retry, call_with_heartbeat and durable_send. They share the plain call's comparison (callRequestIdentity), and each has the same two rows.
+//
+// A run is several records, so "consumes nothing" is measured on the whole run: a different body at the call that ends it must leave the attempts or heartbeats before it unread too.
+func TestTheRetriedHeartbeatAndSendCallsReplayOnlyTheRequestTheyRecorded(t *testing.T) {
+	type kind struct {
+		name    string
+		records func(body string) []EventRecord
+		call    func(ctx context.Context, s *execSession, body string) int64
+		message bool // the call has an output buffer, so a divergence is readable
+	}
+	kinds := []kind{
+		{"call_with_retry", func(body string) []EventRecord {
+			return []EventRecord{
+				{Step: 0, EventType: EventTypeCallAttemptFailed, Service: "svc", Op: "op", Attempt: 1, Err: "TRY_AGAIN: 503"},
+				{Step: 1, EventType: EventTypeCall, Service: "svc", Op: "op", Request: body, Response: `"recorded answer"`},
+			}
+		}, func(ctx context.Context, s *execSession, body string) int64 {
+			return s.DurableCallWithRetry(ctx, nil, "svc", "op", body, 3, 1, 100, 1, "", 0, idBufLen)
+		}, true},
+		{"call_with_heartbeat", func(body string) []EventRecord {
+			return []EventRecord{
+				{Step: 0, EventType: EventTypeHeartbeat, Service: "svc", Op: "op"},
+				{Step: 1, EventType: EventTypeCall, Service: "svc", Op: "op", Request: body, Response: `"recorded answer"`},
+			}
+		}, func(ctx context.Context, s *execSession, body string) int64 {
+			return s.DurableCallWithHeartbeat(ctx, nil, "svc", "op", body, 1000, 0, idBufLen)
+		}, true},
+		{"durable_send", func(body string) []EventRecord {
+			return []EventRecord{{Step: 0, EventType: EventTypeDurableSend, Service: "svc", Op: "op", Request: body}}
+		}, func(ctx context.Context, s *execSession, body string) int64 {
+			return s.DurableSend(ctx, nil, "svc", "op", body)
+		}, false},
+	}
+	for _, k := range kinds {
+		k := k
+		t.Run(k.name+", the same body (control)", func(t *testing.T) {
+			hist := k.records(idBodyRecorded)
+			msg, s := idReplay(nil, hist, func(ctx context.Context, s *execSession) int64 { return k.call(ctx, s, idBodyRecorded) })
+			if isDivergence(msg) || s.stepCount != len(hist) {
+				t.Fatalf("the same request must replay and consume the whole run (%d records): got %q, stepCount %d", len(hist), trimMsg(msg), s.stepCount)
+			}
+			if k.message && msg != `"recorded answer"` {
+				t.Fatalf("the same request must be answered the recorded answer: got %q", msg)
+			}
+		})
+		t.Run(k.name+", a different body", func(t *testing.T) {
+			hist := k.records(idBodyRecorded)
+			msg, s := idReplay(nil, hist, func(ctx context.Context, s *execSession) int64 { return k.call(ctx, s, idBodyOther) })
+			if s.stepCount != 0 {
+				t.Fatalf("a different request consumed %d of %d records (%q): it was served the recorded answer for another request, or part of its run", s.stepCount, len(hist), trimMsg(msg))
+			}
+			if k.message {
+				if !isDivergence(msg) {
+					t.Fatalf("a different request left the step unread but reported no divergence: %q", trimMsg(msg))
+				}
+				for _, leak := range []string{"RECORDED-SENTINEL", "OTHER-SENTINEL", "1001", "1002"} {
+					if strings.Contains(msg, leak) {
+						t.Errorf("the divergence message prints part of a request (%q):\n%s", leak, msg)
+					}
+				}
+				if !strings.Contains(msg, "[redacted: ") || !strings.Contains(msg, "with a different request") {
+					t.Errorf("the divergence message does not name the bodies by size and hash:\n%s", msg)
+				}
+			}
+		})
+	}
+}
+
+// THE LIMIT, pinned so nobody reads the comparison as wider than it is. The request is compared on a record that carries one. call_attempt_failed and heartbeat records carry none,
+// and a call_retry_refused record deliberately carries none (freshCallWithRetry: a request body is the kind of value the sealed-payload machinery exists for), so a history that
+// stops inside a run, or a policy refused for its length, is accepted on its service and operation alone. Probed on the spec's own Identity: running such a history would go live
+// and need a caller, and the claim here is about what the comparison can see.
+func TestTheRequestIsComparedOnlyOnARecordThatCarriesOne(t *testing.T) {
+	a := stepArgs{s1: "svc", s2: "op", s3: idBodyOther}
+	carries := EventRecord{EventType: EventTypeCall, Service: "svc", Op: "op", Request: idBodyRecorded}
+	for _, spec := range []*stepSpec{&callStep, &retryStep, &heartbeatStep} {
+		if why := spec.Identity(a, &carries); why == "" {
+			t.Errorf("%s: a call record with a different request was accepted", spec.Name)
+		}
+	}
+	if why := durableSendStep.Identity(a, &EventRecord{EventType: EventTypeDurableSend, Service: "svc", Op: "op", Request: idBodyRecorded}); why == "" {
+		t.Errorf("durable_send: a send record with a different request was accepted")
+	}
+	for _, c := range []struct {
+		spec *stepSpec
+		rec  EventRecord
+	}{
+		{&retryStep, EventRecord{EventType: EventTypeCallAttemptFailed, Service: "svc", Op: "op"}},
+		{&retryStep, EventRecord{EventType: EventTypeCallRetryRefused, Service: "svc", Op: "op"}},
+		{&heartbeatStep, EventRecord{EventType: EventTypeHeartbeat, Service: "svc", Op: "op"}},
+	} {
+		if why := c.spec.Identity(a, &c.rec); why != "" {
+			t.Errorf("%s: a %s record carries no request, so its body cannot be compared, yet it was refused: %s", c.spec.Name, c.rec.EventType, why)
+		}
+		// and its service and operation are still compared
+		wrong := c.rec
+		wrong.Op = "other"
+		if why := c.spec.Identity(a, &wrong); why == "" {
+			t.Errorf("%s: a %s record of another operation was accepted", c.spec.Name, c.rec.EventType)
+		}
 	}
 }

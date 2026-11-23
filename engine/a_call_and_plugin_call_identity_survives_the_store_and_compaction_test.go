@@ -11,73 +11,120 @@ import (
 // the guest and the replay: a store that normalises a column (a jsonb would reorder keys and rewrite whitespace; these are text, longtext and nvarchar(max)), a payload cipher, and
 // compaction, which rebuilds the history from a trimmed copy. Each is exercised here with a body chosen to expose a normaliser: irregular whitespace, keys out of order, non-ASCII, a
 // trailing newline, and enough bytes to cross any inline size threshold. A comparison that diverged on any of them would fail every compacted, encrypted or stored run on its next replay.
+//
+// The history holds ALL FIVE call kinds that compare a request (call, plugin_call, call_with_retry, call_with_heartbeat, durable_send), one after the other, so that a run is replayed
+// in order as a workflow would replay it, and "diverges at the right step" means something: the calls before it must have replayed and consumed exactly their own records.
 
 func awkwardBody(tag string) string {
 	return "{ \"z\" : 1,\n  \"a\": [3, 2,1],\"ü\":\"日本語\", \"n\":null , \"pad\":\"" + strings.Repeat("x", 100_000) + "\", \"tag\":\"" + tag + "\" }\n"
 }
 
-// replayBoth replays history's step 0 as a call with callBody and step 1 as a plugin_call with pluginInput, in ONE session, and says whether either diverged.
-func replayBoth(opts []EngineOption, history []EventRecord, callBody, pluginInput string) (callMsg, pluginMsg string, s *execSession) {
-	s = stepSession(opts, history)
-	buf := make([]byte, idBufLen)
-	read := func() string {
-		n := 0
-		for n < len(buf) && buf[n] != 0 {
-			n++
+type seqKind struct {
+	name    string
+	records func(body string) []EventRecord // the records one call of this kind leaves, steps not yet numbered
+	call    func(ctx context.Context, s *execSession, body string) int64
+}
+
+var seqKinds = []seqKind{
+	{"call", func(b string) []EventRecord {
+		return []EventRecord{{EventType: EventTypeCall, Service: "svc", Op: "op", Request: b, Response: `"a"`}}
+	}, func(ctx context.Context, s *execSession, b string) int64 {
+		return s.DurableCall(ctx, nil, "svc", "op", b, 0, idBufLen)
+	}},
+	{"plugin_call", func(b string) []EventRecord {
+		return []EventRecord{{EventType: EventTypePluginCall, PluginName: "p", PluginFunc: "plain", PluginInput: b, PluginOutput: `"a"`}}
+	}, func(ctx context.Context, s *execSession, b string) int64 {
+		return s.PluginCall(ctx, nil, "p", "plain", b, 0, idBufLen)
+	}},
+	{"call_with_retry", func(b string) []EventRecord {
+		return []EventRecord{
+			{EventType: EventTypeCallAttemptFailed, Service: "svc", Op: "op2", Attempt: 1, Err: "TRY_AGAIN: 503"},
+			{EventType: EventTypeCall, Service: "svc", Op: "op2", Request: b, Response: `"a"`},
 		}
-		return string(buf[:n])
+	}, func(ctx context.Context, s *execSession, b string) int64 {
+		return s.DurableCallWithRetry(ctx, nil, "svc", "op2", b, 3, 1, 100, 1, "", 0, idBufLen)
+	}},
+	{"call_with_heartbeat", func(b string) []EventRecord {
+		return []EventRecord{
+			{EventType: EventTypeHeartbeat, Service: "svc", Op: "op3"},
+			{EventType: EventTypeCall, Service: "svc", Op: "op3", Request: b, Response: `"a"`},
+		}
+	}, func(ctx context.Context, s *execSession, b string) int64 {
+		return s.DurableCallWithHeartbeat(ctx, nil, "svc", "op3", b, 1000, 0, idBufLen)
+	}},
+	{"durable_send", func(b string) []EventRecord {
+		return []EventRecord{{EventType: EventTypeDurableSend, Service: "svc", Op: "op4", Request: b}}
+	}, func(ctx context.Context, s *execSession, b string) int64 {
+		return s.DurableSend(ctx, nil, "svc", "op4", b)
+	}},
+}
+
+// seqBodies is one distinct awkward body per kind.
+func seqBodies() []string {
+	b := make([]string, len(seqKinds))
+	for i, k := range seqKinds {
+		b[i] = awkwardBody(k.name)
 	}
+	return b
+}
+
+// seqHistory is the records the five calls leave, in order, with their steps numbered.
+func seqHistory(bodies []string) []EventRecord {
+	var hist []EventRecord
+	for i, k := range seqKinds {
+		for _, r := range k.records(bodies[i]) {
+			r.Step = len(hist)
+			hist = append(hist, r)
+		}
+	}
+	return hist
+}
+
+// replaySeq replays the five calls in order against hist with the given bodies and stops at the first one that did not consume its records. It returns that call's index, or -1.
+func replaySeq(opts []EngineOption, hist []EventRecord, bodies []string) (int, *execSession) {
+	s := stepSession(opts, hist)
+	buf := make([]byte, idBufLen)
 	ctx := context.WithValue(context.Background(), wasmMemBufKey{}, buf)
-	s.DurableCall(ctx, nil, "svc", "op", callBody, 0, idBufLen)
-	callMsg = read()
-	for i := range buf {
-		buf[i] = 0
+	for i, k := range seqKinds {
+		before := s.stepCount
+		k.call(ctx, s, bodies[i])
+		if s.stepCount == before {
+			return i, s
+		}
 	}
-	s.PluginCall(ctx, nil, "p", "plain", pluginInput, 0, idBufLen)
-	pluginMsg = read()
-	return callMsg, pluginMsg, s
+	return -1, s
 }
 
-func recordedPair() (callBody, pluginInput string, history []EventRecord) {
-	callBody, pluginInput = awkwardBody("call"), awkwardBody("plugin")
-	return callBody, pluginInput, []EventRecord{
-		{Step: 0, EventType: EventTypeCall, Service: "svc", Op: "op", Request: callBody, Response: `"call answer"`},
-		{Step: 1, EventType: EventTypePluginCall, PluginName: "p", PluginFunc: "plain", PluginInput: pluginInput, PluginOutput: `"plugin answer"`},
-	}
-}
-
-func assertReplaysTheRecordedPair(t *testing.T, opts []EngineOption, hist []EventRecord, callBody, pluginInput string) {
+func assertReplaysTheRecordedSequence(t *testing.T, opts []EngineOption, hist []EventRecord, bodies []string) {
 	t.Helper()
-	// CONTROL: the same bodies replay, both steps, with the recorded answers.
-	cm, pm, s := replayBoth(opts, hist, callBody, pluginInput)
-	if isDivergence(cm) || isDivergence(pm) || cm != `"call answer"` || pm != `"plugin answer"` || s.stepCount != 2 {
-		t.Fatalf("the SAME bodies did not replay (a comparison that diverges on everything): call=%q plugin=%q stepCount=%d", trimMsg(cm), trimMsg(pm), s.stepCount)
+	// CONTROL: the same bodies replay, every call, consuming every record.
+	if at, s := replaySeq(opts, hist, bodies); at != -1 || s.stepCount != len(hist) {
+		t.Fatalf("the SAME bodies did not replay (a comparison that diverges on everything): stopped at %d (%s) with stepCount %d of %d", at, nameOf(at), s.stepCount, len(hist))
 	}
-	// A different call body diverges at step 0 and consumes nothing.
-	cm, _, s = replayBoth(opts, hist, callBody+" ", pluginInput)
-	if !isDivergence(cm) || s.stepCount != 0 {
-		t.Errorf("a call body differing by one trailing space was served the recorded answer: %q (stepCount %d)", trimMsg(cm), s.stepCount)
-	}
-	// The same call, then a different plugin input: step 0 replays, step 1 diverges.
-	cm, pm, s = replayBoth(opts, hist, callBody, pluginInput+" ")
-	if isDivergence(cm) || !isDivergence(pm) || s.stepCount != 1 {
-		t.Errorf("a plugin input differing by one trailing space: call=%q plugin=%q stepCount=%d, want the call to replay and the plugin_call to diverge at step 1", trimMsg(cm), trimMsg(pm), s.stepCount)
-	}
-	// And neither body is ever printed (100 KB of padding would show).
-	if strings.Contains(pm, "xxxxxxxxxx") || strings.Contains(cm, "xxxxxxxxxx") {
-		t.Errorf("a divergence message prints part of a body")
+	// Each kind in turn: a body differing by one trailing space diverges AT THAT CALL, having consumed exactly the records of the calls before it.
+	for i, k := range seqKinds {
+		changed := append([]string(nil), bodies...)
+		changed[i] += " "
+		want := 0
+		for j := 0; j < i; j++ {
+			want += len(seqKinds[j].records(bodies[j]))
+		}
+		at, s := replaySeq(opts, hist, changed)
+		if at != i || s.stepCount != want {
+			t.Errorf("%s: a body differing by one trailing space: diverged at call %d (%s) with stepCount %d, want call %d at stepCount %d", k.name, at, nameOf(at), s.stepCount, i, want)
+		}
 	}
 }
 
-func trimMsg(s string) string {
-	if len(s) > 160 {
-		return s[:160] + "..."
+func nameOf(i int) string {
+	if i < 0 || i >= len(seqKinds) {
+		return "none"
 	}
-	return s
+	return seqKinds[i].name
 }
 
-// A call and a plugin_call recorded THROUGH A REAL STORE replay on the same body and diverge on a different one, on every dialect, with payload encryption off and on.
-func TestACallAndAPluginCallPersistedInAStoreReplayOnTheSameRequestOnEveryDialect(t *testing.T) {
+// All five kinds recorded THROUGH A REAL STORE replay on the same bodies and diverge on a different one, on every dialect, with payload encryption off and on.
+func TestEveryRequestCarryingCallPersistedInAStoreReplaysOnTheSameRequestOnEveryDialect(t *testing.T) {
 	opts := idPluginRegistry(t)
 	for _, backend := range registeredBackends {
 		backend := backend
@@ -109,10 +156,11 @@ func TestACallAndAPluginCallPersistedInAStoreReplayOnTheSameRequestOnEveryDialec
 				}
 				ctx := context.Background()
 				wfID := newIntentWorkflow(t, ctx, store, fmt.Sprintf("identity-%s", strings.ReplaceAll(name, "/", "-")))
-				callBody, pluginInput, written := recordedPair()
+				bodies := seqBodies()
+				written := seqHistory(bodies)
 				for _, rec := range written {
 					if err := store.AppendEventHistory(ctx, wfID, rec); err != nil {
-						t.Fatalf("AppendEventHistory step %d: %v", rec.Step, err)
+						t.Fatalf("AppendEventHistory step %d (%s): %v", rec.Step, rec.EventType, err)
 					}
 				}
 				if encrypted {
@@ -122,39 +170,46 @@ func TestACallAndAPluginCallPersistedInAStoreReplayOnTheSameRequestOnEveryDialec
 					if err := store.(*PostgresStore).db.QueryRowContext(ctx, `SELECT COALESCE(request, '') FROM event_history WHERE workflow_id = $1 AND step = 0`, wfID).Scan(&raw); err != nil {
 						t.Fatalf("read the raw request column: %v", err)
 					}
-					if raw == "" || raw == callBody || strings.Contains(raw, "xxxxxxxxxx") {
-						t.Fatalf("PRECONDITION FAILED: the stored request is not ciphertext (%d bytes, equal to the body: %v), so the encrypted row measures the plaintext path", len(raw), raw == callBody)
+					if raw == "" || raw == bodies[0] || strings.Contains(raw, "xxxxxxxxxx") {
+						t.Fatalf("PRECONDITION FAILED: the stored request is not ciphertext (%d bytes, equal to the body: %v), so the encrypted row measures the plaintext path", len(raw), raw == bodies[0])
 					}
 				}
 				loaded, err := store.LoadEventHistory(ctx, wfID)
-				if err != nil || len(loaded) != 2 {
-					t.Fatalf("LoadEventHistory = %d records, err %v; want 2", len(loaded), err)
+				if err != nil || len(loaded) != len(written) {
+					t.Fatalf("LoadEventHistory = %d records, err %v; want %d", len(loaded), err, len(written))
 				}
-				// PRECONDITION: the store handed the bodies back byte for byte. If it did not, the comparison below would be measuring the store, and this says so first.
-				if loaded[0].Request != callBody || loaded[1].PluginInput != pluginInput {
-					t.Fatalf("PRECONDITION FAILED: the %s store did not return the bodies unchanged (call request %d bytes want %d, plugin input %d bytes want %d)",
-						name, len(loaded[0].Request), len(callBody), len(loaded[1].PluginInput), len(pluginInput))
+				// PRECONDITION: the store handed every body back byte for byte. If it did not, the comparison below would be measuring the store, and this says so first.
+				for i := range written {
+					if loaded[i].Request != written[i].Request || loaded[i].PluginInput != written[i].PluginInput {
+						t.Fatalf("PRECONDITION FAILED: the %s store did not return step %d (%s) unchanged (request %d bytes want %d, plugin input %d bytes want %d)",
+							name, i, written[i].EventType, len(loaded[i].Request), len(written[i].Request), len(loaded[i].PluginInput), len(written[i].PluginInput))
+					}
 				}
-				assertReplaysTheRecordedPair(t, opts, loaded, callBody, pluginInput)
+				assertReplaysTheRecordedSequence(t, opts, loaded, bodies)
 			})
 		}
 	}
 }
 
-// The same history after a compaction round trip: the compacted copy must still carry the request and the input, or every compacted run would diverge on its next replay.
-func TestACallAndAPluginCallReplayOnTheSameRequestAfterCompaction(t *testing.T) {
+// The same history after a compaction round trip: the compacted copy must still carry every request and input, or every compacted run would diverge on its next replay.
+func TestEveryRequestCarryingCallReplaysOnTheSameRequestAfterCompaction(t *testing.T) {
 	opts := idPluginRegistry(t)
-	callBody, pluginInput, hist := recordedPair()
+	bodies := seqBodies()
+	hist := seqHistory(bodies)
 	cs, err := extractCompactionStateFrom(nil, hist)
 	if err != nil {
 		t.Fatalf("extractCompactionStateFrom: %v", err)
 	}
 	rebuilt := buildFullHistoryFromCompaction(nil, cs)
-	if len(rebuilt) != 2 {
-		t.Fatalf("PRECONDITION FAILED: compaction rebuilt %d records, want 2", len(rebuilt))
+	if len(rebuilt) != len(hist) {
+		t.Fatalf("PRECONDITION FAILED: compaction rebuilt %d records, want %d", len(rebuilt), len(hist))
 	}
-	if rebuilt[0].Request != callBody || rebuilt[1].PluginInput != pluginInput {
-		t.Fatalf("compaction did not carry the request (%d bytes, want %d) or the plugin input (%d bytes, want %d)", len(rebuilt[0].Request), len(callBody), len(rebuilt[1].PluginInput), len(pluginInput))
+	for i := range hist {
+		// A record that carries no request (an attempt, a heartbeat) must stay without one; the others must carry it whole.
+		if rebuilt[i].Request != hist[i].Request || rebuilt[i].PluginInput != hist[i].PluginInput {
+			t.Fatalf("compaction changed step %d (%s): request %d bytes want %d, plugin input %d bytes want %d",
+				i, hist[i].EventType, len(rebuilt[i].Request), len(hist[i].Request), len(rebuilt[i].PluginInput), len(hist[i].PluginInput))
+		}
 	}
-	assertReplaysTheRecordedPair(t, opts, rebuilt, callBody, pluginInput)
+	assertReplaysTheRecordedSequence(t, opts, rebuilt, bodies)
 }
