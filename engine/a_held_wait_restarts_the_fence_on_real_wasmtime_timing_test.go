@@ -44,6 +44,8 @@ func TestAHeldWaitRestartsTheExecutionFenceOnRealWasmtime(t *testing.T) {
 		d     time.Duration
 		fence time.Duration
 	)
+	// Which precondition ended each attempt, so the final message says what failed instead of assuming load (cleat#4402: it said "too loaded" over numbers that showed the opposite).
+	var sizeFailed, controlFailed, tooGenerous int
 	sized := false
 	for attempt := 1; attempt <= 8 && !sized; attempt++ {
 		rt, wt := newResidentBackend(t, 60*time.Second)
@@ -61,24 +63,38 @@ func TestAHeldWaitRestartsTheExecutionFenceOnRealWasmtime(t *testing.T) {
 		n = int(float64(n) * float64(300*time.Millisecond) / float64(d)) // aim for about 300ms of guest work
 		d = timeSpin(n)
 		if d < 100*time.Millisecond || d > 1500*time.Millisecond {
+			sizeFailed++
 			t.Logf("attempt %d: could not size the guest's work: %d iterations took %s (want about 300ms); retrying", attempt, n, d)
 			continue
 		}
-		fence = time.Duration(float64(d) * 1.7)
-		rt2, wt2 = newResidentBackend(t, fence)
+		// SEVERAL spins, and the fastest sizes the fence (cleat#4402): the one measurement above can be slow for a reason that is gone when the checks below run.
+		spins := []time.Duration{d}
+		for i := 0; i < 3; i++ {
+			spins = append(spins, timeSpin(n))
+		}
+		d, fence = fenceFromSpins(spins)
+		// THE SAME BACKEND checks what it sized (cleat#4402). This used to build a second backend with the fence and check on that one, so the spins the fence was sized from and the
+		// spins it was checked against ran on two different engines. PerExecution copies the root backend's limits on every call, so setting the fence here is what every run below sees.
+		wt.limits.executionTimeout = fence
+		rt2, wt2 = rt, wt
 		warmUp(t, rt2, wt2, wasmBytes, "spin_sleep_spin", spinInput(1000))
 		if got, el, _ := runResident(t, rt2, wt2, wasmBytes, residentRun{entry: "spin_only", input: spinInput(n), ceiling: 60 * time.Second}); got != residentRunCompleted {
+			controlFailed++
 			t.Logf("attempt %d: the control failed: one spin %s in %s against a fence of %s (sized from %s); the machine is too loaded to size it, retrying", attempt, got, el, fence, d)
 			continue
 		}
 		if got, el, _ := runResident(t, rt2, wt2, wasmBytes, residentRun{entry: "spin_twice", input: spinInput(n), ceiling: 60 * time.Second}); got != residentRunFenced {
+			tooGenerous++
 			t.Logf("attempt %d: two spins in ONE segment were %s in %s against a fence of %s: the fence was sized from a slow measurement and is too generous to tell a restart from none; retrying", attempt, got, el, fence)
 			continue
 		}
 		sized = true
 	}
 	if !sized {
-		t.Fatalf("PRECONDITION FAILED after 8 attempts: one spin never fit a fence sized from it. The machine is too loaded for this row to measure anything; it is reported as a failure and not a pass, because a pass here would be a green that measured nothing")
+		t.Fatalf("PRECONDITION FAILED after 8 attempts, so this row measured nothing: the guest's work could not be sized %d time(s) (spin outside 100ms..1500ms: a loaded or erratic machine), "+
+			"the control (one spin must fit the fence) failed %d time(s) (a spin ran longer than 1.7x the fastest of four: load), and two spins did NOT exceed the fence %d time(s) "+
+			"(the fence was too generous to tell a restart from none: later spins ran faster than the sizing spins). It is reported as a failure and not a pass, because a pass here would be a green that measured nothing",
+			sizeFailed, controlFailed, tooGenerous)
 	}
 	t.Logf("one spin is about %s on this machine; the fence is %s", d.Round(time.Millisecond), fence.Round(time.Millisecond))
 
