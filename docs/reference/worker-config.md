@@ -1155,6 +1155,8 @@ on every call.
 |------|---------|-------------|
 | bool | `false` | **EXPERIMENTAL (0.6.0).** Compile a Component Model component (a Python or C# workflow) in a short-lived child process of this binary, and load the serialized result |
 
+**A worker compiles one component at a time**, in the child or in the worker (a fallback below), so a burst of runs of distinct components queues instead of compiling together. Before 0.6.0 only runs of the *same* component waited for each other.
+
 **What it is for.** The first compile of a Python workflow raises the worker's
 resident memory by about 490 MiB, and most of it stays resident for the life of
 the process. With this flag the compile happens in a child that exits, which
@@ -1205,7 +1207,14 @@ memory limit, the compile mode and the fix, and counts it on
 `cleat_workflow_releases_total{check="component_compile_refused",memory_limit_mib,parallel_compilation}`:
 a rate on that check is the alert. Every *other* child failure (cannot start,
 times out, exits non-zero, writes an artifact the worker will not accept) is
-logged and falls back to the in-process compile.
+logged as a WARN and falls back to the in-process compile, **one at a time like any other compile**, and is counted on
+`cleat_component_precompile_fallbacks_total{reason}` (`timeout`, `child_exit`, `record`, `artifact`, `deserialize`, `workdir` or `other`).
+**A rate on that counter means the flag is not protecting the worker's memory**: each fallback retains what an in-process compile retains (about
+up to about 300 MiB (198 to 308 for each of the first four further components, then 44 to 76) per distinct Python component), so a child that fails systematically makes this the same as `--component-precompile=false`. The WARN
+carries the error and says where to look: a timeout means `--component-precompile-timeout` (default 5 minutes) or a loaded node, and an exit or an
+artifact error means the child could not run or write, so check that the system temp directory is writable and not full, and that the binary has not been replaced
+under the running worker (the child is the worker's own binary). A timeout is treated as an ordinary failure and not as a kill, so a merely slow child
+reaches this fallback unforced.
 
 **"The worker stays up" is measured on Docker, where `memory.oom.group` is 0**
 (an out-of-memory kill takes one process). Where it is 1, the kill takes every

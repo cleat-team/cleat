@@ -2297,7 +2297,11 @@ func main() {
 	// option -- it could not fence a compute-bound guest, so silently
 	// running on it was a safety-relevant degradation no operator asked for.
 	// The options it is built with are wasmtimeOptionsFromFlags.
-	wt, wasmtimeErr := engine.NewWasmtimeBackend(ctx, wasmtimeOptionsFromFlags(logger)...)
+	wt, wasmtimeErr := engine.NewWasmtimeBackend(ctx, append(wasmtimeOptionsFromFlags(logger),
+		// Counts each component a failed precompile child sent back to this worker to compile itself (cleat_component_precompile_fallbacks_total).
+		engine.WithWasmtimeComponentPrecompileFallbackHook(func(reason string) {
+			metricsInstance.RecordComponentPrecompileFallback(context.Background(), reason)
+		}))...)
 	if wasmtimeErr != nil {
 		logger.ErrorContext(context.Background(), "wasmtime backend failed to initialize; wasmtime is the only WASM backend cleat has, there is no fallback", "worker_id", workerID, "error", wasmtimeErr)
 		os.Exit(1)

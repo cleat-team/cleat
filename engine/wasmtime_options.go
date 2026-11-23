@@ -179,6 +179,8 @@ type wasmtimeConfig struct {
 
 	// componentPrecompile, when non-nil, makes a component compile happen in a short-lived child process (see ComponentPrecompile).
 	componentPrecompile *ComponentPrecompile
+	// componentFallbackHook is called once for each compile a failed precompile child sent back to the worker (WithWasmtimeComponentPrecompileFallbackHook).
+	componentFallbackHook func(reason string)
 }
 
 // ComponentPrecompile turns on compiling a Component Model component in a CHILD process instead of in the worker (cleat-internal/component-precompile-design-2026-11-23.md, Option A).
@@ -261,6 +263,13 @@ const SerializeComponentArg = "--serialize-component"
 // DefaultComponentPrecompileTimeout is the bound on one precompile child when none is set: the slowest measured Python compile with parallel_compilation off was 5.7 s on a loaded host, so this is
 // generous, and a child that exceeds it is killed and the worker compiles in-process.
 const DefaultComponentPrecompileTimeout = 5 * time.Minute
+
+// WithWasmtimeComponentPrecompileFallbackHook sets a function called with a short reason (timeout, child_exit, record, artifact, deserialize, workdir, other) each time a precompile child failed
+// for an ordinary reason and the worker compiled the component itself. It is how the worker counts the fallbacks on a metric: every one is a compile in this process, with the memory that
+// costs, and a child that fails systematically turns precompile into the in-process case without any other sign. nil, or no precompile, means no calls.
+func WithWasmtimeComponentPrecompileFallbackHook(fn func(reason string)) WasmtimeOption {
+	return func(c *wasmtimeConfig) { c.componentFallbackHook = fn }
+}
 
 // WithWasmtimeComponentPrecompile enables compiling components in a child process. See ComponentPrecompile. A zero Executable keeps the in-process compile.
 func WithWasmtimeComponentPrecompile(p ComponentPrecompile) WasmtimeOption {
