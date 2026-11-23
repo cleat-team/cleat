@@ -73,38 +73,47 @@ func NewMemoryMonitor(interval time.Duration) *MemoryMonitor {
 	return mm
 }
 
-// probeCgroupV2 checks for /sys/fs/cgroup/memory.max and returns a read
-// function backed by cgroup v2 memory accounting. If memory.max is "max"
-// (no explicit limit), /proc/meminfo MemTotal is used for the total.
-func probeCgroupV2() (func() (MemoryInfo, error), bool) {
-	data, err := os.ReadFile("/sys/fs/cgroup/memory.max")
-	if err != nil {
-		return nil, false
-	}
+// probeCgroupV2 reads the process's own cgroup, from the real root.
+func probeCgroupV2() (func() (MemoryInfo, error), bool) { return probeCgroupV2At("/") }
 
-	totalStr := strings.TrimSpace(string(data))
+// probeCgroupV2At returns a read function backed by cgroup v2 memory accounting under root ("/" in the worker; a fake root laid out like / in a test).
+//
+// THE LIMIT AND THE USAGE ARE THE PROCESS'S OWN CGROUP'S, not the mount's root (cleat#4431). The root of the cgroup mount is the process's own cgroup only inside a PRIVATE
+// cgroup namespace; under a host cgroup namespace (docker run --cgroupns=host, a systemd unit with MemoryMax=) it is the whole host, whose memory.max is "max", and this used to
+// read that: a 512 MiB container had its --memory-soft-limit and --memory-hard-limit taken as fractions of the HOST's memory and usage. The limit is the tightest memory.max on the
+// own cgroup or any ancestor (cgroupV2Limit, shared with the residency budget so the two cannot disagree), and the usage is that same cgroup's memory.current. When no level has
+// a limit the total is the host's MemTotal as before, and the usage is the own cgroup's.
+func probeCgroupV2At(root string) (func() (MemoryInfo, error), bool) {
+	limit, limitDir, haveLimit := cgroupV2Limit(root)
+	if !haveLimit {
+		// No numeric limit anywhere. It is still cgroup v2 if the mount's root has a memory.max ("max"), as before; otherwise there is no cgroup v2 here.
+		if _, err := os.ReadFile(root + "sys/fs/cgroup/memory.max"); err != nil {
+			return nil, false
+		}
+	}
 	var totalBytes uint64
-	if totalStr == "max" {
-		// No explicit cgroup limit; fall back to /proc/meminfo for total.
-		memTotal, ok := readMemTotal()
+	currentFile := root + "sys/fs/cgroup/memory.current"
+	if haveLimit {
+		totalBytes = limit
+		currentFile = root + "sys/fs/cgroup" + limitDir + "memory.current"
+	} else {
+		// No explicit cgroup limit; fall back to /proc/meminfo for total, and read usage from the process's own cgroup where it has one.
+		memTotal, ok := readMeminfoTotal(root + "proc/meminfo")
 		if !ok {
 			return nil, false
 		}
 		totalBytes = memTotal
-	} else {
-		totalBytes, err = strconv.ParseUint(totalStr, 10, 64)
-		if err != nil {
-			return nil, false
+		if own := root + "sys/fs/cgroup" + ownCgroupV2Dir(root) + "memory.current"; fileExists(own) {
+			currentFile = own
 		}
 	}
 
 	return func() (MemoryInfo, error) {
-		currentData, err := os.ReadFile("/sys/fs/cgroup/memory.current")
+		currentData, err := os.ReadFile(currentFile)
 		if err != nil {
 			return MemoryInfo{}, err
 		}
-		currentStr := strings.TrimSpace(string(currentData))
-		currentBytes, err := strconv.ParseUint(currentStr, 10, 64)
+		currentBytes, err := strconv.ParseUint(strings.TrimSpace(string(currentData)), 10, 64)
 		if err != nil {
 			return MemoryInfo{}, err
 		}
@@ -123,6 +132,11 @@ func probeCgroupV2() (func() (MemoryInfo, error), bool) {
 			CollectedAt:    time.Now(),
 		}, nil
 	}, true
+}
+
+func fileExists(p string) bool {
+	_, err := os.Stat(p)
+	return err == nil
 }
 
 // readMemTotal parses MemTotal from /proc/meminfo and returns it in bytes.

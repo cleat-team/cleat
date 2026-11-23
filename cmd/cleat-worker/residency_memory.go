@@ -76,27 +76,40 @@ func probeAvailableMemory(root string, physical func() (uint64, bool)) (availabl
 // against 102). So the path is read, and every directory from it to the root is consulted: a limit on a parent bounds the child too, so the answer is the minimum, and the
 // root read stays as the last step, which is the whole answer in a private namespace.
 func readCgroupLimit(root string) (uint64, string, bool) {
-	v2Path, v1Path := selfCgroupPaths(root + "proc/self/cgroup")
+	if n, _, ok := cgroupV2Limit(root); ok {
+		return n, memSourceCgroupV2, true
+	}
+	_, v1Path := selfCgroupPaths(root + "proc/self/cgroup")
 	var best uint64
-	var source string
-	consider := func(n uint64, src string) {
-		if best == 0 || n < best {
-			best, source = n, src
+	for _, dir := range ancestors(v1Path) {
+		if n, ok := parseLimit(root + "sys/fs/cgroup/memory" + dir + "memory.limit_in_bytes"); ok && n < 1<<62 && (best == 0 || n < best) {
+			best = n
 		}
 	}
-	for _, dir := range ancestors(v2Path) {
-		if n, ok := parseLimit(root + "sys/fs/cgroup" + dir + "memory.max"); ok {
-			consider(n, memSourceCgroupV2)
+	return best, memSourceCgroupV1, best != 0
+}
+
+// cgroupV2Limit is the tightest numeric memory.max on the process's own cgroup (from /proc/self/cgroup) and every ancestor up to the mount's root, and the directory
+// that limit lives in, relative to the cgroup mount and ending in a slash ("/docker/abc/"). A parent's limit bounds its children, and the usage that limit is measured
+// against is that directory's memory.current, which is why the directory is returned and not only the number: the memory monitor reads its usage from it (cleat#4431), so
+// the budget and the backstop are measured against the SAME cgroup. This is the one resolver both use.
+func cgroupV2Limit(root string) (limit uint64, dir string, ok bool) {
+	v2Path, _ := selfCgroupPaths(root + "proc/self/cgroup")
+	for _, d := range ancestors(v2Path) {
+		if n, found := parseLimit(root + "sys/fs/cgroup" + d + "memory.max"); found && (limit == 0 || n < limit) {
+			limit, dir = n, d
 		}
 	}
-	if best == 0 {
-		for _, dir := range ancestors(v1Path) {
-			if n, ok := parseLimit(root + "sys/fs/cgroup/memory" + dir + "memory.limit_in_bytes"); ok && n < 1<<62 {
-				consider(n, memSourceCgroupV1)
-			}
-		}
+	return limit, dir, limit != 0
+}
+
+// ownCgroupV2Dir is the process's own cgroup directory, in the same form as cgroupV2Limit's, for reading usage when no level of the hierarchy has a limit.
+func ownCgroupV2Dir(root string) string {
+	v2, _ := selfCgroupPaths(root + "proc/self/cgroup")
+	if v2 == "/" {
+		return "/"
 	}
-	return best, source, best != 0
+	return v2 + "/"
 }
 
 // parseLimit reads a cgroup limit file: a positive number, or false for "max", a missing file or garbage.

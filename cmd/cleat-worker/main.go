@@ -2622,6 +2622,11 @@ func main() {
 	// Initialize memory-aware concurrency controller.
 	monitor := NewMemoryMonitor(*memoryCheckInterval)
 	monitor.logger = logger
+	// Say what the backstop is measuring against, once: --memory-soft-limit and --memory-hard-limit are fractions of this total (cleat#4431).
+	if mi := monitor.Read(); mi.Source != "" {
+		logger.Info("memory monitor", "source", mi.Source, "total_mib", mi.TotalBytes>>20, "used_mib", mi.UsedBytes>>20,
+			"soft_limit", *memorySoftLimit, "hard_limit", *memoryHardLimit)
+	}
 	mc := NewMemoryController(monitor, store, workerID, *concurrency, *memorySoftLimit, *memoryHardLimit)
 	mc.logger = logger
 	if err := mc.LoadEstimates(ctx, defaultTenantID); err != nil {
