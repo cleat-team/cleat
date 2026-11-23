@@ -1,0 +1,18 @@
+E2E 14:44:31.277 DEPLOYED 9 definitions
+E2E 14:44:31.277 PHASE1-FILL-START
+E2E 14:44:37.331 fill hm0: done after 6.05s
+E2E 14:44:41.354 fill hm1: done after 4.02s
+E2E 14:44:46.420 fill hm2: done after 5.05s
+E2E 14:44:54.059 fill hm3: done after 7.61s
+E2E 14:45:01.298 fill hm4: done after 7.08s
+E2E 14:45:07.379 fill hm5: done after 6.06s
+E2E 14:45:13.449 fill hm6: done after 6.07s
+E2E 14:45:20.520 fill hm7: done after 7.07s
+E2E 14:45:20.520 PHASE1-FILL-DONE
+E2E 14:45:20.521 PHASE2-HOLD-START (60 runs, loops=12, sleep=9000ms)
+E2E 14:45:51.028 PHASE2-HOLD-SETTLED
+E2E 14:45:51.028 PHASE3-COMPILE-START
+E2E 14:49:51.498 PHASE3 compile hm8: running after 4m0.46s
+E2E 14:52:43.198 PHASE2-HOLD-END: ready=60
+E2E 14:52:43.203 E2E-DONE
+--- PASS: TestCombinedWorstCase (499.77s)

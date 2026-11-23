@@ -1,0 +1,211 @@
+2026/11/23 14:44:16 INFO residency memory budget bytes=429496729 mib=409 percent=20 of_bytes=2147483648 of_mib=2048 source="cgroup v2 memory.max"
+{"time":"2026-11-23T14:44:16.998147066Z","level":"INFO","msg":"starting worker","worker_id":"4a3ecee9c6e36e3a22c058213bf79251","concurrency":10}
+{"time":"2026-11-23T14:44:16.998205191Z","level":"INFO","msg":"checksum verification enabled","worker_id":"4a3ecee9c6e36e3a22c058213bf79251"}
+{"time":"2026-11-23T14:44:17.02459087Z","level":"INFO","msg":"plugin DB pool configured","worker_id":"4a3ecee9c6e36e3a22c058213bf79251","max_connections":10}
+{"time":"2026-11-23T14:44:17.031990522Z","level":"INFO","msg":"heartbeat DB pool configured","worker_id":"4a3ecee9c6e36e3a22c058213bf79251","max_connections":3}
+{"time":"2026-11-23T14:44:17.032884525Z","level":"INFO","msg":"sensitive-payload encryption is off: no --encryption-key-file, workflow data is stored in plaintext","worker_id":"4a3ecee9c6e36e3a22c058213bf79251"}
+2026/11/23 14:44:17 [migration] applying 001_schema.sql
+2026/11/23 14:44:18 [migration] applied 001_schema.sql
+2026/11/23 14:44:18 [migration] applying 002_defaults.sql
+2026/11/23 14:44:18 [migration] applied 002_defaults.sql
+2026/11/23 14:44:18 [migration] applying 003_procedures.sql
+2026/11/23 14:44:18 [migration] applied 003_procedures.sql
+2026/11/23 14:44:18 [migration] applying 004_operator_key_scopes.sql
+2026/11/23 14:44:18 [migration] applied 004_operator_key_scopes.sql
+2026/11/23 14:44:18 [migration] applying 005_workflow_libraries.sql
+2026/11/23 14:44:18 [migration] applied 005_workflow_libraries.sql
+2026/11/23 14:44:18 [migration] applying 006_a_tenant_records_who_created_it.sql
+2026/11/23 14:44:18 [migration] applied 006_a_tenant_records_who_created_it.sql
+2026/11/23 14:44:18 [migration] applying 007_a_dropped_tenant_leaves_a_tombstone.sql
+2026/11/23 14:44:18 [migration] applied 007_a_dropped_tenant_leaves_a_tombstone.sql
+2026/11/23 14:44:18 [migration] applying 008_registered_plugins.sql
+2026/11/23 14:44:18 [migration] applied 008_registered_plugins.sql
+2026/11/23 14:44:18 [migration] applying 009_library_prefix_lookup.sql
+2026/11/23 14:44:18 [migration] applied 009_library_prefix_lookup.sql
+2026/11/23 14:44:18 [migration] applying 010_library_clashing_names.sql
+2026/11/23 14:44:18 [migration] applied 010_library_clashing_names.sql
+2026/11/23 14:44:18 [migration] applying 011_a_tombstone_cannot_be_rewritten.sql
+2026/11/23 14:44:18 [migration] applied 011_a_tombstone_cannot_be_rewritten.sql
+{"time":"2026-11-23T14:44:18.598748214Z","level":"INFO","msg":"registered in the worker registry","worker_id":"4a3ecee9c6e36e3a22c058213bf79251","secret_key_versions":null}
+{"time":"2026-11-23T14:44:18.60042972Z","level":"INFO","msg":"row-level security is enforced on this connection","worker_id":"4a3ecee9c6e36e3a22c058213bf79251"}
+2026/11/23 14:44:18 INFO audit-log: initialized retention_days=90
+2026/11/23 14:44:18 INFO blobstore: initialized backend=memory
+2026/11/23 14:44:18 INFO dag plugin initialized
+2026/11/23 14:44:18 INFO datadog-export: initialized
+{"time":"2026-11-23T14:44:18.602424185Z","level":"INFO","msg":"plugin not configured, disabled","worker_id":"4a3ecee9c6e36e3a22c058213bf79251","plugin":"email-notify"}
+2026/11/23 14:44:18 INFO event-triggers: initialized
+2026/11/23 14:44:18 INFO eventstore: initialized max_event_size=1048576
+2026/11/23 14:44:18 INFO feature-flags: initialized default_rollout=0
+2026/11/23 14:44:18 INFO jobqueue: initialized
+2026/11/23 14:44:18 INFO kvstore: initialized max_value_size=1048576
+2026/11/23 14:44:18 INFO llm: initialized providers=0
+2026/11/23 14:44:18 INFO notifications: initialized
+2026/11/23 14:44:18 INFO oauth-provider: initialized
+2026/11/23 14:44:18 INFO pagerduty-alert: initialized
+2026/11/23 14:44:18 INFO rate-limiter: initialized mode=memory
+2026/11/23 14:44:18 INFO scheduledbackup: initialized dump_dir=/tmp/cleat-backups
+2026/11/23 14:44:18 INFO scheduler: initialized
+2026/11/23 14:44:18 INFO slack-notify: initialized
+2026/11/23 14:44:18 INFO tenant-lifecycle: initialized
+2026/11/23 14:44:18 INFO tenant-quota: initialized
+2026/11/23 14:44:18 INFO kafka-connect: initialized rest_proxy=""
+2026/11/23 14:44:18 INFO webhook-ingest: initialized
+{"time":"2026-11-23T14:44:18.602978187Z","level":"INFO","msg":"wasmtime backend registered for Go WASM","worker_id":"4a3ecee9c6e36e3a22c058213bf79251","instance_timeout":30000000000,"wall_clock_ceiling":300000000000,"instruction_limit":0,"memory_limit_bytes":268435456,"defer_budget":5000000000}
+{"time":"2026-11-23T14:44:18.607068202Z","level":"INFO","msg":"adaptive flusher registry enabled","worker_id":"4a3ecee9c6e36e3a22c058213bf79251","max_wait_ms":8,"max_batch":200,"enter_rate":500,"exit_rate":250}
+{"time":"2026-11-23T14:44:18.607102202Z","level":"INFO","msg":"database connection budget","worker_id":"4a3ecee9c6e36e3a22c058213bf79251","pools":"core=15 + plugin=10 + flusher=50 + migrate=2 + heartbeat=3 = 80 fixed; plus 25 per tenant pool","configured_budget":0,"tenant_pools_that_fit":0}
+{"time":"2026-11-23T14:44:18.609246669Z","level":"INFO","msg":"server connection limit","worker_id":"4a3ecee9c6e36e3a22c058213bf79251","usable":197,"detail":"max_connections=200 superuser_reserved=3 reserved=0","this_worker_needs":80}
+2026/11/23 14:44:18 INFO eventstore: cleanup started interval=1h0m0s
+2026/11/23 14:44:18 INFO jobqueue: worker started, poll interval=5s, reaper interval=60s
+2026/11/23 14:44:18 INFO scheduler: background loop started, interval=60s
+2026/11/23 14:44:18 INFO scheduledbackup: background loop started, interval=60s
+2026/11/23 14:44:18 INFO tenant-lifecycle: trial-expiry sweep started interval=1m0s
+2026/11/23 14:44:18 INFO event-triggers: background retry worker started interval=30s reconcile_interval=30s reconcile_grace=15s
+2026/11/23 14:44:18 INFO notifications: delivery retry loop started interval=30s
+2026/11/23 14:44:18 INFO kafka-connect: consumer loop started, interval=5s
+2026/11/23 14:44:18 INFO rate-limiter: background reload started, interval=30s
+2026/11/23 14:44:18 INFO blobstore: TTL cleanup started interval=1h0m0s
+2026/11/23 14:44:18 INFO oauth-provider: background loop started interval=5m0s
+2026/11/23 14:44:18 INFO audit-log: background started retention=1h workers=4 buffer=1000 enqueue_wait=1s retry_deadline=1m0s
+{"time":"2026-11-23T14:44:18.611152634Z","level":"INFO","msg":"cross-tenant workflow claim is available by tenant rotation; no database grant is required","worker_id":"4a3ecee9c6e36e3a22c058213bf79251","tenant_id":"00000000-0000-0000-0000-000000000000","tenants_per_tick":16}
+{"time":"2026-11-23T14:44:18.611165259Z","level":"INFO","msg":"cross-tenant due-schedule read is available by tenant rotation; no database grant is required","worker_id":"4a3ecee9c6e36e3a22c058213bf79251","tenant_id":"00000000-0000-0000-0000-000000000000"}
+{"time":"2026-11-23T14:44:18.611202717Z","level":"INFO","msg":"running","worker_id":"4a3ecee9c6e36e3a22c058213bf79251"}
+2026/11/23 14:44:18 INFO jobqueue: initial reaper cycle completed plugin=jobqueue jobs_reset=0
+2026/11/23 14:44:18 INFO scheduler: work cycle completed plugin=scheduler duration_ms=11 schedules_due=0 workflows_started=0 workflows_failed=0
+2026/11/23 14:44:18 INFO jobqueue: initial abandonment sweep completed plugin=jobqueue jobs_abandoned=0
+2026/11/23 14:44:18 INFO rate-limiter: work cycle completed plugin=rate-limiter duration_ms=13 configs_reloaded=0
+2026/11/23 14:44:18 INFO datadog-export: metric export started, interval=60s
+2026/11/23 14:44:23 INFO jobqueue: work cycle completed plugin=jobqueue duration_ms=18 jobs_claimed=0 jobs_dispatched=0 jobs_failed=0
+{"time":"2026-11-23T14:44:28.612483092Z","level":"INFO","msg":"Reaper: a new worker waits out its start-up grace period before reclaiming stale runs; nothing is wrong","worker_id":"4a3ecee9c6e36e3a22c058213bf79251","reclaim_after":42000000000}
+2026/11/23 14:44:28 INFO jobqueue: work cycle completed plugin=jobqueue duration_ms=3 jobs_claimed=0 jobs_dispatched=0 jobs_failed=0
+2026/11/23 14:44:33 INFO jobqueue: work cycle completed plugin=jobqueue duration_ms=11 jobs_claimed=0 jobs_dispatched=0 jobs_failed=0
+{"time":"2026-11-23T14:44:36.982667593Z","level":"INFO","msg":"workflow completed","worker_id":"4a3ecee9c6e36e3a22c058213bf79251","workflow_id":"fill-0","tenant_id":"00000000-0000-0000-0000-000000000000","duration":5221715355,"replay_ms":4966,"finalize_ms":67}
+{"time":"2026-11-23T14:44:38.626501238Z","level":"INFO","msg":"Reaper: a new worker waits out its start-up grace period before reclaiming stale runs; nothing is wrong","worker_id":"4a3ecee9c6e36e3a22c058213bf79251","reclaim_after":42000000000}
+2026/11/23 14:44:38 INFO jobqueue: work cycle completed plugin=jobqueue duration_ms=15 jobs_claimed=0 jobs_dispatched=0 jobs_failed=0
+{"time":"2026-11-23T14:44:41.100738195Z","level":"INFO","msg":"workflow completed","worker_id":"4a3ecee9c6e36e3a22c058213bf79251","workflow_id":"fill-1","tenant_id":"00000000-0000-0000-0000-000000000000","duration":3461536047,"replay_ms":3252,"finalize_ms":31}
+2026/11/23 14:44:43 INFO jobqueue: work cycle completed plugin=jobqueue duration_ms=7 jobs_claimed=0 jobs_dispatched=0 jobs_failed=0
+{"time":"2026-11-23T14:44:46.21088153Z","level":"INFO","msg":"workflow completed","worker_id":"4a3ecee9c6e36e3a22c058213bf79251","workflow_id":"fill-2","tenant_id":"00000000-0000-0000-0000-000000000000","duration":4779349465,"replay_ms":4533,"finalize_ms":44}
+2026/11/23 14:44:48 INFO jobqueue: work cycle completed plugin=jobqueue duration_ms=10 jobs_claimed=0 jobs_dispatched=0 jobs_failed=0
+2026/11/23 14:44:48 INFO rate-limiter: work cycle completed plugin=rate-limiter duration_ms=7 configs_reloaded=0
+{"time":"2026-11-23T14:44:48.634878846Z","level":"INFO","msg":"Reaper: a new worker waits out its start-up grace period before reclaiming stale runs; nothing is wrong","worker_id":"4a3ecee9c6e36e3a22c058213bf79251","reclaim_after":42000000000}
+2026/11/23 14:44:48 INFO event-triggers: retry cycle completed duration_ms=27
+2026/11/23 14:44:53 INFO jobqueue: work cycle completed plugin=jobqueue duration_ms=30 jobs_claimed=0 jobs_dispatched=0 jobs_failed=0
+{"time":"2026-11-23T14:44:53.85689338Z","level":"INFO","msg":"workflow completed","worker_id":"4a3ecee9c6e36e3a22c058213bf79251","workflow_id":"fill-3","tenant_id":"00000000-0000-0000-0000-000000000000","duration":7332856128,"replay_ms":6734,"finalize_ms":413}
+{"time":"2026-11-23T14:44:58.639865442Z","level":"INFO","msg":"Reaper: a new worker waits out its start-up grace period before reclaiming stale runs; nothing is wrong","worker_id":"4a3ecee9c6e36e3a22c058213bf79251","reclaim_after":42000000000}
+2026/11/23 14:44:58 INFO jobqueue: work cycle completed plugin=jobqueue duration_ms=10 jobs_claimed=0 jobs_dispatched=0 jobs_failed=0
+{"time":"2026-11-23T14:45:01.31319504Z","level":"INFO","msg":"workflow completed","worker_id":"4a3ecee9c6e36e3a22c058213bf79251","workflow_id":"fill-4","tenant_id":"00000000-0000-0000-0000-000000000000","duration":7044127494,"replay_ms":6420,"finalize_ms":57}
+2026/11/23 14:45:03 INFO jobqueue: work cycle completed plugin=jobqueue duration_ms=13 jobs_claimed=0 jobs_dispatched=0 jobs_failed=0
+{"time":"2026-11-23T14:45:07.362965835Z","level":"INFO","msg":"workflow completed","worker_id":"4a3ecee9c6e36e3a22c058213bf79251","workflow_id":"fill-5","tenant_id":"00000000-0000-0000-0000-000000000000","duration":5947952758,"replay_ms":5658,"finalize_ms":29}
+2026/11/23 14:45:08 INFO jobqueue: work cycle completed plugin=jobqueue duration_ms=5 jobs_claimed=0 jobs_dispatched=0 jobs_failed=0
+{"time":"2026-11-23T14:45:13.044021955Z","level":"INFO","msg":"workflow completed","worker_id":"4a3ecee9c6e36e3a22c058213bf79251","workflow_id":"fill-6","tenant_id":"00000000-0000-0000-0000-000000000000","duration":5565263449,"replay_ms":5382,"finalize_ms":40}
+2026/11/23 14:45:13 INFO jobqueue: work cycle completed plugin=jobqueue duration_ms=3 jobs_claimed=0 jobs_dispatched=0 jobs_failed=0
+2026/11/23 14:45:18 INFO scheduler: work cycle completed plugin=scheduler duration_ms=12 schedules_due=0 workflows_started=0 workflows_failed=0
+2026/11/23 14:45:18 INFO jobqueue: work cycle completed plugin=jobqueue duration_ms=48 jobs_claimed=0 jobs_dispatched=0 jobs_failed=0
+2026/11/23 14:45:18 INFO jobqueue: reaper cycle completed plugin=jobqueue duration_ms=1 jobs_reset=0
+2026/11/23 14:45:18 INFO jobqueue: abandonment sweep completed plugin=jobqueue duration_ms=2 jobs_abandoned=0
+2026/11/23 14:45:18 INFO rate-limiter: work cycle completed plugin=rate-limiter duration_ms=73 configs_reloaded=0
+2026/11/23 14:45:18 INFO event-triggers: retry cycle completed duration_ms=58
+{"time":"2026-11-23T14:45:20.392125221Z","level":"WARN","msg":"execution fenced out: run superseded by a later generation","worker_id":"4a3ecee9c6e36e3a22c058213bf79251","workflow_id":"fill-7","def_name":"hm7","sent_generation":1,"generation":1}
+{"time":"2026-11-23T14:45:20.60047002Z","level":"INFO","msg":"workflow completed","worker_id":"4a3ecee9c6e36e3a22c058213bf79251","workflow_id":"fill-7","tenant_id":"00000000-0000-0000-0000-000000000000","duration":6869189149,"replay_ms":6023,"finalize_ms":697}
+{"time":"2026-11-23T14:45:20.807649566Z","level":"INFO","msg":"workflow suspended","worker_id":"4a3ecee9c6e36e3a22c058213bf79251","workflow_id":"hold-0","tenant_id":"00000000-0000-0000-0000-000000000000","reason":"cleat_sleep(9000ms)","wake_at":"2026-11-23T14:45:29.523Z"}
+{"time":"2026-11-23T14:45:21.08610062Z","level":"INFO","msg":"workflow suspended","worker_id":"4a3ecee9c6e36e3a22c058213bf79251","workflow_id":"hold-1","tenant_id":"00000000-0000-0000-0000-000000000000","reason":"cleat_sleep(9000ms)","wake_at":"2026-11-23T14:45:29.576Z"}
+{"time":"2026-11-23T14:45:21.280593536Z","level":"INFO","msg":"workflow suspended","worker_id":"4a3ecee9c6e36e3a22c058213bf79251","workflow_id":"hold-2","tenant_id":"00000000-0000-0000-0000-000000000000","reason":"cleat_sleep(9000ms)","wake_at":"2026-11-23T14:45:29.581Z"}
+{"time":"2026-11-23T14:45:21.533827665Z","level":"INFO","msg":"workflow suspended","worker_id":"4a3ecee9c6e36e3a22c058213bf79251","workflow_id":"hold-3","tenant_id":"00000000-0000-0000-0000-000000000000","reason":"cleat_sleep(9000ms)","wake_at":"2026-11-23T14:45:29.585Z"}
+2026/11/23 14:45:23 INFO jobqueue: work cycle completed plugin=jobqueue duration_ms=4 jobs_claimed=0 jobs_dispatched=0 jobs_failed=0
+{"time":"2026-11-23T14:45:25.858799811Z","level":"INFO","msg":"workflow suspended","worker_id":"4a3ecee9c6e36e3a22c058213bf79251","workflow_id":"hold-4","tenant_id":"00000000-0000-0000-0000-000000000000","reason":"cleat_sleep(9000ms)","wake_at":"2026-11-23T14:45:29.591Z"}
+{"time":"2026-11-23T14:45:26.072550714Z","level":"INFO","msg":"workflow suspended","worker_id":"4a3ecee9c6e36e3a22c058213bf79251","workflow_id":"hold-5","tenant_id":"00000000-0000-0000-0000-000000000000","reason":"cleat_sleep(9000ms)","wake_at":"2026-11-23T14:45:29.598Z"}
+{"time":"2026-11-23T14:45:26.27460124Z","level":"INFO","msg":"workflow suspended","worker_id":"4a3ecee9c6e36e3a22c058213bf79251","workflow_id":"hold-6","tenant_id":"00000000-0000-0000-0000-000000000000","reason":"cleat_sleep(9000ms)","wake_at":"2026-11-23T14:45:29.604Z"}
+{"time":"2026-11-23T14:45:26.506636751Z","level":"INFO","msg":"workflow suspended","worker_id":"4a3ecee9c6e36e3a22c058213bf79251","workflow_id":"hold-7","tenant_id":"00000000-0000-0000-0000-000000000000","reason":"cleat_sleep(9000ms)","wake_at":"2026-11-23T14:45:29.613Z"}
+{"time":"2026-11-23T14:45:26.719127732Z","level":"INFO","msg":"workflow suspended","worker_id":"4a3ecee9c6e36e3a22c058213bf79251","workflow_id":"hold-8","tenant_id":"00000000-0000-0000-0000-000000000000","reason":"cleat_sleep(9000ms)","wake_at":"2026-11-23T14:45:29.623Z"}
+{"time":"2026-11-23T14:45:26.976160833Z","level":"INFO","msg":"workflow suspended","worker_id":"4a3ecee9c6e36e3a22c058213bf79251","workflow_id":"hold-9","tenant_id":"00000000-0000-0000-0000-000000000000","reason":"cleat_sleep(9000ms)","wake_at":"2026-11-23T14:45:29.631Z"}
+{"time":"2026-11-23T14:45:27.103409046Z","level":"INFO","msg":"workflow suspended","worker_id":"4a3ecee9c6e36e3a22c058213bf79251","workflow_id":"hold-10","tenant_id":"00000000-0000-0000-0000-000000000000","reason":"cleat_sleep(9000ms)","wake_at":"2026-11-23T14:45:29.636Z"}
+{"time":"2026-11-23T14:45:27.21072352Z","level":"INFO","msg":"workflow suspended","worker_id":"4a3ecee9c6e36e3a22c058213bf79251","workflow_id":"hold-11","tenant_id":"00000000-0000-0000-0000-000000000000","reason":"cleat_sleep(9000ms)","wake_at":"2026-11-23T14:45:29.64Z"}
+{"time":"2026-11-23T14:45:27.338621902Z","level":"INFO","msg":"workflow suspended","worker_id":"4a3ecee9c6e36e3a22c058213bf79251","workflow_id":"hold-12","tenant_id":"00000000-0000-0000-0000-000000000000","reason":"cleat_sleep(9000ms)","wake_at":"2026-11-23T14:45:29.646Z"}
+{"time":"2026-11-23T14:45:27.462104226Z","level":"INFO","msg":"workflow suspended","worker_id":"4a3ecee9c6e36e3a22c058213bf79251","workflow_id":"hold-13","tenant_id":"00000000-0000-0000-0000-000000000000","reason":"cleat_sleep(9000ms)","wake_at":"2026-11-23T14:45:29.65Z"}
+{"time":"2026-11-23T14:45:27.5925627Z","level":"INFO","msg":"workflow suspended","worker_id":"4a3ecee9c6e36e3a22c058213bf79251","workflow_id":"hold-14","tenant_id":"00000000-0000-0000-0000-000000000000","reason":"cleat_sleep(9000ms)","wake_at":"2026-11-23T14:45:29.654Z"}
+{"time":"2026-11-23T14:45:27.699388922Z","level":"INFO","msg":"workflow suspended","worker_id":"4a3ecee9c6e36e3a22c058213bf79251","workflow_id":"hold-15","tenant_id":"00000000-0000-0000-0000-000000000000","reason":"cleat_sleep(9000ms)","wake_at":"2026-11-23T14:45:29.658Z"}
+2026/11/23 14:45:28 INFO jobqueue: work cycle completed plugin=jobqueue duration_ms=3 jobs_claimed=0 jobs_dispatched=0 jobs_failed=0
+2026/11/23 14:45:33 INFO jobqueue: work cycle completed plugin=jobqueue duration_ms=3 jobs_claimed=0 jobs_dispatched=0 jobs_failed=0
+{"time":"2026-11-23T14:45:36.347696876Z","level":"INFO","msg":"workflow suspended","worker_id":"4a3ecee9c6e36e3a22c058213bf79251","workflow_id":"hold-0","tenant_id":"00000000-0000-0000-0000-000000000000","reason":"cleat_sleep(9000ms)","wake_at":"2026-11-23T14:45:38.523Z"}
+{"time":"2026-11-23T14:45:36.694010969Z","level":"INFO","msg":"workflow suspended","worker_id":"4a3ecee9c6e36e3a22c058213bf79251","workflow_id":"hold-1","tenant_id":"00000000-0000-0000-0000-000000000000","reason":"cleat_sleep(9000ms)","wake_at":"2026-11-23T14:45:38.576Z"}
+{"time":"2026-11-23T14:45:36.992270095Z","level":"INFO","msg":"workflow suspended","worker_id":"4a3ecee9c6e36e3a22c058213bf79251","workflow_id":"hold-2","tenant_id":"00000000-0000-0000-0000-000000000000","reason":"cleat_sleep(9000ms)","wake_at":"2026-11-23T14:45:38.581Z"}
+{"time":"2026-11-23T14:45:37.174213007Z","level":"INFO","msg":"workflow suspended","worker_id":"4a3ecee9c6e36e3a22c058213bf79251","workflow_id":"hold-3","tenant_id":"00000000-0000-0000-0000-000000000000","reason":"cleat_sleep(9000ms)","wake_at":"2026-11-23T14:45:38.585Z"}
+{"time":"2026-11-23T14:45:37.380772508Z","level":"INFO","msg":"workflow suspended","worker_id":"4a3ecee9c6e36e3a22c058213bf79251","workflow_id":"hold-4","tenant_id":"00000000-0000-0000-0000-000000000000","reason":"cleat_sleep(9000ms)","wake_at":"2026-11-23T14:45:38.591Z"}
+{"time":"2026-11-23T14:45:37.639608324Z","level":"INFO","msg":"workflow suspended","worker_id":"4a3ecee9c6e36e3a22c058213bf79251","workflow_id":"hold-5","tenant_id":"00000000-0000-0000-0000-000000000000","reason":"cleat_sleep(9000ms)","wake_at":"2026-11-23T14:45:38.598Z"}
+{"time":"2026-11-23T14:45:37.782208843Z","level":"INFO","msg":"workflow suspended","worker_id":"4a3ecee9c6e36e3a22c058213bf79251","workflow_id":"hold-6","tenant_id":"00000000-0000-0000-0000-000000000000","reason":"cleat_sleep(9000ms)","wake_at":"2026-11-23T14:45:38.604Z"}
+{"time":"2026-11-23T14:45:37.890327944Z","level":"INFO","msg":"workflow suspended","worker_id":"4a3ecee9c6e36e3a22c058213bf79251","workflow_id":"hold-7","tenant_id":"00000000-0000-0000-0000-000000000000","reason":"cleat_sleep(9000ms)","wake_at":"2026-11-23T14:45:38.613Z"}
+{"time":"2026-11-23T14:45:38.016049402Z","level":"INFO","msg":"workflow suspended","worker_id":"4a3ecee9c6e36e3a22c058213bf79251","workflow_id":"hold-8","tenant_id":"00000000-0000-0000-0000-000000000000","reason":"cleat_sleep(9000ms)","wake_at":"2026-11-23T14:45:38.623Z"}
+{"time":"2026-11-23T14:45:38.142594029Z","level":"INFO","msg":"workflow suspended","worker_id":"4a3ecee9c6e36e3a22c058213bf79251","workflow_id":"hold-9","tenant_id":"00000000-0000-0000-0000-000000000000","reason":"cleat_sleep(9000ms)","wake_at":"2026-11-23T14:45:38.631Z"}
+{"time":"2026-11-23T14:45:38.258086824Z","level":"INFO","msg":"workflow suspended","worker_id":"4a3ecee9c6e36e3a22c058213bf79251","workflow_id":"hold-10","tenant_id":"00000000-0000-0000-0000-000000000000","reason":"cleat_sleep(9000ms)","wake_at":"2026-11-23T14:45:38.636Z"}
+{"time":"2026-11-23T14:45:38.404441689Z","level":"INFO","msg":"workflow suspended","worker_id":"4a3ecee9c6e36e3a22c058213bf79251","workflow_id":"hold-11","tenant_id":"00000000-0000-0000-0000-000000000000","reason":"cleat_sleep(9000ms)","wake_at":"2026-11-23T14:45:38.64Z"}
+{"time":"2026-11-23T14:45:38.534993914Z","level":"INFO","msg":"workflow suspended","worker_id":"4a3ecee9c6e36e3a22c058213bf79251","workflow_id":"hold-12","tenant_id":"00000000-0000-0000-0000-000000000000","reason":"cleat_sleep(9000ms)","wake_at":"2026-11-23T14:45:38.646Z"}
+2026/11/23 14:45:38 INFO jobqueue: work cycle completed plugin=jobqueue duration_ms=9 jobs_claimed=0 jobs_dispatched=0 jobs_failed=0
+{"time":"2026-11-23T14:45:38.678257768Z","level":"INFO","msg":"workflow suspended","worker_id":"4a3ecee9c6e36e3a22c058213bf79251","workflow_id":"hold-0","tenant_id":"00000000-0000-0000-0000-000000000000","reason":"cleat_sleep(9000ms)","wake_at":"2026-11-23T14:45:47.523Z"}
+{"time":"2026-11-23T14:45:38.808600826Z","level":"INFO","msg":"workflow suspended","worker_id":"4a3ecee9c6e36e3a22c058213bf79251","workflow_id":"hold-1","tenant_id":"00000000-0000-0000-0000-000000000000","reason":"cleat_sleep(9000ms)","wake_at":"2026-11-23T14:45:47.576Z"}
+{"time":"2026-11-23T14:45:38.914233418Z","level":"INFO","msg":"workflow suspended","worker_id":"4a3ecee9c6e36e3a22c058213bf79251","workflow_id":"hold-2","tenant_id":"00000000-0000-0000-0000-000000000000","reason":"cleat_sleep(9000ms)","wake_at":"2026-11-23T14:45:47.581Z"}
+{"time":"2026-11-23T14:45:39.075738047Z","level":"INFO","msg":"workflow suspended","worker_id":"4a3ecee9c6e36e3a22c058213bf79251","workflow_id":"hold-3","tenant_id":"00000000-0000-0000-0000-000000000000","reason":"cleat_sleep(9000ms)","wake_at":"2026-11-23T14:45:47.585Z"}
+{"time":"2026-11-23T14:45:39.19422627Z","level":"INFO","msg":"workflow suspended","worker_id":"4a3ecee9c6e36e3a22c058213bf79251","workflow_id":"hold-4","tenant_id":"00000000-0000-0000-0000-000000000000","reason":"cleat_sleep(9000ms)","wake_at":"2026-11-23T14:45:47.591Z"}
+{"time":"2026-11-23T14:45:39.334359321Z","level":"INFO","msg":"workflow suspended","worker_id":"4a3ecee9c6e36e3a22c058213bf79251","workflow_id":"hold-5","tenant_id":"00000000-0000-0000-0000-000000000000","reason":"cleat_sleep(9000ms)","wake_at":"2026-11-23T14:45:47.598Z"}
+{"time":"2026-11-23T14:45:39.433040222Z","level":"INFO","msg":"workflow suspended","worker_id":"4a3ecee9c6e36e3a22c058213bf79251","workflow_id":"hold-6","tenant_id":"00000000-0000-0000-0000-000000000000","reason":"cleat_sleep(9000ms)","wake_at":"2026-11-23T14:45:47.604Z"}
+{"time":"2026-11-23T14:45:39.543585291Z","level":"INFO","msg":"workflow suspended","worker_id":"4a3ecee9c6e36e3a22c058213bf79251","workflow_id":"hold-7","tenant_id":"00000000-0000-0000-0000-000000000000","reason":"cleat_sleep(9000ms)","wake_at":"2026-11-23T14:45:47.613Z"}
+{"time":"2026-11-23T14:45:39.664490772Z","level":"INFO","msg":"workflow suspended","worker_id":"4a3ecee9c6e36e3a22c058213bf79251","workflow_id":"hold-8","tenant_id":"00000000-0000-0000-0000-000000000000","reason":"cleat_sleep(9000ms)","wake_at":"2026-11-23T14:45:47.623Z"}
+{"time":"2026-11-23T14:45:39.785897714Z","level":"INFO","msg":"workflow suspended","worker_id":"4a3ecee9c6e36e3a22c058213bf79251","workflow_id":"hold-9","tenant_id":"00000000-0000-0000-0000-000000000000","reason":"cleat_sleep(9000ms)","wake_at":"2026-11-23T14:45:47.631Z"}
+{"time":"2026-11-23T14:45:39.926422308Z","level":"INFO","msg":"workflow suspended","worker_id":"4a3ecee9c6e36e3a22c058213bf79251","workflow_id":"hold-10","tenant_id":"00000000-0000-0000-0000-000000000000","reason":"cleat_sleep(9000ms)","wake_at":"2026-11-23T14:45:47.636Z"}
+{"time":"2026-11-23T14:45:40.044787613Z","level":"INFO","msg":"workflow suspended","worker_id":"4a3ecee9c6e36e3a22c058213bf79251","workflow_id":"hold-11","tenant_id":"00000000-0000-0000-0000-000000000000","reason":"cleat_sleep(9000ms)","wake_at":"2026-11-23T14:45:47.64Z"}
+{"time":"2026-11-23T14:45:40.161199287Z","level":"INFO","msg":"workflow suspended","worker_id":"4a3ecee9c6e36e3a22c058213bf79251","workflow_id":"hold-12","tenant_id":"00000000-0000-0000-0000-000000000000","reason":"cleat_sleep(9000ms)","wake_at":"2026-11-23T14:45:47.646Z"}
+{"time":"2026-11-23T14:45:40.275532536Z","level":"INFO","msg":"workflow suspended","worker_id":"4a3ecee9c6e36e3a22c058213bf79251","workflow_id":"hold-13","tenant_id":"00000000-0000-0000-0000-000000000000","reason":"cleat_sleep(9000ms)","wake_at":"2026-11-23T14:45:47.65Z"}
+{"time":"2026-11-23T14:45:40.403097958Z","level":"INFO","msg":"workflow suspended","worker_id":"4a3ecee9c6e36e3a22c058213bf79251","workflow_id":"hold-14","tenant_id":"00000000-0000-0000-0000-000000000000","reason":"cleat_sleep(9000ms)","wake_at":"2026-11-23T14:45:47.654Z"}
+{"time":"2026-11-23T14:45:40.522933269Z","level":"INFO","msg":"workflow suspended","worker_id":"4a3ecee9c6e36e3a22c058213bf79251","workflow_id":"hold-15","tenant_id":"00000000-0000-0000-0000-000000000000","reason":"cleat_sleep(9000ms)","wake_at":"2026-11-23T14:45:47.658Z"}
+{"time":"2026-11-23T14:45:40.841892846Z","level":"INFO","msg":"workflow suspended","worker_id":"4a3ecee9c6e36e3a22c058213bf79251","workflow_id":"hold-16","tenant_id":"00000000-0000-0000-0000-000000000000","reason":"cleat_sleep(9000ms)","wake_at":"2026-11-23T14:45:47.661Z"}
+{"time":"2026-11-23T14:45:40.954830132Z","level":"INFO","msg":"workflow suspended","worker_id":"4a3ecee9c6e36e3a22c058213bf79251","workflow_id":"hold-17","tenant_id":"00000000-0000-0000-0000-000000000000","reason":"cleat_sleep(9000ms)","wake_at":"2026-11-23T14:45:47.668Z"}
+{"time":"2026-11-23T14:45:41.074009523Z","level":"INFO","msg":"workflow suspended","worker_id":"4a3ecee9c6e36e3a22c058213bf79251","workflow_id":"hold-18","tenant_id":"00000000-0000-0000-0000-000000000000","reason":"cleat_sleep(9000ms)","wake_at":"2026-11-23T14:45:47.671Z"}
+{"time":"2026-11-23T14:45:41.192884081Z","level":"INFO","msg":"workflow suspended","worker_id":"4a3ecee9c6e36e3a22c058213bf79251","workflow_id":"hold-19","tenant_id":"00000000-0000-0000-0000-000000000000","reason":"cleat_sleep(9000ms)","wake_at":"2026-11-23T14:45:47.674Z"}
+{"time":"2026-11-23T14:45:41.315226609Z","level":"INFO","msg":"workflow suspended","worker_id":"4a3ecee9c6e36e3a22c058213bf79251","workflow_id":"hold-20","tenant_id":"00000000-0000-0000-0000-000000000000","reason":"cleat_sleep(9000ms)","wake_at":"2026-11-23T14:45:47.678Z"}
+{"time":"2026-11-23T14:45:41.432014909Z","level":"INFO","msg":"workflow suspended","worker_id":"4a3ecee9c6e36e3a22c058213bf79251","workflow_id":"hold-21","tenant_id":"00000000-0000-0000-0000-000000000000","reason":"cleat_sleep(9000ms)","wake_at":"2026-11-23T14:45:47.685Z"}
+{"time":"2026-11-23T14:45:41.552231429Z","level":"INFO","msg":"workflow suspended","worker_id":"4a3ecee9c6e36e3a22c058213bf79251","workflow_id":"hold-22","tenant_id":"00000000-0000-0000-0000-000000000000","reason":"cleat_sleep(9000ms)","wake_at":"2026-11-23T14:45:47.689Z"}
+{"time":"2026-11-23T14:45:41.678258888Z","level":"INFO","msg":"workflow suspended","worker_id":"4a3ecee9c6e36e3a22c058213bf79251","workflow_id":"hold-23","tenant_id":"00000000-0000-0000-0000-000000000000","reason":"cleat_sleep(9000ms)","wake_at":"2026-11-23T14:45:47.693Z"}
+{"time":"2026-11-23T14:45:41.856517703Z","level":"INFO","msg":"workflow suspended","worker_id":"4a3ecee9c6e36e3a22c058213bf79251","workflow_id":"hold-24","tenant_id":"00000000-0000-0000-0000-000000000000","reason":"cleat_sleep(9000ms)","wake_at":"2026-11-23T14:45:47.703Z"}
+{"time":"2026-11-23T14:45:41.993608618Z","level":"INFO","msg":"workflow suspended","worker_id":"4a3ecee9c6e36e3a22c058213bf79251","workflow_id":"hold-25","tenant_id":"00000000-0000-0000-0000-000000000000","reason":"cleat_sleep(9000ms)","wake_at":"2026-11-23T14:45:47.715Z"}
+{"time":"2026-11-23T14:45:42.194238556Z","level":"INFO","msg":"workflow suspended","worker_id":"4a3ecee9c6e36e3a22c058213bf79251","workflow_id":"hold-26","tenant_id":"00000000-0000-0000-0000-000000000000","reason":"cleat_sleep(9000ms)","wake_at":"2026-11-23T14:45:47.72Z"}
+{"time":"2026-11-23T14:45:42.310053144Z","level":"INFO","msg":"workflow suspended","worker_id":"4a3ecee9c6e36e3a22c058213bf79251","workflow_id":"hold-27","tenant_id":"00000000-0000-0000-0000-000000000000","reason":"cleat_sleep(9000ms)","wake_at":"2026-11-23T14:45:47.732Z"}
+{"time":"2026-11-23T14:45:42.426116358Z","level":"INFO","msg":"workflow suspended","worker_id":"4a3ecee9c6e36e3a22c058213bf79251","workflow_id":"hold-28","tenant_id":"00000000-0000-0000-0000-000000000000","reason":"cleat_sleep(9000ms)","wake_at":"2026-11-23T14:45:47.736Z"}
+{"time":"2026-11-23T14:45:42.502125176Z","level":"INFO","msg":"workflow suspended","worker_id":"4a3ecee9c6e36e3a22c058213bf79251","workflow_id":"hold-29","tenant_id":"00000000-0000-0000-0000-000000000000","reason":"cleat_sleep(9000ms)","wake_at":"2026-11-23T14:45:47.739Z"}
+{"time":"2026-11-23T14:45:42.625234748Z","level":"INFO","msg":"workflow suspended","worker_id":"4a3ecee9c6e36e3a22c058213bf79251","workflow_id":"hold-30","tenant_id":"00000000-0000-0000-0000-000000000000","reason":"cleat_sleep(9000ms)","wake_at":"2026-11-23T14:45:47.742Z"}
+{"time":"2026-11-23T14:45:42.744322057Z","level":"INFO","msg":"workflow suspended","worker_id":"4a3ecee9c6e36e3a22c058213bf79251","workflow_id":"hold-31","tenant_id":"00000000-0000-0000-0000-000000000000","reason":"cleat_sleep(9000ms)","wake_at":"2026-11-23T14:45:47.748Z"}
+{"time":"2026-11-23T14:45:42.859266016Z","level":"INFO","msg":"workflow suspended","worker_id":"4a3ecee9c6e36e3a22c058213bf79251","workflow_id":"hold-32","tenant_id":"00000000-0000-0000-0000-000000000000","reason":"cleat_sleep(9000ms)","wake_at":"2026-11-23T14:45:47.757Z"}
+{"time":"2026-11-23T14:45:42.986300395Z","level":"INFO","msg":"workflow suspended","worker_id":"4a3ecee9c6e36e3a22c058213bf79251","workflow_id":"hold-33","tenant_id":"00000000-0000-0000-0000-000000000000","reason":"cleat_sleep(9000ms)","wake_at":"2026-11-23T14:45:47.765Z"}
+{"time":"2026-11-23T14:45:43.098459595Z","level":"INFO","msg":"workflow suspended","worker_id":"4a3ecee9c6e36e3a22c058213bf79251","workflow_id":"hold-34","tenant_id":"00000000-0000-0000-0000-000000000000","reason":"cleat_sleep(9000ms)","wake_at":"2026-11-23T14:45:47.77Z"}
+{"time":"2026-11-23T14:45:43.255682583Z","level":"INFO","msg":"workflow suspended","worker_id":"4a3ecee9c6e36e3a22c058213bf79251","workflow_id":"hold-35","tenant_id":"00000000-0000-0000-0000-000000000000","reason":"cleat_sleep(9000ms)","wake_at":"2026-11-23T14:45:47.773Z"}
+{"time":"2026-11-23T14:45:43.337436839Z","level":"INFO","msg":"workflow suspended","worker_id":"4a3ecee9c6e36e3a22c058213bf79251","workflow_id":"hold-36","tenant_id":"00000000-0000-0000-0000-000000000000","reason":"cleat_sleep(9000ms)","wake_at":"2026-11-23T14:45:47.777Z"}
+{"time":"2026-11-23T14:45:43.465372012Z","level":"INFO","msg":"workflow suspended","worker_id":"4a3ecee9c6e36e3a22c058213bf79251","workflow_id":"hold-37","tenant_id":"00000000-0000-0000-0000-000000000000","reason":"cleat_sleep(9000ms)","wake_at":"2026-11-23T14:45:47.782Z"}
+{"time":"2026-11-23T14:45:43.579210468Z","level":"INFO","msg":"workflow suspended","worker_id":"4a3ecee9c6e36e3a22c058213bf79251","workflow_id":"hold-38","tenant_id":"00000000-0000-0000-0000-000000000000","reason":"cleat_sleep(9000ms)","wake_at":"2026-11-23T14:45:47.787Z"}
+2026/11/23 14:45:43 INFO jobqueue: work cycle completed plugin=jobqueue duration_ms=0 jobs_claimed=0 jobs_dispatched=0 jobs_failed=0
+{"time":"2026-11-23T14:45:43.695964184Z","level":"INFO","msg":"workflow suspended","worker_id":"4a3ecee9c6e36e3a22c058213bf79251","workflow_id":"hold-39","tenant_id":"00000000-0000-0000-0000-000000000000","reason":"cleat_sleep(9000ms)","wake_at":"2026-11-23T14:45:47.801Z"}
+{"time":"2026-11-23T14:45:43.824527819Z","level":"INFO","msg":"workflow suspended","worker_id":"4a3ecee9c6e36e3a22c058213bf79251","workflow_id":"hold-40","tenant_id":"00000000-0000-0000-0000-000000000000","reason":"cleat_sleep(9000ms)","wake_at":"2026-11-23T14:45:47.813Z"}
+{"time":"2026-11-23T14:45:43.933497548Z","level":"INFO","msg":"workflow suspended","worker_id":"4a3ecee9c6e36e3a22c058213bf79251","workflow_id":"hold-41","tenant_id":"00000000-0000-0000-0000-000000000000","reason":"cleat_sleep(9000ms)","wake_at":"2026-11-23T14:45:47.817Z"}
+{"time":"2026-11-23T14:45:44.059935466Z","level":"INFO","msg":"workflow suspended","worker_id":"4a3ecee9c6e36e3a22c058213bf79251","workflow_id":"hold-42","tenant_id":"00000000-0000-0000-0000-000000000000","reason":"cleat_sleep(9000ms)","wake_at":"2026-11-23T14:45:47.82Z"}
+{"time":"2026-11-23T14:45:44.180912781Z","level":"INFO","msg":"workflow suspended","worker_id":"4a3ecee9c6e36e3a22c058213bf79251","workflow_id":"hold-43","tenant_id":"00000000-0000-0000-0000-000000000000","reason":"cleat_sleep(9000ms)","wake_at":"2026-11-23T14:45:47.827Z"}
+{"time":"2026-11-23T14:45:44.310604378Z","level":"INFO","msg":"workflow suspended","worker_id":"4a3ecee9c6e36e3a22c058213bf79251","workflow_id":"hold-44","tenant_id":"00000000-0000-0000-0000-000000000000","reason":"cleat_sleep(9000ms)","wake_at":"2026-11-23T14:45:47.846Z"}
+{"time":"2026-11-23T14:45:44.424126249Z","level":"INFO","msg":"workflow suspended","worker_id":"4a3ecee9c6e36e3a22c058213bf79251","workflow_id":"hold-45","tenant_id":"00000000-0000-0000-0000-000000000000","reason":"cleat_sleep(9000ms)","wake_at":"2026-11-23T14:45:47.857Z"}
+{"time":"2026-11-23T14:45:44.598551425Z","level":"INFO","msg":"workflow suspended","worker_id":"4a3ecee9c6e36e3a22c058213bf79251","workflow_id":"hold-46","tenant_id":"00000000-0000-0000-0000-000000000000","reason":"cleat_sleep(9000ms)","wake_at":"2026-11-23T14:45:47.89Z"}
+{"time":"2026-11-23T14:45:44.734279711Z","level":"INFO","msg":"workflow suspended","worker_id":"4a3ecee9c6e36e3a22c058213bf79251","workflow_id":"hold-47","tenant_id":"00000000-0000-0000-0000-000000000000","reason":"cleat_sleep(9000ms)","wake_at":"2026-11-23T14:45:47.902Z"}
+{"time":"2026-11-23T14:45:44.864686643Z","level":"INFO","msg":"workflow suspended","worker_id":"4a3ecee9c6e36e3a22c058213bf79251","workflow_id":"hold-48","tenant_id":"00000000-0000-0000-0000-000000000000","reason":"cleat_sleep(9000ms)","wake_at":"2026-11-23T14:45:47.93Z"}
+{"time":"2026-11-23T14:45:44.981364943Z","level":"INFO","msg":"workflow suspended","worker_id":"4a3ecee9c6e36e3a22c058213bf79251","workflow_id":"hold-49","tenant_id":"00000000-0000-0000-0000-000000000000","reason":"cleat_sleep(9000ms)","wake_at":"2026-11-23T14:45:47.932Z"}
+{"time":"2026-11-23T14:45:45.106593106Z","level":"INFO","msg":"workflow suspended","worker_id":"4a3ecee9c6e36e3a22c058213bf79251","workflow_id":"hold-50","tenant_id":"00000000-0000-0000-0000-000000000000","reason":"cleat_sleep(9000ms)","wake_at":"2026-11-23T14:45:47.937Z"}
+{"time":"2026-11-23T14:45:45.228302007Z","level":"INFO","msg":"workflow suspended","worker_id":"4a3ecee9c6e36e3a22c058213bf79251","workflow_id":"hold-51","tenant_id":"00000000-0000-0000-0000-000000000000","reason":"cleat_sleep(9000ms)","wake_at":"2026-11-23T14:45:47.942Z"}
+{"time":"2026-11-23T14:45:45.337258737Z","level":"INFO","msg":"workflow suspended","worker_id":"4a3ecee9c6e36e3a22c058213bf79251","workflow_id":"hold-52","tenant_id":"00000000-0000-0000-0000-000000000000","reason":"cleat_sleep(9000ms)","wake_at":"2026-11-23T14:45:47.948Z"}
+{"time":"2026-11-23T14:45:45.457765884Z","level":"INFO","msg":"workflow suspended","worker_id":"4a3ecee9c6e36e3a22c058213bf79251","workflow_id":"hold-53","tenant_id":"00000000-0000-0000-0000-000000000000","reason":"cleat_sleep(9000ms)","wake_at":"2026-11-23T14:45:47.954Z"}
+{"time":"2026-11-23T14:45:45.591381036Z","level":"INFO","msg":"workflow suspended","worker_id":"4a3ecee9c6e36e3a22c058213bf79251","workflow_id":"hold-54","tenant_id":"00000000-0000-0000-0000-000000000000","reason":"cleat_sleep(9000ms)","wake_at":"2026-11-23T14:45:47.957Z"}
+{"time":"2026-11-23T14:45:45.702961442Z","level":"INFO","msg":"workflow suspended","worker_id":"4a3ecee9c6e36e3a22c058213bf79251","workflow_id":"hold-55","tenant_id":"00000000-0000-0000-0000-000000000000","reason":"cleat_sleep(9000ms)","wake_at":"2026-11-23T14:45:47.964Z"}
+{"time":"2026-11-23T14:45:45.865744534Z","level":"INFO","msg":"workflow suspended","worker_id":"4a3ecee9c6e36e3a22c058213bf79251","workflow_id":"hold-56","tenant_id":"00000000-0000-0000-0000-000000000000","reason":"cleat_sleep(9000ms)","wake_at":"2026-11-23T14:45:47.97Z"}
+{"time":"2026-11-23T14:45:46.039011039Z","level":"INFO","msg":"workflow suspended","worker_id":"4a3ecee9c6e36e3a22c058213bf79251","workflow_id":"hold-57","tenant_id":"00000000-0000-0000-0000-000000000000","reason":"cleat_sleep(9000ms)","wake_at":"2026-11-23T14:45:47.975Z"}
+{"time":"2026-11-23T14:45:46.118822954Z","level":"INFO","msg":"workflow suspended","worker_id":"4a3ecee9c6e36e3a22c058213bf79251","workflow_id":"hold-58","tenant_id":"00000000-0000-0000-0000-000000000000","reason":"cleat_sleep(9000ms)","wake_at":"2026-11-23T14:45:47.982Z"}
+{"time":"2026-11-23T14:45:46.23625709Z","level":"INFO","msg":"workflow suspended","worker_id":"4a3ecee9c6e36e3a22c058213bf79251","workflow_id":"hold-59","tenant_id":"00000000-0000-0000-0000-000000000000","reason":"cleat_sleep(9000ms)","wake_at":"2026-11-23T14:45:47.99Z"}
+{"time":"2026-11-23T14:45:48.011484088Z","level":"INFO","msg":"workflow suspended","worker_id":"4a3ecee9c6e36e3a22c058213bf79251","workflow_id":"hold-0","tenant_id":"00000000-0000-0000-0000-000000000000","reason":"cleat_sleep(9000ms)","wake_at":"2026-11-23T14:45:56.523Z"}
+{"time":"2026-11-23T14:45:48.288947222Z","level":"INFO","msg":"workflow suspended","worker_id":"4a3ecee9c6e36e3a22c058213bf79251","workflow_id":"hold-1","tenant_id":"00000000-0000-0000-0000-000000000000","reason":"cleat_sleep(9000ms)","wake_at":"2026-11-23T14:45:56.576Z"}
+{"time":"2026-11-23T14:45:48.441216318Z","level":"INFO","msg":"workflow suspended","worker_id":"4a3ecee9c6e36e3a22c058213bf79251","workflow_id":"hold-2","tenant_id":"00000000-0000-0000-0000-000000000000","reason":"cleat_sleep(9000ms)","wake_at":"2026-11-23T14:45:56.581Z"}
+2026/11/23 14:45:48 INFO rate-limiter: work cycle completed plugin=rate-limiter duration_ms=6 configs_reloaded=0
+2026/11/23 14:45:48 INFO event-triggers: retry cycle completed duration_ms=11
+2026/11/23 14:45:48 INFO jobqueue: work cycle completed plugin=jobqueue duration_ms=17 jobs_claimed=0 jobs_dispatched=0 jobs_failed=0
+{"time":"2026-11-23T14:45:48.78111147Z","level":"INFO","msg":"workflow suspended","worker_id":"4a3ecee9c6e36e3a22c058213bf79251","workflow_id":"hold-3","tenant_id":"00000000-0000-0000-0000-000000000000","reason":"cleat_sleep(9000ms)","wake_at":"2026-11-23T14:45:56.585Z"}
+{"time":"2026-11-23T14:45:49.126022016Z","level":"INFO","msg":"workflow suspended","worker_id":"4a3ecee9c6e36e3a22c058213bf79251","workflow_id":"hold-4","tenant_id":"00000000-0000-0000-0000-000000000000","reason":"cleat_sleep(9000ms)","wake_at":"2026-11-23T14:45:56.591Z"}
+{"time":"2026-11-23T14:45:49.326590788Z","level":"INFO","msg":"workflow suspended","worker_id":"4a3ecee9c6e36e3a22c058213bf79251","workflow_id":"hold-5","tenant_id":"00000000-0000-0000-

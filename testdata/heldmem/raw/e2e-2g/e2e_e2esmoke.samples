@@ -1,0 +1,15 @@
+14:53:41 cur=4 anon=0 file=1 peak=4 oom_kill=0
+14:53:43 cur=41 anon=9 file=31 peak=41 oom_kill=0
+14:53:45 cur=41 anon=9 file=31 peak=41 oom_kill=0
+14:53:47 cur=40 anon=9 file=31 peak=41 oom_kill=0
+14:53:49 cur=41 anon=9 file=31 peak=41 oom_kill=0
+14:53:51 cur=40 anon=9 file=31 peak=41 oom_kill=0
+14:53:53 cur=735 anon=698 file=36 peak=735 oom_kill=0
+14:53:55 cur=988 anon=951 file=33 peak=989 oom_kill=0
+14:53:57 cur=1138 anon=1104 file=33 peak=1139 oom_kill=0
+14:53:59 cur=1339 anon=1304 file=33 peak=1340 oom_kill=0
+14:54:01 cur=1455 anon=1417 file=33 peak=1455 oom_kill=0
+14:54:03 cur=1598 anon=1563 file=33 peak=1598 oom_kill=0
+14:54:05 cur=1806 anon=1771 file=33 peak=1806 oom_kill=0
+14:54:07 cur=1985 anon=1950 file=33 peak=1985 oom_kill=0
+14:54:09 cur=2047 anon=2046 file=1 peak=2048 oom_kill=0

@@ -1,0 +1,152 @@
+package zz_e2e
+
+// SCRATCH, NOT FOR MERGE (cleat#4391 / #4377 combined-worst-case measurement): drives a REAL cleat-worker process through the three phases that decide whether the
+// 0.6.0 defaults fit a 2Gi container: (1) fill the compiled-component cache with distinct Python components, (2) hold runs up to the residency budget, (3) one more
+// first-time compile while both are full. The container's cgroup is sampled from outside; this test only inserts the definitions and runs and reports what the runs did.
+
+import (
+	"database/sql"
+	"fmt"
+	"os"
+	"strconv"
+	"strings"
+	"testing"
+	"time"
+
+	_ "github.com/lib/pq"
+
+	"github.com/cleat-team/cleat/engine/testutil"
+)
+
+const tenant = "00000000-0000-0000-0000-000000000000"
+
+func env(k, d string) string {
+	if v := os.Getenv(k); v != "" {
+		return v
+	}
+	return d
+}
+func envInt(k string, d int) int {
+	if v, err := strconv.Atoi(os.Getenv(k)); err == nil {
+		return v
+	}
+	return d
+}
+
+func status(db *sql.DB, id string) string {
+	var s string
+	if err := db.QueryRow(`SELECT status FROM workflow_leases WHERE id = $1`, id).Scan(&s); err != nil {
+		return "?"
+	}
+	return s
+}
+
+func waitDone(db *sql.DB, id string, budget time.Duration) (string, time.Duration) {
+	start := time.Now()
+	for time.Since(start) < budget {
+		s := status(db, id)
+		if isTerminal(s) {
+			return s, time.Since(start)
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	return status(db, id), time.Since(start)
+}
+
+func isTerminal(s string) bool {
+	return s == "done" || s == "completed" || s == "failed" || s == "terminated" || s == "cancelled"
+}
+
+func mark(format string, a ...any) { fmt.Printf("E2E %s %s\n", time.Now().UTC().Format("15:04:05.000"), fmt.Sprintf(format, a...)) }
+
+func TestCombinedWorstCase(t *testing.T) {
+	db, err := sql.Open("postgres", os.Getenv("E2E_DSN"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	queue := env("E2E_QUEUE", "e2e-q")
+	dir := env("E2E_WASM_DIR", "/e2e/wasm")
+	nFill, nHold := envInt("E2E_NFILL", 8), envInt("E2E_HOLD", 60)
+	loops, sleepMs := envInt("E2E_LOOPS", 12), envInt("E2E_SLEEP_MS", 9000)
+
+	for i := 0; i <= nFill; i++ {
+		b, err := os.ReadFile(fmt.Sprintf("%s/hm%d.wasm", dir, i))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Exec(`INSERT INTO workflow_defs (name, version, wasm_bytes, entry_points, min_version, max_history_length, dag_spec, task_queue, abi_version, plugin_deps, tenant_id)
+			VALUES ($1, 1, $2, ARRAY['held_mem'], 1, 10000, NULL, $3, 1, '{}', $4)
+			ON CONFLICT (tenant_id, name, version) DO UPDATE SET wasm_bytes = EXCLUDED.wasm_bytes, task_queue = EXCLUDED.task_queue`,
+			fmt.Sprintf("hm%d", i), b, queue, tenant); err != nil {
+			t.Fatalf("deploy hm%d: %v", i, err)
+		}
+	}
+	mark("DEPLOYED %d definitions", nFill+1)
+	run := func(id string, def int, loops int) {
+		testutil.SeedRun(t, db, testutil.RunSeed{ID: id, DefName: fmt.Sprintf("hm%d", def), TenantID: tenant,
+			Input: fmt.Sprintf(`{"__entry_point":"run","loops":%d,"sleep_ms":%d}`, loops, sleepMs), TaskQueue: queue})
+	}
+
+	// PHASE 1: fill the cache, one distinct component at a time. A run with loops=0 does no sleep and completes after its compile.
+	mark("PHASE1-FILL-START")
+	for i := 0; i < nFill && os.Getenv("E2E_SKIPFILL") == ""; i++ {
+		id := fmt.Sprintf("fill-%d", i)
+		run(id, i, 0)
+		s, d := waitDone(db, id, 240*time.Second)
+		mark("fill hm%d: %s after %s", i, s, d.Round(10*time.Millisecond))
+	}
+	mark("PHASE1-FILL-DONE")
+
+	// PHASE 2: hold runs on the six most recently compiled components (hm2..hm7), more than the budget admits, so the budget fills and the rest suspend and replay.
+	mark("PHASE2-HOLD-START (%d runs, loops=%d, sleep=%dms)", nHold, loops, sleepMs)
+	holds := make([]string, 0, nHold)
+	for i := 0; i < nHold; i++ {
+		id := fmt.Sprintf("hold-%d", i)
+		run(id, 2+i%6, loops)
+		holds = append(holds, id)
+	}
+	time.Sleep(time.Duration(envInt("E2E_SETTLE_S", 30)) * time.Second)
+	mark("PHASE2-HOLD-SETTLED")
+
+	// PHASE 3: one more first-time compile while the cache is full and the held runs are in flight.
+	mark("PHASE3-COMPILE-START")
+	run("compile-new", nFill, 0)
+	s, d := waitDone(db, "compile-new", 240*time.Second)
+	mark("PHASE3 compile hm%d: %s after %s", nFill, s, d.Round(10*time.Millisecond))
+
+	// Let the held runs finish, and report what every run did.
+	deadline := time.Now().Add(time.Duration(envInt("E2E_TAIL_S", 170)) * time.Second)
+	for time.Now().Before(deadline) {
+		open := 0
+		for _, id := range holds {
+			st := status(db, id)
+			if !isTerminal(st) {
+				open++
+			}
+		}
+		if open == 0 {
+			break
+		}
+		time.Sleep(3 * time.Second)
+	}
+	counts := map[string]int{}
+	for _, id := range holds {
+		counts[status(db, id)]++
+	}
+	var parts []string
+	for k, v := range counts {
+		parts = append(parts, fmt.Sprintf("%s=%d", k, v))
+	}
+	mark("PHASE2-HOLD-END: %s", strings.Join(parts, " "))
+	rows, _ := db.Query(`SELECT w.id, left(coalesce(p.error_msg,''),160) FROM workflow_leases w JOIN workflow_payloads p ON p.id = w.id WHERE w.status = 'failed' LIMIT 5`)
+	if rows != nil {
+		for rows.Next() {
+			var id, msg string
+			_ = rows.Scan(&id, &msg)
+			mark("FAILED RUN %s: %s", id, msg)
+		}
+		rows.Close()
+	}
+	mark("E2E-DONE")
+}
