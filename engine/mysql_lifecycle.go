@@ -1423,6 +1423,18 @@ func (s *MySQLStore) enforceParentClosePolicy(ctx context.Context, parentWorkflo
 
 // enforceParentClosePolicyAt is enforceParentClosePolicy with the recursion
 // depth carried explicitly. See cascadeIntoClosedChildren.
+//
+// THE TRANSACTION IS RUN AGAIN WHEN InnoDB REFUSES IT AS A DEADLOCK VICTIM (cleat#4410). This runs after the verb that closed the parent has already
+// committed, and it returns nothing, so a 1213 that ended it was logged at WARN and dropped: every child of the closing parent was left as it was, a
+// TERMINATE child kept running under a parent that was gone, and nothing re-applied the policy later (no other code reads parent_close_policy to
+// enforce it). Measured with a deterministic victim, MySQL 8.4.11: both TERMINATE children were still `ready` after the call, and the log carried
+// exactly the line the issue quoted. The first UPDATE reads the tenant's rows through idx_instances_tenant_queue_ready and locks every row it scans,
+// so what it can deadlock with is not limited to the closing parent's own children.
+//
+// retryingLockConflict is the pattern the cancel and terminate verbs use for the same refusal (cleat#4340): the server rolled the victim back
+// entirely, so the whole transaction can run again, and the lock it needed is already released. A lock wait timeout (1205) is retried by the same
+// helper, and each such attempt has already waited out innodb_lock_wait_timeout, so a run that keeps timing out costs its caller that wait up to
+// eight times; that is the helper's behaviour for every verb that uses it and is not narrowed here.
 func (s *MySQLStore) enforceParentClosePolicyAt(ctx context.Context, parentWorkflowID string, depth int, outcomeMsg string) {
 	// Collected before the transaction: see releaseTerminatedChildren.
 	terminated, err := s.childrenClosedByTerminate(ctx, parentWorkflowID)
@@ -1431,11 +1443,44 @@ func (s *MySQLStore) enforceParentClosePolicyAt(ctx context.Context, parentWorkf
 			"parent_workflow_id", parentWorkflowID, "error", err)
 	}
 
+	if err := s.retryingLockConflict("enforce parent close policy", func() error {
+		return s.enforceParentClosePolicyOnce(ctx, parentWorkflowID, outcomeMsg)
+	}); err != nil {
+		msg := "enforceParentClosePolicy: failed; children of a closed parent are unaffected by its close policy"
+		var step *closePolicyStepError
+		if errors.As(err, &step) {
+			msg = step.msg
+		}
+		s.log().WarnContext(ctx, msg, "parent_workflow_id", parentWorkflowID, "error", err)
+		return
+	}
+
+	releaseTerminatedChildren(s.log(), s, terminated)
+	// Every child this cascade closed was just TERMINATEd, so its own
+	// children hear "parent workflow was terminated" regardless of what
+	// closed the root parent -- see PostgresStore's identical comment.
+	childOutcomeMsg := parentOutcomeMessage(statusTerminated)
+	cascadeIntoClosedChildren(s.log(), depth, terminated, func(id string, d int) {
+		s.enforceParentClosePolicyAt(ctx, id, d, childOutcomeMsg)
+	})
+}
+
+// closePolicyStepError carries which step of enforceParentClosePolicyOnce failed and the log message that has always named it, so that running the
+// transaction again does not cost the diagnostics: the final WARN says the same thing it said before, with the error underneath it.
+type closePolicyStepError struct {
+	msg string
+	err error
+}
+
+func (e *closePolicyStepError) Error() string { return e.msg + ": " + e.err.Error() }
+func (e *closePolicyStepError) Unwrap() error { return e.err }
+
+// enforceParentClosePolicyOnce is one attempt of the transaction enforceParentClosePolicyAt runs: begin, the three arms, commit. Every failure is a
+// *closePolicyStepError so retryingLockConflict can classify the cause through it with errors.As.
+func (s *MySQLStore) enforceParentClosePolicyOnce(ctx context.Context, parentWorkflowID, outcomeMsg string) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		s.log().WarnContext(ctx, "enforceParentClosePolicy: begin failed; children of a closed parent are unaffected by its close policy",
-			"parent_workflow_id", parentWorkflowID, "error", err)
-		return
+		return &closePolicyStepError{"enforceParentClosePolicy: begin failed; children of a closed parent are unaffected by its close policy", err}
 	}
 	defer tx.Rollback()
 
@@ -1458,12 +1503,10 @@ func (s *MySQLStore) enforceParentClosePolicyAt(ctx context.Context, parentWorkf
 		  AND tenant_id = ?
 		  AND NOT `+deferPhaseOwedSQL+`
 	`, outcomeMsg, parentWorkflowID, s.tenantID); err != nil {
-		s.log().WarnContext(ctx, "enforceParentClosePolicy: TERMINATE children not failed",
-			"parent_workflow_id", parentWorkflowID, "error", err)
-		return
+		return &closePolicyStepError{"enforceParentClosePolicy: TERMINATE children not failed", err}
 	}
 
-	//nolint:gosec // G202: the concatenated fragments are compile-time constants -- statusTerminating and deferPhaseOwedSQL are consts in defer_phase.go, deferPhaseDeadlineMySQL is a Sprintf over a duration const. No caller-controlled string reaches this.
+	//nolint:gosec // G202: the concatenated fragments are compile-time constants -- statusTerminating and deferPhaseOwedSQL are consts in defer_phase.go, deferPhaseDeadlineMySQL is a Sprintf o
 	if _, err := tx.ExecContext(ctx, `
 		UPDATE workflow_instances
 		SET status = '`+statusTerminating+`',
@@ -1479,9 +1522,7 @@ func (s *MySQLStore) enforceParentClosePolicyAt(ctx context.Context, parentWorkf
 		  AND tenant_id = ?
 		  AND `+deferPhaseOwedSQL+`
 	`, outcomeMsg, parentWorkflowID, s.tenantID); err != nil {
-		s.log().WarnContext(ctx, "enforceParentClosePolicy: TERMINATE children with defers not moved to their defer phase",
-			"parent_workflow_id", parentWorkflowID, "error", err)
-		return
+		return &closePolicyStepError{"enforceParentClosePolicy: TERMINATE children with defers not moved to their defer phase", err}
 	}
 
 	// Request cancellation for children with REQUEST_CANCEL policy.
@@ -1493,25 +1534,13 @@ func (s *MySQLStore) enforceParentClosePolicyAt(ctx context.Context, parentWorkf
 		  AND status NOT IN ('done', 'failed', 'dead_lettered', 'terminated', 'cancelled')
 		  AND tenant_id = ?
 	`, parentWorkflowID, s.tenantID); err != nil {
-		s.log().WarnContext(ctx, "enforceParentClosePolicy: REQUEST_CANCEL children not flagged",
-			"parent_workflow_id", parentWorkflowID, "error", err)
-		return
+		return &closePolicyStepError{"enforceParentClosePolicy: REQUEST_CANCEL children not flagged", err}
 	}
 
 	if err := tx.Commit(); err != nil {
-		s.log().WarnContext(ctx, "enforceParentClosePolicy: commit failed; children of a closed parent are unaffected by its close policy",
-			"parent_workflow_id", parentWorkflowID, "error", err)
-		return
+		return &closePolicyStepError{"enforceParentClosePolicy: commit failed; children of a closed parent are unaffected by its close policy", err}
 	}
-
-	releaseTerminatedChildren(s.log(), s, terminated)
-	// Every child this cascade closed was just TERMINATEd, so its own
-	// children hear "parent workflow was terminated" regardless of what
-	// closed the root parent -- see PostgresStore's identical comment.
-	childOutcomeMsg := parentOutcomeMessage(statusTerminated)
-	cascadeIntoClosedChildren(s.log(), depth, terminated, func(id string, d int) {
-		s.enforceParentClosePolicyAt(ctx, id, d, childOutcomeMsg)
-	})
+	return nil
 }
 
 // terminateChildrenQuery selects the children the TERMINATE arm is about to

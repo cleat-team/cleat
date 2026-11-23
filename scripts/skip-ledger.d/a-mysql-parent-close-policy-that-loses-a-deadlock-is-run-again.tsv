@@ -1,0 +1,2 @@
+test-go/engine	1	^TestAMySQLParentClosePolicyThatLosesADeadlockIsRunAgainAndTerminatesEveryChild/mysql$	Guard cleat#4410: a MySQL parent-close enforcement that loses a deadlock is run again and terminates every child. MySQL only, so the mysql arm skips in the engine job, which sets CLEAT_TEST_POSTGRES only.
+multi-db/mssql	1	^TestAMySQLParentClosePolicyThatLosesADeadlockIsRunAgainAndTerminatesEveryChild/mysql$	same test, same reason: multi-db/mssql sets only CLEAT_TEST_MSSQL, so the mysql arm skips there.

@@ -1,0 +1,4 @@
+---
+section: fixed
+---
+- **On MySQL, a parent's close policy is no longer silently dropped when InnoDB picks its enforcement as a deadlock victim (cleat#4410).** After a terminal verb committed, the transaction that applies the closing parent's policy to its children ran once; a deadlock (error 1213) rolled the whole transaction back, was logged at WARN and was dropped, and nothing re-applied the policy later, so every `TERMINATE` child of that parent kept running under a parent that was gone. The transaction is now run again on a deadlock or lock-wait timeout, the way cancel and terminate already were (cleat#4340), and the WARN it logs after the retries are exhausted names the same step as before. Measured with a deterministic victim on MySQL 8.4.11: both children stayed `ready` before the change and are `terminated` after it. SQL Server and PostgreSQL were not measured here.
