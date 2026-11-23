@@ -34,7 +34,8 @@ type parkCaller struct {
 	arrived  atomic.Int32
 	guestSys atomic.Uint64 // the guest's own runtime Sys at the park call, summed (Go guest only)
 	info     atomic.Value  // the first request of an "info" call: the guest describing its own memory (C# only)
-	info2    atomic.Value  // the first request of an "info2" call: the same, after a collection (C# only)
+	info2    atomic.Value
+	gcinfo   atomic.Value // the last request of a "gcinfo" call: the guest reporting its own GC work (C# only)  // the first request of an "info2" call: the same, after a collection (C# only)
 	release  chan struct{}
 	resp     string
 }
@@ -45,6 +46,9 @@ func (c *parkCaller) Call(ctx context.Context, service, op, req string) (string,
 	}
 	if op == "info2" {
 		c.info2.CompareAndSwap(nil, req)
+	}
+	if op == "gcinfo" {
+		c.gcinfo.Store(req)
 	}
 	if op == "park" || strings.Contains(req, "park") {
 		c.arrived.Add(1)
@@ -212,7 +216,14 @@ func TestMeasureHeldInstanceMemory(t *testing.T) {
 	if mode == "hold" {
 		sleepMs = holdMs
 	}
-	input := func(sleep int) string { return fmt.Sprintf(`{"calls":%d,"mb":%d,"sleep_ms":%d}`, calls, mb, sleep) }
+	churn := atoi("HELDMEM_CHURN", 0)            // MiB allocated and DROPPED in 1 MiB blocks (large objects), before the guest parks (Python and C# only)
+	churnSmall := atoi("HELDMEM_CHURN_SMALL", 0) // the same, in 16 KiB blocks (ordinary garbage)
+	input := func(sleep int) string {
+		if churn > 0 || churnSmall > 0 {
+			return fmt.Sprintf(`{"calls":%d,"mb":%d,"sleep_ms":%d,"churn_mb":%d,"churn_small_mb":%d}`, calls, mb, sleep, churn, churnSmall)
+		}
+		return fmt.Sprintf(`{"calls":%d,"mb":%d,"sleep_ms":%d}`, calls, mb, sleep)
+	}
 
 	var wasmBytes []byte
 	var entry string
@@ -264,7 +275,7 @@ func TestMeasureHeldInstanceMemory(t *testing.T) {
 		}
 		wasmBytes, entry = b, "run"
 		mkInput = func(sleep int) string {
-			return fmt.Sprintf(`{"mode":"heldmem","calls":"%d","mb":"%d","sleep_ms":"%d"}`, calls, mb, sleep)
+			return fmt.Sprintf(`{"mode":"heldmem","calls":"%d","mb":"%d","sleep_ms":"%d","churn_mb":"%d","churn_small_mb":"%d"}`, calls, mb, sleep, churn, churnSmall)
 		}
 	default:
 		t.Fatalf("unknown HELDMEM_LANG %q", lang)
@@ -397,7 +408,7 @@ func TestMeasureHeldInstanceMemory(t *testing.T) {
 	}
 
 	out := map[string]any{
-		"lang": lang, "mode": mode, "n": n, "calls": calls, "mb": mb, "wasm_bytes": len(wasmBytes),
+		"lang": lang, "mode": mode, "n": n, "calls": calls, "mb": mb, "churn_mb": churn, "churn_small_mb": churnSmall, "wasm_bytes": len(wasmBytes),
 		"held_check": heldCheck, "pre": pre, "base": base, "held": held,
 		"compiles_component": compilesOf(wt), "compiles_component_before_hold": compBase, "compiles_core": heldMemCoreCompiles.Load(),
 		"guest_sys_kib_sum": c.guestSys.Load() / 1024, "ms_to_held": msToHeld, "guest_info": c.info.Load(), "guest_info2": c.info2.Load(),
