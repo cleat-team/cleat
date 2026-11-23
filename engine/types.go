@@ -280,6 +280,16 @@ type EventRecord struct {
 	PromiseResult string `json:"promise_result,omitempty"`
 	PromiseError  string `json:"promise_error,omitempty"`
 
+	// FirstRead marks a promise_resolved or promise_rejected record that an await wrote because its FIRST read of the promise store found the promise
+	// settled, so no await record of THIS call precedes it (cleat#4277). Without it that record is byte-for-byte what an await records when it is
+	// answered on a wake, and a history [await P, promise_resolved P] could be either ONE call answered, or a first call that timed out followed by a
+	// second whose first read found P settled; a replay handed the first await the resolution in both cases.
+	//
+	// Emitted into the checksum payload only when true, so every event ever written keeps its checksum, and carried in the event's JSON, so there is no
+	// column and no migration. Absent on every event written before this field, which reads back false: such a history stays ambiguous and replays as it
+	// always did, resolved. That is a known limit and not a guess.
+	FirstRead bool `json:"first_read,omitempty"`
+
 	// Child workflow fields.
 	ChildName         string `json:"child_name,omitempty"`
 	ChildInput        string `json:"child_input,omitempty"`

@@ -229,6 +229,10 @@ type stepSpec struct {
 	// next call's. (Measured by cleat-review3 on the first version, with two such awaits: a divergence with an Identity, and b's record
 	// consumed by a's step without one.)
 	EndsWithoutFinal bool
+	// OpensACall, for a MULTI-RECORD step (Role set), says that a record can only be the FIRST record of a call: after at least one record of this run it
+	// ends the run as the next call's, even though its Role is final or prefix and its Identity matches (cleat#4277). Identity cannot say so, because it
+	// is applied to a record in any position and this one must still be accepted as the first. nil means no record is positional.
+	OpensACall func(rec *EventRecord) bool
 	// MaxPrefix, when above zero, is the most prefix records one run may hold: a prefix record past it is FOREIGN and ends the run (cleat#4152,
 	// W5). An await's run holds at most one, and Identity cannot say so: a polling loop that times out records [await, await, ...] with the
 	// SAME names each time, so by type and identity alone the first call's run swallows the second call's record, and the pair of them reads as
@@ -353,6 +357,8 @@ func (sp *stepSpec) validate() error {
 		return fmt.Errorf("step spec %q has an OverPending but is a multi-record step or records nothing: OverPending is a single-record step whose answer is recorded over its own pending record", sp.Name)
 	case sp.ResumesFreshAtForeign && (sp.Role == nil || sp.EndsWithoutFinal || sp.Identity == nil):
 		return fmt.Errorf("step spec %q has ResumesFreshAtForeign but is not a multi-record step with an Identity, or also declares EndsWithoutFinal", sp.Name)
+	case sp.OpensACall != nil && (sp.Role == nil || !(sp.EndsWithoutFinal || sp.ResumesFreshAtForeign)):
+		return fmt.Errorf("step spec %q has OpensACall but is not a multi-record step whose run can end without a final record: a record that ends the run would be a divergence", sp.Name)
 	case sp.MaxPrefix < 0 || (sp.MaxPrefix > 0 && sp.Role == nil):
 		return fmt.Errorf("step spec %q has MaxPrefix %d: it bounds the prefix records of a run, so it needs a Role and cannot be negative", sp.Name, sp.MaxPrefix)
 	case sp.EndsWithoutFinal && sp.Identity == nil:

@@ -257,7 +257,11 @@ type CompactedEvent struct {
 	PromiseName   string `json:"prom_name,omitempty"`
 	PromiseID     string `json:"prom_id,omitempty"`
 	PromiseResult string `json:"prom_res,omitempty"`
-	PromiseError  string `json:"prom_err,omitempty"`
+	// FirstRead mirrors EventRecord.FirstRead on a promise_resolved or promise_rejected: it is what tells an await's own answer from the next call's
+	// first-read settlement (cleat#4277). A compaction that dropped it would turn every such pair back into the ambiguous one on the first replay of a
+	// compacted history, which nothing else would notice: the record still reads as a settlement.
+	FirstRead    bool   `json:"fr,omitempty"`
+	PromiseError string `json:"prom_err,omitempty"`
 
 	// ErrNonRetryable mirrors EventRecord.ErrNonRetryable for a call event
 	// (call or call_heartbeat -- both use EventTypeCall). Its omission here
@@ -701,6 +705,7 @@ func extractCompactionStateFrom(prev *CompactionState, events []EventRecord) (*C
 			ce.PromiseID = ev.PromiseID
 			ce.PromiseResult = ev.PromiseResult
 			ce.Error = ev.Err // see EventTypeCreatePromise above (cleat#4335)
+			ce.FirstRead = ev.FirstRead
 			// Service and Op are what tell a resolve_promise CALL from an await of a promise that was already settled, which records
 			// this same event type (cleat#4079): a killed run's stop point is chosen by them (isStoppableEvent). A compacted region
 			// that dropped them would make every settlement in it a non-stop-point, so the cleanup of exactly the oldest runs would
@@ -712,6 +717,7 @@ func extractCompactionStateFrom(prev *CompactionState, events []EventRecord) (*C
 			ce.PromiseID = ev.PromiseID
 			ce.PromiseError = ev.PromiseError
 			ce.Error = ev.Err // see EventTypeCreatePromise above (cleat#4335)
+			ce.FirstRead = ev.FirstRead
 			ce.Service = ev.Service
 			ce.Op = ev.Op
 		case EventTypeUpdateHandler:
@@ -925,12 +931,14 @@ func buildFullHistoryFromCompaction(tail []EventRecord, cs *CompactionState) []E
 			rec.PromiseID = ce.PromiseID
 			rec.PromiseResult = ce.PromiseResult
 			rec.Err = ce.Error
+			rec.FirstRead = ce.FirstRead
 			rec.Service = ce.Service
 			rec.Op = ce.Op
 		case EventCodePromiseRejected:
 			rec.PromiseID = ce.PromiseID
 			rec.PromiseError = ce.PromiseError
 			rec.Err = ce.Error
+			rec.FirstRead = ce.FirstRead
 			rec.Service = ce.Service
 			rec.Op = ce.Op
 		case EventCodeUpdateHandler:
