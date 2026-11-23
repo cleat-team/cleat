@@ -1603,6 +1603,9 @@ func (s *MySQLStore) retryingLockConflict(what string, once func() error) error 
 			return err
 		}
 		lastErr = err
+		if s.lockConflictRetries != nil {
+			s.lockConflictRetries.Add(1)
+		}
 	}
 	return fmt.Errorf("%s: %d attempts all lost a lock conflict: %w", what, maxAttempts, lastErr)
 }
