@@ -468,6 +468,8 @@ The Helm chart (`topologySpread` and `podDisruptionBudget` in `values.yaml`) and
 (`k8s/deployment.yaml`, `k8s/pdb.yaml`) both ask the scheduler to keep worker pods on different nodes,
 and carry a PodDisruptionBudget that lets a node drain evict one worker at a time (cleat#4439).
 
+**Separate hardware needs at least two schedulable nodes, and nothing here can create the second one.** On a cluster with one node both workers run on it, with the default and with strict mode alike, so a requirement that the workers be on different machines is met only when the cluster has two or more nodes that can take a worker. Strict mode (below) is what refuses to start a worker rather than put it beside another one, and it does that only when a second node exists that cannot take the pod.
+
 **The default spreads, but does not refuse.** It is a `topologySpreadConstraint` on
 `kubernetes.io/hostname` with `maxSkew: 1` and `whenUnsatisfiable: ScheduleAnyway`, so a one-node
 cluster, or one whose other nodes are full or cordoned, still starts every worker, together. Set

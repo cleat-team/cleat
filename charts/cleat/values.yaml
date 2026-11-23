@@ -281,7 +281,8 @@ tolerations: []
 affinity: {}
 
 # -- Spread the worker pods across nodes, so two workers do not share one machine (cleat#4439). The owner's
-# requirement is that the two workers the autoscaler keeps as a floor are on separate hardware.
+# requirement is that the two workers the autoscaler keeps as a floor are on separate hardware, which needs
+# at least TWO schedulable nodes: on a one-node cluster both workers run on it, whatever this is set to.
 #
 # THE DEFAULT SPREADS BUT DOES NOT REFUSE. `whenUnsatisfiable: ScheduleAnyway` makes this a preference the
 # scheduler weighs heavily, not a rule: on a one-node cluster, or when the other node is full, cordoned or
