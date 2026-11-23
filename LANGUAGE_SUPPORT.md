@@ -215,7 +215,7 @@ its tier-2 history):
 - `wasm/component_test.go`'s `TestComponentPythonBinary` reads a hardcoded
   `/tmp/test_python.wasm` and has never run anywhere but the machine it was
   written on — a test-design bug, tracked separately, not a tier-1 blocker.
-- Binary size (CPython WASM is large — the measured component is 18.3 MB)
+- Binary size (CPython WASM is large — the measured component was 18.3 MB on 2026-08-06, and `cleat build` now adds about 11.6 MB of zero-filled gaps so instances share their memory image, cleat#4382: about 30 MB)
   remains a real operational consideration for `workflow_defs.wasm_bytes`
   storage at scale, independent of correctness.
 
@@ -251,7 +251,7 @@ crates/cleat-macro/src/*.rs`) — grown substantially from the original
 | Language | WASM compiler | Status | Binary size (measured where shipped) | Tier |
 |----------|--------------|--------|-------------------|------|
 | **Go** | go | Shipped | ~4-10 MB | 1 |
-| **Python** | componentize-py | Shipped, proven end-to-end in CI | 18.3 MB (measured 2026-08-06) | 1 |
+| **Python** | componentize-py | Shipped, proven end-to-end in CI | 18.3 MB (measured 2026-08-06); about 30 MB since cleat#4382 (measured 2026-11-22) | 1 |
 | **Rust** | cargo build (built-in) | Shipped | ~50-200 KB | 2 |
 | **Java/Kotlin** | TeaVM (mature) | Shipped | 324 KB (measured 2026-08-06) | 2 |
 | **C** | clang (mature) | Not built | 10-50 KB (design estimate) | — |
@@ -398,7 +398,7 @@ This drives the ranking:
 - **Good** (< 500 KB): C, Zig, Rust, Java/TeaVM
 - **OK** (500 KB - 2 MB): Go (standard), TypeScript/Javy (worst-case, unbuilt)
 - **Problematic** (> 2 MB): Python/CPython — measured at 18.3 MB per
-  component (2026-08-06), which makes the "deploy is an INSERT" model
+  component (2026-08-06; about 30 MB since cleat#4382, 2026-11-22), which makes the "deploy is an INSERT" model
   expensive at scale. This is now a known, accepted cost of a shipped tier-1
   language, not a hypothetical.
 

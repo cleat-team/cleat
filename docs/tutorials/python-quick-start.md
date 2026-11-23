@@ -107,8 +107,10 @@ Build SUCCESS
   wazero** (the developer tooling): `--runtime wazero` needs core WASM, and none of
   the `wasm-tools` releases checked has the `component decompose` subcommand that
   produces it, so it exits 1. Use the default.)
-- **18 MB for a hello world is normal.** The component carries a whole CPython.
-  The worker loads it once and caches it.
+- **30 MB for a hello world is normal.** The component carries a whole CPython. (componentize-py's own output is
+  about 18 MB; `cleat build` merges the interpreter's memory snapshot into one dense segment so that running
+  workflows share it instead of each copying 10 MiB, which adds about 11.6 MB on disk. Measured 2026-11-22; the
+  build prints a `Dense data:` line saying so.) The worker loads it once and caches it.
 
 ## 5. Deploy the workflow
 
