@@ -1,0 +1,60 @@
+package zz_e2e
+
+// SCRATCH, NOT FOR MERGE (cleat#4447 condition B): measures the memory of compiling a C# component IN THE WORKER, one distinct component at a time, so a per-language headroom need can be
+// set from a measurement. Distinct components are the same bytes stamped with different metadata (so different cache keys and the same compile cost); the caveat is in the report.
+
+import (
+	"database/sql"
+	"encoding/json"
+	"fmt"
+	"os"
+	"strings"
+	"testing"
+	"time"
+
+	_ "github.com/lib/pq"
+
+	"github.com/cleat-team/cleat/engine/testutil"
+	"github.com/cleat-team/cleat/wasm"
+)
+
+func TestCSharpCompileMemory(t *testing.T) {
+	db, err := sql.Open("postgres", os.Getenv("E2E_DSN"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	// E2E_CS = "label=path=entry=mode,label=path=entry=mode"
+	n := envInt("E2E_VARIANTS", 5)
+	for _, spec := range strings.Split(os.Getenv("E2E_CS"), ",") {
+		parts := strings.Split(spec, "=")
+		label, path, entry, mode := parts[0], parts[1], parts[2], parts[3]
+		base, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for i := 0; i < n; i++ {
+			b, err := wasm.WriteMetadata(base, &wasm.Metadata{WorkflowName: fmt.Sprintf("%s-%d", label, i), WorkflowVersion: 1, ABIVersion: wasm.CurrentABIVersion,
+				MinCompatibleVersion: wasm.CurrentABIVersion, Language: "csharp", EntryPoints: []string{entry}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			name := fmt.Sprintf("%s-%d", label, i)
+			if _, err := db.Exec(`INSERT INTO workflow_defs (name, version, wasm_bytes, entry_points, min_version, max_history_length, dag_spec, task_queue, abi_version, plugin_deps, tenant_id)
+				VALUES ($1, 1, $2, ARRAY[$5], $6, 10000, NULL, $3, $6, '{}', $4)
+				ON CONFLICT (tenant_id, name, version) DO UPDATE SET wasm_bytes = EXCLUDED.wasm_bytes`, name, b, env("E2E_QUEUE", "e2e-q"), tenant, entry, wasm.CurrentABIVersion); err != nil {
+				t.Fatalf("deploy %s: %v", name, err)
+			}
+			time.Sleep(6 * time.Second) // a quiet baseline before each compile
+			mark("CS-COMPILE-START %s size=%d", name, len(b))
+			id := "cs-" + name
+			in := json.RawMessage(fmt.Sprintf(`{"__entry_point":%q,"mode":%q,"x":1}`, entry, mode))
+			testutil.SeedRun(t, db, testutil.RunSeed{ID: id, DefName: name, TenantID: tenant, Input: string(in), TaskQueue: env("E2E_QUEUE", "e2e-q")})
+			st, d := waitDone(db, id, 120*time.Second)
+			mark("CS-COMPILE-END %s status=%s after=%s", name, st, d.Round(10*time.Millisecond))
+			time.Sleep(4 * time.Second) // settle, so what is retained can be read
+			mark("CS-SETTLED %s", name)
+		}
+	}
+	mark("E2E-DONE")
+}

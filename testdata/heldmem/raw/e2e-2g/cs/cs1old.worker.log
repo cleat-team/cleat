@@ -1,0 +1,211 @@
+2026/11/23 17:30:37 INFO residency memory budget bytes=214748364 mib=204 percent=20 of_bytes=1073741824 of_mib=1024 source="cgroup v2 memory.max"
+{"time":"2026-11-23T17:30:37.390025295Z","level":"INFO","msg":"starting worker","worker_id":"5acc4406efc013c24c3232081981fc89","concurrency":10}
+{"time":"2026-11-23T17:30:37.39007042Z","level":"INFO","msg":"checksum verification enabled","worker_id":"5acc4406efc013c24c3232081981fc89"}
+{"time":"2026-11-23T17:30:37.422315743Z","level":"INFO","msg":"plugin DB pool configured","worker_id":"5acc4406efc013c24c3232081981fc89","max_connections":10}
+{"time":"2026-11-23T17:30:37.429514541Z","level":"INFO","msg":"heartbeat DB pool configured","worker_id":"5acc4406efc013c24c3232081981fc89","max_connections":3}
+{"time":"2026-11-23T17:30:37.429860583Z","level":"INFO","msg":"sensitive-payload encryption is off: no --encryption-key-file, workflow data is stored in plaintext","worker_id":"5acc4406efc013c24c3232081981fc89"}
+2026/11/23 17:30:37 [migration] applying 001_schema.sql
+2026/11/23 17:30:38 [migration] applied 001_schema.sql
+2026/11/23 17:30:38 [migration] applying 002_defaults.sql
+2026/11/23 17:30:38 [migration] applied 002_defaults.sql
+2026/11/23 17:30:38 [migration] applying 003_procedures.sql
+2026/11/23 17:30:38 [migration] applied 003_procedures.sql
+2026/11/23 17:30:38 [migration] applying 004_operator_key_scopes.sql
+2026/11/23 17:30:38 [migration] applied 004_operator_key_scopes.sql
+2026/11/23 17:30:38 [migration] applying 005_workflow_libraries.sql
+2026/11/23 17:30:38 [migration] applied 005_workflow_libraries.sql
+2026/11/23 17:30:38 [migration] applying 006_a_tenant_records_who_created_it.sql
+2026/11/23 17:30:38 [migration] applied 006_a_tenant_records_who_created_it.sql
+2026/11/23 17:30:38 [migration] applying 007_a_dropped_tenant_leaves_a_tombstone.sql
+2026/11/23 17:30:38 [migration] applied 007_a_dropped_tenant_leaves_a_tombstone.sql
+2026/11/23 17:30:38 [migration] applying 008_registered_plugins.sql
+2026/11/23 17:30:38 [migration] applied 008_registered_plugins.sql
+2026/11/23 17:30:38 [migration] applying 009_library_prefix_lookup.sql
+2026/11/23 17:30:38 [migration] applied 009_library_prefix_lookup.sql
+2026/11/23 17:30:38 [migration] applying 010_library_clashing_names.sql
+2026/11/23 17:30:38 [migration] applied 010_library_clashing_names.sql
+2026/11/23 17:30:38 [migration] applying 011_a_tombstone_cannot_be_rewritten.sql
+2026/11/23 17:30:38 [migration] applied 011_a_tombstone_cannot_be_rewritten.sql
+{"time":"2026-11-23T17:30:39.680380094Z","level":"INFO","msg":"registered in the worker registry","worker_id":"5acc4406efc013c24c3232081981fc89","secret_key_versions":null}
+{"time":"2026-11-23T17:30:39.684566515Z","level":"INFO","msg":"row-level security is enforced on this connection","worker_id":"5acc4406efc013c24c3232081981fc89"}
+2026/11/23 17:30:39 INFO audit-log: initialized retention_days=90
+2026/11/23 17:30:39 INFO blobstore: initialized backend=memory
+2026/11/23 17:30:39 INFO dag plugin initialized
+2026/11/23 17:30:39 INFO datadog-export: initialized
+{"time":"2026-11-23T17:30:39.685593016Z","level":"INFO","msg":"plugin not configured, disabled","worker_id":"5acc4406efc013c24c3232081981fc89","plugin":"email-notify"}
+2026/11/23 17:30:39 INFO event-triggers: initialized
+2026/11/23 17:30:39 INFO eventstore: initialized max_event_size=1048576
+2026/11/23 17:30:39 INFO feature-flags: initialized default_rollout=0
+2026/11/23 17:30:39 INFO jobqueue: initialized
+2026/11/23 17:30:39 INFO kvstore: initialized max_value_size=1048576
+2026/11/23 17:30:39 INFO llm: initialized providers=0
+2026/11/23 17:30:39 INFO notifications: initialized
+2026/11/23 17:30:39 INFO oauth-provider: initialized
+2026/11/23 17:30:39 INFO pagerduty-alert: initialized
+2026/11/23 17:30:39 INFO rate-limiter: initialized mode=memory
+2026/11/23 17:30:39 INFO scheduledbackup: initialized dump_dir=/tmp/cleat-backups
+2026/11/23 17:30:39 INFO scheduler: initialized
+2026/11/23 17:30:39 INFO slack-notify: initialized
+2026/11/23 17:30:39 INFO tenant-lifecycle: initialized
+2026/11/23 17:30:39 INFO tenant-quota: initialized
+2026/11/23 17:30:39 INFO kafka-connect: initialized rest_proxy=""
+2026/11/23 17:30:39 INFO webhook-ingest: initialized
+{"time":"2026-11-23T17:30:39.6863646Z","level":"INFO","msg":"in-process component compiles are refused when the memory left is under the minimum","min_headroom_mib":800,"source":"cgroupv2","total_mib":1024,"available_mib":984}
+{"time":"2026-11-23T17:30:39.686458725Z","level":"INFO","msg":"wasmtime backend registered for Go WASM","worker_id":"5acc4406efc013c24c3232081981fc89","instance_timeout":30000000000,"wall_clock_ceiling":300000000000,"instruction_limit":0,"memory_limit_bytes":268435456,"defer_budget":5000000000}
+{"time":"2026-11-23T17:30:39.691782897Z","level":"INFO","msg":"adaptive flusher registry enabled","worker_id":"5acc4406efc013c24c3232081981fc89","max_wait_ms":8,"max_batch":200,"enter_rate":500,"exit_rate":250}
+{"time":"2026-11-23T17:30:39.691854647Z","level":"INFO","msg":"database connection budget","worker_id":"5acc4406efc013c24c3232081981fc89","pools":"core=15 + plugin=10 + flusher=50 + migrate=2 + heartbeat=3 = 80 fixed; plus 25 per tenant pool","configured_budget":0,"tenant_pools_that_fit":0}
+{"time":"2026-11-23T17:30:39.69676236Z","level":"INFO","msg":"server connection limit","worker_id":"5acc4406efc013c24c3232081981fc89","usable":197,"detail":"max_connections=200 superuser_reserved=3 reserved=0","this_worker_needs":80}
+{"time":"2026-11-23T17:30:39.696916902Z","level":"INFO","msg":"memory monitor","source":"cgroupv2","total_mib":1024,"used_mib":39,"soft_limit":0.8,"hard_limit":0.95}
+2026/11/23 17:30:39 INFO jobqueue: worker started, poll interval=5s, reaper interval=60s
+2026/11/23 17:30:39 INFO notifications: delivery retry loop started interval=30s
+2026/11/23 17:30:39 INFO oauth-provider: background loop started interval=5m0s
+{"time":"2026-11-23T17:30:39.704047409Z","level":"INFO","msg":"cross-tenant workflow claim is available by tenant rotation; no database grant is required","worker_id":"5acc4406efc013c24c3232081981fc89","tenant_id":"00000000-0000-0000-0000-000000000000","tenants_per_tick":16}
+{"time":"2026-11-23T17:30:39.704071617Z","level":"INFO","msg":"cross-tenant due-schedule read is available by tenant rotation; no database grant is required","worker_id":"5acc4406efc013c24c3232081981fc89","tenant_id":"00000000-0000-0000-0000-000000000000"}
+{"time":"2026-11-23T17:30:39.704089825Z","level":"INFO","msg":"running","worker_id":"5acc4406efc013c24c3232081981fc89"}
+2026/11/23 17:30:39 INFO rate-limiter: background reload started, interval=30s
+2026/11/23 17:30:39 INFO scheduledbackup: background loop started, interval=60s
+2026/11/23 17:30:39 INFO scheduler: background loop started, interval=60s
+2026/11/23 17:30:39 INFO kafka-connect: consumer loop started, interval=5s
+2026/11/23 17:30:39 INFO tenant-lifecycle: trial-expiry sweep started interval=1m0s
+2026/11/23 17:30:39 INFO audit-log: background started retention=1h workers=4 buffer=1000 enqueue_wait=1s retry_deadline=1m0s
+2026/11/23 17:30:39 INFO blobstore: TTL cleanup started interval=1h0m0s
+2026/11/23 17:30:39 INFO eventstore: cleanup started interval=1h0m0s
+2026/11/23 17:30:39 INFO event-triggers: background retry worker started interval=30s reconcile_interval=30s reconcile_grace=15s
+2026/11/23 17:30:39 INFO jobqueue: initial reaper cycle completed plugin=jobqueue jobs_reset=0
+2026/11/23 17:30:39 INFO rate-limiter: work cycle completed plugin=rate-limiter duration_ms=14 configs_reloaded=0
+2026/11/23 17:30:39 INFO jobqueue: initial abandonment sweep completed plugin=jobqueue jobs_abandoned=0
+2026/11/23 17:30:39 INFO scheduler: work cycle completed plugin=scheduler duration_ms=25 schedules_due=0 workflows_started=0 workflows_failed=0
+2026/11/23 17:30:39 INFO datadog-export: metric export started, interval=60s
+2026/11/23 17:30:44 INFO jobqueue: work cycle completed plugin=jobqueue duration_ms=8 jobs_claimed=0 jobs_dispatched=0 jobs_failed=0
+{"time":"2026-11-23T17:30:49.704306209Z","level":"INFO","msg":"Reaper: a new worker waits out its start-up grace period before reclaiming stale runs; nothing is wrong","worker_id":"5acc4406efc013c24c3232081981fc89","reclaim_after":42000000000}
+2026/11/23 17:30:49 INFO jobqueue: work cycle completed plugin=jobqueue duration_ms=44 jobs_claimed=0 jobs_dispatched=0 jobs_failed=0
+{"time":"2026-11-23T17:30:53.839476543Z","level":"ERROR","msg":"execution error","worker_id":"5acc4406efc013c24c3232081981fc89","workflow_id":"cs-small-0","tenant_id":"00000000-0000-0000-0000-000000000000","error":"host: workflow cs-small-0: execution failed: host: component export \"run\" failed: call: service payments.Charge not configured: no endpoint registered. Register one with --service-endpoints payments=https://your-service, or implement it as a plugin"}
+{"time":"2026-11-23T17:30:54.004276327Z","level":"WARN","msg":"execution fenced out: run superseded by a later generation","worker_id":"5acc4406efc013c24c3232081981fc89","workflow_id":"cs-small-0","def_name":"small-0","sent_generation":1,"generation":1}
+2026/11/23 17:30:54 INFO jobqueue: work cycle completed plugin=jobqueue duration_ms=2 jobs_claimed=0 jobs_dispatched=0 jobs_failed=0
+{"time":"2026-11-23T17:30:59.70506301Z","level":"INFO","msg":"Reaper: a new worker waits out its start-up grace period before reclaiming stale runs; nothing is wrong","worker_id":"5acc4406efc013c24c3232081981fc89","reclaim_after":42000000000}
+2026/11/23 17:30:59 INFO jobqueue: work cycle completed plugin=jobqueue duration_ms=0 jobs_claimed=0 jobs_dispatched=0 jobs_failed=0
+2026/11/23 17:31:04 INFO jobqueue: work cycle completed plugin=jobqueue duration_ms=20 jobs_claimed=0 jobs_dispatched=0 jobs_failed=0
+{"time":"2026-11-23T17:31:05.402323687Z","level":"ERROR","msg":"execution error","worker_id":"5acc4406efc013c24c3232081981fc89","workflow_id":"cs-small-1","tenant_id":"00000000-0000-0000-0000-000000000000","error":"host: workflow cs-small-1: execution failed: host: component export \"run\" failed: call: service payments.Charge not configured: no endpoint registered. Register one with --service-endpoints payments=https://your-service, or implement it as a plugin"}
+{"time":"2026-11-23T17:31:09.7042766Z","level":"INFO","msg":"Reaper: a new worker waits out its start-up grace period before reclaiming stale runs; nothing is wrong","worker_id":"5acc4406efc013c24c3232081981fc89","reclaim_after":42000000000}
+2026/11/23 17:31:09 INFO jobqueue: work cycle completed plugin=jobqueue duration_ms=3 jobs_claimed=0 jobs_dispatched=0 jobs_failed=0
+2026/11/23 17:31:09 INFO rate-limiter: work cycle completed plugin=rate-limiter duration_ms=4 configs_reloaded=0
+2026/11/23 17:31:09 INFO event-triggers: retry cycle completed duration_ms=7
+2026/11/23 17:31:14 INFO jobqueue: work cycle completed plugin=jobqueue duration_ms=3 jobs_claimed=0 jobs_dispatched=0 jobs_failed=0
+{"time":"2026-11-23T17:31:16.822722528Z","level":"ERROR","msg":"execution error","worker_id":"5acc4406efc013c24c3232081981fc89","workflow_id":"cs-small-2","tenant_id":"00000000-0000-0000-0000-000000000000","error":"host: workflow cs-small-2: execution failed: host: component export \"run\" failed: call: service payments.Charge not configured: no endpoint registered. Register one with --service-endpoints payments=https://your-service, or implement it as a plugin"}
+{"time":"2026-11-23T17:31:19.704424274Z","level":"INFO","msg":"Reaper: a new worker waits out its start-up grace period before reclaiming stale runs; nothing is wrong","worker_id":"5acc4406efc013c24c3232081981fc89","reclaim_after":42000000000}
+2026/11/23 17:31:19 INFO jobqueue: work cycle completed plugin=jobqueue duration_ms=1 jobs_claimed=0 jobs_dispatched=0 jobs_failed=0
+2026/11/23 17:31:24 INFO jobqueue: work cycle completed plugin=jobqueue duration_ms=2 jobs_claimed=0 jobs_dispatched=0 jobs_failed=0
+{"time":"2026-11-23T17:31:27.248490999Z","level":"ERROR","msg":"execution error","worker_id":"5acc4406efc013c24c3232081981fc89","workflow_id":"cs-small-3","tenant_id":"00000000-0000-0000-0000-000000000000","error":"host: workflow cs-small-3: execution failed: host: component export \"run\" failed: call: service payments.Charge not configured: no endpoint registered. Register one with --service-endpoints payments=https://your-service, or implement it as a plugin"}
+2026/11/23 17:31:29 INFO jobqueue: work cycle completed plugin=jobqueue duration_ms=0 jobs_claimed=0 jobs_dispatched=0 jobs_failed=0
+2026/11/23 17:31:34 INFO jobqueue: work cycle completed plugin=jobqueue duration_ms=3 jobs_claimed=0 jobs_dispatched=0 jobs_failed=0
+{"time":"2026-11-23T17:31:38.499053938Z","level":"ERROR","msg":"execution error","worker_id":"5acc4406efc013c24c3232081981fc89","workflow_id":"cs-small-4","tenant_id":"00000000-0000-0000-0000-000000000000","error":"host: workflow cs-small-4: execution failed: host: component export \"run\" failed: call: service payments.Charge not configured: no endpoint registered. Register one with --service-endpoints payments=https://your-service, or implement it as a plugin"}
+2026/11/23 17:31:39 INFO jobqueue: work cycle completed plugin=jobqueue duration_ms=7 jobs_claimed=0 jobs_dispatched=0 jobs_failed=0
+2026/11/23 17:31:39 INFO jobqueue: reaper cycle completed plugin=jobqueue duration_ms=4 jobs_reset=0
+2026/11/23 17:31:39 INFO jobqueue: abandonment sweep completed plugin=jobqueue duration_ms=5 jobs_abandoned=0
+2026/11/23 17:31:39 INFO scheduler: work cycle completed plugin=scheduler duration_ms=6 schedules_due=0 workflows_started=0 workflows_failed=0
+2026/11/23 17:31:39 INFO event-triggers: retry cycle completed duration_ms=29
+2026/11/23 17:31:39 INFO rate-limiter: work cycle completed plugin=rate-limiter duration_ms=32 configs_reloaded=0
+2026/11/23 17:31:44 INFO jobqueue: work cycle completed plugin=jobqueue duration_ms=1 jobs_claimed=0 jobs_dispatched=0 jobs_failed=0
+{"time":"2026-11-23T17:31:49.630355579Z","level":"ERROR","msg":"execution error","worker_id":"5acc4406efc013c24c3232081981fc89","workflow_id":"cs-small-5","tenant_id":"00000000-0000-0000-0000-000000000000","error":"host: workflow cs-small-5: execution failed: host: component export \"run\" failed: call: service payments.Charge not configured: no endpoint registered. Register one with --service-endpoints payments=https://your-service, or implement it as a plugin"}
+2026/11/23 17:31:49 INFO jobqueue: work cycle completed plugin=jobqueue duration_ms=8 jobs_claimed=0 jobs_dispatched=0 jobs_failed=0
+2026/11/23 17:31:54 INFO jobqueue: work cycle completed plugin=jobqueue duration_ms=0 jobs_claimed=0 jobs_dispatched=0 jobs_failed=0
+2026/11/23 17:31:59 INFO jobqueue: work cycle completed plugin=jobqueue duration_ms=2 jobs_claimed=0 jobs_dispatched=0 jobs_failed=0
+{"time":"2026-11-23T17:32:01.151051481Z","level":"ERROR","msg":"execution error","worker_id":"5acc4406efc013c24c3232081981fc89","workflow_id":"cs-small-6","tenant_id":"00000000-0000-0000-0000-000000000000","error":"host: workflow cs-small-6: execution failed: host: component export \"run\" failed: call: service payments.Charge not configured: no endpoint registered. Register one with --service-endpoints payments=https://your-service, or implement it as a plugin"}
+2026/11/23 17:32:04 INFO jobqueue: work cycle completed plugin=jobqueue duration_ms=3 jobs_claimed=0 jobs_dispatched=0 jobs_failed=0
+2026/11/23 17:32:09 INFO jobqueue: work cycle completed plugin=jobqueue duration_ms=5 jobs_claimed=0 jobs_dispatched=0 jobs_failed=0
+2026/11/23 17:32:09 INFO rate-limiter: work cycle completed plugin=rate-limiter duration_ms=9 configs_reloaded=0
+2026/11/23 17:32:09 INFO event-triggers: retry cycle completed duration_ms=8
+{"time":"2026-11-23T17:32:12.674705883Z","level":"ERROR","msg":"execution error","worker_id":"5acc4406efc013c24c3232081981fc89","workflow_id":"cs-small-7","tenant_id":"00000000-0000-0000-0000-000000000000","error":"host: workflow cs-small-7: execution failed: host: component export \"run\" failed: call: service payments.Charge not configured: no endpoint registered. Register one with --service-endpoints payments=https://your-service, or implement it as a plugin"}
+2026/11/23 17:32:14 INFO jobqueue: work cycle completed plugin=jobqueue duration_ms=2 jobs_claimed=0 jobs_dispatched=0 jobs_failed=0
+2026/11/23 17:32:19 INFO jobqueue: work cycle completed plugin=jobqueue duration_ms=2 jobs_claimed=0 jobs_dispatched=0 jobs_failed=0
+2026/11/23 17:32:24 INFO jobqueue: work cycle completed plugin=jobqueue duration_ms=2 jobs_claimed=0 jobs_dispatched=0 jobs_failed=0
+{"time":"2026-11-23T17:32:25.595665212Z","level":"INFO","msg":"workflow completed","worker_id":"5acc4406efc013c24c3232081981fc89","workflow_id":"cs-large-0","tenant_id":"00000000-0000-0000-0000-000000000000","duration":2174010785,"replay_ms":2040,"finalize_ms":56}
+2026/11/23 17:32:29 INFO jobqueue: work cycle completed plugin=jobqueue duration_ms=4 jobs_claimed=0 jobs_dispatched=0 jobs_failed=0
+2026/11/23 17:32:34 INFO jobqueue: work cycle completed plugin=jobqueue duration_ms=3 jobs_claimed=0 jobs_dispatched=0 jobs_failed=0
+{"time":"2026-11-23T17:32:36.417626693Z","level":"ERROR","msg":"component not compiled in this process: not enough memory left; returning the run to the queue and keeping the components already compiled running","headroom_mib":762,"needed_mib":800,"memory_limit_mib":1024,"retry_after":300000000000,"reason":"low_headroom"}
+{"time":"2026-11-23T17:32:36.419887942Z","level":"ERROR","msg":"could not compile this workflow's component for want of memory; returning it to the queue rather than failing it","worker_id":"5acc4406efc013c24c3232081981fc89","workflow_id":"cs-large-1","tenant_id":"00000000-0000-0000-0000-000000000000","def_name":"large-1","def_version":1,"retry_after":300000000000,"error":"host: workflow cs-large-1: execution failed: wasm trap: component compile refused: this worker has 762 MiB of memory left, and compiling a component in the worker is judged to need 800 MiB (about 500 MiB of scratch during the compile and about 300 MiB it keeps). The compile was not attempted, because the worker would be killed with every run it holds; this run is released and will be retried in 5m0s, possibly on another worker, and components already compiled keep running. To fix it: raise the memory limit, lower --resident-memory-percent, keep --component-precompile on so compiles run in a child, or lower --component-compile-min-headroom-mb if you have measured that this component needs less"}
+2026/11/23 17:32:39 INFO rate-limiter: work cycle completed plugin=rate-limiter duration_ms=4 configs_reloaded=0
+2026/11/23 17:32:39 INFO scheduler: work cycle completed plugin=scheduler duration_ms=11 schedules_due=0 workflows_started=0 workflows_failed=0
+2026/11/23 17:32:39 INFO jobqueue: reaper cycle completed plugin=jobqueue duration_ms=13 jobs_reset=0
+2026/11/23 17:32:39 INFO jobqueue: abandonment sweep completed plugin=jobqueue duration_ms=15 jobs_abandoned=0
+2026/11/23 17:32:39 INFO event-triggers: retry cycle completed duration_ms=14
+2026/11/23 17:32:39 INFO jobqueue: work cycle completed plugin=jobqueue duration_ms=1 jobs_claimed=0 jobs_dispatched=0 jobs_failed=0
+2026/11/23 17:32:44 INFO jobqueue: work cycle completed plugin=jobqueue duration_ms=1 jobs_claimed=0 jobs_dispatched=0 jobs_failed=0
+2026/11/23 17:32:49 INFO jobqueue: work cycle completed plugin=jobqueue duration_ms=3 jobs_claimed=0 jobs_dispatched=0 jobs_failed=0
+2026/11/23 17:32:54 INFO jobqueue: work cycle completed plugin=jobqueue duration_ms=3 jobs_claimed=0 jobs_dispatched=0 jobs_failed=0
+2026/11/23 17:32:59 INFO jobqueue: work cycle completed plugin=jobqueue duration_ms=5 jobs_claimed=0 jobs_dispatched=0 jobs_failed=0
+2026/11/23 17:33:04 INFO jobqueue: work cycle completed plugin=jobqueue duration_ms=4 jobs_claimed=0 jobs_dispatched=0 jobs_failed=0
+2026/11/23 17:33:09 INFO rate-limiter: work cycle completed plugin=rate-limiter duration_ms=4 configs_reloaded=0
+2026/11/23 17:33:09 INFO jobqueue: work cycle completed plugin=jobqueue duration_ms=8 jobs_claimed=0 jobs_dispatched=0 jobs_failed=0
+2026/11/23 17:33:09 INFO event-triggers: retry cycle completed duration_ms=1
+2026/11/23 17:33:14 INFO jobqueue: work cycle completed plugin=jobqueue duration_ms=2 jobs_claimed=0 jobs_dispatched=0 jobs_failed=0
+2026/11/23 17:33:19 INFO jobqueue: work cycle completed plugin=jobqueue duration_ms=3 jobs_claimed=0 jobs_dispatched=0 jobs_failed=0
+2026/11/23 17:33:24 INFO jobqueue: work cycle completed plugin=jobqueue duration_ms=1 jobs_claimed=0 jobs_dispatched=0 jobs_failed=0
+2026/11/23 17:33:29 INFO jobqueue: work cycle completed plugin=jobqueue duration_ms=1 jobs_claimed=0 jobs_dispatched=0 jobs_failed=0
+2026/11/23 17:33:34 INFO jobqueue: work cycle completed plugin=jobqueue duration_ms=2 jobs_claimed=0 jobs_dispatched=0 jobs_failed=0
+2026/11/23 17:33:39 INFO rate-limiter: work cycle completed plugin=rate-limiter duration_ms=20 configs_reloaded=0
+2026/11/23 17:33:39 INFO jobqueue: reaper cycle completed plugin=jobqueue duration_ms=20 jobs_reset=0
+2026/11/23 17:33:39 INFO scheduler: work cycle completed plugin=scheduler duration_ms=22 schedules_due=0 workflows_started=0 workflows_failed=0
+2026/11/23 17:33:39 INFO event-triggers: retry cycle completed duration_ms=5
+2026/11/23 17:33:39 INFO jobqueue: abandonment sweep completed plugin=jobqueue duration_ms=29 jobs_abandoned=0
+2026/11/23 17:33:39 INFO jobqueue: work cycle completed plugin=jobqueue duration_ms=2 jobs_claimed=0 jobs_dispatched=0 jobs_failed=0
+2026/11/23 17:33:44 INFO jobqueue: work cycle completed plugin=jobqueue duration_ms=6 jobs_claimed=0 jobs_dispatched=0 jobs_failed=0
+2026/11/23 17:33:49 INFO jobqueue: work cycle completed plugin=jobqueue duration_ms=2 jobs_claimed=0 jobs_dispatched=0 jobs_failed=0
+2026/11/23 17:33:54 INFO jobqueue: work cycle completed plugin=jobqueue duration_ms=6 jobs_claimed=0 jobs_dispatched=0 jobs_failed=0
+2026/11/23 17:33:59 INFO jobqueue: work cycle completed plugin=jobqueue duration_ms=4 jobs_claimed=0 jobs_dispatched=0 jobs_failed=0
+2026/11/23 17:34:04 INFO jobqueue: work cycle completed plugin=jobqueue duration_ms=2 jobs_claimed=0 jobs_dispatched=0 jobs_failed=0
+2026/11/23 17:34:09 INFO jobqueue: work cycle completed plugin=jobqueue duration_ms=5 jobs_claimed=0 jobs_dispatched=0 jobs_failed=0
+2026/11/23 17:34:09 INFO event-triggers: retry cycle completed duration_ms=6
+2026/11/23 17:34:09 INFO rate-limiter: work cycle completed plugin=rate-limiter duration_ms=6 configs_reloaded=0
+2026/11/23 17:34:14 INFO jobqueue: work cycle completed plugin=jobqueue duration_ms=3 jobs_claimed=0 jobs_dispatched=0 jobs_failed=0
+2026/11/23 17:34:19 INFO jobqueue: work cycle completed plugin=jobqueue duration_ms=1 jobs_claimed=0 jobs_dispatched=0 jobs_failed=0
+2026/11/23 17:34:24 INFO jobqueue: work cycle completed plugin=jobqueue duration_ms=3 jobs_claimed=0 jobs_dispatched=0 jobs_failed=0
+2026/11/23 17:34:29 INFO jobqueue: work cycle completed plugin=jobqueue duration_ms=3 jobs_claimed=0 jobs_dispatched=0 jobs_failed=0
+2026/11/23 17:34:34 INFO jobqueue: work cycle completed plugin=jobqueue duration_ms=3 jobs_claimed=0 jobs_dispatched=0 jobs_failed=0
+2026/11/23 17:34:39 INFO jobqueue: work cycle completed plugin=jobqueue duration_ms=3 jobs_claimed=0 jobs_dispatched=0 jobs_failed=0
+2026/11/23 17:34:39 INFO jobqueue: reaper cycle completed plugin=jobqueue duration_ms=0 jobs_reset=0
+2026/11/23 17:34:39 INFO scheduler: work cycle completed plugin=scheduler duration_ms=4 schedules_due=0 workflows_started=0 workflows_failed=0
+2026/11/23 17:34:39 INFO jobqueue: abandonment sweep completed plugin=jobqueue duration_ms=2 jobs_abandoned=0
+2026/11/23 17:34:39 INFO event-triggers: retry cycle completed duration_ms=6
+2026/11/23 17:34:39 INFO rate-limiter: work cycle completed plugin=rate-limiter duration_ms=9 configs_reloaded=0
+2026/11/23 17:34:44 INFO jobqueue: work cycle completed plugin=jobqueue duration_ms=2 jobs_claimed=0 jobs_dispatched=0 jobs_failed=0
+{"time":"2026-11-23T17:34:46.531756427Z","level":"ERROR","msg":"component not compiled in this process: not enough memory left; returning the run to the queue and keeping the components already compiled running","headroom_mib":759,"needed_mib":800,"memory_limit_mib":1024,"retry_after":300000000000,"reason":"low_headroom"}
+{"time":"2026-11-23T17:34:46.533755719Z","level":"ERROR","msg":"could not compile this workflow's component for want of memory; returning it to the queue rather than failing it","worker_id":"5acc4406efc013c24c3232081981fc89","workflow_id":"cs-large-2","tenant_id":"00000000-0000-0000-0000-000000000000","def_name":"large-2","def_version":1,"retry_after":300000000000,"error":"host: workflow cs-large-2: execution failed: wasm trap: component compile refused: this worker has 759 MiB of memory left, and compiling a component in the worker is judged to need 800 MiB (about 500 MiB of scratch during the compile and about 300 MiB it keeps). The compile was not attempted, because the worker would be killed with every run it holds; this run is released and will be retried in 5m0s, possibly on another worker, and components already compiled keep running. To fix it: raise the memory limit, lower --resident-memory-percent, keep --component-precompile on so compiles run in a child, or lower --component-compile-min-headroom-mb if you have measured that this component needs less"}
+2026/11/23 17:34:49 INFO jobqueue: work cycle completed plugin=jobqueue duration_ms=2 jobs_claimed=0 jobs_dispatched=0 jobs_failed=0
+2026/11/23 17:34:54 INFO jobqueue: work cycle completed plugin=jobqueue duration_ms=0 jobs_claimed=0 jobs_dispatched=0 jobs_failed=0
+2026/11/23 17:34:59 INFO jobqueue: work cycle completed plugin=jobqueue duration_ms=0 jobs_claimed=0 jobs_dispatched=0 jobs_failed=0
+2026/11/23 17:35:04 INFO jobqueue: work cycle completed plugin=jobqueue duration_ms=0 jobs_claimed=0 jobs_dispatched=0 jobs_failed=0
+2026/11/23 17:35:09 INFO jobqueue: work cycle completed plugin=jobqueue duration_ms=1 jobs_claimed=0 jobs_dispatched=0 jobs_failed=0
+2026/11/23 17:35:09 INFO rate-limiter: work cycle completed plugin=rate-limiter duration_ms=1 configs_reloaded=0
+2026/11/23 17:35:09 INFO event-triggers: retry cycle completed duration_ms=1
+2026/11/23 17:35:14 INFO jobqueue: work cycle completed plugin=jobqueue duration_ms=0 jobs_claimed=0 jobs_dispatched=0 jobs_failed=0
+2026/11/23 17:35:19 INFO jobqueue: work cycle completed plugin=jobqueue duration_ms=0 jobs_claimed=0 jobs_dispatched=0 jobs_failed=0
+2026/11/23 17:35:24 INFO jobqueue: work cycle completed plugin=jobqueue duration_ms=1 jobs_claimed=0 jobs_dispatched=0 jobs_failed=0
+2026/11/23 17:35:29 INFO jobqueue: work cycle completed plugin=jobqueue duration_ms=2 jobs_claimed=0 jobs_dispatched=0 jobs_failed=0
+2026/11/23 17:35:34 INFO jobqueue: work cycle completed plugin=jobqueue duration_ms=0 jobs_claimed=0 jobs_dispatched=0 jobs_failed=0
+2026/11/23 17:35:39 INFO event-triggers: retry cycle completed duration_ms=6
+2026/11/23 17:35:39 INFO jobqueue: work cycle completed plugin=jobqueue duration_ms=10 jobs_claimed=0 jobs_dispatched=0 jobs_failed=0
+2026/11/23 17:35:39 INFO jobqueue: reaper cycle completed plugin=jobqueue duration_ms=0 jobs_reset=0
+2026/11/23 17:35:39 INFO jobqueue: abandonment sweep completed plugin=jobqueue duration_ms=1 jobs_abandoned=0
+2026/11/23 17:35:39 INFO rate-limiter: work cycle completed plugin=rate-limiter duration_ms=9 configs_reloaded=0
+2026/11/23 17:35:39 INFO scheduler: work cycle completed plugin=scheduler duration_ms=21 schedules_due=0 workflows_started=0 workflows_failed=0
+2026/11/23 17:35:44 INFO jobqueue: work cycle completed plugin=jobqueue duration_ms=1 jobs_claimed=0 jobs_dispatched=0 jobs_failed=0
+2026/11/23 17:35:49 INFO jobqueue: work cycle completed plugin=jobqueue duration_ms=5 jobs_claimed=0 jobs_dispatched=0 jobs_failed=0
+2026/11/23 17:35:54 INFO jobqueue: work cycle completed plugin=jobqueue duration_ms=0 jobs_claimed=0 jobs_dispatched=0 jobs_failed=0
+2026/11/23 17:35:59 INFO jobqueue: work cycle completed plugin=jobqueue duration_ms=0 jobs_claimed=0 jobs_dispatched=0 jobs_failed=0
+2026/11/23 17:36:04 INFO jobqueue: work cycle completed plugin=jobqueue duration_ms=0 jobs_claimed=0 jobs_dispatched=0 jobs_failed=0
+2026/11/23 17:36:09 INFO jobqueue: work cycle completed plugin=jobqueue duration_ms=0 jobs_claimed=0 jobs_dispatched=0 jobs_failed=0
+2026/11/23 17:36:09 INFO rate-limiter: work cycle completed plugin=rate-limiter duration_ms=0 configs_reloaded=0
+2026/11/23 17:36:09 INFO event-triggers: retry cycle completed duration_ms=1
+2026/11/23 17:36:14 INFO jobqueue: work cycle completed plugin=jobqueue duration_ms=0 jobs_claimed=0 jobs_dispatched=0 jobs_failed=0
+2026/11/23 17:36:19 INFO jobqueue: work cycle completed plugin=jobqueue duration_ms=0 jobs_claimed=0 jobs_dispatched=0 jobs_failed=0
+2026/11/23 17:36:24 INFO jobqueue: work cycle completed plugin=jobqueue duration_ms=0 jobs_claimed=0 jobs_dispatched=0 jobs_failed=0
+2026/11/23 17:36:29 INFO jobqueue: work cycle completed plugin=jobqueue duration_ms=0 jobs_claimed=0 jobs_dispatched=0 jobs_failed=0
+2026/11/23 17:36:34 INFO jobqueue: work cycle completed plugin=jobqueue duration_ms=1 jobs_claimed=0 jobs_dispatched=0 jobs_failed=0
+2026/11/23 17:36:39 INFO jobqueue: work cycle completed plugin=jobqueue duration_ms=0 jobs_claimed=0 jobs_dispatched=0 jobs_failed=0
+2026/11/23 17:36:39 INFO rate-limiter: work cycle completed plugin=rate-limiter duration_ms=1 configs_reloaded=0
+2026/11/23 17:36:39 INFO jobqueue: reaper cycle completed plugin=jobqueue duration_ms=1 jobs_reset=0
+2026/11/23 17:36:39 INFO jobqueue: abandonment sweep completed plugin=jobqueue duration_ms=2 jobs_abandoned=0
+2026/11/23 17:36:39 INFO scheduler: work cycle completed plugin=scheduler duration_ms=4 schedules_due=0 workflows_started=0 workflows_failed=0
+2026/11/23 17:36:39 INFO event-triggers: retry cycle completed duration_ms=4
+2026/11/23 17:36:44 INFO jobqueue: work cycle completed plugin=jobqueue duration_ms=1 jobs_clai
