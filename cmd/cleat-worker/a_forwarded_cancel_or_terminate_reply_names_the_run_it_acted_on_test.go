@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -84,5 +86,47 @@ func TestAForwardedCancelOrTerminateReplyNamesTheRunItActedOn(t *testing.T) {
 				t.Errorf("an unforwarded reply is %v, want status=%s", body, tc.wantStatus)
 			}
 		})
+	}
+}
+
+// A cooperative cancel to a chain whose current run is closed for good (`done` or `cancelled`) is refused as the pre-emptive verbs are: 409 `state_conflict`, the answer a signal to it gets
+// (the coordinator's ruling on cleat#4340). The handler used writeStoreError for this path, which has no 409 for it, so the store's refusal would have come out as a 500.
+func TestACooperativeCancelToAClosedChainAnswers409StateConflictAndOtherErrorsStayWhatTheyWere(t *testing.T) {
+	post := func(err error) (int, map[string]string) {
+		ms := &mockStore{}
+		ms.requestCancellationFn = func(context.Context, string, string) error { return err }
+		api := newTestAPIServer(ms)
+		req := httptest.NewRequest(http.MethodPost, "/api/workflows/wf-old/cancel", strings.NewReader(`{}`))
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		api.handleCancel(w, req, "wf-old")
+		var body map[string]string
+		_ = json.Unmarshal(w.Body.Bytes(), &body)
+		return w.Code, body
+	}
+
+	refusal := engine.ErrAdminStateConflict
+	code, body := post(fmt.Errorf("workflow wf-old: continued as new, and its current run wf-end is already settled (status=done); refusing to write a cancellation request over it: %w", refusal))
+	if code != http.StatusConflict || body["detail"] != "state_conflict" {
+		t.Errorf("a closed chain's refusal answered %d %v, want 409 with detail=state_conflict", code, body)
+	}
+	if !strings.Contains(body["error"], "wf-end") {
+		t.Errorf("the 409 does not name the run that refused (wf-end): %v", body)
+	}
+
+	// CONTROL: an unrelated store failure is still a 500 that does not carry the driver's text, as before; so the mapping above is not "every error is a 409".
+	code, body = post(errors.New("driver: secret connection string"))
+	if code != http.StatusInternalServerError {
+		t.Errorf("an unrelated failure answered %d, want 500", code)
+	}
+	for _, v := range body {
+		if strings.Contains(v, "secret connection string") {
+			t.Errorf("the 500 leaks the driver's text: %v", body)
+		}
+	}
+	// CONTROL: accepted still answers 200 cancellation_requested.
+	code, body = post(nil)
+	if code != http.StatusOK || body["status"] != "cancellation_requested" {
+		t.Errorf("an accepted request answered %d %v, want 200 cancellation_requested", code, body)
 	}
 }

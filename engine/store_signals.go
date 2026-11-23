@@ -42,6 +42,16 @@ func (s *PostgresStore) requestCancellationTo(ctx context.Context, workflowID, r
 	if settled != nil {
 		*settled = end
 	}
+	// The end's status, under the lock lockChainEndTx took. An end that does not exist for this tenant falls through to the update, which matches nothing, as before.
+	var endStatus string
+	switch err := tx.QueryRowContext(ctx, `SELECT status FROM workflow_leases WHERE id = $1 AND tenant_id = $2`, end, s.tenantID).Scan(&endStatus); {
+	case err == nil:
+		if refusal := cooperativeRefusal(workflowID, end, endStatus); refusal != nil {
+			return refusal
+		}
+	case !errors.Is(err, sql.ErrNoRows):
+		return fmt.Errorf("request cancellation: read the end's status: %w", err)
+	}
 	workflowID = end
 
 	// cleat#2312: cancellation_reason is sensitive-at-rest.

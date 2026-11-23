@@ -38,6 +38,17 @@ type SettleReceiptStore interface {
 	RequestCancellationReceipt(ctx context.Context, workflowID, reason string) (SettleReceipt, error)
 }
 
+// cooperativeRefusal is the error for a cooperative cancel whose chain END is closed for good (`done` or `cancelled`), or nil when the request can be stored. It is the rule signals
+// follow (closedForGood, signal_target_settled.go): a request stored on a run no one will ever run again is read by no one, and answering 200 for it was the same silent loss a signal
+// had. A redrivable end (`failed`, `terminated`, `dead_lettered`) accepts, as a signal does, because an operator can reopen it under the same id and the request is then read.
+// The refusal is the pre-emptive verbs' own (ErrAdminStateConflict, 409 state_conflict), naming the end when the addressed run had continued.
+func cooperativeRefusal(addressed, end, status string) error {
+	if !closedForGood(status) {
+		return nil
+	}
+	return settledRefusal(addressed, end, status, "a cancellation request")
+}
+
 // settledRefusal is the error for a verb that found the END of the addressed run's chain already settled. For the addressed run itself the text is what it always was; for a run
 // that continued it names the end, so the caller is not told "already settled" about a run that went on and is not the one that refused.
 func settledRefusal(addressed, end, status, finalStatus string) error {

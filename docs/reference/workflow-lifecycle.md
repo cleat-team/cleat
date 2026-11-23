@@ -77,10 +77,24 @@ row on PostgreSQL, its instance row on MySQL and SQL Server), so either the canc
 successor is created**, or the continue commits first and the verb walks to the successor and settles that. A cooperative
 cancel **already requested on a run when it continues** is **carried to its successor**, with its reason, in the transaction
 that completes the old run; before this a successor was created un-cancelled and the request was lost to a guest that had
-never looked at it. A chain whose **current run** is already settled refuses as before (409 `state_conflict`), and the
-message now names the run that refused: `workflow A: continued as new, and its current run B is already settled
-(status=done); ...`. A `dead_lettered` current run is still taken off the queue by terminate. The same sharding issue as
-for signals applies, and is not about these verbs.
+never looked at it.
+
+**What a chain's current run being already over means, per verb.** The rule is a signal's: a run that is **closed for
+good** (`done`, `cancelled`) refuses, and one that an operator can reopen under the same id (`failed`, `terminated`,
+`dead_lettered`) accepts, because a request stored on it is then read. The refusal is `409 {"detail":"state_conflict"}`
+and names the run that refused when the one you addressed had continued: `workflow A: continued as new, and its current
+run B is already settled (status=done); ...`.
+
+| current run is | pre-emptive cancel | terminate | cooperative cancel |
+|---|---|---|---|
+| open (`ready`, `running`, ...) | acts | acts | stores the request |
+| `done` | 409 | 409 | **409** (was `200`, and the request was read by no one) |
+| `cancelled` | 409 | 409 | **409** (was `200`) |
+| `failed` | 409 | 409 | stores the request |
+| `terminated` | 409 | 409 | stores the request |
+| `dead_lettered` | 409 | **acts** (the route exists to take it off the queue) | stores the request |
+
+The same sharding issue as for signals applies, and is not about these verbs.
 
 **A signal is addressed to a workflow, and reaches whichever run of it is live; one to a run that can never be reopened
 is refused.** cleat#4340. A workflow that continues as new is the same workflow to its sender, so a signal sent to

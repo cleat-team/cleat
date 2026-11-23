@@ -1446,6 +1446,16 @@ func (s *MSSQLStore) requestCancellationOnceTo(ctx context.Context, workflowID, 
 	if settled != nil {
 		*settled = end
 	}
+	// The end's status, under the lock lockChainEndTx took; see PostgresStore.requestCancellationTo.
+	var endStatus string
+	switch err := tx.QueryRowContext(ctx, `SELECT status FROM workflow_instances WHERE id = @p1 AND tenant_id = @p2`, end, s.tenantID).Scan(&endStatus); {
+	case err == nil:
+		if refusal := cooperativeRefusal(workflowID, end, endStatus); refusal != nil {
+			return refusal
+		}
+	case !errors.Is(err, sql.ErrNoRows):
+		return fmt.Errorf("request cancellation: read the end's status: %w", err)
+	}
 	workflowID = end
 
 	_, err = tx.ExecContext(ctx, `

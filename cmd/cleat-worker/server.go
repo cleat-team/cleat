@@ -1799,7 +1799,9 @@ func (s *apiServer) handleCancel(w http.ResponseWriter, r *http.Request, id stri
 		return rs.RequestCancellationReceipt(r.Context(), id, req.Reason)
 	}, func() error { return st.RequestCancellation(r.Context(), id, req.Reason) }, id)
 	if err != nil {
-		s.writeStoreError(w, r, err)
+		// A cancellation request to a chain whose current run is done or cancelled is refused as the pre-emptive verbs are (409 state_conflict), as a signal to it is (cleat#4340).
+		// Every other error is what writeStoreError did with it before.
+		s.handleAdminOpError(w, r, err)
 		return
 	}
 	s.writeJSON(w, 200, settleReply("cancellation_requested", id, rec))
