@@ -131,6 +131,11 @@ func TestPythonAnInstanceSharesAMemoryImage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("build_wasm.py failed:\n%s\n%v", out, err)
 	}
+	// The step must have RUN, whatever it decided: every outcome prints one "Dense data:" line. A build that never calls the step prints none, which on
+	// a layout that is already dense would otherwise pass the image check below with nothing having been tested (cleat-review2's mutant P1).
+	if !strings.Contains(string(out), "Dense data:") {
+		t.Fatalf("the build printed no 'Dense data:' line, so build_wasm.py never ran the dense-data step:\n%s", out)
+	}
 	acted := regexp.MustCompile(`Dense data: ([\d,]+) segments over ([\d.]+) MiB covered ([\d.]+) MiB \((\d+)%\)`).FindStringSubmatch(string(out))
 	if acted != nil {
 		t.Logf("REWRITE ACTED: the CPython module had %s segments covering %s MiB of %s MiB (%s%%), so wasmtime would have built no image", acted[1], acted[3], acted[2], acted[4])

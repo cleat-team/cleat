@@ -330,22 +330,28 @@ def densify_component(component: bytes) -> tuple[bytes, list[dict]]:
 
 
 def densify_output(path: str) -> int:
-    """Densify the component at ``path`` in place. Returns the bytes added; never fails the build for a shape it does not model."""
+    """Densify the component at ``path`` in place. Returns the bytes added; never fails the build for a shape it does not model.
+
+    EVERY outcome prints exactly one line that starts ``Dense data:`` (merged, not needed, or NOT rewritten and why), so that a build that never reached
+    this step is distinguishable from one that ran it and found nothing to do: python-sdk/tests/test_build_wasm_always_runs_the_dense_data_step.py and
+    engine/a_python_instance_shares_a_memory_image_linux_test.go both assert that line (cleat#4382, cleat-review2's mutant P1).
+    """
     try:
         with open(path, "rb") as f:
             original = f.read()
         dense, report = densify_component(original)
     except (NotDensifiable, IndexError) as e:
-        print(f"  Warning: the module's data layout was not rewritten ({e}); every Python workflow instance will copy the whole snapshot "
+        print(f"  Dense data: NOT rewritten ({e}); every Python workflow instance will copy the whole snapshot "
               "(about 12 MiB of memory each) instead of sharing it (cleat#4382).", file=sys.stderr)
         return 0
     if not report:
+        print("  Dense data: not needed; wasmtime already builds a shared memory image for every core module in this component.")
         return 0
     if shutil.which("wasm-tools"):
         check = subprocess.run(["wasm-tools", "validate", "-"], input=dense, capture_output=True)
         if check.returncode != 0:
-            print("  Warning: the rewritten component does not validate, so the original was kept: "
-                  f"{check.stderr.decode(errors='replace').strip()[:300]}", file=sys.stderr)
+            print("  Dense data: NOT rewritten (the rewritten component does not validate, so the original was kept: "
+                  f"{check.stderr.decode(errors='replace').strip()[:300]}).", file=sys.stderr)
             return 0
     tmp = path + ".dense"
     with open(tmp, "wb") as f:

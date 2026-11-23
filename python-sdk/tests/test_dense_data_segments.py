@@ -164,7 +164,7 @@ def test_the_build_step_keeps_the_original_and_says_so_when_it_cannot_parse(tmp_
     path.write_bytes(module)
     assert bw.densify_output(str(path)) == 0
     assert path.read_bytes() == module, "an unparseable module must be left exactly as it was"
-    assert "was not rewritten" in capsys.readouterr().err, "the cost of keeping the original must be said, not silent"
+    assert "Dense data: NOT rewritten" in capsys.readouterr().err, "the cost of keeping the original must be said, not silent"
 
 
 def test_the_build_step_rewrites_a_file_in_place_and_reports_it(tmp_path, capsys):
