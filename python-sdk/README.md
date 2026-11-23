@@ -82,7 +82,7 @@ places.
 - `current_run_id() -> str` -- the current run's unique ID
 
 ### Time & Random
-- `now() -> int` -- wall-clock time in ms since epoch
+- `now() -> int` -- wall-clock time in ms since epoch. **This is the replayable clock**: the same value on replay. Python's own monotonic clock is not (see below)
 - `random() -> int` -- deterministic random value (same on replay)
 - `version() -> int` -- workflow definition version
 - `min_version() -> int` -- minimum supported version
@@ -324,7 +324,7 @@ These modules are partially available with documented restrictions:
 | `pathlib` | ⚠️ Limited | Path manipulation works **once `pathlib` is imported at the top level** (it is not in the component otherwise, see the rule above). No real filesystem I/O (`read_text`, `write_text`, etc.) |
 | `random` | ⚠️ Limited | Basic PRNG works. Use `h.random()` for deterministic workflow randomness instead |
 | `json` | ✅ Fully available, see above | |
-| `time` | ⚠️ Limited | `time.time()` works. `time.sleep()` is not available (use `h.sleep()`) |
+| `time` | ⚠️ Limited | `time.time()` works. `time.sleep()` runs and really sleeps (measured: a 0.5 s sleep took 524 ms), blocks its execution for its whole duration and is **not interrupted by the instance timeout** (cleat#4403); `cleat vet` refuses it, use `h.sleep()`. **`time.monotonic()`, `monotonic_ns()`, `perf_counter()` and `perf_counter_ns()` read the host's real clock, which replay does not reproduce** (measured: two runs of one workflow id read 0.5029 and 0.5021 s for the same `time.sleep(0.5)`); `cleat vet` warns (PY016); use `h.now()` and subtract two readings |
 
 ### Imports, but `cleat vet` refuses it in workflow code
 

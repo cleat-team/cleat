@@ -82,7 +82,7 @@ harmless and a source check cannot tell the two apart.
 pins the wall clock to the workflow's start time and seeds entropy from the workflow's identity, and a run under a
 different identity gets different values. `h.Now()` and `h.Random()` are the explicit forms and remain the clearer choice.
 This section said the opposite until cleat#4080, and it was wrong for the same reason cleat#4078 fixed: the shadows reach
-every WASI minor a C# toolchain emits. **Monotonic clocks are not pinned**: `Stopwatch` returns a different value on every run, and `Environment.TickCount64`
+every WASI minor a C# toolchain emits. **Monotonic clocks are not pinned, in any language** (see `docs/determinism.md`, "The monotonic clock is real elapsed time"): `Stopwatch` returns a different value on every run, and `Environment.TickCount64`
 (a few milliseconds since the instance started) differs from its replay in most runs and coincides in some, so the vet
 refuses both. `Thread.Sleep` really sleeps (it holds the worker and is not
 durable), `Task.Run`, `Task.Factory.StartNew`, `Task.Delay`, `.Wait()` and `new Thread` throw `PlatformNotSupportedException`, and `Task.Yield`
