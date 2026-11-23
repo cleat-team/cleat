@@ -182,10 +182,11 @@ type componentPrecompiler struct {
 	// childInstructionLimit overrides what the child is told, for a test that makes the child's fuel setting disagree with the worker's.
 	childInstructionLimit *uint64
 
-	childCompiles atomic.Int64 // components served from a child's artifact
-	fallbacks     atomic.Int64 // misses where the child path failed and the worker compiled in-process
-	refusals      atomic.Int64 // misses refused because the child was killed (see ComponentCompileRefusedError)
-	spawns        atomic.Int64 // children started
+	childCompiles atomic.Int64        // components served from a child's artifact
+	fallbacks     atomic.Int64        // misses where the child path failed and the worker compiled in-process
+	onFallback    func(reason string) // set once, before the precompiler is shared; nil is none
+	refusals      atomic.Int64        // misses refused because the child was killed (see ComponentCompileRefusedError)
+	spawns        atomic.Int64        // children started
 
 	memLimit uint64
 	window   time.Duration
@@ -369,6 +370,28 @@ func (p *componentPrecompiler) refuse(key string, cause error, left time.Duratio
 // compileComponentMiss is acquireComponent's compile step. It returns the component and whether it was compiled IN THIS PROCESS, which is what componentCache.compiles counts. With a precompiler
 // configured it tries the child first and falls back to the in-process compile on any failure, logged and counted, never returned as an error.
 func (b *wasmtimeBackend) compileComponentMiss(key string, wasmBytes []byte) (*C.wasmtime_component_t, bool, error) {
+	// ONE compile at a time per worker, child or in-process (cleat-team/cleat#4397 follow-up): see componentCompileSem. A refusal that needs no compile is answered first, below, without waiting.
+	if p := b.precompiler; p != nil {
+		if left, refused := p.refusalFor(key); refused {
+			err := p.refuse(key, nil, left, true)
+			b.log().Warn("component compile refused without trying: its precompile child was killed within the refusal window", "retry_after", left.Round(time.Second))
+			return nil, false, err
+		}
+	}
+	// A component refused for want of memory within the window is answered the same way without waiting for a turn or reading the memory again.
+	if h := b.compileHeadroom; h != nil {
+		if left, refused := h.refusalFor(key); refused {
+			return nil, false, h.refusal(0, h.needFor(len(wasmBytes)), true, left)
+		}
+	}
+	if sem := b.componentCompileSem; sem != nil {
+		start := time.Now()
+		sem <- struct{}{}
+		defer func() { <-sem }()
+		if w := time.Since(start); w >= time.Second {
+			b.log().Info("component compile waited for another compile to finish", "waited", w.Round(time.Millisecond))
+		}
+	}
 	if p := b.precompiler; p != nil {
 		if left, refused := p.refusalFor(key); refused {
 			// One attempt per component per window: a run released for retry must not respawn a child that was just killed.
@@ -393,9 +416,59 @@ func (b *wasmtimeBackend) compileComponentMiss(key string, wasmBytes []byte) (*C
 				"memory_limit_mib", p.memLimit>>20, "parallel_compilation", p.parallel, "retry_after", p.window.Round(time.Second), "error", refusal)
 			return nil, false, refusal
 		}
-		p.fallbacks.Add(1)
-		b.log().Warn("component precompile in a child failed; compiling in this process", "error", err)
+		n := p.fallbacks.Add(1)
+		reason := precompileFallbackReason(err)
+		if p.onFallback != nil {
+			p.onFallback(reason)
+		}
+		b.log().Warn("component precompile in a child failed; compiling in this process, one component at a time. Every such compile costs this worker the memory a compile retains "+
+			"(198 to 308 MiB for each of the first four further distinct Python components and 44 to 76 for each of the next three (mean 175)). The cause is in error: a timeout means --component-precompile-timeout (default "+DefaultComponentPrecompileTimeout.String()+") or a loaded node, an exit or an "+
+			"artifact error means the child could not run or write (is the system temp directory writable and not full?), and the worker's own binary is the child, so a binary replaced under a running worker "+
+			"does it. Counted on cleat_component_precompile_fallbacks_total{reason}. To compile in this process on purpose, set --component-precompile=false",
+			"reason", reason, "fallbacks_total", n, "error", err)
 	}
-	comp, err := componentCompile(b.engine, wasmBytes)
+	// The compile below runs in THIS process: the fallback after a child that failed, or every compile with precompile off. Look at the memory left NOW, inside our turn, so the compile
+	// ahead of us has already kept what it keeps.
+	if h := b.compileHeadroom; h != nil {
+		refusal, unreadable := h.check(key, len(wasmBytes))
+		if refusal != nil {
+			var ref *ComponentCompileRefusedError
+			if errors.As(refusal, &ref) {
+				b.log().Error("component not compiled in this process: not enough memory left; returning the run to the queue and keeping the components already compiled running",
+					"headroom_mib", ref.HeadroomBytes>>20, "needed_mib", ref.NeededBytes>>20, "memory_limit_mib", ref.MemoryLimitBytes>>20, "retry_after", ref.RetryAfter.Round(time.Second), "reason", ref.Reason)
+			}
+			return nil, false, refusal
+		}
+		if unreadable && h.unreadable.CompareAndSwap(false, true) {
+			b.log().Warn("the memory left in this container could not be read, so an in-process component compile is not checked against it")
+		}
+	}
+	comp, err := componentCompileFunc(b.engine, wasmBytes)
 	return comp, true, err
 }
+
+// precompileFallbackReason names the stage of a failed child compile for a metric label, from the error p.compile built: a small closed set, never the error text.
+func precompileFallbackReason(err error) string {
+	msg := err.Error()
+	switch {
+	case strings.HasPrefix(msg, "child: timed out"):
+		return "timeout"
+	case strings.HasPrefix(msg, "child:"):
+		return "child_exit"
+	case strings.HasPrefix(msg, "record:"):
+		return "record"
+	case strings.HasPrefix(msg, "artifact:"):
+		return "artifact"
+	case strings.HasPrefix(msg, "deserialize:"):
+		return "deserialize"
+	case strings.HasPrefix(msg, "workdir:"), strings.HasPrefix(msg, "write input:"):
+		return "workdir"
+	}
+	return "other"
+}
+
+// componentCompileFunc is the in-process compile; a variable only so a test can count how many run at once.
+var componentCompileFunc = componentCompile
+
+// componentHandle names the compiled component for a test, which cannot import "C".
+type componentHandle = *C.wasmtime_component_t

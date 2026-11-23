@@ -2297,7 +2297,11 @@ func main() {
 	// option -- it could not fence a compute-bound guest, so silently
 	// running on it was a safety-relevant degradation no operator asked for.
 	// The options it is built with are wasmtimeOptionsFromFlags.
-	wt, wasmtimeErr := engine.NewWasmtimeBackend(ctx, wasmtimeOptionsFromFlags(logger)...)
+	wt, wasmtimeErr := engine.NewWasmtimeBackend(ctx, append(wasmtimeOptionsFromFlags(logger),
+		// Counts each component a failed precompile child sent back to this worker to compile itself (cleat_component_precompile_fallbacks_total).
+		engine.WithWasmtimeComponentPrecompileFallbackHook(func(reason string) {
+			metricsInstance.RecordComponentPrecompileFallback(context.Background(), reason)
+		}))...)
 	if wasmtimeErr != nil {
 		logger.ErrorContext(context.Background(), "wasmtime backend failed to initialize; wasmtime is the only WASM backend cleat has, there is no fallback", "worker_id", workerID, "error", wasmtimeErr)
 		os.Exit(1)
@@ -3207,7 +3211,7 @@ func applyEngineGlobalsFromFlags() {
 // and StoreLimits (memory/table/instance ceilings), plus optional fuel-based instruction metering when --wasm-instruction-limit is set.
 // The memory limit is the flag's value, or the engine's default (256 MiB) for 0: see wasmtimeMemoryLimitBytes.
 func wasmtimeOptionsFromFlags(logger *slog.Logger) []engine.WasmtimeOption {
-	return append(componentPrecompileOptionFromFlags(logger), []engine.WasmtimeOption{
+	return append(append(componentPrecompileOptionFromFlags(logger), compileHeadroomOptionFromFlags(logger)...), []engine.WasmtimeOption{
 		engine.WithWasmtimeExecutionTimeout(*wasmInstanceTimeout),
 		engine.WithWasmtimeInstructionLimit(uint64(*wasmInstructionLimit)),
 		engine.WithWasmtimeMemoryLimits(wasmtimeMemoryLimitBytes(*wasmMemoryMaxMB), 0, 0),
@@ -3221,7 +3225,7 @@ func wasmtimeOptionsFromFlags(logger *slog.Logger) []engine.WasmtimeOption {
 	}...)
 }
 
-// componentPrecompileOptionFromFlags enables compiling components in a child process when --component-precompile is set (EXPERIMENTAL, off by default). The child is THIS binary, found with
+// componentPrecompileOptionFromFlags compiles components in a child process unless --component-precompile=false (ON by default since 0.6.0). The child is THIS binary, found with
 // os.Executable and resolved once, here, to an absolute path: never a PATH lookup, so it is guaranteed to be the same build and the same engine-config code. If the path cannot be resolved the
 // feature is left off and says so; the worker compiles in-process, as it always did.
 func componentPrecompileOptionFromFlags(logger *slog.Logger) []engine.WasmtimeOption {
@@ -3233,7 +3237,7 @@ func componentPrecompileOptionFromFlags(logger *slog.Logger) []engine.WasmtimeOp
 		exe, err = filepath.EvalSymlinks(exe)
 	}
 	if err != nil || !filepath.IsAbs(exe) {
-		logger.Warn("--component-precompile is set but the worker's own executable could not be resolved to an absolute path; compiling in-process", "error", err)
+		logger.Warn("--component-precompile is on but the worker's own executable could not be resolved to an absolute path; compiling in-process", "error", err)
 		return nil
 	}
 	if msg := oomGroupWarning(readOOMGroup()); msg != "" {
@@ -3245,7 +3249,7 @@ func componentPrecompileOptionFromFlags(logger *slog.Logger) []engine.WasmtimeOp
 	}
 	parallel, reason, err := resolvePrecompileParallel(*componentPrecompileParallel, total)
 	if err != nil {
-		logger.Warn("--component-precompile is set but its parallel setting is not usable; compiling in-process", "error", err)
+		logger.Warn("--component-precompile is on but its parallel setting is not usable; compiling in-process", "error", err)
 		return nil
 	}
 	logger.Info("component precompile in a child process is ON", "parallel_compilation", parallel, "why", reason, "child", exe)

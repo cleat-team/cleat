@@ -1153,7 +1153,11 @@ on every call.
 
 | Type | Default | Description |
 |------|---------|-------------|
-| bool | `false` | **EXPERIMENTAL (0.6.0).** Compile a Component Model component (a Python or C# workflow) in a short-lived child process of this binary, and load the serialized result |
+| bool | `true` | **ON by default since 0.6.0; `--component-precompile=false` turns it off.** Compile a Component Model component (a Python or C# workflow) in a short-lived child process of this binary, and load the serialized result, one component at a time per worker |
+
+**Why it is the default.** Measured 2026-11-23 on a real worker in a container limited to 2 GiB, the stock flags, nine distinct Python components (one run of each configuration, one arm64 machine, x86-64 not measured; the components differ in code and data but share the CPython runtime, so each is a different cache key with a near-identical compile cost). **Compiling in the worker** retained 198 to 308 MiB for each of the first four further distinct components and 44 to 76 for each of the next three (mean 175) (anonymous memory after each of eight fills: 533, 836, 1034, 1277, 1585, 1661, 1716 and 1760 MiB) and the container was **killed by the out-of-memory killer** when it then compiled a ninth (peak 2013 of 2048 MiB); the same limit with a fresh worker and six distinct components arriving at once was killed within 17 seconds, because six first compiles ran at once. **With this flag** the same nine components, 60 held-eligible runs and a ninth compile all completed, with a container peak of **1159 MiB** and no kill, and the six-at-once start completed in 41 seconds at a peak of 1425 MiB.
+
+**A worker compiles one component at a time**, in the child or in the worker (a fallback below), so a burst of runs of distinct components queues instead of compiling together. Before 0.6.0 only runs of the *same* component waited for each other.
 
 **What it is for.** The first compile of a Python workflow raises the worker's
 resident memory by about 490 MiB, and most of it stays resident for the life of
@@ -1205,7 +1209,14 @@ memory limit, the compile mode and the fix, and counts it on
 `cleat_workflow_releases_total{check="component_compile_refused",memory_limit_mib,parallel_compilation}`:
 a rate on that check is the alert. Every *other* child failure (cannot start,
 times out, exits non-zero, writes an artifact the worker will not accept) is
-logged and falls back to the in-process compile.
+logged as a WARN and falls back to the in-process compile, **one at a time like any other compile**, and is counted on
+`cleat_component_precompile_fallbacks_total{reason}` (`timeout`, `child_exit`, `record`, `artifact`, `deserialize`, `workdir` or `other`).
+**A rate on that counter means the flag is not protecting the worker's memory**: each fallback retains what an in-process compile retains (about
+up to about 300 MiB (198 to 308 for each of the first four further components, then 44 to 76) per distinct Python component), so a child that fails systematically makes this the same as `--component-precompile=false`. The WARN
+carries the error and says where to look: a timeout means `--component-precompile-timeout` (default 5 minutes) or a loaded node, and an exit or an
+artifact error means the child could not run or write, so check that the system temp directory is writable and not full, and that the binary has not been replaced
+under the running worker (the child is the worker's own binary). A timeout is treated as an ordinary failure and not as a kill, so a merely slow child
+reaches this fallback unforced.
 
 **"The worker stays up" is measured on Docker, where `memory.oom.group` is 0**
 (an out-of-memory kill takes one process). Where it is 1, the kill takes every
@@ -1227,6 +1238,30 @@ Kubernetes `emptyDir` with `medium: Memory`, for instance) the 46 MB artifact is
 in the same cgroup as the compile and counts against the limit while it exists.
 
 The child is this binary, found with `os.Executable` and resolved once at start-up.
+
+### --component-compile-min-headroom-mb
+
+| Type | Default | Description |
+|------|---------|-------------|
+| int (MB) | `800` | The most memory a container must have left for this worker to compile a Component Model component **in its own process**: the need of a Python-sized component. A smaller component needs proportionally less, down to 256 MB. Below the need the run is released, not failed. `0` turns the check off |
+
+**What it is for.** A compile in the worker costs about 500 MiB of scratch while it runs and the worker keeps up to about 300 MiB of it for good (198 to 308 for each of the first four further components, then 44 to 76), for each distinct Python component. Serialising compiles (a worker compiles one component at a time) removes the simultaneous peak and **not that retention**, so a worker that compiles in its own process runs out of memory after about six distinct Python components at a 2 GiB limit, and gets killed with every run it holds. Measured 2026-11-23 in a 2 GiB container: with the check absent, a seventh distinct component compiled in the worker sat at the limit in one run (anonymous memory 1863 of 2048 MiB) and killed the container in another.
+
+**What it does.** Before a compile in the worker (the fallback after a `--component-precompile` child failed for an ordinary reason, and every compile when `--component-precompile=false`) the worker reads the memory the container has left, from the same cgroup v2 reading as `--memory-soft-limit`: the level with the least headroom on the worker's own cgroup path. If that is below this figure it **does not compile**: the run is **released** (it stays `ready`, retried after `--component-precompile-refusal-window`, possibly on another worker), the worker logs an ERROR with the memory left and the memory needed, and counts `cleat_workflow_releases_total{check="component_compile_refused",reason="low_headroom"}` (a killed child is `reason="child_killed"`). **Components already compiled keep running**, so the worker degrades instead of being killed. **This is a degraded mode, not a full-speed one:** a worker under memory pressure that meets a new component refuses it until memory comes back or another worker takes it.
+
+**A refusal usually lasts until a restart or a larger limit.** Memory a worker compiled with in its own process stays with that process (the allocator keeps it, and wasm memory never shrinks), so the memory does not come back by waiting. A refused run is retried after the window and refused again for as long as the container is short; what ends it is restarting the worker, raising its memory limit, or another worker taking the run. Keep `--component-precompile` on, so compiles run in a child that returns its memory, and the question does not arise for the components it compiles.
+
+**What a compile is judged to need depends on the component.** Measured 2026-11-23 on a real worker (arm64 Linux), in a 2 GiB container, with `--component-precompile=false` and one compile at a time. The figures are the container's own `memory.current`: the peak is the highest value above the level before the compile, and what is retained is what was still there 4 seconds after it.
+
+| component | wasm | first compile in the process | each further distinct compile |
+|---|---|---|---|
+| C# (a small workflow, 6 variants) | 1.0 MiB | peak +118, retained +70 (includes the engine's own start-up) | peak +11 to +23, retained +9 to +23 |
+| C# (the conformance guest, 6 variants) | 2.8 MiB | peak +60, retained +60 | peak +33 to +42 (once +3), retained +33 to +41 |
+| Python | 17.6 to 19.5 MiB | peak +486 to +512 (RSS) | retained +185 to +268 (RSS); 198 to 308 for each of the first four further components and 44 to 76 after, in the 2 GiB container |
+
+So the need is the component's wasm length times 42 bytes, at least 256 MiB and at most the flag (800 by default): about 800 MiB for a 19.5 MiB Python component, 256 MiB for a small C# one (twice the largest C# peak measured, which is the first compile of a process). It is a fit through two measured languages. The C# variants are one set of code stamped with different metadata, so each is a different cache key with the same compile cost; a fleet of different C# libraries would cost more. The Python figures are the component-memory measurements and the 2 GiB run (anonymous memory after each of eight distinct compiles: 533, 836, 1034, 1277, 1585, 1661, 1716 and 1760 MiB). x86-64 is not measured.
+
+**With no cgroup v2 limit** the reading is the host's available memory (`/proc/meminfo`), which a container limited another way can exceed; the worker warns at start-up and the check then means less. If the memory cannot be read at all the check is off and the worker warns.
 
 ### --component-precompile-parallel
 
