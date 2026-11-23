@@ -72,6 +72,26 @@ func TestTheAvailableMemoryIsReadFromTheMostSpecificSourceFirst(t *testing.T) {
 		{"a v1 limit at or above the host's memory is no limit", map[string]string{"sys/fs/cgroup/memory/memory.limit_in_bytes": "137438953472\n", "proc/meminfo": meminfo(host >> 10)}, nil, host, memSourcePhysical, true},
 		{"a v2 limit above the host's memory is no limit", map[string]string{"sys/fs/cgroup/memory.max": "137438953472\n", "proc/meminfo": meminfo(host >> 10)}, nil, host, memSourcePhysical, true},
 		{"v2 wins over v1 when both are there", map[string]string{"sys/fs/cgroup/memory.max": "2147483648\n", "sys/fs/cgroup/memory/memory.limit_in_bytes": "1073741824\n", "proc/meminfo": meminfo(host >> 10)}, nil, 2 * gib, memSourceCgroupV2, false},
+		// cleat-review3's case, measured: docker run --memory 512m --cgroupns=host. The mount's root says "max" and the container's own limit is at its path.
+		{"host cgroup namespace: the limit is on the process's own cgroup, not the root", map[string]string{
+			"proc/self/cgroup": "0::/docker/abc\n", "sys/fs/cgroup/memory.max": "max\n", "sys/fs/cgroup/docker/abc/memory.max": "536870912\n", "proc/meminfo": meminfo(host >> 10)}, nil, 512 << 20, memSourceCgroupV2, false},
+		{"a parent's limit bounds the child when the child's is max", map[string]string{
+			"proc/self/cgroup": "0::/a/b\n", "sys/fs/cgroup/a/memory.max": "1073741824\n", "sys/fs/cgroup/a/b/memory.max": "max\n", "proc/meminfo": meminfo(host >> 10)}, nil, 1 * gib, memSourceCgroupV2, false},
+		{"the tightest of child and parent wins (child tighter)", map[string]string{
+			"proc/self/cgroup": "0::/a/b\n", "sys/fs/cgroup/a/memory.max": "4294967296\n", "sys/fs/cgroup/a/b/memory.max": "2147483648\n", "proc/meminfo": meminfo(host >> 10)}, nil, 2 * gib, memSourceCgroupV2, false},
+		{"the tightest of child and parent wins (parent tighter)", map[string]string{
+			"proc/self/cgroup": "0::/a/b\n", "sys/fs/cgroup/a/memory.max": "1073741824\n", "sys/fs/cgroup/a/b/memory.max": "2147483648\n", "proc/meminfo": meminfo(host >> 10)}, nil, 1 * gib, memSourceCgroupV2, false},
+		{"a private cgroup namespace: the path is / and the root is the container", map[string]string{
+			"proc/self/cgroup": "0::/\n", "sys/fs/cgroup/memory.max": "536870912\n", "proc/meminfo": meminfo(host >> 10)}, nil, 512 << 20, memSourceCgroupV2, false},
+		{"cgroup v1, host namespace: the memory controller's own path", map[string]string{
+			"proc/self/cgroup": "12:cpu,cpuacct:/docker/abc\n4:memory:/docker/abc\n", "sys/fs/cgroup/memory/memory.limit_in_bytes": "9223372036854771712\n",
+			"sys/fs/cgroup/memory/docker/abc/memory.limit_in_bytes": "536870912\n", "proc/meminfo": meminfo(host >> 10)}, nil, 512 << 20, memSourceCgroupV1, false},
+		{"a removed cgroup's (deleted) suffix is ignored", map[string]string{
+			"proc/self/cgroup": "0::/docker/abc (deleted)\n", "sys/fs/cgroup/docker/abc/memory.max": "536870912\n", "proc/meminfo": meminfo(host >> 10)}, nil, 512 << 20, memSourceCgroupV2, false},
+		{"a path that tries to leave the mount is held inside it (the file outside is never read)", map[string]string{
+			"proc/self/cgroup": "0::/../../../etc\n", "etc/memory.max": "1024\n", "sys/fs/cgroup/memory.max": "max\n", "proc/meminfo": meminfo(host >> 10)}, nil, host, memSourcePhysical, true},
+		{"every level says max: no limit, physical, with the warning", map[string]string{
+			"proc/self/cgroup": "0::/docker/abc\n", "sys/fs/cgroup/memory.max": "max\n", "sys/fs/cgroup/docker/abc/memory.max": "max\n", "proc/meminfo": meminfo(host >> 10)}, nil, host, memSourcePhysical, true},
 		{"no cgroup at all: meminfo", map[string]string{"proc/meminfo": meminfo(host >> 10)}, nil, host, memSourcePhysical, true},
 		{"no cgroup and no /proc (macOS): the platform's own figure", map[string]string{}, func() (uint64, bool) { return 16 * gib, true }, 16 * gib, memSourcePhysical, true},
 	}
@@ -224,5 +244,13 @@ func TestAPercentageOfZeroTurnsResidencyOff(t *testing.T) {
 	on, _ := buildPolicy(t, root, map[string]string{"resident-memory-percent": "1"})
 	if on.maxRuns != 1024 || on.budget != 21474836 {
 		t.Errorf("--resident-memory-percent 1 gave %+v, want 1024 runs and 1%% of 2 GiB", on)
+	}
+}
+
+func TestAncestorsListThePathAndEveryParentUpToTheRootDeepestFirst(t *testing.T) {
+	for in, want := range map[string]string{"/": "/", "/a": "/a/ /", "/a/b": "/a/b/ /a/ /", "/docker/abc": "/docker/abc/ /docker/ /"} {
+		if got := strings.Join(ancestors(in), " "); got != want {
+			t.Errorf("ancestors(%q) = %q, want %q", in, got, want)
+		}
 	}
 }
