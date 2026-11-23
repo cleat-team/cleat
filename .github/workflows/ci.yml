@@ -4829,12 +4829,14 @@ jobs:
           }
           accepts "the defaults"
           accepts "a limit and a request set together" --set resources.limits.memory=512Mi --set resources.requests.memory=256Mi
-          accepts "a limit equal to the default request" --set resources.limits.memory=1Gi
+          accepts "a limit equal to the default request" --set resources.limits.memory=2Gi
+          accepts "a smaller limit with its own request" --set resources.limits.memory=1Gi --set resources.requests.memory=1Gi
+          refuses "limits.memory=1Gi set alone (the default request is 2Gi)" "resources.requests.memory" --set resources.limits.memory=1Gi
           accepts "a quantity the guard cannot parse (never compared)" --set resources.limits.memory=1e3
           refuses "limits.memory=512Mi set alone" "resources.requests.memory" --set resources.limits.memory=512Mi
           refuses "limits.cpu=250m set alone" "resources.requests.cpu" --set resources.limits.cpu=250m
           refuses "requests.memory=4Gi set alone" "resources.limits.memory" --set resources.requests.memory=4Gi
-          refuses "limits.memory=1G (1e9, below the 1Gi request)" "resources.requests.memory" --set resources.limits.memory=1G
+          refuses "limits.memory=1G (1e9, below the 2Gi request)" "resources.requests.memory" --set resources.limits.memory=1G
           exit $fail
 
       # A scratch, unauthenticated registry -- this job has no ghcr.io

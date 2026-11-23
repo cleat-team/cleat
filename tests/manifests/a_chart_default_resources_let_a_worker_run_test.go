@@ -82,6 +82,25 @@ func TestTheChartsDefaultResourcesLetAWorkerRun(t *testing.T) {
 	}
 }
 
+// The owner's decision, 2026-11-23: a worker RESERVES its memory, so the memory request equals the limit, in the chart and in both raw manifests. Pinned as
+// equality and not as 2Gi: the number is values.yaml's, and the rule is the decision.
+func TestAWorkersMemoryRequestEqualsItsLimit(t *testing.T) {
+	values := loadChartValues(t)
+	req, rok := resourceValue(t, values, "requests", "memory")
+	lim, lok := resourceValue(t, values, "limits", "memory")
+	if !rok || !lok || req != lim {
+		t.Errorf("charts/cleat/values.yaml: requests.memory = %v, limits.memory = %v; a worker reserves its memory, so they must be equal (rok=%v lok=%v)", req, lim, rok, lok)
+	}
+	for _, tc := range []struct{ path, kind string }{{"../../k8s/deployment.yaml", "Deployment"}, {"../../k8s/migrate-job.yaml", "Job"}} {
+		r := containerResources(t, tc.path, tc.kind)
+		rq, _ := r["requests"].(map[string]any)
+		lm, _ := r["limits"].(map[string]any)
+		if quantity(t, rq["memory"]) != quantity(t, lm["memory"]) {
+			t.Errorf("%s: requests.memory = %v, limits.memory = %v; they must be equal", tc.path, rq["memory"], lm["memory"])
+		}
+	}
+}
+
 func TestTheDefaultAutoscalerScalesOnCPUAndNotOnMemory(t *testing.T) {
 	def := renderHPA(t, nil)
 	if !strings.Contains(def, "name: cpu") {

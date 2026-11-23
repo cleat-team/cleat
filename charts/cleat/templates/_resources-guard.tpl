@@ -2,7 +2,7 @@
   A resource REQUEST above its LIMIT is rejected by the Kubernetes API at apply time, and helm lint and helm template both pass it
   (cleat#4393). It is easy to do by accident: Helm deep-merges an install's values over the chart's, so
       --set resources.limits.memory=512Mi
-  alone leaves the chart's default requests.memory (1Gi) above the new 512Mi limit, and an install whose values were valid against the
+  alone leaves the chart's default requests.memory (2Gi) above the new 512Mi limit, and an install whose values were valid against the
   old defaults (a 128Mi request) is refused by `helm upgrade`. This turns that late API error into an early one that says what to set.
 
   It is a pure function of the resources map so a test can pin it. It returns the refusal message, or nothing.
@@ -34,7 +34,7 @@
 {{- $r := include "cleat.quantityValue" $req | float64 -}}
 {{- $l := include "cleat.quantityValue" $lim | float64 -}}
 {{- if and (ge $r 0.0) (ge $l 0.0) (gt $r $l) -}}
-resources.requests.{{ $name }} ({{ $req }}) is above resources.limits.{{ $name }} ({{ $lim }}), and Kubernetes rejects a pod whose request exceeds its limit. Helm merges your values over the chart's defaults, so setting only one of resources.requests.{{ $name }} and resources.limits.{{ $name }} leaves the other at the chart's default (requests: cpu 500m, memory 1Gi; limits: cpu 2, memory 2Gi): set BOTH, with the request at or below the limit. The defaults are in values.yaml, with what a worker needs.
+resources.requests.{{ $name }} ({{ $req }}) is above resources.limits.{{ $name }} ({{ $lim }}), and Kubernetes rejects a pod whose request exceeds its limit. Helm merges your values over the chart's defaults, so setting only one of resources.requests.{{ $name }} and resources.limits.{{ $name }} leaves the other at the chart's default (requests: cpu 500m, memory 2Gi; limits: cpu 2, memory 2Gi): set BOTH, with the request at or below the limit. The defaults are in values.yaml, with what a worker needs.
 {{- end -}}
 {{- end -}}
 {{- end -}}

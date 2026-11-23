@@ -201,10 +201,19 @@ auth:
 # for about ten seconds. The CPU REQUEST is what the autoscaler measures utilization against (see
 # autoscaling), so it is sized for a worker doing real work, not for an idle one.
 # The migration Job (templates/migrate-job.yaml) uses the same values.
+#
+# THE MEMORY REQUEST EQUALS THE LIMIT (2Gi), by the owner's decision (2026-11-23): a worker RESERVES its
+# memory. The scheduler sets 2Gi aside for it, it cannot be over-committed away, and because it can never use
+# more than it requested, node-pressure eviction ranks it behind every pod that does. (The pod's QoS class is
+# still Burstable, not Guaranteed, because the CPU request is below the CPU limit; that is on purpose, see
+# the CPU note above. From the Kubernetes documentation, not tested on a cluster.) The price is
+# scheduling: the default 2 replicas need 4 GiB of allocatable memory free, and the pre-upgrade migration
+# Job asks for another 2 GiB while the old pods are still running. Lower BOTH requests.memory and
+# limits.memory together for a smaller cluster.
 resources:
   requests:
     cpu: 500m
-    memory: 1Gi
+    memory: 2Gi
   limits:
     cpu: "2"
     memory: 2Gi
