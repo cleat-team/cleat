@@ -1506,6 +1506,19 @@ func (b *wasmtimeBackend) dispatchWasiWallClockResolution(
 	return nil
 }
 
+// dispatchWasiInsecureSeed handles wasi:random/insecure-seed#insecure-seed() -> tuple<u64, u64>: two draws of the workflow's seeded source, so a
+// guest that seeds a hash table or a PRNG from it gets the same pair on every replay of the workflow (cleat#4396).
+func (b *wasmtimeBackend) dispatchWasiInsecureSeed(
+	args *C.wasmtime_component_val_t, nargs C.size_t,
+	results *C.wasmtime_component_val_t, nresults C.size_t,
+) *C.wasmtime_error_t {
+	if b.handler == nil {
+		return nil
+	}
+	setResultU64Pair(results, nresults, uint64(b.handler.Random(context.Background())), uint64(b.handler.Random(context.Background())))
+	return nil
+}
+
 // dispatchWasiRandomU64 handles wasi:random/random#get-random-u64() -> u64.
 func (b *wasmtimeBackend) dispatchWasiRandomU64(
 	args *C.wasmtime_component_val_t, nargs C.size_t,
@@ -1728,7 +1741,9 @@ var wasiDeterminismInterfaces = map[string]map[string]cbType{
 		"get-insecure-random-u64":   cbTypeWasiRandomU64,
 	},
 	"wasi:random/insecure-seed": {
-		"insecure-seed": cbTypeWasiRandomU64,
+		// A tuple<u64, u64>, NOT a u64: registered as cbTypeWasiRandomU64 this trapped every guest that called it with "type mismatch:
+		// expected tuple, found u64" (cleat#4396, measured by the probe-insecure fixtures). It was in this table, so it read as shadowed.
+		"insecure-seed": cbTypeWasiRandomSeed,
 	},
 }
 

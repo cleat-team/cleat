@@ -190,6 +190,25 @@ package engine
 //     v->of.record.data = fields;
 // }
 //
+// // tuple<u64, u64>
+// //
+// // wasi:random/insecure-seed returns one, and a u64 where the component expects a tuple traps with "type mismatch: expected tuple, found
+// // u64" (cleat#4396). Same ownership as every other result here: wasmtime drops the tuple's elements and its vec recursively, so both are
+// // C-allocator heap.
+// static void component_val_set_u64_pair(wasmtime_component_val_t *v, uint64_t a, uint64_t b) {
+//     wasmtime_component_val_t *items =
+//         (wasmtime_component_val_t *)malloc(2 * sizeof(*items));
+//     if (items == NULL) { abort(); }   // dereferenced on the next line
+//     items[0].kind = WASMTIME_COMPONENT_U64;
+//     items[0].of.u64 = a;
+//     items[1].kind = WASMTIME_COMPONENT_U64;
+//     items[1].of.u64 = b;
+//
+//     v->kind = WASMTIME_COMPONENT_TUPLE;
+//     v->of.tuple.size = 2;
+//     v->of.tuple.data = items;
+// }
+//
 // // list<u8>
 // //
 // // A component list is a vec of wasmtime_component_val_t, not a byte buffer:
@@ -755,6 +774,7 @@ const (
 	cbTypeWasiWallClockResolution // () -> datetime
 	cbTypeWasiRandomU64           // () -> u64
 	cbTypeWasiRandomBytes         // (u64) -> list<u8>
+	cbTypeWasiRandomSeed          // () -> tuple<u64, u64>  (wasi:random/insecure-seed)
 	cbTypeDurableLog              // (string) -> u64
 
 	// durable-version interface
@@ -960,6 +980,16 @@ func setResultU64(results *C.wasmtime_component_val_t, nresults C.size_t, val ui
 	}
 	r := (*C.wasmtime_component_val_t)(unsafe.Pointer(results))
 	C.component_val_set_u64(r, C.uint64_t(val))
+}
+
+// setResultU64Pair sets the first result value to a WIT `tuple<u64, u64>`, which is what wasi:random/insecure-seed returns. Registering that
+// function with setResultU64 instead trapped every guest that called it ("type mismatch: expected tuple, found u64", cleat#4396).
+func setResultU64Pair(results *C.wasmtime_component_val_t, nresults C.size_t, a, b uint64) {
+	if int(nresults) < 1 {
+		return
+	}
+	r := (*C.wasmtime_component_val_t)(unsafe.Pointer(results))
+	C.component_val_set_u64_pair(r, C.uint64_t(a), C.uint64_t(b))
 }
 
 // setResultS64 sets the first result value to an s64. Use it for a function the
@@ -1480,6 +1510,8 @@ func goComponentCallback(
 		return entry.backend.dispatchWasiRandomU64(args, nargs, results, nresults)
 	case cbTypeWasiRandomBytes:
 		return entry.backend.dispatchWasiRandomBytes(args, nargs, results, nresults)
+	case cbTypeWasiRandomSeed:
+		return entry.backend.dispatchWasiInsecureSeed(args, nargs, results, nresults)
 	case cbTypeDurableLog:
 		return entry.backend.dispatchDurableLog(args, nargs, results, nresults)
 	case cbTypeVersion:
