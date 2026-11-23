@@ -134,12 +134,8 @@ var callStep = stepSpec{
 	// The guest decodes result<string, call-failure>: a divergence is answered in the durable-call layout (ABI.md, "Return packing" of cleat_call).
 	// AfterSuspend is left nil on purpose, as for every durable-call-family spec: the refusal after a suspension is the dispatcher's and answers the stop word.
 	Result: layoutDurableCall,
-	Identity: func(a stepArgs, rec *EventRecord) string {
-		if rec.Service != a.s1 || rec.Op != a.s2 {
-			return fmt.Sprintf("call %s.%s, recorded %s.%s", a.s1, a.s2, rec.Service, rec.Op)
-		}
-		return ""
-	},
+	// The service, the operation and the request body (callRequestIdentity, cleat#4424).
+	Identity:         func(a stepArgs, rec *EventRecord) string { return callRequestIdentity("call", a, rec) },
 	RecordsNothingOn: []string{callRecordsNothingCancelled, callRecordsNothingHeartbeat, callRecordsNothingHardStop, callRecordsNothingIntent},
 	// What the plain call printed on a divergence and docs/troubleshooting.md shows: the two request bodies (TestEngineReplayDivergence pins the labels).
 	DivergenceDetail: requestDivergenceDetail,
@@ -170,6 +166,26 @@ func (s *execSession) DurableCall(ctx context.Context, m api.Module, service, op
 // truncated at 4096 bytes and printed whole under it, and the labels are the same.
 func requestDivergenceDetail(a stepArgs, rec *EventRecord) string {
 	return fmt.Sprintf("\n  actual request: %s\n  expected request: %s", redactedBody(a.s3), redactedBody(rec.Request))
+}
+
+// callRequestIdentity is the Identity of the four durable-call specs that carry a request (call, call_with_retry, call_with_heartbeat, durable_send): the service and the
+// operation, and then the request body (cleat#4424). A call that asks the same service the same operation with a different body is not the recorded call, and until the
+// body was compared it was handed the recorded answer for the old one with no divergence; fetch has always compared its body. The body is the string the record carries, compared
+// as the same bytes or the same JSON value (sameRequest: ABI.md §6.7 promises cross-language replay, and two SDKs do not serialise one request alike), and a divergence names each
+// body by its size and a short hash and never prints it (redactedBody, cleat#4321).
+//
+// THE BODY IS COMPARED ONLY ON A RECORD THAT CARRIES ONE, and that is a limit of what is recorded, not a choice here. A call event and a send event carry the request. A
+// call_attempt_failed event does not, a heartbeat event does not, and a call_retry_refused event deliberately does not ("a request body is exactly the kind of value the
+// sealed-payload machinery exists for", freshCallWithRetry). So in a multi-record run the body is checked at the call that ends it, and a history that stops INSIDE the run (a
+// worker lost mid-policy, mid-call) is accepted on its service and operation alone, as it always was.
+func callRequestIdentity(verb string, a stepArgs, rec *EventRecord) string {
+	if rec.Service != a.s1 || rec.Op != a.s2 {
+		return fmt.Sprintf("%s %s.%s, recorded %s.%s", verb, a.s1, a.s2, rec.Service, rec.Op)
+	}
+	if (rec.EventType == EventTypeCall || rec.EventType == EventTypeDurableSend) && !sameRequest(rec.Request, a.s3) {
+		return fmt.Sprintf("%s %s.%s with a different request: %s, recorded %s", verb, a.s1, a.s2, redactedBody(a.s3), redactedBody(rec.Request))
+	}
+	return ""
 }
 
 // atEventCap reports whether this session has recorded as many durable events as --max-quota-events allows.
@@ -515,12 +531,8 @@ var retryStep = stepSpec{
 	// The guest decodes result<string, call-failure>: a divergence is answered in the durable-call layout (ABI.md, "Return packing" of cleat_call_retry).
 	// AfterSuspend is left nil on purpose, as for every durable-call-family spec: the refusal after a suspension is the dispatcher's own, and answers the stop word.
 	Result: layoutDurableCall,
-	Identity: func(a stepArgs, rec *EventRecord) string {
-		if rec.Service != a.s1 || rec.Op != a.s2 {
-			return fmt.Sprintf("call %s.%s, recorded %s.%s", a.s1, a.s2, rec.Service, rec.Op)
-		}
-		return ""
-	},
+	// The service and operation on EVERY record of the run, and the request body on the call that ends it (callRequestIdentity: an attempt record carries none, cleat#4424).
+	Identity: func(a stepArgs, rec *EventRecord) string { return callRequestIdentity("call", a, rec) },
 	Role: func(_ stepArgs, rec *EventRecord) recordRole {
 		switch rec.EventType {
 		case EventTypeCallAttemptFailed:
@@ -1155,8 +1167,9 @@ func (s *execSession) DurableSend(ctx context.Context, m api.Module, service, op
 // end, so the dispatcher refuses it where the call did.
 //
 // IDENTITY IS NEW. The old replay consumed any durable_send record, so a send to another service or operation replayed as the recorded
-// one. A send is identified by its service and operation (the design's "target and message name"); the request text is not compared,
-// which the old code did not either.
+// one. A send is identified by its service and operation (the design's "target and message name") and, since cleat#4424, by its request
+// text, which the old code did not compare either (callRequestIdentity). Its divergence reaches the guest as error code 1 and nothing else: a
+// send has no output buffer to carry a message.
 var durableSendStep = stepSpec{
 	Name:               "durable_send",
 	NoDivergenceDetail: "its old message was `replay divergence: expected durable_send, got a different event`: less than the shared one, and no request; " + divergenceSweepNote,
@@ -1164,12 +1177,7 @@ var durableSendStep = stepSpec{
 	Effect:             effectEffect,
 	Records:            recordsOne,
 	Want:               EventTypeDurableSend,
-	Identity: func(a stepArgs, rec *EventRecord) string {
-		if rec.Service != a.s1 || rec.Op != a.s2 {
-			return fmt.Sprintf("send %s.%s, recorded %s.%s", a.s1, a.s2, rec.Service, rec.Op)
-		}
-		return ""
-	},
+	Identity:           func(a stepArgs, rec *EventRecord) string { return callRequestIdentity("send", a, rec) },
 	// fire-and-forget is recorded and not re-executed: a replayed send answers success and dispatches nothing.
 	Decode: func(c *stepCtx, rec *EventRecord) int64 { return 0 },
 	Fresh: func(c *stepCtx) int64 {

@@ -157,13 +157,13 @@ func TestReplayFailuresAreClassified(t *testing.T) {
 		},
 		{
 			name:    "ambiguous outcome",
-			history: []EventRecord{{Step: 0, EventType: EventTypeCall, Service: "svc", Op: "op", Pending: true}},
+			history: []EventRecord{{Step: 0, EventType: EventTypeCall, Service: "svc", Op: "op", Request: `{}`, Pending: true}},
 			want:    callErrorUnknown,
 			why:     "the call may have succeeded; retrying risks a duplicate side effect",
 		},
 		{
 			name:    "recorded service failure",
-			history: []EventRecord{{Step: 0, EventType: EventTypeCall, Service: "svc", Op: "op", Err: "boom"}},
+			history: []EventRecord{{Step: 0, EventType: EventTypeCall, Service: "svc", Op: "op", Request: `{}`, Err: "boom"}},
 			want:    callFailureCode,
 			why:     "must equal what the fresh path returned for the same failure",
 		},
@@ -201,7 +201,7 @@ func TestFreshAndReplayAgreeOnRecordedFailure(t *testing.T) {
 	replay := &execSession{
 		engine:   NewEngine(nil, &mockCaller{}),
 		isReplay: true,
-		history:  []EventRecord{{Step: 0, EventType: EventTypeCall, Service: "svc", Op: "op", Err: "boom"}},
+		history:  []EventRecord{{Step: 0, EventType: EventTypeCall, Service: "svc", Op: "op", Request: `{}`, Err: "boom"}},
 	}
 	replayResult := replay.DurableCall(context.Background(), nil, "svc", "op", `{}`, 0, 0)
 

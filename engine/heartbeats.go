@@ -22,13 +22,9 @@ var heartbeatStep = stepSpec{
 	// AfterSuspend is left nil on purpose: a heartbeat call is refused after a suspension by the dispatcher's own stop refusal, as every durable-call-family
 	// spec is, and a hook of its own would be a second answer to the same question.
 	Result: layoutDurableCall,
-	// The call's service and operation identify it. They are compared on EVERY record of the run, heartbeats included.
-	Identity: func(a stepArgs, rec *EventRecord) string {
-		if rec.Service != a.s1 || rec.Op != a.s2 {
-			return fmt.Sprintf("call %s.%s, recorded %s.%s", a.s1, a.s2, rec.Service, rec.Op)
-		}
-		return ""
-	},
+	// The call's service and operation identify it. They are compared on EVERY record of the run, heartbeats included. The request body is compared too, on the call that ends the
+	// run (callRequestIdentity, cleat#4424): a heartbeat record carries no request.
+	Identity: func(a stepArgs, rec *EventRecord) string { return callRequestIdentity("call", a, rec) },
 	Role: func(_ stepArgs, rec *EventRecord) recordRole {
 		switch rec.EventType {
 		case EventTypeHeartbeat:

@@ -199,7 +199,7 @@ func g3rCases() map[string]g3rCase {
 	failed := func(step, attempt int) EventRecord {
 		return EventRecord{Step: step, EventType: EventTypeCallAttemptFailed, Service: "svc", Op: "op", Attempt: attempt, Err: "503 try again"}
 	}
-	plain := EventRecord{Step: 0, EventType: EventTypeCall, Service: "svc", Op: "before", Response: `{"ok":true}`}
+	plain := EventRecord{Step: 0, EventType: EventTypeCall, Service: "svc", Op: "before", Request: `{}`, Response: `{"ok":true}`}
 	terminal := EventRecord{Step: 0, EventType: EventTypeCall, Service: "svc", Op: "op", Request: `{}`, Response: `{"ok":true}`}
 	cases := map[string]g3rCase{}
 	cases["fresh_first_attempt_succeeds"] = g3rCase{policy: pol()}
