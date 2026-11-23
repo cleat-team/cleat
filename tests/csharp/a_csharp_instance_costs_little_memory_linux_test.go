@@ -56,9 +56,10 @@ func privateKiB(t *testing.T) uint64 {
 	return 0
 }
 
-// instanceMemoryBudgetMiB bounds the marginal physical memory of one parked C# instance. The SDK build measures 12.7 MiB; the build without the
-// GC segment setting measures 48.7. 20 sits between, with room for the toolchain, and well under half the failure it guards.
-const instanceMemoryBudgetMiB = 20
+// instanceMemoryBudgetMiB bounds the marginal physical memory of one parked C# instance. The SDK build (8 MiB segments) measures 16.7 to 17.1
+// MiB; a build with 16 MiB segments measures 32.8 and one without the setting 48.7. 25 sits between the first and the others, with about 8 MiB
+// either side.
+const instanceMemoryBudgetMiB = 25
 
 func TestCSharpAnInstanceCostsUnderTheMemoryBudget(t *testing.T) {
 	b := conformanceComponent(t)
