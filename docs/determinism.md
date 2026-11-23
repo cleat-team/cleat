@@ -114,7 +114,7 @@ The following patterns are blocked at build time:
 - `fmt.Print*` -- blocked (captures stdout non-deterministically)
 - Goroutines, channels -- use cleat's async patterns
 
-## The monotonic clock is real elapsed time, in every language
+## The monotonic clock is real elapsed time
 
 **`h.Now()` is replayable and the monotonic clock is not.** A guest that reads its language's monotonic clock (Python's `time.monotonic()`,
 `time.perf_counter()` and their `_ns` forms, C#'s `Stopwatch` and `Environment.TickCount64`, Go's `time.Since`) gets the host's real elapsed time. A
@@ -126,6 +126,11 @@ replay; so is a sleep taken with `h.DurableSleep()` (`h.sleep()` in Python).
 |---|---|---|
 | the core-module path (Go runs here) | real elapsed time since the instance started, never zero and never backwards (`nextMonotonicNs`) | **read from the code.** It was a count of reads until cleat#1300, which made a 500 ms sleep take 62.5 s, so it was made real on purpose |
 | the component path (Python, C#) | the host's own monotonic clock; `wasi:clocks/monotonic-clock` is not shadowed | **measured**, Python 2026-11-23 on componentize-py 0.25.1: two runs of one workflow id read `0.5029` and `0.5021` seconds for a `time.sleep(0.5)`, and the deadline loop above ran 41 and then 42 iterations. C# `Stopwatch`: measured to differ on every run, as the C# README records |
+
+**Which path a guest takes follows its artifact, not its language**: `isComponentWasm` in `engine/backend_wasmtime.go` sends a Component Model binary down
+the component path and anything else down the core-module path. Python and C# ship components; Go ships a core module; Rust's guest is a
+`wasm32-unknown-unknown` core module (`tests/cross-language`), where what `Instant::now` does was **not looked at**; Java and JavaScript were **not
+checked**. So the heading's claim is as wide as the two rows above it, and no wider.
 
 **Why the component path is not simply pinned.** A shadow of that interface replaces all of it, and the interface also exports `subscribe-instant` and
 `subscribe-duration`, which return `pollable` resources the host cannot supply from outside the WASI implementation it links. Measured: a guest
@@ -146,7 +151,10 @@ monotonic deadline.
 | Java | `System.currentTimeMillis` (J001) and `Thread.sleep` (J003); `System.nanoTime` is **not** flagged |
 | TypeScript | no vet exists |
 
-PY016 is a warning, not an error, so it never refuses a build that runs today. Python's `time.sleep` also blocks its execution for its whole duration and
+PY016 is a warning, not an error, so it never refuses a build that runs today. It looks at what the workflow executes. A module-level
+`T0 = time.monotonic()` is **not** flagged: componentize-py runs module code while it builds, so both runs read the same value (measured, `2.607878167`
+twice). A module-level *reference*, `clock = time.perf_counter`, is flagged where it is called, because that reads the real clock at run time (measured,
+`0.0199` then `0.0109`). Python's `time.sleep` also blocks its execution for its whole duration and
 the instance timeout does not interrupt it (cleat#4403, measured: a 0.5 s sleep under a 150 ms timeout ran its full 524 ms and failed only after it
 returned). **Not measured:** the monotonic clock in Rust, Java and TypeScript guests, and what a blocking sleep does to other workflows on the same worker.
 

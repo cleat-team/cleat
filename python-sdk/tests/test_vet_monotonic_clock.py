@@ -210,13 +210,59 @@ def test_py016_only_what_the_workflow_executes_is_checked(tmp_path) -> None:
     assert [w["line"] for w in warnings] == [4], warnings
 
 
-def test_py016_module_level_code_is_outside_the_scope(tmp_path) -> None:
-    """The scope is the functions the entry points reach, as for every other rule here; a read at module level is not in it.
+def test_py016_a_module_level_call_is_not_flagged_because_it_is_a_build_time_constant(
+    tmp_path,
+) -> None:
+    """``T0 = time.monotonic()`` at module level is evaluated once, while componentize-py builds, so a run and its replay read the same value.
 
-    Not a claim that a module-level read is safe: it is a statement of what this rule looks at, so the limit is written down and not discovered.
+    Measured in review (cleat#4428): the same ``2.607878167`` on both runs. The scope is the functions an entry point reaches, as for every other rule here.
     """
     result = _analyze(
-        tmp_path,
-        _wrap("pass", top="import time\nSTARTED = time.monotonic()\nCLOCK = time.perf_counter\n"),
+        tmp_path, _wrap("return_value = T0", top="import time\nT0 = time.monotonic()\n")
     )
     assert _by_code(result, "PY016") == []
+
+
+def test_py016_a_module_level_reference_is_flagged_where_it_is_called(tmp_path) -> None:
+    """KNOWN POSITIVE for the half that was missed: ``clock = time.perf_counter`` at module level, ``clock()`` in the entry.
+
+    Measured in review (cleat#4428): ``clock()`` read 0.0199 and then 0.0109 on two runs of one workflow id, the real clock at run time, while the
+    module-level CALL above was frozen. The warning is at the use, line 6 of the module, because that is where the clock is read.
+    """
+    result = _analyze(
+        tmp_path, _wrap("t0 = clock()", top="import time\nclock = time.perf_counter\n")
+    )
+    warnings = _by_code(result, "PY016")
+    assert len(warnings) == 1, result.warnings
+    assert "time.perf_counter()" in warnings[0]["message"]
+    assert warnings[0]["line"] == 7, warnings
+
+
+def test_py016_module_level_references_in_every_spelling(tmp_path) -> None:
+    """Plain, annotated and aliased-module forms, and ``time.sleep`` held in a name (PY004 matches the spelling ``time.sleep`` only)."""
+    for top, body, function in (
+        ("import time\nclock: object = time.monotonic_ns\n", "clock()", "time.monotonic_ns()"),
+        ("import time as t\nclock = t.perf_counter_ns\n", "clock()", "time.perf_counter_ns()"),
+        ("import time\nnap = time.sleep\n", "nap(1)", "time.sleep()"),
+    ):
+        warnings = _by_code(_analyze(tmp_path, _wrap(body, top=top)), "PY016")
+        assert len(warnings) == 1, (top, body, warnings)
+        assert function in warnings[0]["message"]
+
+
+def test_py016_a_module_level_reference_that_is_never_called_warns_nowhere(tmp_path) -> None:
+    """The warning is at the use. An alias nothing calls reads no clock, and an unrelated module-level assignment is not an alias."""
+    result = _analyze(
+        tmp_path,
+        _wrap(
+            "unused = (label, other)",
+            top="import time\nclock = time.perf_counter\nlabel = time.timezone\nother = len\n",
+        ),
+    )
+    assert _by_code(result, "PY016") == []
+
+
+def test_py016_a_module_level_reference_to_an_unrelated_object_is_not_an_alias(tmp_path) -> None:
+    """``tick = meter.monotonic`` is a method of a name that is not the ``time`` module. Calling ``tick()`` reads whatever that object reads."""
+    top = "class Meter:\n    def monotonic(self):\n        return 0\n\nmeter = Meter()\ntick = meter.monotonic\n"
+    assert _by_code(_analyze(tmp_path, _wrap("tick()", top=top)), "PY016") == []

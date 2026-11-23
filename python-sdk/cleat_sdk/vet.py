@@ -151,7 +151,7 @@ FORBIDDEN_API_RULES: dict[tuple[str | None, str], tuple[str, str, str]] = {
     ),
     ("time", "sleep"): (
         "PY004",
-        "time.sleep() is not allowed in durable functions: real-time sleep advances differently on each replay, breaking determinism. It also blocks the worker "
+        "time.sleep() is not allowed in durable functions: real-time sleep advances differently on each replay, breaking determinism. It also blocks its execution "
         "for its whole duration, and the instance timeout does not interrupt it (cleat#4403).",
         "Use h.sleep() instead",
     ),
@@ -841,11 +841,24 @@ class RealTimeClockChecker(ast.NodeVisitor):
                 for alias in node.names:
                     if alias.name in interesting:
                         self._functions[alias.asname or alias.name] = alias.name
+        # A module-level REFERENCE (``clock = time.perf_counter``) reads the clock when it is CALLED, which can be in the entry, at run time. A
+        # module-level CALL (``T0 = time.monotonic()``) is a build-time constant: componentize-py runs module code while it builds, so both runs of a
+        # workflow read the same value (measured in review, cleat#4428). So the reference is recorded here as an alias, and the call is not flagged.
+        for stmt in getattr(tree, "body", []):
+            value = stmt.value if isinstance(stmt, (ast.Assign, ast.AnnAssign)) else None
+            if not (isinstance(value, ast.Attribute) and isinstance(value.value, ast.Name)):
+                continue
+            if value.value.id not in self._modules or value.attr not in interesting:
+                continue
+            targets = stmt.targets if isinstance(stmt, ast.Assign) else [stmt.target]
+            for target in targets:
+                if isinstance(target, ast.Name):
+                    self._functions[target.id] = value.attr
 
     def _warn(self, node: ast.AST, function: str) -> None:
         if function == "sleep":
             message = (
-                "time.sleep() really sleeps: it blocks the worker for its whole duration, the instance timeout does not interrupt it (cleat#4403), "
+                "time.sleep() really sleeps: it blocks its execution for its whole duration, the instance timeout does not interrupt it (cleat#4403), "
                 "and it is not durable. PY004 refuses `time.sleep` written plainly; this is the same call through an alias."
             )
             suggestion = "Use h.sleep(seconds) for a durable sleep"
