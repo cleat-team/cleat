@@ -18,8 +18,9 @@ import (
 //  2. main() calls the function that builds the policy, unconditionally (the shape of cleat#4212's check);
 //  3. the drain paths send held runs back: a held run is in flight, so a drain that waited for it would wait for its wake.
 
-func TestStockFlagsGiveAResidencyPolicyThatIsOnWithEightRuns(t *testing.T) {
-	for _, n := range []string{"resident-max-runs", "resident-memory-budget-mb", "resident-window-floor", "resident-window-cap",
+func TestStockFlagsGiveAResidencyPolicyThatIsOnWithACountCapAndAMemoryBudget(t *testing.T) {
+	useFakeHostMemory(t, 2<<30)
+	for _, n := range []string{"resident-max-runs", "resident-memory-percent", "resident-memory-budget-mb", "resident-window-floor", "resident-window-cap",
 		"resident-replay-multiplier", "resident-replay-fixed", "resident-replay-per-event"} {
 		stockFlag(t, n)
 	}
@@ -27,8 +28,12 @@ func TestStockFlagsGiveAResidencyPolicyThatIsOnWithEightRuns(t *testing.T) {
 	if err != nil {
 		t.Fatalf("the stock flags are refused: %v", err)
 	}
-	if cfg.MaxRuns != 8 {
-		t.Errorf("a stock worker holds MaxRuns = %d runs, want 8 (cleat#4162: on by default)", cfg.MaxRuns)
+	if cfg.MaxRuns != 1024 {
+		t.Errorf("a stock worker holds MaxRuns = %d runs, want 1024 (cleat#4162: on by default; cleat#4377: the count cap, with the memory budget the usual limit)", cfg.MaxRuns)
+	}
+	// 20% of a 2 GiB worker is 409.6 MiB, rounded down. The value is the default percentage reaching the policy: a stock worker's budget is a share of ITS memory.
+	if want := uint64(429496729); cfg.MemoryBudgetBytes != want {
+		t.Errorf("a stock worker on a 2 GiB cgroup limit has a residency budget of %d bytes, want %d (20%% of the limit; cleat#4377)", cfg.MemoryBudgetBytes, want)
 	}
 	// The CONTROL that makes the row above mean something: the documented way to turn it off must still work, or "on by default" is "on, and you cannot leave".
 	setFlag(t, "resident-max-runs", "0")
@@ -42,12 +47,13 @@ func TestStockFlagsGiveAResidencyPolicyThatIsOnWithEightRuns(t *testing.T) {
 	}
 	stockFlag(t, "resident-max-runs")
 	if cfg.WindowFloor != 10*time.Second || cfg.WindowCap != 5*time.Minute || cfg.ReplayMultiplier != 10 ||
-		cfg.ReplayFixed != 500*time.Millisecond || cfg.ReplayPerEvent != 0 || cfg.MemoryBudgetBytes != 0 {
-		t.Errorf("the stock policy is %+v, want floor 10s, cap 5m, multiplier 10, fixed 500ms, per-event 0, budget derived", cfg)
+		cfg.ReplayFixed != 500*time.Millisecond || cfg.ReplayPerEvent != 0 {
+		t.Errorf("the stock policy is %+v, want floor 10s, cap 5m, multiplier 10, fixed 500ms, per-event 0", cfg)
 	}
 }
 
 func TestEveryResidencyFlagChangesThePolicy(t *testing.T) {
+	useFakeHostMemory(t, 2<<30)
 	// The control for the stock row: a flag value that is not the default must reach the policy, or the stock row is also true of a function that
 	// ignores every flag.
 	for _, c := range []struct {
@@ -56,6 +62,7 @@ func TestEveryResidencyFlagChangesThePolicy(t *testing.T) {
 	}{
 		{"resident-max-runs", "7", func(c *residencyView) bool { return c.maxRuns == 7 }},
 		{"resident-memory-budget-mb", "96", func(c *residencyView) bool { return c.budget == 96<<20 }},
+		{"resident-memory-percent", "10", func(c *residencyView) bool { return c.budget == 214748364 }},
 		{"resident-window-floor", "3s", func(c *residencyView) bool { return c.floor == 3*time.Second }},
 		{"resident-window-cap", "2m", func(c *residencyView) bool { return c.cap == 2*time.Minute }},
 		{"resident-replay-multiplier", "4", func(c *residencyView) bool { return c.mult == 4 }},
@@ -87,6 +94,7 @@ type residencyView struct {
 // --poll IS the recheck interval of a held signal wait (cleat#4162, 2b-i), which is what makes "a held run is never later than the same run with residency off" true. The stock value
 // equals the engine's default, so the stock row alone is also true of a function that ignores the flag: the control is a value that is not the default.
 func TestThePollFlagIsTheRecheckIntervalOfAHeldSignalWait(t *testing.T) {
+	useFakeHostMemory(t, 2<<30)
 	stockFlag(t, "poll")
 	defer stockFlag(t, "poll")
 	cfg, err := residencyConfigFromFlags()
@@ -119,8 +127,12 @@ func TestThePollFlagIsTheRecheckIntervalOfAHeldSignalWait(t *testing.T) {
 }
 
 func TestAResidencyFlagThatCannotMeanWhatItSaysIsRefused(t *testing.T) {
+	useFakeHostMemory(t, 2<<30)
 	for _, c := range []struct{ flag, value string }{
 		{"resident-max-runs", "-1"},
+		{"resident-memory-percent", "-1"},
+		{"resident-memory-percent", "100.5"},
+		{"resident-memory-percent", "NaN"},
 		{"resident-memory-budget-mb", "-1"},
 		{"resident-window-cap", "1s"}, // below the 10s floor
 		{"resident-replay-multiplier", "0"},

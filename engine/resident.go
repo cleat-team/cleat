@@ -243,7 +243,23 @@ func NewResidentSet(cfg ResidencyConfig) (*ResidentSet, error) {
 		}
 		cfg.MemoryBudgetBytes = dearest * uint64(cfg.MaxRuns)
 	}
+	// The budget is a fixed fact of the set, so it is recorded once here and the charged figure moves with each hold (cleat#4377).
+	if m := cfg.Metrics; m != nil && cfg.MaxRuns > 0 && cfg.MemoryBudgetBytes > 0 {
+		m.AddResidentMemoryBudget(context.Background(), int64(cfg.MemoryBudgetBytes))
+	}
 	return &ResidentSet{cfg: cfg, parked: map[*residentSlot]struct{}{}, nudge: make(chan struct{})}, nil
+}
+
+// DearestResidentInstanceBytes is the largest per-language charge in the default table. The worker uses it for the one case with no better number: a host whose memory
+// it cannot read, where the budget falls back to a few runs of the dearest language instead of a share of a size it does not know (cleat#4377).
+func DearestResidentInstanceBytes() uint64 {
+	var dearest uint64
+	for _, b := range defaultResidentInstanceBytes {
+		if b > dearest {
+			dearest = b
+		}
+	}
+	return dearest
 }
 
 // Enabled says whether the set will ever park anything.
@@ -434,6 +450,7 @@ func (r *ResidentRun) Wait(ctx context.Context, req parkRequest) parkOutcome {
 	s.mu.Unlock()
 	if m := s.cfg.Metrics; m != nil {
 		m.AddResidentRuns(ctx, 1)
+		m.AddResidentMemoryCharged(ctx, int64(cost))
 	}
 
 	outcome, ended := parkRefused, residentEndedCancelled
@@ -461,6 +478,7 @@ func (r *ResidentRun) Wait(ctx context.Context, req parkRequest) parkOutcome {
 	resume(true)
 	if m := s.cfg.Metrics; m != nil {
 		m.AddResidentRuns(ctx, -1)
+		m.AddResidentMemoryCharged(ctx, -int64(cost))
 		m.RecordResidentPark(ctx, req.Kind.String(), ended)
 		if ended == residentEndedEvicted {
 			m.RecordResidentEviction(ctx, reason)

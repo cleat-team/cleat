@@ -419,7 +419,7 @@ workflow starts (returns HTTP 503).
 
 ## Residency
 
-A durable sleep that is due soon can be **held on the worker** instead of suspended: the run keeps its instance and wakes in place when the timer fires, with no claim, no instantiation and no replay (cleat#4162, design: `docs/design/resident-suspended-runs.md`). It is **on by default since 0.6.0 (`--resident-max-runs` is 8; 0 turns it off)**, and a refusal is always the safe answer: the wait suspends exactly as it always has, so a wrong number here can only hold less than it could.
+A durable sleep that is due soon can be **held on the worker** instead of suspended: the run keeps its instance and wakes in place when the timer fires, with no claim, no instantiation and no replay (cleat#4162, design: `docs/design/resident-suspended-runs.md`). It is **on by default since 0.6.0 (0 in `--resident-max-runs` or `--resident-memory-percent` turns it off)**, and how many runs it holds is a **share of the worker's memory** (`--resident-memory-percent`, 20% by default; cleat#4377), not a fixed count, and a refusal is always the safe answer: the wait suspends exactly as it always has, so a wrong number here can only hold less than it could.
 
 **What is and is not measured, so you can judge the defaults.** The memory of a held instance is measured for *minimal* guests (Go 2.5 MiB, 19.6 MiB after a guest had made garbage; Python 9 to 16 MiB; C# 49 to 66 MiB), not for real workflows. Each held run is charged the larger of the measured figures, rounded up (Go 24 MiB, Python 17 MiB, C# 66 MiB; the Python and C# figures were measured on an arm64 Linux VM only, **x86-64 is not measured**). **The compiled component is deliberately not charged**: it lives in the worker's code cache (an LRU) whether or not anything is held, so a worker that ran the workflow already carries it, and the measured per-process figure (Python about 500 MiB, C# about 81 MiB) also included the Go and wasmtime baseline; it belongs to `--memory-soft-limit`, not to this budget. **A hold never outlives its code's cache entry**: a held instance keeps its compiled code alive even after the cache evicts it, so when the cache evicts a module or component every held run of it is sent back (it suspends, and the next claim replays it, which recompiles); the worst case stays bounded by the cache, as it is without residency. **None of this includes what a guest allocates before it blocks**: measured, a Python or C# guest that touched 64 MiB cost about 64 MiB more, so these are the cost of the runtime and a floor for a guest that does real work; the default budget (`--resident-max-runs` times the dearest language) can still be exceeded by real guests, and `--memory-soft-limit` is the second guard. A component the build did not stamp as C# is detected as Python and charged as Python. The fixed cost of replaying a run is measured (0.44 to 0.67 s per claim for a minimal guest); the cost per recorded event is **not**. The multiplier, the floor and the cap are a starting point and **not measured**; tuning them on real workflows is cleat#4187. So the defaults are conservative, and with the per-event cost left at 0 every run gets the floor as its window.
 
@@ -429,11 +429,11 @@ A durable sleep that is due soon can be **held on the worker** instead of suspen
 
 | Type | Default | Description |
 |------|---------|-------------|
-| int | `8` | Most runs held in memory through a wait that is due soon; 0 turns residency off |
+| int | `1024` | Most runs held in memory through a wait that is due soon, a ceiling on the count; 0 turns residency off |
 
-**On by default since 0.6.0 (cleat#4162), and 8 is a conservative guess, not a measured optimum: tuning it on real workflows is cleat#4187.** **If a worker dies while it holds runs, their wakes are delayed until the runs are reclaimed.** The kill-while-held scenario (`tests/chaos`, `TestChaosSigkillWhileAHeldRunSleepsThenReclaim`) kills a worker mid-hold and shows the run is reclaimed and every effect happens exactly once, and measures the cost: the second effect came **40 to 41 s** after the first, against **9.2 to 9.5 s** with residency off (measured by cleat-review3 on one loaded machine, from the recording service's own timestamps), because a held run is still assigned to the dead worker, so only the reaper can take it, after its start-up grace, while a suspended run is simply claimable at its wake time. The harness ages the dead worker's lease instead of waiting out the real reclaim window, so **the production window comes on top of those figures: about 47 s at the default `--heartbeat`, which is derived from the formula in `--heartbeat`'s help and has not been measured**. **In short: a worker crash during a hold delays the sleeping run's wake to the reaper's reclaim, about 40 s measured plus that derived production window, against about 9 s with residency off; every effect still happens exactly once.** A faster path for held runs is cleat#4275 (0.7.0). A worker that is draining or cordoned, or at its memory hard limit, already sends every held run back (tested).
+**On by default since 0.6.0 (cleat#4162). Since cleat#4377 this is a ceiling and not the usual limit:** the memory budget (`--resident-memory-percent`) is what normally decides how many runs a worker holds, and 1024 is the largest count the scheduler was measured at. It was 8, "a conservative guess, not a measured optimum", until then; tuning on real workflows is cleat#4187. **If a worker dies while it holds runs, their wakes are delayed until the runs are reclaimed.** The kill-while-held scenario (`tests/chaos`, `TestChaosSigkillWhileAHeldRunSleepsThenReclaim`) kills a worker mid-hold and shows the run is reclaimed and every effect happens exactly once, and measures the cost: the second effect came **40 to 41 s** after the first, against **9.2 to 9.5 s** with residency off (measured by cleat-review3 on one loaded machine, from the recording service's own timestamps), because a held run is still assigned to the dead worker, so only the reaper can take it, after its start-up grace, while a suspended run is simply claimable at its wake time. The harness ages the dead worker's lease instead of waiting out the real reclaim window, so **the production window comes on top of those figures: about 47 s at the default `--heartbeat`, which is derived from the formula in `--heartbeat`'s help and has not been measured**. **In short: a worker crash during a hold delays the sleeping run's wake to the reaper's reclaim, about 40 s measured plus that derived production window, against about 9 s with residency off; every effect still happens exactly once.** A faster path for held runs is cleat#4275 (0.7.0). A worker that is draining or cordoned, or at its memory hard limit, already sends every held run back (tested).
 
-A held run keeps its instance and one OS thread (measured: about one thread per held instance, 1053 for 1024 Go instances), so keep this small. The thread cost at larger counts was not measured.
+A held run keeps its instance and one OS thread (measured: about one thread per held instance, 1053 for 1024 Go instances), so this is also a bound on threads. 1024 is the largest count measured; the thread cost above it was not.
 
 **A held run's limits are paused for the hold and start again when it ends.** The wall-clock limits (`--wasm-wall-clock-ceiling` and `--max-workflow-duration`) are per execution *segment*, and a workflow that suspends and resumes gets a fresh deadline each time. A held wait gets the same: the limits do not run while the run is held, and **they restart at their full duration when it wakes**, as does the execution fence (`--wasm-instance-timeout`, which counts only the guest's own execution). So the held time is charged to none of them, and the work before the wait and the work after it do **not** add up against one limit, which is what suspending and resuming would have given. A limit still binds each segment: work after the wake that is longer than a fresh limit times out, as it would in the next segment of a suspended run.
 
@@ -457,13 +457,33 @@ Measured on real wasmtime (a Go guest through `Engine.Execute`, `TestAHeldRunMee
 
 ---
 
+### --resident-memory-percent
+
+| Type | Default | Description |
+|------|---------|-------------|
+| float | `20` | The share, in percent, of the worker's memory that held runs may be charged; 0 turns residency off |
+
+**The budget is computed once at start-up and logged**, with where the memory figure came from (cleat#4377). The figure is the worker's memory **limit**, in this order: a cgroup v2 `memory.max`; a cgroup v1 `memory.limit_in_bytes` when it is a real limit (the "unlimited" value near 2^63 is not); else the host's **physical** memory (`/proc/meminfo`, or `hw.memsize` on macOS), **with a warning**, because on a host shared with other workloads a share of physical memory can be most of what they need: set a container limit or lower this. A limit at or above the host's memory is no limit. If none of these can be read the budget is 8 runs of the dearest language and a warning says so; residency is never turned on with an unknown budget.
+
+It is the limit and **not what is free now**, so the budget does not shrink as running runs grow; `--memory-soft-limit` is what reacts to real pressure, and it stops a hold while the worker is over it. **20 is the owner's choice, argued from the soft limit's 80%:** the rest has to hold the worker's own baseline (several hundred MB for a Python or C# component) and the runs that are executing, each of which may use up to the per-store limit.
+
+| Worker memory limit | Budget at 20% |
+|---|---|
+| 512 MiB | 102 MiB |
+| 2 GiB | 410 MiB |
+| 8 GiB | 1.6 GiB |
+
+What that buys depends on the language, at the per-run charges below. **The charge is an estimate by language, not a reading**: a guest that allocates more than its charge before it waits adds roughly one for one, and a component guest's real size is not readable by the engine, so that is caught by `--memory-soft-limit` and not by this budget. Two gauges show it: `cleat_resident_memory_budget_bytes` and `cleat_resident_memory_charged_bytes`. **When the budget is full a wait is refused with reason `memory` and suspends as it always did; nothing is evicted to make room** (evicting the run that wakes furthest away is a follow-up).
+
+---
+
 ### --resident-memory-budget-mb
 
 | Type | Default | Description |
 |------|---------|-------------|
-| int | `0` | Memory the held runs may add up to, in MB; 0 means `--resident-max-runs` times the dearest measured language |
+| int | `0` | Memory the held runs may add up to, in MB; 0 means derive it from `--resident-memory-percent`, and a value above 0 overrides that |
 
-Each held run is charged a per-language figure: **24 MiB for Go**, rounded up from the 19.6 MiB measured after a guest had allocated and dropped about 256 MiB (a minimal guest is 2.5 MiB).
+Each held run is charged a per-language figure: **24 MiB for Go**, rounded up from the 19.6 MiB measured after a guest had allocated and dropped about 256 MiB (a minimal guest is 2.5 MiB); **17 MiB for Python** and **66 MiB for C#**. Those are the larger of the measured figures and are not lowered here: the Python and C# instance costs have changed since (cleat#4382, cleat#4378) and the figures follow in a separate change.
 
 ---
 
