@@ -127,31 +127,6 @@ func probeCgroupV2At(root string) (func() (MemoryInfo, error), bool) {
 	}, true
 }
 
-// readMemTotal parses MemTotal from /proc/meminfo and returns it in bytes.
-func readMemTotal() (uint64, bool) {
-	f, err := os.Open("/proc/meminfo")
-	if err != nil {
-		return 0, false
-	}
-	defer f.Close()
-
-	scanner := bufio.NewScanner(f)
-	for scanner.Scan() {
-		line := scanner.Text()
-		if strings.HasPrefix(line, "MemTotal:") {
-			fields := strings.Fields(line)
-			if len(fields) >= 2 {
-				kb, err := strconv.ParseUint(fields[1], 10, 64)
-				if err != nil {
-					return 0, false
-				}
-				return kb * 1024, true
-			}
-		}
-	}
-	return 0, false
-}
-
 // probeProcMeminfo checks for /proc/meminfo and returns a read function
 // backed by MemTotal and MemAvailable parsing.
 func probeProcMeminfo() (func() (MemoryInfo, error), bool) {
