@@ -150,6 +150,11 @@ jobs:
       # The configuration is set as step env and echoed from it, so the line in the log is what the test run was given, not a restatement of it: a
       # dispatched run counts toward the stability window only if this line reads the seed that was asked for, SAMPLE=60 and SCRIPTS=4.
       - name: Seeded sample
+        # A STEP timeout below the job's, and above go test's own: go test -timeout 20m fires first for a hang inside a test and dumps its goroutines to the log; this fires for a
+        # hang go test cannot reach (cleat#4432: one run sat in this step for 35 minutes, was cancelled at the job's 30-minute limit plus the 5-minute cancellation grace, and
+        # left NO log at all, so nothing could say why). A step the runner stops while the runner is alive still lets the `if: always()` upload below run; a job-level cancel
+        # does not, so the artifact and the diagnosis step were never reached. tests/guards pin the ordering go test < step < job.
+        timeout-minutes: 25
         env:
           CLEAT_CHAOS_SEED: ${{ github.event.pull_request.number || github.event.inputs.seed }}
           CLEAT_CHAOS_MODE: sample
@@ -164,12 +169,52 @@ jobs:
           # This job does not take the residency input (it runs the product default, which is the point); refuse it rather than ignore it silently.
           test -z "${RESIDENT_INPUT}" || { echo "::error::resident_max_runs is not an input of the sample job; leave it empty with mode=pr-sample"; exit 1; }
           [[ "${CLEAT_CHAOS_SEED}" =~ ^[0-9]+$ ]] || { echo "::error::the seed must be a non-negative integer (a pull request number or the seed input); got '${CLEAT_CHAOS_SEED}'"; exit 1; }
+          # A resource sampler (cleat#4432), to a FILE and not to this step's output: the flake log reads go test -json events out of the failed job log, and a line that is
+          # not one is noise there, but a copy of one would be counted twice. Every 30 s: memory, the root disk, load and the largest processes. If the runner dies mid-step
+          # nothing survives; if it lives (a step timeout, a cancel) the next step prints the tail, and the artifact carries the whole file.
+          : > chaos-sample-resources.log
+          (
+            while true; do
+              {
+                echo "--- $(date -u +%FT%TZ)"
+                free -m | sed -n '1,2p'
+                df -h / | tail -n 1
+                echo "load: $(cut -d' ' -f1-3 /proc/loadavg)"
+                ps -eo pid,rss,etimes,comm --sort=-rss | head -n 8
+              } >> chaos-sample-resources.log 2>&1 || true
+              sleep 30
+            done
+          ) &
+          sampler=$!
+          # The loop's own `sleep` is a child that outlives a kill of the loop; stop it too.
+          trap 'pkill -P "${sampler}" 2>/dev/null || true; kill "${sampler}" 2>/dev/null || true' EXIT
           go test -json -tags chaos -count=1 -timeout 20m ./tests/chaos -run 'TestChaosSeeded' 2>&1 | tee chaos-sample.log
+      # What the machine looked like, when the sample did not succeed and the runner is still there to say. It prints ONLY machine facts, never a line of chaos-sample.log: that
+      # file is go test -json, and a copy of its events in this log would be counted a second time by scripts/chaos-flake-log.py. It sets no continue-on-error (scripts/
+      # check-workflow-guards.py refuses one in a required job: it would let a step fail without failing the check) and needs none: it runs only when the job is already failing
+      # or cancelled, its commands are written never to fail, and its own timeout is short so that a diagnosis cannot hold the job as the sample did.
+      - name: Diagnose a sample that did not succeed
+        if: ${{ failure() || cancelled() }}
+        timeout-minutes: 3
+        run: |
+          echo "::group::resource samples, the last 120 lines"
+          tail -n 120 chaos-sample-resources.log || echo "(no resource log: the Seeded sample step never started)"
+          echo "::endgroup::"
+          echo "::group::kernel messages naming an out-of-memory kill"
+          { sudo -n dmesg -T 2>/dev/null || dmesg -T 2>/dev/null || true; } | grep -iE 'out of memory|oom-kill|killed process' | tail -n 20 || true
+          echo "::endgroup::"
+          echo "::group::machine now"
+          free -m || true
+          df -h / || true
+          ps -eo pid,rss,etimes,comm --sort=-rss | head -n 15 || true
+          echo "::endgroup::"
       - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: chaos-sample-logs
-          path: chaos-sample.log
+          path: |
+            chaos-sample.log
+            chaos-sample-resources.log
           retention-days: 14
 
   chaos-full:
