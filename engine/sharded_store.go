@@ -1905,6 +1905,43 @@ func (s *ShardedStore) CancelWorkflow(ctx context.Context, workflowID, reason st
 	return shard.Store.CancelWorkflow(ctx, workflowID, reason)
 }
 
+// CancelWorkflowReceipt, TerminateWorkflowReceipt and RequestCancellationReceipt implement SettleReceiptStore by routing to the shard owning the ADDRESSED workflow (cleat#4340). The
+// chain walk happens inside that shard, which holds a run's successor (a continue inserts it on the old run's shard). A shard whose store has no receipt form still does the verb,
+// and its receipt says only that the addressed run was acted on; see the sharding note on #4340: a successor addressed by its OWN id routes by that id's hash and can reach a shard
+// that does not hold it.
+func (s *ShardedStore) CancelWorkflowReceipt(ctx context.Context, workflowID, reason string) (SettleReceipt, error) {
+	shard := s.getShard(workflowID)
+	if shard == nil {
+		return SettleReceipt{}, fmt.Errorf("cancel_workflow: no shard available -- check shard configuration in CLEAT_SHARD_CONFIG")
+	}
+	if rs, ok := shard.Store.(SettleReceiptStore); ok {
+		return rs.CancelWorkflowReceipt(ctx, workflowID, reason)
+	}
+	return SettleReceipt{SettledRun: workflowID}, shard.Store.CancelWorkflow(ctx, workflowID, reason)
+}
+
+func (s *ShardedStore) TerminateWorkflowReceipt(ctx context.Context, workflowID, reason string) (SettleReceipt, error) {
+	shard := s.getShard(workflowID)
+	if shard == nil {
+		return SettleReceipt{}, fmt.Errorf("terminate_workflow: no shard available -- check shard configuration in CLEAT_SHARD_CONFIG")
+	}
+	if rs, ok := shard.Store.(SettleReceiptStore); ok {
+		return rs.TerminateWorkflowReceipt(ctx, workflowID, reason)
+	}
+	return SettleReceipt{SettledRun: workflowID}, shard.Store.TerminateWorkflow(ctx, workflowID, reason)
+}
+
+func (s *ShardedStore) RequestCancellationReceipt(ctx context.Context, workflowID, reason string) (SettleReceipt, error) {
+	shard := s.getShard(workflowID)
+	if shard == nil {
+		return SettleReceipt{}, fmt.Errorf("request_cancellation: no shard available -- check shard configuration in CLEAT_SHARD_CONFIG")
+	}
+	if rs, ok := shard.Store.(SettleReceiptStore); ok {
+		return rs.RequestCancellationReceipt(ctx, workflowID, reason)
+	}
+	return SettleReceipt{SettledRun: workflowID}, shard.Store.RequestCancellation(ctx, workflowID, reason)
+}
+
 // LoadEventHistoryBatch returns event histories for multiple workflow IDs
 // by dispatching per-ID to the appropriate shard.
 func (s *ShardedStore) LoadEventHistoryBatch(ctx context.Context, workflowIDs []string) (map[string][]EventRecord, error) {

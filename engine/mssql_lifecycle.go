@@ -1312,6 +1312,17 @@ func (s *MSSQLStore) continueAsNewOnce(ctx context.Context, currentRunID, worker
 	if _, err := tx.ExecContext(ctx, `UPDATE workflow_signals SET workflow_id = @p1 WHERE workflow_id = @p2 AND tenant_id = @p3`, newRunID, currentRunID, s.tenantID); err != nil {
 		return "", fmt.Errorf("continue as new: carry the pending signals: %w", err)
 	}
+	// A cooperative cancel requested on the old run and not yet seen belongs to the WORKFLOW too (cleat#4340); see PostgresStore.ContinueAsNew. Read after the old run's row was updated
+	// above, which holds it, so a RequestCancellation (which locks that row first) cannot change it before this commits.
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE n
+		SET n.cancellation_requested = 1, n.cancellation_reason = o.cancellation_reason
+		FROM workflow_instances n
+		JOIN workflow_instances o ON o.id = @p1 AND o.tenant_id = @p3
+		WHERE n.id = @p2 AND n.tenant_id = @p3 AND o.cancellation_requested = 1
+	`, currentRunID, newRunID, s.tenantID); err != nil {
+		return "", fmt.Errorf("continue as new: carry the cancellation request: %w", err)
+	}
 
 	if err := tx.Commit(); err != nil {
 		return "", err
@@ -1413,11 +1424,39 @@ func (s *MSSQLStore) RequestCancellation(ctx context.Context, workflowID, reason
 }
 
 func (s *MSSQLStore) requestCancellationOnce(ctx context.Context, workflowID, reason string) error {
+	return s.requestCancellationOnceTo(ctx, workflowID, reason, nil)
+}
+
+// requestCancellationOnceTo sets the flag on the END of workflowID's continue-as-new chain, under the lock that orders it against that run's continue (cleat#4340). It is the body the
+// deadlock retry wraps. A flag set on a run that then continues is carried to its successor by ContinueAsNew.
+func (s *MSSQLStore) requestCancellationOnceTo(ctx context.Context, workflowID, reason string, settled *string) error {
+	hint, err := latestRunInChain(ctx, workflowID, s.successorOfRun)
+	if err != nil {
+		return fmt.Errorf("request cancellation: resolve the chain: %w", err)
+	}
 	tx, err := s.beginTxWithContext(ctx)
 	if err != nil {
 		return fmt.Errorf("request cancellation: begin: %w", err)
 	}
 	defer tx.Rollback()
+	end, err := s.lockChainEndTx(ctx, tx, workflowID, hint)
+	if err != nil {
+		return fmt.Errorf("request cancellation: lock: %w", err)
+	}
+	if settled != nil {
+		*settled = end
+	}
+	// The end's status, under the lock lockChainEndTx took; see PostgresStore.requestCancellationTo.
+	var endStatus string
+	switch err := tx.QueryRowContext(ctx, `SELECT status FROM workflow_instances WHERE id = @p1 AND tenant_id = @p2`, end, s.tenantID).Scan(&endStatus); {
+	case err == nil:
+		if refusal := cooperativeRefusal(workflowID, end, endStatus); refusal != nil {
+			return refusal
+		}
+	case !errors.Is(err, sql.ErrNoRows):
+		return fmt.Errorf("request cancellation: read the end's status: %w", err)
+	}
+	workflowID = end
 
 	_, err = tx.ExecContext(ctx, `
 		UPDATE workflow_instances

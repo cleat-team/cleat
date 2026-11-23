@@ -13,11 +13,46 @@ import (
 )
 
 func (s *PostgresStore) RequestCancellation(ctx context.Context, workflowID, reason string) error {
+	return s.requestCancellationTo(ctx, workflowID, reason, nil)
+}
+
+// RequestCancellationReceipt implements SettleReceiptStore (cleat#4340).
+func (s *PostgresStore) RequestCancellationReceipt(ctx context.Context, workflowID, reason string) (SettleReceipt, error) {
+	var acted string
+	err := s.requestCancellationTo(ctx, workflowID, reason, &acted)
+	return settleReceiptFor(workflowID, acted), err
+}
+
+// requestCancellationTo sets the cancellation flag on the END of workflowID's continue-as-new chain, under the lease lock that orders it against that run's continue (cleat#4340).
+// A flag set on a run that then continues is carried to its successor by ContinueAsNew, so it is not lost to a guest that never looked at it.
+func (s *PostgresStore) requestCancellationTo(ctx context.Context, workflowID, reason string, settled *string) error {
+	hint, err := latestRunInChain(ctx, workflowID, s.successorOfRun)
+	if err != nil {
+		return fmt.Errorf("request cancellation: resolve the chain: %w", err)
+	}
 	tx, err := s.beginTxWithRLS(ctx)
 	if err != nil {
 		return fmt.Errorf("request cancellation: begin: %w", err)
 	}
 	defer tx.Rollback()
+	end, err := s.lockChainEndTx(ctx, tx, workflowID, hint)
+	if err != nil {
+		return fmt.Errorf("request cancellation: lock: %w", err)
+	}
+	if settled != nil {
+		*settled = end
+	}
+	// The end's status, under the lock lockChainEndTx took. An end that does not exist for this tenant falls through to the update, which matches nothing, as before.
+	var endStatus string
+	switch err := tx.QueryRowContext(ctx, `SELECT status FROM workflow_leases WHERE id = $1 AND tenant_id = $2`, end, s.tenantID).Scan(&endStatus); {
+	case err == nil:
+		if refusal := cooperativeRefusal(workflowID, end, endStatus); refusal != nil {
+			return refusal
+		}
+	case !errors.Is(err, sql.ErrNoRows):
+		return fmt.Errorf("request cancellation: read the end's status: %w", err)
+	}
+	workflowID = end
 
 	// cleat#2312: cancellation_reason is sensitive-at-rest.
 	tc, err := s.tenantCipherForWrite()
