@@ -68,14 +68,24 @@ const CompiledSizeEstimateMultiplier = 4
 // DefaultModuleCacheMaxBytes is the default ceiling on the compiled-module
 // cache's estimated resident size.
 //
-// 512 MB, chosen against the measurements above rather than as a round number:
-// at the 4x estimate it holds roughly six Python components, or every
-// release-built Rust and Java artifact a deployment is likely to have many
-// times over. A
-// deployment that runs many large Python guests is the one that has to raise
-// it, and it is the one for which the old entry-count bound was silently worth
-// gigabytes.
-const DefaultModuleCacheMaxBytes int64 = 512 << 20
+// 1 GiB (it was 512 MB until cleat#4389), by the owner's decision, chosen against the
+// measurements above rather than as a round number. A Python component is now charged
+// 3.5x its serialized artifact, 111 to 153 MiB, so 1 GiB holds about six to seven of them
+// (9 of the smaller, 6 to 7 of the densified or the plugin-harness one) where 512 MB held
+// three; every release-built Rust and Java artifact a deployment is likely to have fits
+// many times over. The LIVE cost of about 100 MiB per Python entry puts a full cache near
+// 650 MiB. WHAT THAT COSTS A 2Gi WORKER, MEASURED (2026-11-23: a real worker in a 2 GiB container, the chart's limit
+// since cleat#4394, nine distinct Python components that differ in code and data but share the CPython runtime, the stock
+// flags, one run of each configuration on one arm64 machine). With --component-precompile (the default in 0.6.0,
+// cleat#4397) the cache filled, 60 held-eligible runs and a ninth compile all completed at a container peak of 1107 to
+// 1159 MiB (anonymous memory at most 776) with no out-of-memory kill. Compiled in the worker instead, each further
+// distinct component KEPT 198 to 308 MiB for each of the first four further components and 44 to 76 for each of the next three (mean 175), for good (anonymous memory after each of eight compiles: 533, 836, 1034, 1277,
+// 1585, 1661, 1716, 1760) and the container was killed on the ninth (peak 2013 of 2048). The bound below limits what the
+// cache CHARGES, not what compiling leaves behind in the worker, which is why compiling in a child matters more to a 2Gi
+// worker than the bound does. A deployment
+// that runs many large Python guests is the one that has to raise it, and it is the one
+// for which the old entry-count bound was silently worth gigabytes.
+const DefaultModuleCacheMaxBytes int64 = 1 << 30
 
 // CompiledSizeEstimate returns the estimated resident cost of compiling
 // wasmLen bytes of wasm.

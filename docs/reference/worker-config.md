@@ -1095,7 +1095,7 @@ lease.
 
 | Type | Default | Description |
 |------|---------|-------------|
-| int | `512` | Max **estimated** size of the compiled-module cache, in MB (LRU eviction) |
+| int | `1024` | Max **estimated** size of the compiled-module cache, in MB (LRU eviction) |
 
 **Two different caches, and this is the larger one.** `--wasm-cache-max-mb`
 above bounds the WASM *byte* cache — the artifacts as uploaded.
@@ -1162,10 +1162,22 @@ means, not a per-entry guarantee. **The first component an engine compiles costs
 than any later one** (about 200 MiB live and about 480 MiB at its high-water mark for Python:
 the engine and the compile scratch), and no per-entry bound covers that.
 
-**What this means for a deployment:** at the default 512 MB a worker now holds about **three**
-distinct Python components, not six, and a fourth evicts the least recently used and recompiles
-it (about 1.5 s and a transient of several hundred MB). That is what holding them costs, now
-stated. A deployment that runs more than three distinct Python workflows should raise
+**What this means for a deployment:** the default is **1024 MB** (it was 512 MB until cleat#4389;
+the owner raised it with the new charge), so a worker holds about **six to seven** distinct
+Python components (nine of the smaller ones), where 512 MB at the new charge would have held
+three; one more evicts the least recently used and recompiles it (about 1.5 s and a transient
+of several hundred MB). That is what holding them costs, now stated. The live cost is about
+100 MiB per Python entry, so a full cache is near 650 MiB. **What that costs a 2 GiB worker, measured**
+(2026-11-23: a real worker in a container limited to 2 GiB, the chart's limit since cleat#4394, nine distinct Python
+components that differ in code and data but share the CPython runtime, the stock flags, one run of each configuration on
+one arm64 machine, x86-64 not measured). With `--component-precompile` (the default in 0.6.0) the cache filled, 60
+held-eligible runs and a ninth compile all completed at a container peak of **1107 to 1159 MiB** (anonymous memory at
+most 776) and no out-of-memory kill. Compiled in the worker instead (`--component-precompile=false`), each further
+distinct component **kept 198 to 308 MiB for each of the first four further components and 44 to 76 for each of the next three (mean 175), for good** (anonymous memory after each of eight compiles: 533, 836, 1034, 1277,
+1585, 1661, 1716 and 1760 MiB) and the container was **killed on the ninth** (peak 2013 of 2048 MiB). That retained memory
+is not what the bound limits: the bound limits what the cache *charges*, so at 2Gi compiling in a child matters more than
+this setting does. The bound is not to be raised casually either way. A deployment that runs more than
+six or seven distinct Python workflows should raise
 `--wasm-module-cache-max-mb`, and should size the container for the live figure above, about
 100 MiB per entry plus the first compile's high-water mark.
 

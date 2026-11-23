@@ -394,7 +394,7 @@ func TestTheCheckedInPythonComponentIsCompiledOnce(t *testing.T) {
 		t.Fatalf("three calls on the Python component compiled it %d time(s), want 1", got)
 	}
 	// It is resident, and costed as a COMPONENT is: 3.5x its serialized artifact (CompiledComponentSizeEstimate), not 4x its wasm, which measured
-	// 1.35 to 1.5x under the live cost of a Python component (cleat#4389). It must still fit the default 512 MB bound with room for another.
+	// 1.35 to 1.5x under the live cost of a Python component (cleat#4389). It must still fit the default 1 GiB bound with room for several more.
 	held, err := b.acquireComponent(wasm)
 	if err != nil {
 		t.Fatalf("acquiring the cached component: %v", err)
