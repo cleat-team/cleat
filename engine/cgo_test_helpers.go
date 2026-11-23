@@ -32,10 +32,13 @@ package engine
 //     wasmtime_component_val_t *args, size_t nargs,
 //     wasmtime_component_val_t *results, size_t nresults);
 //
-// // See cbid_as_env in component_callbacks.go. A separate copy because cgo
-// // compiles each file's preamble into its own translation unit, so a static
-// // function in one is not visible from another.
-// static void *cbid_as_env_test(uintptr_t id) { return (void *)id; }
+// // Calls goComponentCallback the way wasmtime does, with a callback-registry id as its host data. The id crosses into C as the integer it is and
+// // is cast to the `void *` here: returning it to Go as a pointer is the hazard of cleat#4417, see add_func_with_id in component_callbacks.go. A
+// // separate copy because cgo compiles each file's preamble into its own translation unit, so a static function in one is not visible from another.
+// static wasmtime_error_t *cgotest_call_component_callback(
+//     uintptr_t id, wasmtime_component_val_t *args, size_t nargs, wasmtime_component_val_t *results, size_t nresults) {
+//     return goComponentCallback((void *)id, NULL, NULL, args, nargs, results, nresults);
+// }
 //
 // static wasmtime_component_val_t cgotest_make_u64(uint64_t v) {
 //     wasmtime_component_val_t val;
@@ -522,13 +525,14 @@ func (b *wasmtimeBackend) cgotestDispatchU64(method int, argsPtr unsafe.Pointer,
 // cgotestGoComponentCallback invokes the callback exactly as wasmtime does,
 // taking the registry id rather than a pointer.
 //
-// It takes a uintptr and casts in C for the same reason
-// component_callbacks.go's cbid_as_env does: the id is a token, and spelling
-// it as a Go unsafe.Pointer is both a vet finding and an invalid Go pointer in
-// a pointer-typed slot. Callers used to write unsafe.Pointer(id) at each call
-// site, which put four copies of that in the test file.
+// It takes a uintptr and casts in C for the same reason add_func_with_id does
+// in component_callbacks.go: the id is a token, and spelling it as a Go
+// unsafe.Pointer, or receiving it from C as one, is both a vet finding and an
+// invalid Go pointer in a pointer-typed slot (cleat#4417). Callers used to
+// write unsafe.Pointer(id) at each call site, which put four copies of that in
+// the test file.
 func cgotestGoComponentCallback(cbID uintptr, argsPtr unsafe.Pointer, nargs int, resultsPtr unsafe.Pointer) *C.wasmtime_error_t {
-	return C.goComponentCallback(C.cbid_as_env_test(C.uintptr_t(cbID)), nil, nil, (*C.wasmtime_component_val_t)(argsPtr), C.size_t(nargs), (*C.wasmtime_component_val_t)(resultsPtr), 1)
+	return C.cgotest_call_component_callback(C.uintptr_t(cbID), (*C.wasmtime_component_val_t)(argsPtr), C.size_t(nargs), (*C.wasmtime_component_val_t)(resultsPtr), 1)
 }
 
 // payloadDispatchOutcome is what cgotestDispatchPayload saw: the trap text if the dispatcher trapped, else the result read as the kind the

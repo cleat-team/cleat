@@ -21,28 +21,26 @@ package engine
 //     wasmtime_error_message(err, msg);
 // }
 //
-// // cbid_as_env turns a callback-registry id into the opaque `void *env`
-// // wasmtime stores alongside a host function and hands back to
-// // goComponentCallback, which converts it straight back with lookupCB.
-// //
-// // The cast lives here, in C, on purpose. Written on the Go side as
-// // unsafe.Pointer(uintptr(cbID)) it is two things at once: a go vet unsafeptr
-// // finding, and a value that is not a valid Go pointer sitting in a
-// // pointer-typed Go slot, which the garbage collector is entitled to reject
-// // when it scans the frame. The id is a small counter, never dereferenced by
-// // anyone -- it is a token, and C is where a token may legally be spelled as
-// // a pointer.
-// //
-// // go vet never said so before 2026-08-05 because this file was excluded from
-// // every default build by the wasmtime_component_cgo tag, so nothing vetted
-// // it. Compiling it by default is what surfaced this.
-// static void *cbid_as_env(uintptr_t id) { return (void *)id; }
 //
 // extern wasmtime_error_t *goComponentCallback(
 //     void *env, wasmtime_context_t *ctx,
 //     wasmtime_component_func_type_t *ty,
 //     wasmtime_component_val_t *args, size_t nargs,
 //     wasmtime_component_val_t *results, size_t nresults);
+//
+// // add_func_with_id registers goComponentCallback on a linker instance with a callback-registry id as the host data wasmtime hands back to it,
+// // which goComponentCallback converts straight back with lookupCB.
+// //
+// // The id is a small counter, a token and not an address, and C is the only place a token may be spelled as a pointer. It must not even be
+// // RETURNED from C to Go as one: a `void *` result arrives in Go as an unsafe.Pointer temporary, and while it is live, in a pointer-typed stack
+// // slot holding a value below the smallest legal address, any stack copy aborts the whole process -- "fatal error: invalid pointer found on
+// // stack" -- which is rare, unrecoverable, and takes every run on the worker with it (cleat#4417). So the cast and the call that consumes it
+// // both stay in this function and Go passes the id as the integer it is.
+// static wasmtime_error_t *add_func_with_id(
+//     wasmtime_component_linker_instance_t *inst, const char *name, size_t name_len, uintptr_t id) {
+//     return wasmtime_component_linker_instance_add_func(
+//         inst, name, name_len, (wasmtime_component_func_callback_t)goComponentCallback, (void *)id, NULL);
+// }
 import "C"
 import (
 	"context"
@@ -1825,10 +1823,8 @@ func (b *wasmtimeBackend) registerWasiDeterminismImports(linker *C.wasmtime_comp
 			for fnName, fnType := range funcs {
 				fnBytes := []byte(fnName)
 				cbID := scope.register(b, fnType)
-				if err := C.wasmtime_component_linker_instance_add_func(
-					sub, (*C.char)(unsafe.Pointer(&fnBytes[0])), C.size_t(len(fnName)),
-					C.wasmtime_component_func_callback_t(C.goComponentCallback),
-					C.cbid_as_env(C.uintptr_t(cbID)), nil); err != nil {
+				if err := C.add_func_with_id(
+					sub, (*C.char)(unsafe.Pointer(&fnBytes[0])), C.size_t(len(fnName)), C.uintptr_t(cbID)); err != nil {
 					return fmt.Errorf("shadow %s.%s: %s", iface, fnName, componentErrorMessage(err))
 				}
 			}
@@ -1882,7 +1878,7 @@ func (b *wasmtimeBackend) registerCleatComponentImports(linker *C.wasmtime_compo
 				fnPtr = (*C.char)(unsafe.Pointer(&fnBytes[0]))
 			}
 			cbID := scope.register(b, fnType)
-			err := C.wasmtime_component_linker_instance_add_func(sub, fnPtr, C.size_t(len(witFuncName)), C.wasmtime_component_func_callback_t(C.goComponentCallback), C.cbid_as_env(C.uintptr_t(cbID)), nil)
+			err := C.add_func_with_id(sub, fnPtr, C.size_t(len(witFuncName)), C.uintptr_t(cbID))
 			if err != nil {
 				var msg C.wasm_byte_vec_t
 				C.get_error_message(err, &msg)
