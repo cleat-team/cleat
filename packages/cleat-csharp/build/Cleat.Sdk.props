@@ -17,6 +17,37 @@
     <CleatWitFile Condition="'$(CleatWitFile)' == ''">$([System.IO.Path]::GetFullPath('$(CleatSdkDir)../../python-sdk/wit/cleat.wit'))</CleatWitFile>
   </PropertyGroup>
 
+  <!--
+    THE GC SEGMENT SIZE: ONE CONSTANT, AND IT IS THE WHOLE POINT OF THIS BLOCK (cleat#4378).
+
+    A NativeAOT-LLVM guest on WASI starts a workstation GC with three 16 MiB heap segments (small-object, large-object, pinned: the 32-bit
+    defaults, INITIAL_ALLOC and LHEAP_ALLOC in the runtime's gc.cpp), and the WASI layer's VirtualReserve is posix_memalign followed by
+    memset(0) (gc/wasm/gcenv.wasm.cpp), so "reserving" a segment WRITES all of it. An empty workflow therefore cost 48.7 MiB of private
+    memory per instance (measured as a fit over N = 1 to 64 instances, R2 = 1.0000), before it had allocated a byte.
+
+    GCSegmentSize is the GC's own setting for that size, and 4 MiB is its floor (anything smaller is raised to 4 MiB). At 8 MiB, the value
+    chosen here, an empty workflow costs 16.7 MiB per instance and starts in 296 pages of linear memory instead of 809 (same fit, same
+    machine). At the 4 MiB floor it costs 12.7 MiB and starts in 232 pages, and the trade-off below is the same size, so the choice of 8 is
+    the owner's (2026-11-22) and not a measurement's.
+
+    IT IS A PRIVATE GC SETTING, so it must be embedded with the ILCompiler's runtimeopt switch, which is how it passes ServerGarbageCollection.
+    A RuntimeHostConfigurationOption becomes the runtimeknob switch and carries PUBLIC keys only: GCSegmentSize set that way is read back by
+    managed code as a switch and does nothing. DOTNET_GCSegmentSize in the environment did nothing either, in every form tried.
+    (No double hyphen may appear in this comment: XML forbids it, and the build then fails to evaluate this file at all.)
+
+    THE TRADE-OFF, measured: a workflow that holds many large (large-object-heap) objects pays about 26% over its data, from segment rounding
+    (16 MiB held in 1 MiB arrays moved the per-instance cost by 20.5 MiB at 8 MiB segments, against 16.2 MiB with the default segments).
+    Large allocations still work: 16, 64 and 128 MiB of 1 MiB arrays completed. Set CleatGcSegmentSizeHex in the project to choose another
+    value, and tests/csharp pins the start-up memory and the per-instance cost this default gives.
+  -->
+  <PropertyGroup>
+    <CleatGcSegmentSizeHex Condition="'$(CleatGcSegmentSizeHex)' == ''">0x800000</CleatGcSegmentSizeHex>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <IlcArg Include="--runtimeopt:GCSegmentSize=$(CleatGcSegmentSizeHex)" />
+  </ItemGroup>
+
   <ItemGroup>
     <Compile Include="$(CleatSdkDir)src/**/*.cs" Visible="false" />
     <Wit Include="$(CleatWitFile)" World="cleat-workflow" />
