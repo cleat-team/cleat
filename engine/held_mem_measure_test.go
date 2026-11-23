@@ -226,6 +226,14 @@ func TestMeasureHeldInstanceMemory(t *testing.T) {
 		// The Go fixture reads the first three digit runs as calls, mb, sleep_ms.
 		wasmBytes, entry = b, "held_mem"
 	case "python":
+		if v := os.Getenv("HELDMEM_PY_WASM"); v != "" { // a prebuilt (possibly rewritten) component instead of compiling the guest
+			b, err := os.ReadFile(v)
+			if err != nil {
+				t.Fatalf("UNMEASURED: %v", err)
+			}
+			wasmBytes, entry = b, "run"
+			break
+		}
 		h := newPythonWasmTestHelper(t)
 		if !h.toolsAvailable() {
 			t.Fatalf("UNMEASURED: %s", h.missingTools())
