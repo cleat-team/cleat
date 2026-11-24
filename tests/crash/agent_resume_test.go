@@ -142,7 +142,7 @@ type agentClient struct {
 // a top-level test name and scripts/tier-gate.sh enumerates exclusions against
 // `go test -list`, which lists top-level tests only, so a subtest of this one
 // could not be excluded from Tier 1 without dropping go and python with it. Do
-// not add a rust, java or assemblyscript entry here. The guard in
+// not add a rust or java entry here. The guard in
 // engine/tier2_toolchain_tests_in_every_tier1_package_test.go fails if one
 // appears, naming this test.
 func agentClients() []agentClient {
@@ -197,14 +197,14 @@ func agentClients() []agentClient {
 	}
 }
 
-// tierTwoAgentClients are the clients whose language is tier 2 (D5): Rust, Java and
-// AssemblyScript. Building each needs a toolchain that tier 1 does not provision and
-// whose download host (crates.io, Maven Central and the Gradle distribution, the npm
-// registry) is not one tier 1 is meant to depend on. cleat#3689 was that, for Gradle.
+// tierTwoAgentClients are the clients whose language is tier 2 (D5): Rust and Java.
+// Building each needs a toolchain that tier 1 does not provision and
+// whose download host (crates.io, Maven Central and the Gradle distribution) is not
+// one tier 1 is meant to depend on. cleat#3689 was that, for Gradle.
 //
 // They run in TestCrashMidAgentLoopInATierTwoLanguageResumesWithoutReaskingTheModel,
 // which tiers.yaml's tier1.exclude_tests names and ci.yml's test-go "crash" leg
-// runs. That leg provisions all three toolchains and runs ./tests/crash/... with no
+// runs. That leg provisions both toolchains and runs ./tests/crash/... with no
 // -run and no -skip; the guard checks both halves.
 func tierTwoAgentClients() []agentClient {
 	return []agentClient{
@@ -233,18 +233,6 @@ func tierTwoAgentClients() []agentClient {
 			input:   agentConfigJSON,
 			build:   buildJavaClientWASM,
 		},
-		{
-			// AssemblyScript's @cleat/transform supports only primitive
-			// parameter types; a single defaultless STRING parameter is the
-			// one shape that receives the whole payload verbatim rather than
-			// a value looked up by name (examples/as-workflow's own
-			// place_order(h, input: string) is the precedent). Same shape as
-			// Go and Java: parsed by hand in testdata/agentclientas.
-			name:    "assemblyscript",
-			defName: "agentclientas",
-			input:   agentConfigJSON,
-			build:   buildAssemblyScriptClientWASM,
-		},
 	}
 }
 
@@ -256,7 +244,7 @@ func TestCrashMidAgentLoopResumesWithoutReaskingTheModel(t *testing.T) {
 }
 
 // TestCrashMidAgentLoopInATierTwoLanguageResumesWithoutReaskingTheModel is the same
-// acceptance for Rust, Java and AssemblyScript clients (cleat#3692).
+// acceptance for Rust and Java clients (cleat#3692).
 //
 // It exists as a top-level test of its own so that tiers.yaml can exclude it from
 // Tier 1 by name, which a subtest cannot be (see agentClients). Excluded tests
@@ -577,7 +565,7 @@ func missingPythonToolchain(t *testing.T, reason string) {
 	}
 	t.Skipf("componentize-py or a compatible python3 is unavailable, so the Python agent "+
 		"client cannot be built. CI installs both, where this test always runs. To run it "+
-		"locally: `pip install componentize-py` on Python >= 3.10, with its bin directory "+
+		"locally: `pip install componentize-py==0.25.1` on Python >= 3.10, with its bin directory "+
 		"on PATH.\n\n%s", reason)
 }
 
@@ -613,12 +601,11 @@ func buildPythonClientWASM(t *testing.T) []byte {
 	return readWASMOutput(t, outDir, "the Python agent client")
 }
 
-// missingRustToolchain, missingJavaToolchain and missingAssemblyScriptToolchain
-// are missingPythonToolchain's shape for the other three languages cleat#2978
-// added: a toolchain absent LOCALLY is an environmental precondition
+// missingRustToolchain and missingJavaToolchain are missingPythonToolchain's
+// shape for the other languages cleat#2978 added: a toolchain absent LOCALLY is an environmental precondition
 // (narrow skip), and absent in CI is a broken job (fatal), because
-// ci.yml installs each one for this job by name -- see the "Setup Rust",
-// "Setup Node" and "Setup Java" steps gated on matrix.package.name == 'crash'.
+// ci.yml installs each one for this job by name -- see the "Setup Rust"
+// and "Setup Java" steps gated on matrix.package.name == 'crash'.
 // A skip collapsing the two cases would let this test stop running while the
 // suite stayed green, which is this repository's name for the hazard the
 // Python half already guards against.
@@ -649,19 +636,6 @@ func missingJavaToolchain(t *testing.T, reason string) {
 		"JDK (17+) and Gradle.\n\n%s", reason)
 }
 
-func missingAssemblyScriptToolchain(t *testing.T, reason string) {
-	t.Helper()
-	if os.Getenv("CI") != "" {
-		t.Fatalf("the AssemblyScript agent client cannot be built, and this job installs "+
-			"the toolchain it needs (ci.yml, 'Setup Node', gated on "+
-			"matrix.package.name == 'crash'). Missing here means the job is broken, not "+
-			"that a precondition is absent -- do not turn this into a skip.\n\n%s", reason)
-	}
-	t.Skipf("node or npm is unavailable, so the AssemblyScript agent client cannot be "+
-		"built. CI installs both, where this test always runs. To run it locally: "+
-		"install Node 20+.\n\n%s", reason)
-}
-
 // buildRustClientWASM compiles the Rust client to a plain WASM module --
 // unlike Python's, no Component Model wrapping: `cleat build --target rust`
 // (cmd/cleat/build_rust.go) targets wasm32-unknown-unknown directly, the
@@ -681,7 +655,7 @@ func buildRustClientWASM(t *testing.T) []byte {
 	// DEFAULT toolchain, which is not necessarily the one dtolnay/rust-toolchain
 	// just set up and the one `cargo`/`cleat build --target rust` actually
 	// resolve to -- so the probe was answering a different question than
-	// the one that matters. Match Python/Java/AssemblyScript's shape
+	// the one that matters. Match Python/Java's shape
 	// instead: only `cargo` itself needs to be on PATH, and the real build
 	// below is the sole arbiter of whether the target is actually usable.
 	root := repoRoot(t)
@@ -718,30 +692,6 @@ func buildJavaClientWASM(t *testing.T) []byte {
 		t.Fatalf("building the Java agent client: %v\n%s", err, out)
 	}
 	return readWASMOutput(t, outDir, "the Java agent client")
-}
-
-// buildAssemblyScriptClientWASM compiles the AssemblyScript client to WASM
-// via asc (cmd/cleat/build_as.go), which installs the client's own
-// node_modules on demand if missing -- no separate install step needed here.
-func buildAssemblyScriptClientWASM(t *testing.T) []byte {
-	t.Helper()
-	if _, err := exec.LookPath("node"); err != nil {
-		missingAssemblyScriptToolchain(t, "node is not on PATH")
-	}
-	if _, err := exec.LookPath("npm"); err != nil {
-		missingAssemblyScriptToolchain(t, "npm is not on PATH")
-	}
-
-	root := repoRoot(t)
-	outDir := t.TempDir()
-	cmd := exec.Command("go", "run", filepath.Join(root, "cmd", "cleat"),
-		"build", "--target", "assemblyscript", "-o", outDir,
-		filepath.Join(root, "testdata", "agentclientas"))
-	cmd.Dir = root
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("building the AssemblyScript agent client: %v\n%s", err, out)
-	}
-	return readWASMOutput(t, outDir, "the AssemblyScript agent client")
 }
 
 // deployOneDef registers one definition the way deployFixture registers

@@ -91,18 +91,27 @@ type AdaptiveFlusher struct {
 	lastReportTime time.Time
 }
 
+// The adaptive flusher's defaults. They live HERE, once: NewAdaptiveFlusher, NewTenantFlusherRegistry and the worker's --batch-flush-* flags
+// each carried their own copy of these four numbers, so a change to one left the others describing a different engine (cleat#4172).
+const (
+	DefaultBatchFlushMaxWait   = 8 * time.Millisecond
+	DefaultBatchFlushMaxSize   = 200
+	DefaultBatchFlushEnterRate = 500.0
+	DefaultBatchFlushExitRate  = 250.0
+)
+
 func NewAdaptiveFlusher(db *sql.DB, tenantID string, maxWait time.Duration, maxBatch int, enterThreshold, exitThreshold float64, _ int) *AdaptiveFlusher {
 	if maxWait <= 0 {
-		maxWait = 8 * time.Millisecond
+		maxWait = DefaultBatchFlushMaxWait
 	}
 	if maxBatch <= 0 {
-		maxBatch = 200
+		maxBatch = DefaultBatchFlushMaxSize
 	}
 	if enterThreshold <= 0 {
-		enterThreshold = 500.0
+		enterThreshold = DefaultBatchFlushEnterRate
 	}
 	if exitThreshold <= 0 {
-		exitThreshold = 250.0
+		exitThreshold = DefaultBatchFlushExitRate
 	}
 
 	return &AdaptiveFlusher{
@@ -893,16 +902,16 @@ type TenantFlusherRegistry struct {
 // AdaptiveFlusher instances with the given configuration.
 func NewTenantFlusherRegistry(db *sql.DB, config FlusherConfig) *TenantFlusherRegistry {
 	if config.MaxWait <= 0 {
-		config.MaxWait = 8 * time.Millisecond
+		config.MaxWait = DefaultBatchFlushMaxWait
 	}
 	if config.MaxBatch <= 0 {
-		config.MaxBatch = 200
+		config.MaxBatch = DefaultBatchFlushMaxSize
 	}
 	if config.EnterThreshold <= 0 {
-		config.EnterThreshold = 500.0
+		config.EnterThreshold = DefaultBatchFlushEnterRate
 	}
 	if config.ExitThreshold <= 0 {
-		config.ExitThreshold = 250.0
+		config.ExitThreshold = DefaultBatchFlushExitRate
 	}
 	return &TenantFlusherRegistry{
 		flushers: make(map[string]*AdaptiveFlusher),

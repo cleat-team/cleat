@@ -43,7 +43,7 @@ func (s *apiServer) handleListLibraryInstalls(w http.ResponseWriter, r *http.Req
 	}
 	installs, err := lister.ListInstalledLibraries(r.Context())
 	if err != nil {
-		s.writeLibraryReadError(w, err)
+		s.writeLibraryReadError(w, r, err)
 		return
 	}
 	if installs == nil {
@@ -65,7 +65,7 @@ func (s *apiServer) handleListLibraries(w http.ResponseWriter, r *http.Request) 
 	}
 	bundles, err := catalogue.ListPublishedLibraries(r.Context(), r.URL.Query().Get("library"))
 	if err != nil {
-		s.writeLibraryReadError(w, err)
+		s.writeLibraryReadError(w, r, err)
 		return
 	}
 
@@ -92,10 +92,10 @@ func (s *apiServer) handleListLibraries(w http.ResponseWriter, r *http.Request) 
 	s.writeJSON(w, http.StatusOK, map[string]any{"bundles": out})
 }
 
-func (s *apiServer) writeLibraryReadError(w http.ResponseWriter, err error) {
+func (s *apiServer) writeLibraryReadError(w http.ResponseWriter, r *http.Request, err error) {
 	if errors.Is(err, engine.ErrLibrariesUnsupported) {
 		s.writeError(w, http.StatusNotImplemented, librariesUnavailableMessage)
 		return
 	}
-	s.writeError(w, http.StatusInternalServerError, err.Error())
+	s.writeStoreError(w, r, err)
 }

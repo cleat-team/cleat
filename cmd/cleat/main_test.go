@@ -53,13 +53,15 @@ func TestIsErrorType(t *testing.T) {
 }
 
 func TestIsValidTarget(t *testing.T) {
-	valid := []string{"go", "rust", "java", "assemblyscript", "python"}
+	valid := []string{"go", "rust", "java", "python", "csharp"}
 	for _, v := range valid {
 		if !isValidTarget(v) {
 			t.Errorf("isValidTarget(%q) = false, want true", v)
 		}
 	}
-	invalid := []string{"", "gogo", "csharp", "swift", "kotlin", "javascript", "wasm", "tinygo"}
+	invalid := []string{"", "gogo", "zig", "swift", "kotlin", "javascript", "wasm", "tinygo",
+		// removed with the AssemblyScript SDK (cleat#4023): a target that used to build is now refused
+		"assemblyscript"}
 	for _, v := range invalid {
 		if isValidTarget(v) {
 			t.Errorf("isValidTarget(%q) = true, want false", v)

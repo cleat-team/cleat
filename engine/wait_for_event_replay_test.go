@@ -81,12 +81,14 @@ func waitForEventSession(t *testing.T, counter *eventClaimCounter, hist []EventR
 }
 
 // pluginClaimRecord is one attempt's recorded plugin_call, named so the replay
-// arm's divergence check (which compares EventType, PluginName and PluginFunc,
-// and NOT the input) is satisfied.
+// arm's divergence check (which compares EventType, PluginName, PluginFunc and the
+// input, cleat#4424) is satisfied: the guest in these tests passes "{}", so the
+// record carries it.
 func pluginClaimRecord(step int, output string) EventRecord {
 	return EventRecord{
 		Step: step, EventType: EventTypePluginCall,
 		PluginName: "webhook-ingest", PluginFunc: "await_webhook",
+		PluginInput:  "{}",
 		PluginOutput: output,
 	}
 }

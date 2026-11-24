@@ -63,7 +63,7 @@ rm -rf "$work/sdk-src/build" "$work/sdk-src/dist"
 python3 -m venv "$work/venv" || { echo "UNMEASURED: could not create a virtual environment." >&2; exit 2; }
 # shellcheck disable=SC1091
 . "$work/venv/bin/activate"
-if ! pip install --quiet "$work/sdk-src" 'componentize-py>=0.12.0' >"$work/pip.log" 2>&1; then
+if ! pip install --quiet "$work/sdk-src" componentize-py==0.25.1 >"$work/pip.log" 2>&1; then
   echo "UNMEASURED: pip install failed, so the build below would measure nothing:" >&2
   tail -20 "$work/pip.log" >&2
   exit 2

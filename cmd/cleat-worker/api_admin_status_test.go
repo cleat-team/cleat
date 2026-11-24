@@ -4,7 +4,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/cleat-team/cleat/engine"
@@ -92,19 +94,29 @@ func TestAdminErrorStatusIsChosenByClass(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			s := &apiServer{}
 			rec := httptest.NewRecorder()
-			s.handleAdminOpError(rec, tc.err)
+			s.handleAdminOpError(rec, httptest.NewRequest(http.MethodPost, "/x", nil), tc.err)
 
 			if rec.Code != tc.status {
 				t.Errorf("status = %d, want %d\nerror was: %v", rec.Code, tc.status, tc.err)
 			}
 
-			// The message reaches the caller whatever the status, so an
-			// operator still sees the explanation that was always correct.
 			var body map[string]string
 			if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
 				t.Fatalf("response is not JSON: %v (%q)", err, rec.Body.String())
 			}
-			if body["error"] != tc.err.Error() {
+			if tc.status == http.StatusInternalServerError {
+				// An unclassified error is a server fault and its text is not the caller's (cleat#3883): this
+				// default branch answered `msg := err.Error()` with the driver's text until then. The caller gets
+				// a fixed sentence and a request id; the text is in the log.
+				if strings.Contains(rec.Body.String(), "re-replay") || strings.Contains(rec.Body.String(), "pq:") {
+					t.Errorf("the error's text reached the caller of a 500: %q", rec.Body.String())
+				}
+				if body["request_id"] == "" {
+					t.Errorf("a 500 without a request_id the operator can find in the log: %q", rec.Body.String())
+				}
+			} else if body["error"] != tc.err.Error() {
+				// A classified refusal reaches the caller whatever the status, so an operator still sees the
+				// explanation that was always correct.
 				t.Errorf("error body = %q, want %q", body["error"], tc.err.Error())
 			}
 			if body["detail"] != tc.detail {
@@ -128,7 +140,7 @@ func TestNoAdminRefusalClassIsAServerError(t *testing.T) {
 		t.Run(class.Error(), func(t *testing.T) {
 			s := &apiServer{}
 			rec := httptest.NewRecorder()
-			s.handleAdminOpError(rec, fmt.Errorf("op: %w", class))
+			s.handleAdminOpError(rec, httptest.NewRequest(http.MethodPost, "/x", nil), fmt.Errorf("op: %w", class))
 			if rec.Code >= 500 {
 				t.Errorf("the %q class answered %d; a deliberate refusal must be 4xx.\n"+
 					"Add a case for it in handleAdminOpError.", class, rec.Code)

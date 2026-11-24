@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"time"
 )
 
@@ -65,7 +66,30 @@ func (h *HostCallsImpl) AwaitPromise(promiseID string, timeout time.Duration) (s
 	if h.awaitPromise == nil {
 		return "", false, errors.New("durable: AwaitPromise can only be called from within a workflow function (the HostCalls runtime was not initialized). Ensure this call is inside a cleat_entry / #[cleat_entry] / @CleatEntry / @cleatEntry function.")
 	}
-	return h.awaitPromise(promiseID, timeout)
+	return h.awaitPromise(promiseID, roundUpWait(timeout))
+}
+
+// roundUpWait keeps a POSITIVE wait from becoming 0 on its way to the host (cleat#4144). The adapter reads the Duration with
+// Milliseconds(), which truncates, so 400*time.Microsecond reached the host as 0 ms. Zero and negative values are returned as
+// they are.
+func roundUpWait(d time.Duration) time.Duration {
+	if d > 0 && d < time.Millisecond {
+		return time.Millisecond
+	}
+	return d
+}
+
+// waitMsDuration is a millisecond count as a Duration, saturating instead of wrapping (cleat#4144).
+//
+// time.Duration(ms) * time.Millisecond overflows int64 for ms above about 9.2e12, and the wrapped product is an arbitrary
+// number, often negative, which the host reads as "do not wait". Saturating at the largest Duration keeps "a very long time"
+// meaning a very long time; the host clamps what it is given (cleat#4105). Zero and negative values are returned as they are.
+func waitMsDuration(ms int64) time.Duration {
+	const maxMs = math.MaxInt64 / int64(time.Millisecond)
+	if ms > maxMs {
+		return time.Duration(math.MaxInt64)
+	}
+	return time.Duration(ms) * time.Millisecond
 }
 
 func (h *HostCallsImpl) AwaitPromiseMs(promiseID string, timeoutMs int64) (result string, timedOut bool, err error) {
@@ -73,7 +97,7 @@ func (h *HostCallsImpl) AwaitPromiseMs(promiseID string, timeoutMs int64) (resul
 	// It was here first, which meant calling AwaitPromise directly -- what
 	// every workflow and the SendSignalAndWait composite actually do -- skipped
 	// the dispatch entirely.
-	return h.AwaitPromise(promiseID, time.Duration(timeoutMs)*time.Millisecond)
+	return h.AwaitPromise(promiseID, waitMsDuration(timeoutMs))
 }
 
 func (h *HostCallsImpl) ResolvePromise(id, value string) error {

@@ -1,0 +1,8 @@
+test-go/engine	2	^TestAFailedScopeRunSurvivesARealEventHistory/(mysql|mssql)$	dialect-gated per SUBTEST: a registeredBackends test (step_dispatcher_scope_roundtrip_test.go, #4256), so mysql and mssql skip in this PostgreSQL-only job
+test-go/engine	2	^TestTheSetScopeSpecRoundTripsThroughARealEventHistory/(mysql|mssql)$	dialect-gated per SUBTEST: same file and shape as the line above (#4256)
+test-go/engine	2	^TestEveryLockSpecRoundTripsThroughARealEventHistory/(mysql|mssql)$	dialect-gated per SUBTEST: a registeredBackends test (step_dispatcher_lock_roundtrip_test.go), so mysql and mssql skip in this PostgreSQL-only job
+test-go/engine	1	^TestARustGuestReceivesAResponseOverSixtyFourKiBOnTheCallAfterTheTruncation$	wasm32-wasip1 Rust target not installed on this runner; only e2e-cross-language.yml provisions it (#4132)
+test-go/engine	1	^TestRustSideEffectFunctionRunsOnceAcrossFirstRunAndReplay$	wasm32-wasip1 Rust target not installed on this runner; only e2e-cross-language.yml provisions it (#4148)
+test-go/engine	1	^TestPythonDeferRegisteredBeforeASleepDoesNotRunAtTheSuspension$	componentize-py and wasm-tools are not installed on this runner (python_defer_segment_e2e_test.go, #4197)
+test-go/engine	1	^TestPythonDeferRegisteredBeforeContinueAsNewRunsExactlyOnce$	componentize-py and wasm-tools are not installed on this runner (python_defer_segment_e2e_test.go, #4197)
+test-go/engine	1	^TestPythonSideEffectFreezesAValueEndToEnd$	componentize-py and wasm-tools are not installed on this runner (python_side_effect_e2e_test.go, #4147)

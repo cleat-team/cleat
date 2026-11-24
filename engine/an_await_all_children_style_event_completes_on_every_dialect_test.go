@@ -21,7 +21,7 @@ import (
 // AwaitAllChildren needs no equivalent of the event_type-transition fix
 // (AwaitPromise) or nonEmptyChildError (AwaitChild's error path): its
 // completing write always marshals a []ChildOutcome slice into Response
-// (children.go's freshAwaitAllChildren/replayAwaitAllChildren), and
+// (children.go's awaitAllChildrenStep, its Fresh and its replay), and
 // json.Marshal of a slice is "[]" at its shortest, never "" -- so the
 // completion guard's response-IS-NULL half can never be fooled by a
 // genuinely-completed row here. This test's completed Response uses a
@@ -61,7 +61,7 @@ func runAwaitAllChildrenStyleCompletionCase(t *testing.T, dialect testutil.Diale
 		WithWorkflowStore(store),
 		WithDB(db))
 
-	// Suspend: the shape freshAwaitAllChildren's "not all done yet" branch
+	// Suspend: the shape awaitAllChildrenStep's Fresh "not all done yet" branch
 	// records (children.go) -- everything empty.
 	pending := EventRecord{
 		Step:        0,
@@ -73,8 +73,8 @@ func runAwaitAllChildrenStyleCompletionCase(t *testing.T, dialect testutil.Diale
 	}
 
 	// Complete: same step, a marshaled []ChildOutcome -- the shape
-	// freshAwaitAllChildren/replayAwaitAllChildren record once every child has
-	// settled.
+	// awaitAllChildrenStep records (and answers over the pending row) once every
+	// child has settled.
 	completed := EventRecord{
 		Step:        0,
 		EventType:   EventTypeAwaitAllChildren,

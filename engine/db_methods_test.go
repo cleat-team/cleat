@@ -4065,8 +4065,10 @@ func TestPostgresStore_RequestCancellation_BeginError(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error from begin failure")
 	}
-	if !strings.Contains(err.Error(), "request cancellation: begin") {
-		t.Errorf("expected 'request cancellation: begin' error, got: %v", err)
+	// The first database access is now the chain lookup (cleat#4340: the flag goes on the END of a continue-as-new chain), which opens its own transaction, so the injected begin
+	// failure meets it first. What this test protects is unchanged: a failure to begin is reported with the verb's name and the cause, not swallowed.
+	if !strings.Contains(err.Error(), "request cancellation:") || !strings.Contains(err.Error(), "begin failed") {
+		t.Errorf("expected a 'request cancellation: ...' error carrying the begin failure, got: %v", err)
 	}
 }
 
@@ -4683,8 +4685,10 @@ func TestPostgresStore_DeliverSignal_BeginError(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error from begin failure")
 	}
-	if !strings.Contains(err.Error(), "deliver signal: begin") {
-		t.Errorf("expected 'deliver signal: begin' error, got: %v", err)
+	// The chain's end is read before the delivery's own transaction is opened (cleat#4340), and that read opens a transaction too, so a database that cannot begin one fails there first.
+	// What the caller is owed is unchanged: an error that names the delivery and carries the driver's own "begin failed".
+	if !strings.Contains(err.Error(), "deliver signal") || !strings.Contains(err.Error(), "begin failed") {
+		t.Errorf("expected a 'deliver signal' error carrying 'begin failed', got: %v", err)
 	}
 }
 
@@ -5342,6 +5346,10 @@ func TestPostgresStore_LoadDAGSpec_NotFound(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "workflow def not found") {
 		t.Errorf("expected 'workflow def not found' error, got: %v", err)
+	}
+	// cleat#3883: matchable, so the HTTP layer can answer 404 and not a 500 carrying the sentence.
+	if !errors.Is(err, ErrWorkflowDefNotFound) {
+		t.Errorf("the not-found is not ErrWorkflowDefNotFound: %v", err)
 	}
 }
 

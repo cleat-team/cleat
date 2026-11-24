@@ -14,7 +14,13 @@ import (
 // fails in, the fix is to justify the edit in the comment on WasmtimeLanguages
 // and update this list -- not to loosen the assertion.
 func TestWasmtimeLanguages(t *testing.T) {
-	want := []string{"go", "assemblyscript", "java", "rust", "python"}
+	// "javascript" (cleat#3825) was added ahead of the build chain, as a label; the
+	// justification is the comment on WasmtimeLanguages, which says what was and was
+	// not verified on this branch. The exact-match assertion stays exact.
+	//
+	// "csharp" (cleat#4080) is the same kind of addition: a label ahead of the build chain, justified in the same comment.
+	// Whether it is a defer-segment language is a separate decision, pinned by its own test (C# PR 3).
+	want := []string{"go", "java", "rust", "python", "javascript", "csharp"}
 	if !reflect.DeepEqual(WasmtimeLanguages, want) {
 		t.Errorf("WasmtimeLanguages = %v, want %v", WasmtimeLanguages, want)
 	}
@@ -47,12 +53,12 @@ func TestRunsOnWasmtimeAgreesWithTheList(t *testing.T) {
 // so the replacement has to actually register all of them.
 func TestWithBackendsRegistersEvery(t *testing.T) {
 	e := &Engine{}
-	WithBackends([]string{"go", "assemblyscript", "java"}, nil)(e)
+	WithBackends([]string{"go", "rust", "java"}, nil)(e)
 
 	if len(e.backends) != 3 {
 		t.Fatalf("registered %d backends, want 3: %v", len(e.backends), e.backends)
 	}
-	for _, lang := range []string{"go", "assemblyscript", "java"} {
+	for _, lang := range []string{"go", "rust", "java"} {
 		if _, ok := e.backends[lang]; !ok {
 			t.Errorf("language %q was not registered", lang)
 		}
@@ -75,7 +81,7 @@ func TestWithBackendsRegistersEvery(t *testing.T) {
 // cannot be dissolved by an unrelated edit to the routing list.
 func TestBackendForWasmFallsBackForUnregistered(t *testing.T) {
 	e := &Engine{}
-	WithBackends([]string{"go", "assemblyscript", "java", "rust"}, nil)(e)
+	WithBackends([]string{"go", "java", "rust"}, nil)(e)
 
 	// A component-model header detects as "python", which the subset omits.
 	pythonish := []byte{0x00, 0x61, 0x73, 0x6d, 0x0d, 0x00, 0x01, 0x00}

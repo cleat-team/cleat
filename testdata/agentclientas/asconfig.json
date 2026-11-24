@@ -1,9 +1,0 @@
-{
-  "options": {
-    "bindings": "raw",
-    "use": ["ASC_WASI=0"],
-    "paths": {
-      "@cleat/sdk": ["../../packages/cleat-as/assembly"]
-    }
-  }
-}

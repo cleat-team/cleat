@@ -11,6 +11,7 @@ package engine
 import (
 	"context"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -43,6 +44,11 @@ type mockCall struct {
 type mockHostHandler struct {
 	ret int64
 
+	// fill is how many bytes a method that takes a response pointer writes there before returning ret. The component dispatchers size their
+	// buffer to what the host call wrote (cleat#4132), so a mock whose packed word CLAIMS n response bytes has to write them, as the real
+	// handlers do; before, the dispatcher's zero-filled 64 KiB buffer made a claim of n bytes look like n zero bytes.
+	fill int
+
 	// Guarded because wasmtime may invoke a handler from any goroutine, and
 	// the tests run under -race.
 	mu    sync.Mutex
@@ -71,6 +77,7 @@ func (h *mockHostHandler) reset() {
 }
 
 func (h *mockHostHandler) DurableCall(ctx context.Context, m api.Module, service, operation, requestJSON string, responsePtr, responseMaxLen uint32) int64 {
+	h.fillResponse(ctx, m, responsePtr, responseMaxLen)
 	h.record("DurableCall", service, operation, requestJSON)
 	return h.ret
 }
@@ -79,10 +86,12 @@ func (h *mockHostHandler) DurableSleep(ctx context.Context, m api.Module, durati
 	return h.ret
 }
 func (h *mockHostHandler) DurableAwaitSignals(ctx context.Context, m api.Module, signalNames string, timeoutMs int64, sigNamePtr, sigNameMaxLen, payloadPtr, payloadMaxLen uint32) int64 {
+	h.fillResponse(ctx, m, payloadPtr, payloadMaxLen)
 	h.record("DurableAwaitSignals", signalNames)
 	return h.ret
 }
 func (h *mockHostHandler) DurableDefer(ctx context.Context, m api.Module, description string, deferIDPtr, deferIDMaxLen uint32) int64 {
+	h.fillResponse(ctx, m, deferIDPtr, deferIDMaxLen)
 	h.record("DurableDefer", description)
 	return h.ret
 }
@@ -91,10 +100,12 @@ func (h *mockHostHandler) DurableLog(ctx context.Context, m api.Module, message 
 	return h.ret
 }
 func (h *mockHostHandler) PollCancellation(ctx context.Context, m api.Module, reasonPtr, reasonMaxLen uint32) int64 {
+	h.fillResponse(ctx, m, reasonPtr, reasonMaxLen)
 	h.record("PollCancellation")
 	return h.ret
 }
 func (h *mockHostHandler) PollSignal(ctx context.Context, m api.Module, signalName string, payloadPtr, payloadMaxLen uint32) int64 {
+	h.fillResponse(ctx, m, payloadPtr, payloadMaxLen)
 	h.record("PollSignal", signalName)
 	return h.ret
 }
@@ -107,34 +118,42 @@ func (h *mockHostHandler) ContinueAsNewWithVersion(ctx context.Context, m api.Mo
 	return h.ret
 }
 func (h *mockHostHandler) ChildWorkflow(ctx context.Context, m api.Module, name, inputJSON string, runIDPtr, runIDMaxLen uint32) int64 {
+	h.fillResponse(ctx, m, runIDPtr, runIDMaxLen)
 	h.record("ChildWorkflow", name, inputJSON)
 	return h.ret
 }
 func (h *mockHostHandler) ChildWorkflowWithOptions(ctx context.Context, m api.Module, name, inputJSON string, version int64, priority int64, parentClosePolicy string, runIDPtr, runIDMaxLen uint32) int64 {
+	h.fillResponse(ctx, m, runIDPtr, runIDMaxLen)
 	h.record("ChildWorkflowWithOptions", name, inputJSON, parentClosePolicy)
 	return h.ret
 }
 func (h *mockHostHandler) AwaitChild(ctx context.Context, m api.Module, runID string, resultPtr, resultMaxLen uint32) int64 {
+	h.fillResponse(ctx, m, resultPtr, resultMaxLen)
 	h.record("AwaitChild", runID)
 	return h.ret
 }
 func (h *mockHostHandler) AwaitAllChildren(ctx context.Context, m api.Module, runIDsJSON string, resultsPtr, resultsMaxLen uint32) int64 {
+	h.fillResponse(ctx, m, resultsPtr, resultsMaxLen)
 	h.record("AwaitAllChildren", runIDsJSON)
 	return h.ret
 }
 func (h *mockHostHandler) PollChild(ctx context.Context, m api.Module, runID string, resultPtr, resultMaxLen uint32) int64 {
+	h.fillResponse(ctx, m, resultPtr, resultMaxLen)
 	h.record("PollChild", runID)
 	return h.ret
 }
 func (h *mockHostHandler) AwaitAnyChild(ctx context.Context, m api.Module, runIDsJSON string, resultPtr, resultMaxLen uint32) int64 {
+	h.fillResponse(ctx, m, resultPtr, resultMaxLen)
 	h.record("AwaitAnyChild", runIDsJSON)
 	return h.ret
 }
 func (h *mockHostHandler) DurableCallWithRetry(ctx context.Context, m api.Module, service, operation, requestJSON string, maxAttempts, initialIntervalMs, backoffCoefficient100x, maxIntervalMs int64, nonRetryableErrorsJSON string, responsePtr, responseMaxLen uint32) int64 {
+	h.fillResponse(ctx, m, responsePtr, responseMaxLen)
 	h.record("DurableCallWithRetry", service, operation, requestJSON, nonRetryableErrorsJSON)
 	return h.ret
 }
 func (h *mockHostHandler) DurableCallWithHeartbeat(ctx context.Context, m api.Module, service, operation, requestJSON string, heartbeatIntervalMs int64, responsePtr, responseMaxLen uint32) int64 {
+	h.fillResponse(ctx, m, responsePtr, responseMaxLen)
 	h.record("DurableCallWithHeartbeat", service, operation, requestJSON)
 	return h.ret
 }
@@ -168,18 +187,22 @@ func (h *mockHostHandler) ServeWasiSleep(ctx context.Context, durationMs int64) 
 	return 0
 }
 func (h *mockHostHandler) CreatePromise(ctx context.Context, m api.Module, name string, promiseIDPtr, promiseIDMaxLen uint32) int64 {
+	h.fillResponse(ctx, m, promiseIDPtr, promiseIDMaxLen)
 	h.record("CreatePromise", name)
 	return h.ret
 }
 func (h *mockHostHandler) AwaitPromise(ctx context.Context, m api.Module, promiseID string, timeoutMs int64, resultPtr, resultMaxLen uint32) int64 {
+	h.fillResponse(ctx, m, resultPtr, resultMaxLen)
 	h.record("AwaitPromise", promiseID)
 	return h.ret
 }
 func (h *mockHostHandler) PluginCall(ctx context.Context, m api.Module, pluginName, functionName, inputJSON string, responsePtr, responseMaxLen uint32) int64 {
+	h.fillResponse(ctx, m, responsePtr, responseMaxLen)
 	h.record("PluginCall", pluginName, functionName, inputJSON)
 	return h.ret
 }
 func (h *mockHostHandler) PluginCallStreaming(ctx context.Context, m api.Module, pluginName, functionName, inputJSON string, responsePtr, responseMaxLen uint32) int64 {
+	h.fillResponse(ctx, m, responsePtr, responseMaxLen)
 	h.record("PluginCallStreaming", pluginName, functionName, inputJSON)
 	return h.ret
 }
@@ -189,13 +212,16 @@ func (h *mockHostHandler) RegisterUpdateHandler(ctx context.Context, m api.Modul
 }
 
 func (h *mockHostHandler) DurablePollUpdate(ctx context.Context, m api.Module, outPtr, outMaxLen uint32) int64 {
+	h.fillResponse(ctx, m, outPtr, outMaxLen)
 	return 0
 }
 
 func (h *mockHostHandler) DurableCompleteUpdate(ctx context.Context, m api.Module, requestID, result, errMsg string) int64 {
+	h.record("DurableCompleteUpdate", requestID, result, errMsg)
 	return 0
 }
 func (h *mockHostHandler) SendSignalAndWait(ctx context.Context, m api.Module, targetRunID, signalName, payload string, timeoutMs int64, responsePtr, responseMaxLen uint32) int64 {
+	h.fillResponse(ctx, m, responsePtr, responseMaxLen)
 	h.record("SendSignalAndWait", targetRunID, signalName, payload)
 	return h.ret
 }
@@ -208,14 +234,17 @@ func (h *mockHostHandler) SignalWorkflow(ctx context.Context, m api.Module, targ
 	return h.ret
 }
 func (h *mockHostHandler) SetScope(ctx context.Context, m api.Module, objectType, instanceKey string, prevScopePtr, prevScopeMaxLen uint32) int64 {
+	h.fillResponse(ctx, m, prevScopePtr, prevScopeMaxLen)
 	h.record("SetScope", objectType, instanceKey)
 	return h.ret
 }
 func (h *mockHostHandler) GetScope(ctx context.Context, m api.Module, objTypePtr, objTypeMaxLen, instKeyPtr, instKeyMaxLen uint32) int64 {
+	h.fillResponse(ctx, m, instKeyPtr, instKeyMaxLen)
 	h.record("GetScope")
 	return h.ret
 }
 func (h *mockHostHandler) UUID(ctx context.Context, m api.Module, seed string, uuidPtr, uuidMaxLen uint32) int64 {
+	h.fillResponse(ctx, m, uuidPtr, uuidMaxLen)
 	h.record("UUID", seed)
 	return h.ret
 }
@@ -228,14 +257,22 @@ func (h *mockHostHandler) ReleaseLock(ctx context.Context, m api.Module, key str
 	return h.ret
 }
 func (h *mockHostHandler) SideEffect(ctx context.Context, m api.Module, computedResult string, respPtr, respMaxLen uint32) int64 {
+	h.fillResponse(ctx, m, respPtr, respMaxLen)
 	h.record("SideEffect", computedResult)
 	return h.ret
 }
+func (h *mockHostHandler) SideEffectRecorded(ctx context.Context, m api.Module, respPtr, respMaxLen uint32) int64 {
+	h.fillResponse(ctx, m, respPtr, respMaxLen)
+	h.record("SideEffectRecorded")
+	return h.ret
+}
 func (h *mockHostHandler) WorkflowID(ctx context.Context, m api.Module, idPtr, idMaxLen uint32) int64 {
+	h.fillResponse(ctx, m, idPtr, idMaxLen)
 	h.record("WorkflowID")
 	return h.ret
 }
 func (h *mockHostHandler) RunID(ctx context.Context, m api.Module, idPtr, idMaxLen uint32) int64 {
+	h.fillResponse(ctx, m, idPtr, idMaxLen)
 	h.record("RunID")
 	return h.ret
 }
@@ -264,6 +301,7 @@ func (h *mockHostHandler) SetState(ctx context.Context, m api.Module, key, value
 	return h.ret
 }
 func (h *mockHostHandler) GetState(ctx context.Context, m api.Module, key string, valuePtr, valueMaxLen uint32) int64 {
+	h.fillResponse(ctx, m, valuePtr, valueMaxLen)
 	h.record("GetState", key)
 	return h.ret
 }
@@ -280,6 +318,7 @@ func (h *mockHostHandler) HasState(ctx context.Context, m api.Module, key string
 	return h.ret
 }
 func (h *mockHostHandler) ListState(ctx context.Context, m api.Module, prefix string, keysPtr, keysMaxLen uint32) int64 {
+	h.fillResponse(ctx, m, keysPtr, keysMaxLen)
 	h.record("ListState", prefix)
 	return h.ret
 }
@@ -288,14 +327,17 @@ func (h *mockHostHandler) RunDetached(ctx context.Context, m api.Module, name, i
 	return h.ret
 }
 func (h *mockHostHandler) StartDetached(ctx context.Context, m api.Module, name, inputJSON string, runIDPtr, runIDMaxLen uint32) int64 {
+	h.fillResponse(ctx, m, runIDPtr, runIDMaxLen)
 	h.record("StartDetached", name, inputJSON)
 	return h.ret
 }
 func (h *mockHostHandler) Fetch(ctx context.Context, m api.Module, method, url, headersJSON, body string, responsePtr, responseMaxLen uint32) int64 {
+	h.fillResponse(ctx, m, responsePtr, responseMaxLen)
 	h.record("Fetch", method, url, headersJSON, body)
 	return h.ret
 }
 func (h *mockHostHandler) ScheduleCron(ctx context.Context, m api.Module, workflowName, cronExpr, timezone, inputJSON string, idPtr, idMaxLen uint32) int64 {
+	h.fillResponse(ctx, m, idPtr, idMaxLen)
 	h.record("ScheduleCron", workflowName, cronExpr, timezone, inputJSON)
 	return h.ret
 }
@@ -304,14 +346,17 @@ func (h *mockHostHandler) DeleteCron(ctx context.Context, m api.Module, schedule
 	return h.ret
 }
 func (h *mockHostHandler) ListCrons(ctx context.Context, m api.Module, outPtr, outMaxLen uint32) int64 {
+	h.fillResponse(ctx, m, outPtr, outMaxLen)
 	h.record("ListCrons")
 	return h.ret
 }
 func (h *mockHostHandler) JsonParse(ctx context.Context, m api.Module, input string, outPtr, outMaxLen uint32) int64 {
+	h.fillResponse(ctx, m, outPtr, outMaxLen)
 	h.record("JsonParse", input)
 	return h.ret
 }
 func (h *mockHostHandler) JsonStringify(ctx context.Context, m api.Module, input string, outPtr, outMaxLen uint32) int64 {
+	h.fillResponse(ctx, m, outPtr, outMaxLen)
 	h.record("JsonStringify", input)
 	return h.ret
 }
@@ -319,3 +364,10 @@ func (h *mockHostHandler) JsonStringify(ctx context.Context, m api.Module, input
 // SetDeferPhase satisfies HostHandler. The flag it would set is only read when
 // events are recorded, which these mocks do not do.
 func (h *mockHostHandler) SetDeferPhase(_ context.Context, _ bool) int64 { return 0 }
+
+// fillResponse writes h.fill bytes at ptr, the way a real handler writes its response.
+func (h *mockHostHandler) fillResponse(ctx context.Context, m api.Module, ptr, maxLen uint32) {
+	if h.fill > 0 {
+		_, _ = new(execSession).writeResult(ctx, m, ptr, strings.Repeat("x", h.fill), maxLen)
+	}
+}

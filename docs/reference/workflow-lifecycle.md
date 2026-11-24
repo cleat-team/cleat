@@ -34,7 +34,7 @@ seventh, `terminating`, gained its writer on 2026-09-04 (see the defer phase bel
 | `terminated` | **yes** | Force-terminated by an operator through the admin API, or closed by its parent's `TERMINATE` close policy (cleat#1978 — before this the TERMINATE arm wrote `failed`, with a fixed `error_msg` regardless of why the parent closed; it now writes `terminated`, `error_op='parent_close'`, and an `error_msg` naming the parent's actual outcome, e.g. "parent workflow completed"/"parent workflow failed"/"parent workflow was terminated" — see `parentOutcomeMessage`, `engine/store_lifecycle.go`). |
 | `cancelled` | **yes** | Stopped pre-emptively by an operator, through `POST /api/workflows/:id/cancel` with `{"preemptive": true}`. **Distinct from `done` deliberately** — cleat#1153: cancellation used to be cooperative and unobservable, so a run that honoured a cancellation and one that simply finished were both `done`, and nobody could tell which had happened. Like `terminated`, it runs the workflow's registered defers first, through the same two-phase transition. |
 | `dead_lettered` | **yes** | Retries exhausted. On the Go SDK this is reachable only through a retry policy short enough to have run on the host — see `IMPROVEMENT-PLAN.md` §3.88. |
-| `terminating` | no | The defer phase's window: a terminal outcome has been decided and the workflow is running its cleanup before it is applied. Claimable, non-terminal. Written by `TerminateWorkflow`, by `enforceParentClosePolicy`'s TERMINATE arm, and since 2026-09-13 by force-complete and force-fail — in each case only when the workflow has registered defers; cleared by `FinalizeDeferPhase` or by the deadline sweep. Schema in `migrations/postgres/038`, `mysql/037`, `mssql/041`. |
+| `terminating` | no | The defer phase's window: a terminal outcome has been decided and the workflow is running its cleanup before it is applied. Claimable, non-terminal. Written by `TerminateWorkflow`, by `enforceParentClosePolicy`'s TERMINATE arm, and since 2026-09-13 by force-complete and force-fail — in each case only when the workflow has registered defers; and, since cleat#4079, by the worker for a COMPONENT run that was killed (the execution fence, an instruction limit, a trap) with defers still owed, carrying the failed or dead-lettered outcome and its error, which are written at the kill. Cleared by `FinalizeDeferPhase` or by the deadline sweep. Schema in `migrations/postgres/038`, `mysql/037`, `mssql/041`. |
 
 **The five `terminal? yes` rows above are a run's outcomes**, and each carries a contract — what it
 keeps and for how long, which redrive verbs apply to it, what a parent awaiting it sees, and which
@@ -60,6 +60,102 @@ to be.
 `terminating` is **not** settled — it is the cleanup window above, and a second terminate landing
 on a `terminating` row still cuts the defer phase short rather than being refused, exactly as
 before.
+
+**A cancel or a terminate is addressed to a workflow too, and acts on whichever run of it is live.** cleat#4340. A
+pre-emptive `POST /api/workflows/<id>/cancel`, a cooperative one (no `"preemptive"`), and
+`POST /api/dead-letters/<id>/terminate` sent to **any run of a continue-as-new chain** act on the **current run** (the end
+of the chain), once, and the `200` says where, as a signal's does:
+
+```
+POST /api/workflows/<first-run>/cancel  {"preemptive":true}  →  200 {"status":"cancelled",
+                                                                    "workflow_id":"<current run>", "forwarded_from":"<first-run>"}
+```
+
+`workflow_id` and `forwarded_from` are present only when the verb was forwarded. The runs that already continued are left
+as they were (`done`). A verb and a continue-as-new cannot miss each other: each locks the old run's row first (its lease
+row on PostgreSQL, its instance row on MySQL and SQL Server), so either the cancel wins, settles the old run and **no
+successor is created**, or the continue commits first and the verb walks to the successor and settles that. A cooperative
+cancel **already requested on a run when it continues** is **carried to its successor**, with its reason, in the transaction
+that completes the old run; before this a successor was created un-cancelled and the request was lost to a guest that had
+never looked at it.
+
+**What a chain's current run being already over means, per verb.** The rule is a signal's: a run that is **closed for
+good** (`done`, `cancelled`) refuses, and one that an operator can reopen under the same id (`failed`, `terminated`,
+`dead_lettered`) accepts, because a request stored on it is then read. The refusal is `409 {"detail":"state_conflict"}`
+and names the run that refused when the one you addressed had continued: `workflow A: continued as new, and its current
+run B is already settled (status=done); ...`.
+
+| current run is | pre-emptive cancel | terminate | cooperative cancel |
+|---|---|---|---|
+| open (`ready`, `running`, ...) | acts | acts | stores the request |
+| `done` | 409 | 409 | **409** (was `200`, and the request was read by no one) |
+| `cancelled` | 409 | 409 | **409** (was `200`) |
+| `failed` | 409 | 409 | stores the request |
+| `terminated` | 409 | 409 | stores the request |
+| `dead_lettered` | 409 | **acts** (the route exists to take it off the queue) | stores the request |
+
+The same sharding issue as for signals applies, and is not about these verbs.
+
+**A signal is addressed to a workflow, and reaches whichever run of it is live; one to a run that can never be reopened
+is refused.** cleat#4340. A workflow that continues as new is the same workflow to its sender, so a signal sent to
+**any run of a continue-as-new chain** is delivered to the **current run** (the end of the chain), exactly once, and the
+`200` says where it went:
+
+```
+POST /api/workflows/<first-run>/signal  →  200 {"status":"delivered", "workflow_id":"<current run>",
+                                                "forwarded_from":"<first-run>", "replay":false}
+```
+
+`workflow_id` and `forwarded_from` are present only when the signal was forwarded. A signal already **stored on a run
+when it continues** (sent but not yet read) is **carried to its successor**, in the same transaction that completes the
+old run, in the order it was sent. A signal that races the continue lands on exactly one run, before the commit (and is
+carried) or after it (and is forwarded): a delivery locks the old run's row (its lease row on PostgreSQL, its instance
+row on MySQL and SQL Server) before it decides, and the continue's own update of that row waits for it, so neither can
+miss the other.
+
+A chain whose **current run** is `done` or `cancelled` has nowhere to deliver, and is refused, in the statement that would
+have stored the signal, so nothing is written:
+
+```
+POST /api/workflows/<id>/signal  →  409 {"error":"…", "detail":"workflow_not_open",
+                                         "status":"done", "continued_to":"<run>"}
+```
+
+`status` is the state of the run that refused, `done` or `cancelled`. `continued_to` appears only when the run addressed
+had **continued as new** and names the **last run in its chain**, whose state `status` is; it is absent for a run that
+simply finished. The refusal is the same under an `Idempotency-Key`, and it does **not** spend the key; a key that
+already delivered is a replay and delivers nothing, forwarded or not. A run that does not exist, or belongs to another
+tenant, is still `404`, identically, so this answer reveals nothing about another tenant's runs. Inside a workflow,
+`SignalWorkflow` to a target that is closed for good returns the existing **not-found** outcome (a new outcome class would
+be an ABI change in every SDK), and a plugin sees `plugin.ErrWorkflowNotFound`, so an awaiter registered for the run is
+dropped, as for a missing one.
+
+**Sharding (experimental) has a known issue here.** A continue inserts the successor on the shard of the run it
+continues, so forwarding and the carry-over work for a signal addressed to a run that shard holds. But every other
+operation routes a run by the hash of its OWN id, which need not name the shard that holds a continued run, so a signal
+addressed to a successor by ITS id can be routed away from it. That routing predates this change and is not about
+signals; a signal addressed to the first run of a chain is not affected.
+
+**`failed`, `terminated` and `dead_lettered` are different, and are deliberately NOT refused.** An operator can
+reopen them under the **same id** (`re-replay`, and `retry` for `dead_lettered`; see *Redriving a settled run*), and
+the signals already stored for them stay in place, so "signal a dead-lettered run, then retry it" works and the
+signal is read after the retry. That is accepted and stored exactly as before, but the reply no longer claims
+delivery:
+
+```
+POST /api/workflows/<id>/signal  →  200 {"status":"stored", "run_status":"dead_lettered",
+                                         "detail":"stored; this run reads it only if it is retried or re-replayed",
+                                         "idempotent_replay":false}
+```
+
+It is the same `200`, so a client that checks only the code is unaffected; one that reads `status` is told the
+truth. `run_status` is the run's status at the moment of the reply. An open run still answers
+`{"status":"delivered"}`. The set refused is exactly "settled and not redrivable", derived from the engine's own
+`reReplayableStatuses`, not a second list.
+
+Two open questions, both for the owner and neither decided here: whether a signal to a continued run should instead
+be **forwarded** to its successor (cleat#4340), and whether the three redrivable statuses should **refuse** like the
+others (cleat#4345).
 
 Re-derive the written set with:
 
@@ -345,6 +441,21 @@ that their action was already submitted; it is not worth branching the happy pat
 
 ---
 
+### Per-run limit overrides on a start request
+
+`POST /api/workflows/<name>/start` accepts four optional per-run bounds, in milliseconds:
+`wasm_instance_timeout_ms`, `wasm_wall_clock_ceiling_ms`, `host_retry_budget_ms` and
+`max_workflow_duration_ms`. Each can only **tighten**: a run's bound is clamped to its tenant's, and
+that to the operator's flag (`min(run, tenant, operator)`). `0` or absent means no override. A
+negative value is a `400` (`per-run limit overrides must be positive milliseconds`).
+
+**`wasm_instance_timeout_ms` above `0` and under `250` is a `400`** that names the value, the 250ms
+floor and why: below about 200ms the hard trap beats the soft kill to a poll, so the defers of a run
+this timeout stops do not reliably run (`ABI.md`, "There is a cliff below about 200 ms"). Before
+cleat#3922 such a request was accepted. It is the same floor as the worker's
+`--wasm-instance-timeout` and a tenant's `wasm_instance_timeout_ms` setting. The three other bounds
+are not subject to it.
+
 ## Outcomes
 
 The five settled statuses are a run's **outcomes**. Everything else in this document says how a run
@@ -464,6 +575,25 @@ what the run's history still holds.
 | **retry** | `POST /api/workflows/{id}/retry` | `dead_lettered` | the same run, in place, back to `ready` |
 | **reprocess** | `POST /api/dead-letters/{id}/reprocess` | `dead_lettered` | a **new** run, from the definition and input — not from history |
 
+**A redrive replays the history position by position, and a defer segment writes its events after the last
+event the body recorded.** When a run is terminated while it is running or sleeping, or a component run is killed
+with defers owed (below), the engine runs its defers in a segment before the run settles, and those events end the
+history. A redrive replays the body, reaches that point and makes a fresh call at a step the segment already
+filled, so it fails with `replay divergence at step N: workflow called X but history has <the cleanup's call>`.
+Measured on PostgreSQL, MySQL and SQL Server (cleat#4094).
+
+Every event a segment records carries a marker, `in_defer_segment`, set by the engine and never by the guest, so
+a guest's own cleanup after an ordinary failure is not marked and replays deterministically (cleat#4079).
+
+- **A run with a marked event is refused by `re-replay` (any status) and by `retry` (a dead-lettered run), with a
+  conflict that says why.** Start a new run instead; a dead-lettered run can be reprocessed from the dead-letter
+  queue. An ordinary dead-lettered or failed run whose only defer-phase events are its own drain still redrives.
+- **Runs recorded before the marker existed have no marked events.** For those, `re-replay` keeps the earlier
+  scan: a `terminated` or `cancelled` run with a defer-phase event is refused. **Known residual:** nothing in a
+  history says which engine wrote it, so a dead-lettered run terminated off the queue after an ordinary
+  failure's own cleanup is refused too, although it would replay. An old `failed` run that ran a segment is not
+  refused and can still diverge; reprocess it as a new run.
+
 The re-replay and retry endpoints are gated by `--enable-admin-api` for the admin routes and by
 tenant ownership for the rest; while the admin API is off, its routes answer 404.
 
@@ -505,9 +635,11 @@ stateDiagram-v2
 
     ready --> terminating: outcome decided, defers registered
     running --> terminating: outcome decided, defers registered
+    running --> terminating: a component run killed with defers owed (MarkFailureForDeferPhase)
     terminating --> terminated: FinalizeDeferPhase
     terminating --> cancelled: FinalizeDeferPhase
     terminating --> failed: FinalizeDeferPhase / ExpireDeferPhases
+    terminating --> dead_lettered: FinalizeDeferPhase (a killed component run that exhausted a call)
     terminating --> done: FinalizeDeferPhase (force-complete)
 
     done --> [*]
@@ -516,6 +648,41 @@ stateDiagram-v2
     cancelled --> [*]
     dead_lettered --> [*]
 ```
+
+**A killed component run runs its cleanup.** A trapped component instance cannot be re-entered, so a Python or C#
+run killed by the execution fence used to lose the defers it had registered. Now the worker marks it `terminating`
+carrying the outcome the failure would have had (`failed`, or `dead_lettered` when its last durable act exhausted a
+call) and its error, the next claim replays its history on a fresh instance and stops at the last host call the
+engine can refuse, the guest's defers run, and `FinalizeDeferPhase` applies the recorded outcome. Three things follow:
+
+- **What a client sees.** The run reads `terminating` for the length of the replay plus the cleanup, plus the claim
+  latency (12 to 295 ms for the replay and drain over 10 to 10,000 recorded calls, measured on Python); the bound if
+  the worker vanishes is the 5-minute defer-phase deadline, after which it fails without its cleanup. Then it reads the
+  same failure it would have had. A killed run that registered no defer goes straight to `failed` as before.
+  Anything that treats `terminating` as "someone terminated this" would mislabel a timeout.
+- **A defer after a kill must not assume the last call failed.** The guest is stopped at a call whose effect happened;
+  the call's result is withheld, so the cleanup sees the last effect as indeterminate, exactly as after a kill during
+  that call. Make the cleanup idempotent, or check the world.
+- **Only calls the engine can refuse, and a guest can be told about, are stop points:** calls, retried calls, sends,
+  side effects, fetches, plugin calls, child workflows, detached runs, signal awaits, lock acquisition, cron scheduling
+  and schedule invocation, promise settlements (`resolve_promise`, `reject_promise`, and `reply_to_signal`, which is
+  `resolve_promise`), and defer registrations. A kill after `set_query_state`, `create_promise`, `set_scope`, `poll_update`
+  or `delete_cron` stops at the previous stop point and skips those events (they are recorded, not replayed).
+  `delete_cron` is refused by the host in a segment, but its component function returns nothing, so a component guest
+  cannot be told to stop at it: it would carry on past the refused call and back into the loop the kill interrupted.
+  `TestEveryHostStopSiteIsClassifiedForTheStoppableSet` keeps this list in step with the host.
+- **Settling a promise is refused in a segment's body for every guest, not only for a killed run's segment.** It is an effect
+  another run may be waiting on, so a terminated workflow's cleanup body past its recorded history can no longer resolve or
+  reject a promise it never reached, as it already could not delete a schedule (cleat#4083). The refusal rides in bit 31 of the
+  packed `u64` the two imports already return, so no WIT signature changes for them; the Rust and Java SDKs now test that bit
+  before decoding, the Go adapters panic with `ErrSuspend`, and Python raises `SuspendSentinel`. Their events carry
+  `Service = "promise"` and `Op = "resolve"` or `"reject"`: `await_promise` of an already-settled promise records the same
+  event type with the same fields, and only the settlements are effects, so a stop point at an event with no `Op` would let that
+  await return normally and the guest run on. Histories written before this change have no `Op`, so their settlements are not
+  stop points and the stop lands earlier, which only skips events.
+- **A cleanup that never returns is cut off.** The drain has its own 30-second budget (measured 30.2 s for a defer
+  body that loops forever); the run then still ends with its recorded outcome, not at the 5-minute deadline, and
+  that cleanup is lost.
 
 `terminating` was absent from this diagram until 2026-09-19, while the status table above has
 described it since 2026-09-04. It is the only non-terminal state a workflow can be in that a

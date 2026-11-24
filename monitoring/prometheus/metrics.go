@@ -65,35 +65,41 @@ type Metrics struct {
 	internalDefs map[string]struct{}
 
 	// --- Counters (Int64Counter) ---
-	workflowsStarted        metric.Int64Counter
-	workflowsCompleted      metric.Int64Counter
-	workflowsFailed         metric.Int64Counter
-	freshSteps              metric.Int64Counter
-	replaySteps             metric.Int64Counter
-	calls                   metric.Int64Counter
-	callRetries             metric.Int64Counter
-	replayFailures          metric.Int64Counter
-	replayShortHistories    metric.Int64Counter
-	replayChecksumFailures  metric.Int64Counter
-	ambiguousCalls          metric.Int64Counter
-	compactionEventsDeleted metric.Int64Counter
-	encryptionErrors        metric.Int64Counter
-	decryptionErrors        metric.Int64Counter
-	continueAsNew           metric.Int64Counter
-	wasmFuelExhausted       metric.Int64Counter
-	workflowsDeadLettered   metric.Int64Counter
-	workflowsClaimed        metric.Int64Counter
-	executionsFencedOut     metric.Int64Counter
-	workflowReleases        metric.Int64Counter
-	wasmCacheHits           metric.Int64Counter
-	wasmCacheMisses         metric.Int64Counter
-	eventsDeleted           metric.Int64Counter
-	compactionStateCleared  metric.Int64Counter
-	workflowsPurged         metric.Int64Counter
-	backgroundLoops         metric.Int64Counter
-	backgroundLoopRestarts  metric.Int64Counter
-	pluginEventsLost        metric.Int64Counter
-	secretKeyReloads        metric.Int64Counter
+	workflowsStarted             metric.Int64Counter
+	workflowsCompleted           metric.Int64Counter
+	workflowsFailed              metric.Int64Counter
+	freshSteps                   metric.Int64Counter
+	replaySteps                  metric.Int64Counter
+	calls                        metric.Int64Counter
+	callRetries                  metric.Int64Counter
+	replayFailures               metric.Int64Counter
+	residentParks                metric.Int64Counter
+	residentRefusals             metric.Int64Counter
+	residentEvictions            metric.Int64Counter
+	residentRechecks             metric.Int64Counter
+	replayShortHistories         metric.Int64Counter
+	replayChecksumFailures       metric.Int64Counter
+	ambiguousCalls               metric.Int64Counter
+	compactionEventsDeleted      metric.Int64Counter
+	encryptionErrors             metric.Int64Counter
+	decryptionErrors             metric.Int64Counter
+	continueAsNew                metric.Int64Counter
+	eventWriteFailures           metric.Int64Counter
+	wasmFuelExhausted            metric.Int64Counter
+	componentPrecompileFallbacks metric.Int64Counter
+	workflowsDeadLettered        metric.Int64Counter
+	workflowsClaimed             metric.Int64Counter
+	executionsFencedOut          metric.Int64Counter
+	workflowReleases             metric.Int64Counter
+	wasmCacheHits                metric.Int64Counter
+	wasmCacheMisses              metric.Int64Counter
+	eventsDeleted                metric.Int64Counter
+	compactionStateCleared       metric.Int64Counter
+	workflowsPurged              metric.Int64Counter
+	backgroundLoops              metric.Int64Counter
+	backgroundLoopRestarts       metric.Int64Counter
+	pluginEventsLost             metric.Int64Counter
+	secretKeyReloads             metric.Int64Counter
 
 	// Database reachability (cleat#2007), fed by the worker's deadline-bounded probes.
 	dbReachable            metric.Int64Gauge
@@ -106,6 +112,9 @@ type Metrics struct {
 
 	// --- UpDownCounters (Int64UpDownCounter) ---
 	workflowsActive                metric.Int64UpDownCounter
+	residentRuns                   metric.Int64UpDownCounter
+	residentMemoryBudget           metric.Int64UpDownCounter
+	residentMemoryCharged          metric.Int64UpDownCounter
 	workerCount                    metric.Int64UpDownCounter
 	eventHistorySize               metric.Int64UpDownCounter
 	wasmCacheEntries               metric.Int64UpDownCounter
@@ -276,6 +285,38 @@ func New(cfg Config) (*Metrics, error) {
 		return nil, fmt.Errorf("cleat_replay_failures_total: %w", err)
 	}
 
+	m.residentParks, err = meter.Int64Counter(
+		"cleat_resident_parks_total",
+		metric.WithDescription("Waits that were held on the worker instead of suspended, by what they waited for and how the hold ended (deadline: the timer fired; cancelled: the run's context ended; evicted: the worker sent the run back)"),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("cleat_resident_parks_total: %w", err)
+	}
+
+	m.residentRefusals, err = meter.Int64Counter(
+		"cleat_resident_refusals_total",
+		metric.WithDescription("Waits that were NOT held and suspended as they always have, by what they waited for and why (kind, language, window, count, memory, pressure, draining)"),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("cleat_resident_refusals_total: %w", err)
+	}
+
+	m.residentEvictions, err = meter.Int64Counter(
+		"cleat_resident_evictions_total",
+		metric.WithDescription("Held runs the worker sent back before their wait was due, by reason (shutdown, pressure)"),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("cleat_resident_evictions_total: %w", err)
+	}
+
+	m.residentRechecks, err = meter.Int64Counter(
+		"cleat_resident_rechecks_total",
+		metric.WithDescription("Store reads a HELD signal wait made to see whether its delivery had arrived, by what it waited for and the result (found: a delivery was there and the run resumes; none: nothing yet; error: the store could not be read, so the hold ended and the run suspended). This is the cost of holding such a wait: one read per awaited name per held run per --poll interval, bounded by --resident-max-runs"),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("cleat_resident_rechecks_total: %w", err)
+	}
+
 	m.replayShortHistories, err = meter.Int64Counter(
 		"cleat_replay_short_histories_total",
 		metric.WithDescription("Replays whose loaded history was shorter than the instance's recorded event_count"),
@@ -332,12 +373,28 @@ func New(cfg Config) (*Metrics, error) {
 		return nil, fmt.Errorf("cleat_continue_as_new_total: %w", err)
 	}
 
+	m.eventWriteFailures, err = meter.Int64Counter(
+		"cleat_event_write_failures_total",
+		metric.WithDescription("Recorded events whose durable write failed and stopped the run, by reason (quota or error); a run that keeps failing counts once per segment"),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("cleat_event_write_failures_total: %w", err)
+	}
+
 	m.wasmFuelExhausted, err = meter.Int64Counter(
 		"cleat_wasm_fuel_exhausted_total",
 		metric.WithDescription("Total number of WASM fuel exhaustion events"),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("cleat_wasm_fuel_exhausted_total: %w", err)
+	}
+
+	m.componentPrecompileFallbacks, err = meter.Int64Counter(
+		"cleat_component_precompile_fallbacks_total",
+		metric.WithDescription("Components a failed precompile child sent back to this worker to compile in-process, by the stage that failed (timeout, child_exit, record, artifact, deserialize, workdir, other). A rate here means --component-precompile is not protecting the worker's memory"),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("cleat_component_precompile_fallbacks_total: %w", err)
 	}
 
 	m.workflowsDeadLettered, err = meter.Int64Counter(
@@ -508,6 +565,32 @@ func New(cfg Config) (*Metrics, error) {
 	}
 
 	// --- Initialise UpDownCounters ---
+
+	m.residentRuns, err = meter.Int64UpDownCounter(
+		"cleat_resident_runs",
+		metric.WithDescription("Runs held on this worker right now instead of suspended"),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("cleat_resident_runs: %w", err)
+	}
+
+	m.residentMemoryBudget, err = meter.Int64UpDownCounter(
+		"cleat_resident_memory_budget_bytes",
+		metric.WithDescription("The memory the runs held on this worker may add up to, in bytes (cleat#4377); set once at start-up"),
+		metric.WithUnit("By"),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("cleat_resident_memory_budget_bytes: %w", err)
+	}
+
+	m.residentMemoryCharged, err = meter.Int64UpDownCounter(
+		"cleat_resident_memory_charged_bytes",
+		metric.WithDescription("What the runs held on this worker are charged against that budget right now, in bytes: an estimate by language, not a reading"),
+		metric.WithUnit("By"),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("cleat_resident_memory_charged_bytes: %w", err)
+	}
 
 	m.workflowsActive, err = meter.Int64UpDownCounter(
 		"cleat_workflows_active",
@@ -1032,6 +1115,45 @@ func (m *Metrics) RecordReplayFailure(ctx context.Context, extraAttrs ...attribu
 	m.replayFailures.Add(ctx, 1, metric.WithAttributes(attrs...))
 }
 
+// RecordResidentPark counts a wait that was held on the worker and says how the hold ended (cleat#4162).
+func (m *Metrics) RecordResidentPark(ctx context.Context, kind, outcome string) {
+	attrs := m.mergeAttrs(attribute.String("kind", kind), attribute.String("outcome", outcome))
+	m.residentParks.Add(ctx, 1, metric.WithAttributes(attrs...))
+}
+
+// RecordResidentRefusal counts a wait that was not held, and why. A refusal is the safe answer and is what every wait gets when residency is off.
+func (m *Metrics) RecordResidentRefusal(ctx context.Context, kind, reason string) {
+	attrs := m.mergeAttrs(attribute.String("kind", kind), attribute.String("reason", reason))
+	m.residentRefusals.Add(ctx, 1, metric.WithAttributes(attrs...))
+}
+
+// RecordResidentRecheck counts one store read a held signal wait made to see whether its delivery had arrived. It is the visible cost of holding a signal wait.
+func (m *Metrics) RecordResidentRecheck(ctx context.Context, kind, result string) {
+	attrs := m.mergeAttrs(attribute.String("kind", kind), attribute.String("result", result))
+	m.residentRechecks.Add(ctx, 1, metric.WithAttributes(attrs...))
+}
+
+// RecordResidentEviction counts a held run the worker sent back before its wait was due.
+func (m *Metrics) RecordResidentEviction(ctx context.Context, reason string) {
+	attrs := m.mergeAttrs(attribute.String("reason", reason))
+	m.residentEvictions.Add(ctx, 1, metric.WithAttributes(attrs...))
+}
+
+// AddResidentRuns moves the number of runs held right now by delta: +1 when a run is admitted, -1 when it leaves.
+func (m *Metrics) AddResidentRuns(ctx context.Context, delta int64) {
+	m.residentRuns.Add(ctx, delta, metric.WithAttributes(m.defaultAttrs...))
+}
+
+// AddResidentMemoryBudget records the held-run memory budget, once, when the set is built (cleat#4377).
+func (m *Metrics) AddResidentMemoryBudget(ctx context.Context, bytes int64) {
+	m.residentMemoryBudget.Add(ctx, bytes, metric.WithAttributes(m.defaultAttrs...))
+}
+
+// AddResidentMemoryCharged moves what the held runs are charged against the budget by delta bytes: +cost when a run is admitted, -cost when it leaves.
+func (m *Metrics) AddResidentMemoryCharged(ctx context.Context, delta int64) {
+	m.residentMemoryCharged.Add(ctx, delta, metric.WithAttributes(m.defaultAttrs...))
+}
+
 // RecordReplayShortHistory increments the replay-short-histories counter.
 //
 // NOT RecordReplayFailure, and the distinction is the whole point: a short
@@ -1082,10 +1204,24 @@ func (m *Metrics) RecordContinueAsNew(ctx context.Context, reason string, extraA
 	m.continueAsNew.Add(ctx, 1, metric.WithAttributes(attrs...))
 }
 
+// RecordEventWriteFailure increments the failed-event-write counter by reason ("quota" or "error").
+func (m *Metrics) RecordEventWriteFailure(ctx context.Context, reason string, extraAttrs ...attribute.KeyValue) {
+	attrs := m.mergeAttrs(append([]attribute.KeyValue{
+		attribute.String("reason", reason),
+	}, extraAttrs...)...)
+	m.eventWriteFailures.Add(ctx, 1, metric.WithAttributes(attrs...))
+}
+
 // RecordWasmFuelExhausted increments the wasm-fuel-exhausted counter.
 func (m *Metrics) RecordWasmFuelExhausted(ctx context.Context, extraAttrs ...attribute.KeyValue) {
 	attrs := m.mergeAttrs(extraAttrs...)
 	m.wasmFuelExhausted.Add(ctx, 1, metric.WithAttributes(attrs...))
+}
+
+// RecordComponentPrecompileFallback counts one component a failed precompile child sent back to this worker to compile in-process.
+func (m *Metrics) RecordComponentPrecompileFallback(ctx context.Context, reason string) {
+	attrs := m.mergeAttrs(attribute.String("reason", reason))
+	m.componentPrecompileFallbacks.Add(ctx, 1, metric.WithAttributes(attrs...))
 }
 
 // RecordPluginCallDuration records a plugin call duration by plugin and function.

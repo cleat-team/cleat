@@ -1,0 +1,36 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- The determinism probe (cleat#4080, PR 6): a workflow component whose entries DELIBERATELY use the APIs the determinism vet
+       refuses, and report what each does inside a component on the real engine. It exists so every rule in cmd/cleat/vet_csharp.go
+       cites a measurement rather than an assumption, and so the measurements can be re-run: tests/csharp/determinism_probe_test.go builds
+       it with build.sh directly. It is NOT built by `cleat build -target csharp`, which would refuse it, and it is not an example. -->
+  <PropertyGroup>
+    <OutputType>Library</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <AssemblyName>probe</AssemblyName>
+    <RootNamespace>Cleat.Probe</RootNamespace>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <RuntimeIdentifier>wasi-wasm</RuntimeIdentifier>
+    <UseAppHost>false</UseAppHost>
+    <PublishTrimmed>true</PublishTrimmed>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <SelfContained>true</SelfContained>
+    <DebugType>none</DebugType>
+    <!-- Deliberately NOT UseSystemResourceKeys: under it an exception's Message is a resource key, and Message is what
+         run-outcome::failed carries (cleat#4077). -->
+  </PropertyGroup>
+
+  <Import Project="../build/Cleat.Sdk.props" />
+
+  <ItemGroup>
+    <PackageReference Include="BytecodeAlliance.Componentize.DotNet.Wasm.SDK" Version="0.8.0-preview00011" />
+    <!-- The host pack follows the build platform (linux-x64 or linux-arm64 in the container), not a hard-coded one. -->
+    <PackageReference Include="runtime.$(NETCoreSdkPortableRuntimeIdentifier).microsoft.dotnet.ilcompiler.llvm" Version="10.0.0-rc.1.26306.1" />
+    <ProjectReference Include="../generator/Cleat.Generator.csproj" OutputItemType="Analyzer" ReferenceOutputAssembly="false" />
+  </ItemGroup>
+
+  <Import Project="../build/Cleat.Sdk.targets" />
+
+</Project>

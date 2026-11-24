@@ -1,0 +1,12 @@
+{
+  "doc": [
+    "The 'children' group of host calls (cleat#3827). Each call is listed here as unbound ('pending: ...') until its binding lands; the PR that binds a call moves its entry from 'unbound' to 'bound' in THIS file and touches no other inventory file. See packages/cleat-ts/groups/README.md."
+  ],
+  "bound": {
+    "__cleat_child_workflow_with_options": "cleat_child_workflow_with_options",
+    "__cleat_await_all_children": "cleat_await_all_children",
+    "__cleat_await_any_child": "cleat_await_any_child",
+    "__cleat_poll_child": "cleat_poll_child"
+  },
+  "unbound": {}
+}

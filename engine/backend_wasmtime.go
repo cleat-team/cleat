@@ -9,12 +9,9 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
-
-	"github.com/cespare/xxhash/v2"
 
 	"github.com/bytecodealliance/wasmtime-go/v48"
 
@@ -31,6 +28,14 @@ import (
 // +50ms, which is negligible next to the multi-second timeouts this
 // backend is configured with.
 const epochTickInterval = 50 * time.Millisecond
+
+// interruptMinMarginTime is the floor under the epoch reserve. Two epoch ticks plus a poll gap: a
+// deadline of N ticks expires 50*(N-1) to 50*N ms out, so anything under two ticks can be overtaken
+// by the hard trap before a poll observes the reserve. It lives here rather than beside the other
+// interrupt constants because it is written in terms of epochTickInterval, which exists only in this
+// cgo-tagged file: put in the untagged options file it breaks `CGO_ENABLED=0 go build ./engine/`,
+// and with it the CLI's pure-Go cross-compile. (cleat#3922 review.)
+const interruptMinMarginTime = 2*epochTickInterval + 20*time.Millisecond
 
 // Compile-time check: wasmtimeBackend implements WasmBackend.
 var _ WasmBackend = (*wasmtimeBackend)(nil)
@@ -71,6 +76,36 @@ type wasmtimeBackend struct {
 	// IMPROVEMENT-PLAN 3.90; see engine/wasmtime_hostbudget.go.
 	budget *hostBudget
 
+	// store is the store of the execution in progress, so a host function can read its fuel budget.
+	// Per-execution, like budget.
+	store *wasmtime.Store
+
+	// interruptFenced is true while the host runs a drain. The stop bit is answered 0 for its whole
+	// duration: the drain is the work the interrupt exists to make possible, and the fuel it runs on
+	// is refunded (see runGuestDefersAfterKill), so a fuel-based stop bit would fire immediately.
+	// Per-execution.
+	interruptFenced bool
+
+	// interruptMarginTime is the epoch arm's reserve for this execution: the smaller of
+	// DefaultWasmtimeInterruptMarginTime, a tenth of the budget and half of it, floored at
+	// interruptMinMarginTime unless half the budget is smaller. Zero when no epoch fence is armed.
+	interruptMarginTime time.Duration
+
+	// interruptUnwindGranted records that the unwind grant has been given, so a second poll — or a
+	// second arm firing — cannot grant it again and turn the reserve into a way to run past the
+	// budget it was protecting.
+	interruptUnwindGranted bool
+
+	// interruptArm records WHICH arm answered 1 -- fuel or epoch -- because the error the user sees
+	// names the budget that was enforced, and the two are different kills. Zero means none.
+	interruptArm int
+
+	// interruptRequested records that cleat_interrupt_requested answered 1 during this execution.
+	// The guest's surface after an interrupt is javy's process::abort(), which wasmtime reports as a
+	// bare `unreachable` trap -- indistinguishable from one a guest raises itself. This flag is what
+	// tells them apart: only a trap the HOST asked for is reported as the kill. Per-execution.
+	interruptRequested bool
+
 	// epochBoundByDeadline records that the epoch budget configureStore applied
 	// was ctx's remaining deadline, not this backend's executionTimeout, so the
 	// error resourceLimitError builds names the bound that actually stopped the
@@ -89,7 +124,19 @@ type wasmtimeBackend struct {
 	moduleCache  *moduleLRU
 	components   *componentCache // compiled components, in moduleCache's LRU (cleat#3748); PerExecution must copy it
 	compileLocks *sync.Map       // per-key *sync.Mutex to serialize compilation
-	metaCache    *sync.Map       // per-key *wasmMeta (envNeeded, hasWasi, language)
+
+	// componentCompileSem lets ONE component compile run at a time in this worker's container, whichever way it is compiled (in this process, in a precompile child, or in this process
+	// after the child failed). compileLocks stops two runs compiling the SAME component and nothing stops two DIFFERENT ones, so a cold start that claims runs of six distinct Python
+	// components compiled six at once: measured 2026-11-23 in a 2Gi container, 40 MiB to the limit in 17 seconds and OOM-killed. A nil channel (a backend built without one) is no limit. Shared
+	// by every PerExecution copy, like compileLocks.
+	componentCompileSem chan struct{}
+
+	// compileHeadroom, when non-nil, refuses an in-process component compile the container has no memory left for (WithWasmtimeCompileHeadroom). Shared by every PerExecution copy.
+	compileHeadroom *compileHeadroom
+
+	// precompiler, when non-nil, compiles components in a child process (WithWasmtimeComponentPrecompile). Shared by every PerExecution copy; the root backend owns its directory.
+	precompiler *componentPrecompiler
+	metaCache   *sync.Map // per-key *wasmMeta (envNeeded, hasWasi, language)
 
 	// envNeeded is the set of "env" module imports the WASM module requests.
 	// nil means "register everything" (conservative fallback on parse error).
@@ -164,25 +211,41 @@ func NewWasmtimeBackend(ctx context.Context, opts ...WasmtimeOption) (*wasmtimeB
 	if lim.instancesLimit <= 0 {
 		lim.instancesLimit = DefaultWasmtimeInstancesLimit
 	}
-
-	cfg := wasmtime.NewConfig()
-	cfg.SetEpochInterruption(true)
-	if lim.instructionLimit > 0 {
-		cfg.SetConsumeFuel(true)
+	if lim.interruptMargin <= 0 {
+		lim.interruptMargin = DefaultWasmtimeInterruptMarginFuel
 	}
-	eng := wasmtime.NewEngineWithConfig(cfg)
+	// The fuel arm is capped at a tenth of the instruction limit and has NO floor: fuel is spent in
+	// counted increments, so the epoch's tick rounding -- the reason the time margin needs one -- does
+	// not apply, and a floor would only stop small-budget workflows earlier than it must.
+	if lim.instructionLimit > 0 && lim.interruptMargin > lim.instructionLimit/10 {
+		lim.interruptMargin = lim.instructionLimit / 10
+	}
+
+	// The engine config is built by newWasmtimeEngine, which the precompile child also calls: an artifact is accepted only by an engine configured the same way.
+	eng := newWasmtimeEngine(lim.instructionLimit > 0, true)
 
 	moduleCache := newModuleLRU(bcfg.moduleCacheMaxEntries, bcfg.moduleCacheMaxBytes)
 	b := &wasmtimeBackend{
-		engine:       eng,
-		moduleCache:  moduleCache,
-		components:   newComponentCache(moduleCache),
-		compileLocks: new(sync.Map),
-		metaCache:    new(sync.Map),
-		limits:       lim,
-		logger:       bcfg.logger,
-		epochStop:    make(chan struct{}),
-		epochDone:    make(chan struct{}),
+		engine:              eng,
+		moduleCache:         moduleCache,
+		components:          newComponentCache(moduleCache),
+		compileLocks:        new(sync.Map),
+		componentCompileSem: make(chan struct{}, 1),
+		compileHeadroom:     bcfg.compileHeadroom,
+		metaCache:           new(sync.Map),
+		limits:              lim,
+		logger:              bcfg.logger,
+		epochStop:           make(chan struct{}),
+		epochDone:           make(chan struct{}),
+	}
+	if bcfg.componentPrecompile != nil {
+		// Off unless configured. A failure to set it up leaves the in-process compile, which is what the worker always did.
+		if pc, err := newComponentPrecompiler(*bcfg.componentPrecompile, lim.instructionLimit, bcfg.logger); err != nil {
+			b.log().Warn("component precompile disabled", "error", err)
+		} else {
+			pc.onFallback = bcfg.componentFallbackHook
+			b.precompiler = pc
+		}
 	}
 	b.startEpochTicker()
 	return b, nil
@@ -247,6 +310,10 @@ func (b *wasmtimeBackend) Close(ctx context.Context) error {
 	// The cached components first: each is a reference into the engine's compiled
 	// code, and a held reference is a C allocation nothing else will free.
 	b.components.close()
+	if b.epochStop != nil {
+		// Only the root backend owns the precompiler's private directory; a PerExecution copy shares it.
+		b.precompiler.close()
+	}
 	b.engine.Close()
 	return nil
 }
@@ -272,12 +339,15 @@ func (b *wasmtimeBackend) PerExecution(tenantInstanceTimeout time.Duration) Wasm
 	lim.executionTimeout = ClampToCeiling(tenantInstanceTimeout, b.limits.executionTimeout)
 
 	return &wasmtimeBackend{
-		engine:       b.engine,
-		moduleCache:  b.moduleCache,
-		components:   b.components,
-		compileLocks: b.compileLocks,
-		metaCache:    b.metaCache,
-		limits:       lim,
+		engine:              b.engine,
+		moduleCache:         b.moduleCache,
+		components:          b.components,
+		compileLocks:        b.compileLocks,
+		componentCompileSem: b.componentCompileSem,
+		compileHeadroom:     b.compileHeadroom,
+		precompiler:         b.precompiler,
+		metaCache:           b.metaCache,
+		limits:              lim,
 		// Copied, like limits. A PerExecution copy that dropped the logger
 		// would send every record from the path that actually executes
 		// workflows to slog.Default(), which is the bug this field exists to
@@ -351,8 +421,8 @@ func (b *wasmtimeBackend) configureStore(ctx context.Context, store *wasmtime.St
 	}
 
 	memLimit := int64(-1)
-	if b.limits.memoryLimitBytes > 0 {
-		memLimit = b.limits.memoryLimitBytes
+	if lim := b.limits.memoryLimitBytes; lim > 0 {
+		memLimit = lim
 	}
 	tblLimit := int64(-1)
 	if b.limits.tableElementsLimit > 0 {
@@ -438,6 +508,12 @@ func (b *wasmtimeBackend) runGuestDefersAfterSuspend(
 		return
 	}
 
+	// The drain is what the interrupt exists for, so the stop bit is off for its whole duration.
+	// Save and restore rather than clear: a drain is reachable from an ordinary segment too.
+	wasFenced := b.interruptFenced
+	b.interruptFenced = true
+	defer func() { b.interruptFenced = wasFenced }()
+
 	budget := b.limits.deferBudget
 	if budget <= 0 {
 		budget = DefaultWasmtimeDeferBudget
@@ -498,6 +574,13 @@ func (b *wasmtimeBackend) runGuestDefersAfterSuspend(
 func (b *wasmtimeBackend) runGuestDefersAfterKill(
 	store *wasmtime.Store, instance *wasmtime.Instance, entryPoint string, cause error,
 ) {
+	// The drain is what the interrupt exists for, so the stop bit is off for its whole duration.
+	// This is the drain that matters: it runs on an instance the kill just stopped, and the host
+	// refunds its budget below, so a fuel-based stop bit would fire on the drain's first poll.
+	wasFenced := b.interruptFenced
+	b.interruptFenced = true
+	defer func() { b.interruptFenced = wasFenced }()
+
 	fn := instance.GetFunc(store, deferRunnerExport)
 	if fn == nil {
 		// Not an error worth logging on its own: a guest built before this
@@ -574,6 +657,77 @@ func isExecutionLimit(err error) bool {
 	return errors.As(err, &limitErr)
 }
 
+// grantUnwind grants the guest enough budget to unwind, ONCE per execution.
+//
+// The poll that fires the soft kill returns through the host-call bracket, which re-arms the epoch
+// deadline from whatever the guest has left; with the budget at its reserve that is one tick, and a
+// one-tick deadline can expire during the unwind. Giving the budget back is what makes the
+// bracket's own arithmetic produce a safe deadline -- the bracket is not bypassed here, it is fed.
+func (b *wasmtimeBackend) grantUnwind() {
+	if b.interruptUnwindGranted || b.budget == nil {
+		return
+	}
+	b.budget.grant(interruptUnwindGrant)
+	b.interruptUnwindGranted = true
+}
+
+// interruptError maps the trap a soft kill produces onto the kill the host was enforcing, and
+// returns nil when the host did NOT ask for the interrupt.
+//
+// The gate is the whole point. A guest's surface after a soft kill is javy's process::abort() ->
+// `unreachable`; a guest that executes `unreachable` itself raises exactly the same trap. Only the
+// one the host asked for may be reported as a kill. A genuine trap in a workflow nobody interrupted
+// falls through to resourceLimitError, which leaves it as the trap it is.
+func (b *wasmtimeBackend) interruptError(callErr error, execTimeout time.Duration) error {
+	if !b.interruptRequested {
+		return nil
+	}
+	if b.interruptArm == interruptArmFuel {
+		return b.fuelLimitError(callErr)
+	}
+	return b.timeLimitError(callErr, execTimeout)
+}
+
+// restartFence gives the guest its full execution budget again, by the rule configureStore applies at the start of an invocation. It runs from inside a host
+// call (the wait that was held), where the budget is not running and leaveHost re-arms it from what is set here, so nothing else needs to move.
+func (b *wasmtimeBackend) restartFence(ctx context.Context) {
+	if b.budget == nil {
+		return
+	}
+	full := b.limits.executionTimeout
+	if full <= 0 {
+		full = DefaultWasmtimeExecutionTimeout
+	}
+	b.epochBoundByDeadline = false
+	if deadline, ok := ctx.Deadline(); ok {
+		if remaining := time.Until(deadline); remaining < full {
+			if remaining < epochTickInterval {
+				remaining = epochTickInterval // the floor configureStore and setDeadline apply: an exhausted guest stops at the next tick
+			}
+			full = remaining
+			b.epochBoundByDeadline = true
+		}
+	}
+	b.budget.restart(full)
+}
+
+// timeLimitError names the wall-clock bound that stopped the guest.
+//
+// Which bound it was decides which flag to point at. When it was ctx's remaining deadline
+// (--max-workflow-duration, or a tenant's or a run's lower value), --wasm-instance-timeout is the
+// wrong advice: the guest was inside it. The wording up to "wall-clock budget" is the same either
+// way, which callers that parse the number rely on.
+func (b *wasmtimeBackend) timeLimitError(err error, timeout time.Duration) error {
+	if b.epochBoundByDeadline {
+		return &executionLimitError{&workflowDeadlineError{fmt.Errorf("execution time limit exceeded (%s wall-clock budget, the time left on the workflow's deadline; configure with --max-workflow-duration, or the tenant's or the run's workflow timeout): %w", timeout, err)}}
+	}
+	return &executionLimitError{fmt.Errorf("execution time limit exceeded (%s wall-clock budget; configure with --wasm-instance-timeout): %w", timeout, err)}
+}
+
+func (b *wasmtimeBackend) fuelLimitError(err error) error {
+	return &executionLimitError{fmt.Errorf("instruction limit exceeded (%d fuel units; configure with --wasm-instruction-limit): %w", b.limits.instructionLimit, err)}
+}
+
 // resourceLimitError recognizes traps caused by the resource bounds
 // configureStore applies (epoch interruption, fuel exhaustion) and turns
 // them into a clear, actionable message naming the limit that was hit and
@@ -601,20 +755,8 @@ func (b *wasmtimeBackend) resourceLimitError(err error, timeout time.Duration) e
 	if err == nil {
 		return nil
 	}
-	timeLimit := func() error {
-		// Which bound stopped the guest decides which flag to point at. When it
-		// was ctx's remaining deadline (--max-workflow-duration, or a tenant's or
-		// a run's lower value), --wasm-instance-timeout is the wrong advice: the
-		// guest was inside it. The wording up to "wall-clock budget" is the same
-		// either way, which callers that parse the number rely on.
-		if b.epochBoundByDeadline {
-			return &executionLimitError{&workflowDeadlineError{fmt.Errorf("execution time limit exceeded (%s wall-clock budget, the time left on the workflow's deadline; configure with --max-workflow-duration, or the tenant's or the run's workflow timeout): %w", timeout, err)}}
-		}
-		return &executionLimitError{fmt.Errorf("execution time limit exceeded (%s wall-clock budget; configure with --wasm-instance-timeout): %w", timeout, err)}
-	}
-	fuelLimit := func() error {
-		return &executionLimitError{fmt.Errorf("instruction limit exceeded (%d fuel units; configure with --wasm-instruction-limit): %w", b.limits.instructionLimit, err)}
-	}
+	timeLimit := func() error { return b.timeLimitError(err, timeout) }
+	fuelLimit := func() error { return b.fuelLimitError(err) }
 
 	var trap *wasmtime.Trap
 	if errors.As(err, &trap) {
@@ -664,6 +806,11 @@ func (b *wasmtimeBackend) Execute(ctx context.Context, wasmBytes []byte, entryPo
 	// Create per-execution store with WASI configuration.
 	store := wasmtime.NewStore(b.engine)
 	defer store.Close()
+	b.store = store
+	b.interruptRequested = false
+	b.interruptArm = 0
+	b.interruptUnwindGranted = false
+	defer func() { b.store = nil }()
 	execTimeout, err := b.configureStore(ctx, store)
 	if err != nil {
 		return nil, err
@@ -671,6 +818,28 @@ func (b *wasmtimeBackend) Execute(ctx context.Context, wasmBytes []byte, entryPo
 	// The fence bounds guest execution, not wall clock. IMPROVEMENT-PLAN 3.90,
 	// engine/wasmtime_hostbudget.go.
 	b.budget = newHostBudget(store, execTimeout)
+	// A run that is held through a wait gets fresh limits when it wakes, as a suspended one would on its next claim (execution_limits.go), and this fence is
+	// one of them: it is bounded by the earlier of --wasm-instance-timeout and what the context has left, and both start again.
+	onLimitsRestart(ctx, func() { b.restartFence(ctx) })
+	b.interruptMarginTime = DefaultWasmtimeInterruptMarginTime
+	if execTimeout > 0 {
+		if b.interruptMarginTime > execTimeout/10 {
+			b.interruptMarginTime = execTimeout / 10
+		}
+		// The reserve must clear the epoch's own rounding before the cap can be allowed to shrink
+		// it. An N-tick deadline expires 50*(N-1) to 50*N ms after it is armed, so a reserve under
+		// two ticks can be overtaken by the hard trap before any poll sees the budget below it --
+		// measured at cleat#3922 review: 7 of 20 kills lost their defers at an 800ms budget, where
+		// the cap had shrunk the reserve to 80ms, and none of the losing runs ever saw a poll return
+		// 1. Two ticks plus a poll gap is the floor; the budget's own half is the ceiling, so a very
+		// short budget still leaves the guest most of its time.
+		if b.interruptMarginTime < interruptMinMarginTime {
+			b.interruptMarginTime = interruptMinMarginTime
+		}
+		if max := execTimeout / 2; b.interruptMarginTime > max {
+			b.interruptMarginTime = max
+		}
+	}
 	t1 := time.Now()
 
 	// Configure WASI for Go wasip1 module support.
@@ -679,8 +848,7 @@ func (b *wasmtimeBackend) Execute(ctx context.Context, wasmBytes []byte, entryPo
 	// Skip for modules that don't import from WASI (AS, Rust cdylib, TeaVM)
 	// to avoid wasmtime-go v44 nil pointer dereference during fn.Call.
 	// Look up or populate cached per-WASM metadata (envNeeded, hasWasi, language).
-	wHash := xxhash.Sum64(wasmBytes)
-	wKey := strconv.FormatUint(wHash, 16)
+	wKey := moduleCacheKey(wasmBytes)
 	var meta *wasmMeta
 	if cached, ok := b.metaCache.Load(wKey); ok {
 		meta = cached.(*wasmMeta)
@@ -1125,7 +1293,10 @@ func (b *wasmtimeBackend) Execute(ctx context.Context, wasmBytes []byte, entryPo
 	}
 
 	if callErr != nil {
-		if limitErr := b.resourceLimitError(callErr, execTimeout); limitErr != nil {
+		recordUnwind(store)
+		if mapped := b.interruptError(callErr, execTimeout); mapped != nil {
+			callErr = mapped
+		} else if limitErr := b.resourceLimitError(callErr, execTimeout); limitErr != nil {
 			callErr = limitErr
 		}
 		// Run the guest's outstanding defers before giving up on it.
@@ -1360,6 +1531,9 @@ func (b *wasmtimeBackend) registerAllImports(linker *wasmtime.Linker, completeRe
 	if err := b.registerCleatReleaseLock(linker); err != nil {
 		return err
 	}
+	if err := b.registerCleatSideEffectRecorded(linker); err != nil {
+		return err
+	}
 	if err := b.registerCleatSideEffect(linker); err != nil {
 		return err
 	}
@@ -1414,6 +1588,9 @@ func (b *wasmtimeBackend) registerAllImports(linker *wasmtime.Linker, completeRe
 	if err := b.registerCleatPollWork(linker); err != nil {
 		return err
 	}
+	if err := b.registerCleatInterruptRequested(linker); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -1450,4 +1627,39 @@ func (b *wasmtimeBackend) writeWorkToFixedMemory(mem *wasmtime.Memory, store was
 	if inputLen > 0 {
 		copy(data[fixedWorkOffset+8+entryLen:fixedWorkOffset+8+entryLen+inputLen], input[:inputLen])
 	}
+}
+
+// OnModuleEvicted registers f to be called with the CodeID of every compiled module or component the backend's cache EVICTS (see moduleLRU.onEvict), after the lock is
+// released. A held instance refcounts the code it runs, so eviction alone frees nothing while one is held: the worker uses this to send back every held run of the
+// evicted code (ResidentSet.EvictCode), so that a hold never pins code the cache had decided to free. Backends made per execution share the cache, so one registration on
+// the root backend covers them. A nil f clears it.
+func (b *wasmtimeBackend) OnModuleEvicted(f func(key string)) {
+	if b == nil || b.moduleCache == nil {
+		return
+	}
+	if f == nil {
+		b.moduleCache.setOnEvict(nil)
+		return
+	}
+	b.moduleCache.setOnEvict(func(key string) { f(codeIDOfCacheKey(key)) })
+}
+
+// CodeCached reports whether the code with this CodeID is still in the backend's cache. The resident set asks it when a run is about to be held (ResidentSet.AttachToCodeCache),
+// because EvictCode reaches only runs already held: a run whose code was evicted while it was still EXECUTING would otherwise reach its sleep afterwards and be held against
+// code that is gone. It answers true only where nothing CAN be evicted (no cache at all). An identity it does not recognise answers FALSE: that means the key space changed under
+// it, and a silent true would be a pin nobody could see. A refused hold suspends as with residency off, so being wrong in that direction costs a replay and is caught at once by
+// the in-place control rows, where being wrong the other way is caught by nothing.
+func (b *wasmtimeBackend) CodeCached(codeID string) bool {
+	if b == nil || b.moduleCache == nil {
+		return true
+	}
+	var engineID uint64
+	if b.components != nil {
+		engineID = b.components.engineID
+	}
+	key, ok := cacheKeyOfCodeID(codeID, engineID)
+	if !ok {
+		return false
+	}
+	return b.moduleCache.has(key)
 }

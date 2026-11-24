@@ -26,7 +26,18 @@ run-name: >-
 
 on:
   push:
-    branches: [main, develop]
+    # develop is NOT here (cleat#3958): every job in this workflow ran,
+    # and passed, in a merge_group run on the same commit before it landed
+    # -- the queue's merge commit IS the develop commit, so the develop
+    # push was a second full pass over an identical tree (905/339/190/142
+    # runner-minutes a day across the four workflows).
+    #
+    # main stays: it has no merge queue behind it, so a push there is the
+    # only run that tree will get. tier1-gate.yml's
+    # `develop-push-was-queued` job asserts the merge_group run actually
+    # exists for every develop commit and fails the Tier 1 run when it
+    # does not.
+    branches: [main]
   pull_request:
     # cleat#2483: `branches` filters on the PR's BASE branch, and a
     # release branch was absent -- so every PR targeting one ran none of
@@ -113,21 +124,103 @@ concurrency:
 # true.
 permissions:
   contents: read
+  # The PR-edit gate below reads this workflow's own runs and jobs for the head
+  # to decide whether they already passed.
+  actions: read
 
 jobs:
+  # ---------------------------------------------------------------------------
+  # A title/body edit re-runs every required context on a head this workflow
+  # has already tested. cleat#3958's inventory found exactly one job in the
+  # repository that reads `pull_request.body` (closing-reference-check.yml) and
+  # none that reads `.title` for anything but a display name, so a body-edit run
+  # here measures a tree that has not changed.
+  #
+  # `edit-gate` decides whether skipping is SAFE, which is not the same question
+  # as whether it is cheap. A skipped job reports as Success and does not block
+  # a required check (GitHub docs, "Using conditions to control job execution"),
+  # so skipping unconditionally would launder a RED head into a green one: edit
+  # the body of a failing PR and its red check-runs become green skips. The gate
+  # therefore says `skip=true` only when every job's latest NON-skipped
+  # conclusion on this head is `success` -- see scripts/pr-edit-already-green.py,
+  # whose --self-test covers the failure-then-skip sequence by name.
+  #
+  # It runs ONLY for an `edited` whose base did not change. Every other event
+  # leaves it skipped, and `needs.edit-gate.outputs.skip` is then the empty
+  # string, which is not 'true', so every job below runs exactly as before.
+  # That is why their conditions carry `!cancelled()` or `always()`: a job whose
+  # `needs` dependency was skipped is itself skipped unless its `if` uses a
+  # status function. Measured on cleat#3959 -- the plain `needs.*` form stayed
+  # skipped, the `!cancelled()` form ran.
+  # ---------------------------------------------------------------------------
+  edit-gate:
+    name: PR edit gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    if: github.event_name == 'pull_request' && github.event.action == 'edited' && !github.event.changes.base
+    outputs:
+      skip: ${{ steps.gate.outputs.skip }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          sparse-checkout: scripts
+      - name: Has this head already passed this workflow?
+        id: gate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          # Passed through the environment, never interpolated into the script:
+          # a branch name is attacker-controlled and can carry `$(...)`, which
+          # the runner would execute. actionlint's `expression` rule flags the
+          # inline form, correctly.
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+        run: |
+          set -uo pipefail
+          # `-e` is on: GitHub runs this as `bash -e {0}` and `set -u` below does not
+          # clear it, so a bare `out=$(...)` exits the step the moment the script
+          # exits 2 -- before `rc=$?` -- leaving the job RED with an empty output.
+          # The output still fails open (nothing publishes skip=true), but a red
+          # gate check holds the PR un-CLEAN until the next push (cleat-review).
+          rc=0
+          out=$(python3 scripts/pr-edit-already-green.py \
+                  --repo "$GITHUB_REPOSITORY" \
+                  --workflow plugin-harness-ci.yml \
+                  --sha "${{ github.event.pull_request.head.sha }}" \
+                  --branch "$HEAD_REF" \
+                  --exclude-run "${{ github.run_id }}") || rc=$?
+          echo "$out"
+          if [ "$rc" -ne 0 ]; then
+            # UNMEASURED: a gate that could not look must not skip.
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          case "$out" in
+            skip=true*) echo "skip=true" >> "$GITHUB_OUTPUT" ;;
+            *)          echo "skip=false" >> "$GITHUB_OUTPUT" ;;
+          esac
   # --------------------------------------------------------------------------
   # Layer 1 — cleattest-based SDK tests (fast, no infra needed)
   # --------------------------------------------------------------------------
   test-layer1:
     name: Layer 1 — SDK (cleattest)
+    if: ${{ !cancelled() }}
+    needs: [edit-gate]
     runs-on: ubuntu-latest
     timeout-minutes: 15  # max 1.1m over 58 successful runs (develop push + pull_request samples); internal go test -timeout 2m, 2026-10-27; cleat#3479
     steps:
+      # A required context must still report SUCCESS on a body edit: a
+      # `skipped` one beside its `success` twin leaves the PR un-mergeable
+      # (cleat#3958, measured on #3960). So the job runs and does nothing.
+      - name: Nothing to do -- this head already passed
+        if: ${{ needs.edit-gate.outputs.skip == 'true' }}
+        run: echo "the PR head already passed this workflow; nothing to re-run"
       - uses: actions/checkout@v7
+        if: ${{ needs.edit-gate.outputs.skip != 'true' }}
       - uses: actions/setup-go@v7
+        if: ${{ needs.edit-gate.outputs.skip != 'true' }}
         with:
           go-version-file: go.mod
       - name: Check tools
+        if: ${{ needs.edit-gate.outputs.skip != 'true' }}
         run: make tools-go
       # tests/plugin-harness is its own Go module since the
       # root<->cleat/ module cycle was broken (it imports cleat/cleattest and
@@ -160,9 +253,11 @@ jobs:
       # Runs here rather than in Lint because it needs `go test -list`, and
       # this is the cheapest job that already has Go and this module.
       - name: CI test-selection guard
+        if: ${{ needs.edit-gate.outputs.skip != 'true' }}
         run: python3 scripts/check_ci_test_selection.py
 
       - run: go test -count=1 -timeout=120s ./... -run 'TestPluginCalls_Cleattest|TestPluginCallStreaming_Cleattest|TestNewTestPluginEnvInMemory|TestMockServers'
+        if: ${{ needs.edit-gate.outputs.skip != 'true' }}
         working-directory: tests/plugin-harness
         env:
           CGO_ENABLED: "1"
@@ -172,11 +267,21 @@ jobs:
   # --------------------------------------------------------------------------
   test-layer2:
     name: Layer 2 — WASM Integration
+    if: ${{ !cancelled() }}
+    needs: [edit-gate]
     runs-on: ubuntu-latest
     timeout-minutes: 20  # max 3.3m over 56 successful runs (develop push + pull_request samples); internal go test -timeout 10m, 2026-10-27; cleat#3479
     steps:
+      # A required context must still report SUCCESS on a body edit: a
+      # `skipped` one beside its `success` twin leaves the PR un-mergeable
+      # (cleat#3958, measured on #3960). So the job runs and does nothing.
+      - name: Nothing to do -- this head already passed
+        if: ${{ needs.edit-gate.outputs.skip == 'true' }}
+        run: echo "the PR head already passed this workflow; nothing to re-run"
       - uses: actions/checkout@v7
+        if: ${{ needs.edit-gate.outputs.skip != 'true' }}
       - uses: actions/setup-go@v7
+        if: ${{ needs.edit-gate.outputs.skip != 'true' }}
         with:
           go-version-file: go.mod
       # wasm32-unknown-unknown, not wasm32-wasip1: `cleat build --target rust`
@@ -184,6 +289,7 @@ jobs:
       # TestPluginCalls_Wasm_Rust skips, and it is the only test anywhere that
       # runs the Rust build path users actually invoke.
       - name: Setup Rust + wasm32-unknown-unknown
+        if: ${{ needs.edit-gate.outputs.skip != 'true' }}
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
@@ -205,13 +311,15 @@ jobs:
       # requiring a tool for an output nothing consumes is what made this test
       # skip in the first place. Leaving it out keeps that honest.
       - name: Setup Python
+        if: ${{ needs.edit-gate.outputs.skip != 'true' }}
         uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - name: Install componentize-py and the Python SDK
+        if: ${{ needs.edit-gate.outputs.skip != 'true' }}
         run: |
           pip install --upgrade pip
-          pip install componentize-py
+          bash scripts/install-componentize-py.sh
           pip install -e python-sdk
       # TestPluginCalls_Wasm_Java runs a Gradle build of
       # tests/plugin-harness/testdata/javaworkflow, and this job had no Java
@@ -240,23 +348,14 @@ jobs:
       # Java 17 to match the other four jobs that build this SDK, rather than
       # inheriting the runner image's default, which can change without us.
       - name: Setup Java
+        if: ${{ needs.edit-gate.outputs.skip != 'true' }}
         uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: "17"
       - name: Setup Gradle
+        if: ${{ needs.edit-gate.outputs.skip != 'true' }}
         uses: gradle/actions/setup-gradle@v6
-      # Explicit, for the same reason Java 17 is pinned two steps up: the
-      # AssemblyScript host-call fixture needs npx, ubuntu-latest happens to
-      # ship Node, and "happens to" is what changes without us. buildASHostCallWasm
-      # SKIPS on a missing npx rather than failing, so an image that dropped Node
-      # would retire the whole AssemblyScript half of the harness quietly -- the
-      # skip budget below is what would catch it, and only because this step
-      # makes the toolchain this job's own promise rather than the runner's.
-      - name: Setup Node
-        uses: actions/setup-node@v7
-        with:
-          node-version: "20"
       # -json into a report, and a skip budget over it. Without that, this step
       # ran `go test` with no -v, so a skipped language and a passing one looked
       # identical in the log -- which is how TestPluginCalls_Wasm_Go sat
@@ -266,6 +365,7 @@ jobs:
       # The budget is the enforcement: if either regresses to skipping, this
       # fails rather than going quietly green.
       - name: Run WASM integration tests
+        if: ${{ needs.edit-gate.outputs.skip != 'true' }}
         shell: bash
         # tests/plugin-harness is its own Go module since the root<->cleat/
         # module cycle was broken (it imports cleat/cleattest and cleat/wasmtest;
@@ -304,12 +404,14 @@ jobs:
           #   go test ./... -list 'TestPluginCalls_Wasm|TestHostCalls|HostCallTableCovers'
           #     -> the harness, its table guard, and the five plugin tests
           #
-          # The count is now SIX, not two: C2 added Rust and AssemblyScript
-          # fixtures, so the pattern selects TestHostCalls{Go,Rust,AS} and
-          # TestHostCallTableCovers.../TestRust.../TestAS... -- three harnesses
-          # and the three drift guards that keep their tables honest.
-          #   cd tests/plugin-harness && go test -list 'TestHostCalls|HostCallTableCovers' ./...
-          # must list 6. If it lists 3, the guards have come unselected again.
+          # The count is SIX, not two, because the pattern selects one harness and one
+          # drift guard per language fixture -- TestHostCalls{Go,Rust,Java} and their
+          # TestHostCallTableCovers... guards. (C2 added the Rust and AssemblyScript
+          # fixtures; cleat#4023 removed the AssemblyScript one and Java had since been
+          # added, so the figure did not move.) Re-derive it, do not trust this sentence:
+          #   cd tests/plugin-harness && go test -list 'TestHostCalls|HostCallTableCovers' ./... | grep -c '^Test'
+          # printed 6 on 2026-11-18. If it lists half that, the guards have come
+          # unselected again.
           #
           # EverySDK is named separately because it matches none of the other
           # terms -- these are not TestHostCalls* and not TableCovers*. Added
@@ -334,12 +436,19 @@ jobs:
           # trapped. Confirm with
           #   go test -list 'TestGoAwaitCallsUnwind' ./...    -> 1
           #   (the CI test-selection guard names it if this term goes missing)
-          # TestASAwaitCallsHonour and TestJavaAwaitCallsHonour (cleat#3430) are the
-          # same check for AssemblyScript and Java, where the wrapper has to act on
-          # the sentinel rather than panic; neither is TestHostCalls* either.
-          #   go test -list 'TestASAwaitCallsHonour|TestJavaAwaitCallsHonour' ./...    -> 2
+          # TestSideEffectGoFunctionRunsOnceAcrossFirstRunAndReplay (cleat#4113) is its own term: a Go guest's side-effect function must run
+          # once across a first run and its replay. Confirm with
+          #   go test -list 'TestSideEffectGo' ./...    -> 1
+          # TestSideEffectJavaFunctionRunsOnceAcrossFirstRunAndReplay (cleat#4113): a Java guest's sideEffectOnce function must run once across a
+          # first run and its replay. Confirm with
+          #   go test -list 'TestSideEffectJava' ./...    -> 1
+          # TestJavaAwaitCallsHonour (cleat#3430) is the same check for Java, where the
+          # wrapper has to act on the sentinel rather than panic; it is not
+          # TestHostCalls* either. (AssemblyScript had a twin, TestASAwaitCallsHonour,
+          # removed by cleat#4023.)
+          #   go test -list 'TestJavaAwaitCallsHonour' ./...    -> 1 on 2026-11-18
           go test -count=1 -timeout=600s -json \
-            ./... -run 'TestPluginCalls_Wasm|TestHostCalls|HostCallTableCovers|EverySDK|TestACompiledGoWorkflow|TestAnIntParameterIsDecoded|TestCallOptionsTimeoutAtTheWasmBoundary|TestDurableCallWithOptionsAloneIsBound|TestASBindingContract|TestGoAwaitCallsUnwind|TestASAwaitCallsHonour|TestJavaAwaitCallsHonour' \
+            ./... -run 'TestPluginCalls_Wasm|TestHostCalls|HostCallTableCovers|EverySDK|TestACompiledGoWorkflow|TestAnIntParameterIsDecoded|TestCallOptionsTimeoutAtTheWasmBoundary|TestDurableCallWithOptionsAloneIsBound|TestGoAwaitCallsUnwind|TestSideEffectGo|TestSideEffectJava|TestJavaAwaitCallsHonour|TestAJavaGuestStopsAtAChildAwait' \
             2>&1 | tee ../../wasm-integration-report.json
         env:
           # Explicit, not left to the default: Go defaults CGO_ENABLED to 1 only
@@ -362,9 +471,9 @@ jobs:
       #
       # Scoped to testdata rather than to pythonworkflow alone, deliberately.
       # The same defect in another language is the thing most worth catching,
-      # and #726 already found and fixed one in the AssemblyScript fixture.
+      # and #726 already found and fixed one in the AssemblyScript fixture (removed since, cleat#4023).
       - name: Tests did not rewrite their own fixtures
-        if: always()
+        if: always() && (needs.edit-gate.outputs.skip != 'true')
         run: |
           if ! git diff --exit-code --stat -- tests/plugin-harness/testdata; then
             echo
@@ -377,7 +486,7 @@ jobs:
           fi
 
       - name: Skip budget
-        if: always()
+        if: always() && (needs.edit-gate.outputs.skip != 'true')
         run: scripts/check-skip-budget.sh plugin-harness/wasm wasm-integration-report.json
 
   # --------------------------------------------------------------------------
@@ -385,6 +494,8 @@ jobs:
   # --------------------------------------------------------------------------
   test-multi-db:
     name: Layer 3 — Multi-DB
+    if: ${{ !cancelled() }}
+    needs: [edit-gate]
     runs-on: ubuntu-latest
     timeout-minutes: 20  # max 2.4m over 58 successful runs (develop push + pull_request samples); internal go test -timeout 10m, 2026-10-27; cleat#3479
     services:
@@ -401,6 +512,10 @@ jobs:
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
+      # `--health-start-period` is load-bearing: mysql:8.4 starts a server twice
+      # (initialize, then run) and a loaded runner can take over 50s to boot, which
+      # is the whole budget without it (cleat#3936). Guarded by
+      # scripts/check-workflow-guards.py.
       mysql:
         image: mirror.gcr.io/library/mysql:8.4.11@sha256:b3b90af2a6552ae30c266fdb7d5dd55f3afb72404bb78d37fe8a23eb857fd3fb
         env:
@@ -412,7 +527,8 @@ jobs:
           --health-cmd "mysqladmin ping -h 127.0.0.1 -u root -pcleat"
           --health-interval 10s
           --health-timeout 5s
-          --health-retries 5
+          --health-retries 15
+          --health-start-period 60s
       mssql:
         # Pinned by digest 2026-08-07; `2022-latest` is a moving tag and this is
         # a required check. Full rationale, the re-derive commands, and why the
@@ -440,8 +556,16 @@ jobs:
       CLEAT_TEST_MSSQL: sqlserver://sa:CleatTest123!@localhost:1433?database=master
       CLEAT_TEST_SKIP_REAL_SERVICES: '1'
     steps:
+      # A required context must still report SUCCESS on a body edit: a
+      # `skipped` one beside its `success` twin leaves the PR un-mergeable
+      # (cleat#3958, measured on #3960). So the job runs and does nothing.
+      - name: Nothing to do -- this head already passed
+        if: ${{ needs.edit-gate.outputs.skip == 'true' }}
+        run: echo "the PR head already passed this workflow; nothing to re-run"
       - uses: actions/checkout@v7
+        if: ${{ needs.edit-gate.outputs.skip != 'true' }}
       - uses: actions/setup-go@v7
+        if: ${{ needs.edit-gate.outputs.skip != 'true' }}
         with:
           go-version-file: go.mod
       # This job WAS vacuous, and the budget below is what said so.
@@ -486,12 +610,13 @@ jobs:
       # would run it before TestPluginCalls_MultiDB -- see IMPROVEMENT-PLAN
       # 3.236.
       - run: go test -count=1 -timeout=600s -json ./... -run 'TestPluginCalls_MultiDB|TestReapplyingTheCoreMigrations' > ../../test-report.json 2>&1
+        if: ${{ needs.edit-gate.outputs.skip != 'true' }}
         working-directory: tests/plugin-harness
         env:
           CGO_ENABLED: "1"
 
       - name: Skip budget
-        if: always()
+        if: always() && (needs.edit-gate.outputs.skip != 'true')
         run: scripts/check-skip-budget.sh plugin-harness/multi-db test-report.json
 
       # cleat#2661: the -json output above was produced and then discarded --
@@ -502,7 +627,7 @@ jobs:
       # more than there, since the whole point is recovering a FAILING run's
       # detail without a local reproduction.
       - name: Upload report
-        if: always()
+        if: always() && (needs.edit-gate.outputs.skip != 'true')
         uses: actions/upload-artifact@v7
         with:
           name: plugin-harness-multi-db-report-${{ github.run_id }}-${{ github.run_attempt }}
@@ -514,6 +639,8 @@ jobs:
   # --------------------------------------------------------------------------
   test-blobstore-s3:
     name: Blobstore S3 Round-Trip
+    if: ${{ !cancelled() }}
+    needs: [edit-gate]
     runs-on: ubuntu-latest
     timeout-minutes: 15  # max 1.7m over 58 successful runs (develop push + pull_request samples); internal go test -timeout 2m, 2026-10-27; cleat#3479
     services:
@@ -588,8 +715,16 @@ jobs:
       CLEAT_TEST_S3_BUCKET: cleat-test-harness
       CLEAT_TEST_S3_USE_SSL: 'false'
     steps:
+      # A required context must still report SUCCESS on a body edit: a
+      # `skipped` one beside its `success` twin leaves the PR un-mergeable
+      # (cleat#3958, measured on #3960). So the job runs and does nothing.
+      - name: Nothing to do -- this head already passed
+        if: ${{ needs.edit-gate.outputs.skip == 'true' }}
+        run: echo "the PR head already passed this workflow; nothing to re-run"
       - uses: actions/checkout@v7
+        if: ${{ needs.edit-gate.outputs.skip != 'true' }}
       - uses: actions/setup-go@v7
+        if: ${{ needs.edit-gate.outputs.skip != 'true' }}
         with:
           go-version-file: go.mod
       # tests/plugin-harness is its own Go module since the
@@ -600,6 +735,7 @@ jobs:
       # module or its selected dependencies" -- so the pattern is ./... from
       # inside the module instead. See tests/plugin-harness/go.mod.
       - name: Wait for MinIO
+        if: ${{ needs.edit-gate.outputs.skip != 'true' }}
         run: |
           for i in $(seq 1 60); do
             if curl -fsS http://localhost:9000/minio/health/live >/dev/null; then
@@ -611,6 +747,7 @@ jobs:
           docker ps -a
           exit 1
       - run: go test -count=1 -timeout=120s -v ./... -run 'TestBlobstore_S3'
+        if: ${{ needs.edit-gate.outputs.skip != 'true' }}
         working-directory: tests/plugin-harness
         env:
           CGO_ENABLED: "1"

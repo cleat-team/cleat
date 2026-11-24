@@ -475,6 +475,10 @@ func normaliseWorkflowVersion(wasmBytes []byte) []byte {
 // `cleat plugin uninstall <name> <version>` already takes this argument shape,
 // so requiring it is the only option that does not add a second convention.
 func deployPlugin(ctx context.Context, db *sql.DB, args []string) {
+	// Refused BEFORE the arguments are read and long before any statement: the point is that a
+	// MySQL or SQL Server user learns which half of `deploy` works (cleat#3994).
+	requireDeployPluginPorted(currentDialect)
+
 	if len(args) < 3 {
 		fmt.Fprintln(os.Stderr, "usage: cleatctl deploy plugin <name> <version> <wasm-file>")
 		fmt.Fprintln(os.Stderr, "  <version> is a semver string, e.g. 1.0.0 -- plugin_defs is keyed (name, version)")

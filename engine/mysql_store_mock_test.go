@@ -423,12 +423,15 @@ func TestMySQLStore_WithEncryption(t *testing.T) {
 
 	store := NewMySQLStore(db)
 	enc := &PayloadEncryption{}
-	result := store.WithEncryption(enc, true)
+	// Enabling is refused on this dialect; that half is pinned, with
+	// PostgreSQL as the positive control, in
+	// TestEnablingPayloadEncryptionIsRefusedOnADialectThatCannotSeal (cleat#3906).
+	result := store.WithEncryption(enc, false)
 	if result.encryption != enc {
 		t.Error("encryption not set")
 	}
-	if !result.encryptSensitivePayloads {
-		t.Error("encryptSensitivePayloads should be true")
+	if result.encryptSensitivePayloads {
+		t.Error("encryptSensitivePayloads should be false")
 	}
 	if store.encryption != nil {
 		t.Error("original store encryption should be nil")

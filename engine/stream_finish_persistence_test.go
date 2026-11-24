@@ -50,16 +50,12 @@ func TestAStreamErrorIsStillAnErrorAfterItsHistoryIsReloaded(t *testing.T) {
 	}
 
 	// Vacuity guard: the fresh path really does mark a stream error this way,
-	// so this record is the shape recordStreamError produces rather than one
-	// invented for the test. If recordStreamError stops setting StreamFinish
+	// so this record is the shape streamErrorRecord produces rather than one
+	// invented for the test. If streamErrorRecord stops setting StreamFinish
 	// this test should stop claiming to cover it.
-	probe := newTestExecSession()
-	probe.recordStreamError("test-plugin", "Echo", `{}`, "plugin_call_streaming: boom", callFailureCode)
-	if len(probe.history) != 1 {
-		t.Fatalf("recordStreamError recorded %d events, want 1", len(probe.history))
-	}
-	if !probe.history[0].StreamFinish {
-		t.Fatal("recordStreamError no longer sets StreamFinish; this test's premise is gone")
+	probe := streamErrorRecord(0, "test-plugin", "Echo", `{}`, "plugin_call_streaming: boom", callFailureCode)
+	if !probe.StreamFinish {
+		t.Fatal("streamErrorRecord no longer sets StreamFinish; this test's premise is gone")
 	}
 
 	s := newTestExecSession()

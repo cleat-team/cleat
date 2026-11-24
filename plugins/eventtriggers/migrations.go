@@ -1433,5 +1433,47 @@ func (p *Plugin) Migrations() []plugin.Migration {
 				PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
 			`,
 		},
+		{
+			// cleat#3873: a published event's body is stored as published on MySQL, as it already is on SQL Server
+			// and, in digits, on PostgreSQL. ingested_events.event_data stayed a JSON column when step 5 (cleat#1622)
+			// converted input_template, so a number outside what MySQL's JSON type keeps exactly was rewritten in
+			// every event this plugin stored. See step 5 for the mechanism; nothing about it is specific to the
+			// column, and this is the same change:
+			//
+			//     sent    {"x":123456789012345678901234567890}
+			//     stored  {"x": 1.2345678901234566e29}
+			//
+			// LONGTEXT with the CHECK that restores the validation the JSON type gave. The column was nullable with
+			// DEFAULT ('{}') and still is.
+			//
+			// A NEW VERSION, for step 12's reason: an UpMySQL added to a version MySQL has already recorded would
+			// never run on a database that has migrated.
+			//
+			// ONE ALTER, ONE COPY. The type change and the CHECK are a single statement, so the table is rebuilt
+			// once; ADD CONSTRAINT ... CHECK also asks for a copy on its own. ALGORITHM=COPY, LOCK=SHARED is stated
+			// outright, as in step 12: reads continue and writers wait for the copy. The figure is in the pull
+			// request that added this step; it scales with the table.
+			//
+			// The statement is guarded on the column's current type, so a re-run after a crash between the ALTER and
+			// the version record does nothing (MySQL DDL is not transactional).
+			//
+			// Rows already stored stay as they are: the digits were lost at write time and cannot be recovered. What
+			// changes is every write from here on. The ALTER keeps each row's stored text exactly.
+			Version:         13,
+			Up:              "",
+			DialectSpecific: "MySQL only: PostgreSQL's JSONB already keeps the digits and SQL Server has always stored this column as NVARCHAR(MAX), so neither has anything to do. cleat#3873.",
+			UpMySQL: `
+				SET @typ := (SELECT DATA_TYPE FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'ingested_events' AND COLUMN_NAME = 'event_data');
+				SET @ddl := IF(@typ = 'json', 'ALTER TABLE ingested_events MODIFY event_data LONGTEXT NULL DEFAULT (''{}''), ADD CONSTRAINT ck_ingested_events_event_data CHECK (event_data IS NULL OR JSON_VALID(event_data)), ALGORITHM=COPY, LOCK=SHARED', 'DO 0');
+				PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+			`,
+			// Reversal restores the JSON type and with it the narrowing: a value stored intact while this step was
+			// applied is rewritten by the ALTER itself, so this is lossy. It costs the same copy.
+			DownMySQL: `
+				SET @typ := (SELECT DATA_TYPE FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'ingested_events' AND COLUMN_NAME = 'event_data');
+				SET @ddl := IF(@typ <> 'json', 'ALTER TABLE ingested_events DROP CONSTRAINT ck_ingested_events_event_data, MODIFY event_data JSON NULL DEFAULT (''{}''), ALGORITHM=COPY, LOCK=SHARED', 'DO 0');
+				PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+			`,
+		},
 	}
 }

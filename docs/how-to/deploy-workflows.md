@@ -53,6 +53,27 @@ either -- it need not match the artifact's filename at all.
 
 ## Step 2: Deploy the WASM binary
 
+### On MySQL or SQL Server, use `deploy-workflow` (or `cleatctl deploy workflow`)
+
+The `cleat deploy` command on this page is **PostgreSQL-only**, and it says so rather than failing
+partway through. If your database is MySQL or SQL Server, deploy with one of these instead — both
+accept `--driver postgres|mysql|mssql` and apply the same version and plugin checks:
+
+```bash
+# Standalone command; works on all three dialects.
+deploy-workflow --driver mysql --db "$CLEAT_DATABASE_URL" place_order ./out/place_order.wasm
+
+# cleatctl: 'deploy workflow' and 'versions' work on all three; 'deploy plugin' is still
+# PostgreSQL-only and refuses with a message saying so.
+cleatctl -driver mssql -db "$CLEAT_DATABASE_URL" deploy workflow place_order ./out/place_order.wasm
+```
+
+`cleatctl deploy workflow` and `cleatctl versions` were ported to MySQL and SQL Server in cleat#3994
+and measured there; `cleatctl deploy plugin` was not, because the plugin loader's statements are
+still PostgreSQL-shaped.
+
+### Deploying with `cleat deploy`
+
 Use `cleat deploy` to insert the built WASM binary into the `workflow_defs` database table:
 
 ```bash

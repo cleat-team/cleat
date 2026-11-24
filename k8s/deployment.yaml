@@ -21,6 +21,17 @@ spec:
       # this is what makes each pod resolvable as <pod-name>.cleat-worker-headless,
       # rather than just reachable through the load-balanced ClusterIP above.
       subdomain: cleat-worker-headless
+      # Keeps two workers off one node (cleat#4439), the same default as charts/cleat/values.yaml's topologySpread.
+      # A PREFERENCE, not a refusal: ScheduleAnyway lets a one-node cluster, or one whose other nodes are full or
+      # cordoned, still start every worker. For a Pending pod instead of two workers on one node, change it to
+      # DoNotSchedule. It is spread rather than anti-affinity so the autoscaler can go past the node count.
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: cleat-worker
       containers:
         - name: worker
           image: cleat-worker:latest
@@ -55,13 +66,16 @@ spec:
               port: 8080
             initialDelaySeconds: 2
             periodSeconds: 5
+          # The same defaults as charts/cleat/values.yaml, which has the measurements behind them
+          # (cleat#4393): a Python component compile is OOM-killed at a 512Mi limit and takes 11.4 s
+          # at 500m of CPU, and the HPA below measures utilization against the REQUEST.
           resources:
             requests:
-              cpu: 100m
-              memory: 128Mi
-            limits:
               cpu: 500m
-              memory: 512Mi
+              memory: 2Gi
+            limits:
+              cpu: "2"
+              memory: 2Gi
 ---
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
@@ -81,14 +95,12 @@ spec:
         target:
           type: Utilization
           averageUtilization: 70
-    - type: Resource
-      resource:
-        name: memory
-        target:
-          type: Utilization
-          averageUtilization: 80
-    # Custom metric for memory-pressure-driven scaling (requires prometheus-adapter).
-    # Uncomment to use instead of resource:memory above:
+    # No resource:memory metric (cleat#4393): it is a percentage of the request, a worker's memory is
+    # dominated by caches and held runs that grow by design, and a target below what one warmed worker
+    # uses pins the autoscaler at maxReplicas. charts/cleat/values.yaml (autoscaling.targetMemory) has
+    # the arithmetic. For memory-pressure-driven scaling use the custom metric below, or KEDA
+    # (k8s/keda-scaledobject.yaml).
+    # Custom metric for memory-pressure-driven scaling (requires prometheus-adapter):
     # - type: Pods
     #   pods:
     #     metric:

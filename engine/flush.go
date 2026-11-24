@@ -23,6 +23,11 @@ func (s *execSession) writeResult(ctx context.Context, m api.Module, ptr uint32,
 			data = data[:maxLen]
 			truncated = true
 		}
+		// A component dispatcher's buffer is sized by this write rather than before the call (see responseBuf): grow it to exactly what is
+		// about to be written, so the bounds check below is against the buffer this response needs and no more.
+		if rb, ok := responseBufFrom(ctx); ok {
+			rawBuf = rb.ensure(uint64(ptr) + uint64(len(data)))
+		}
 		// ptr comes from the guest. Unchecked, `rawBuf[ptr:]` panics for any
 		// ptr past the end of linear memory -- reachable from guest code by
 		// calling e.g. cleat_workflow_id with a bad output pointer, and
@@ -545,6 +550,14 @@ func (e *Engine) flushEvent(ctx context.Context, workflowID string, rec EventRec
 	if e.db == nil || e.noPerStepFlush {
 		return nil
 	}
+	return e.flushEventUngated(ctx, workflowID, rec, prevChecksum)
+}
+
+// flushEventUngated is flushEvent without the two early returns: it writes whether or not per-step flush is on. The gate is
+// the caller's decision. flushEvent keeps it for the per-step path, and the failure-path tail (flushUnflushedEvents) calls
+// this directly, because that is the one place a run with per-step flush OFF must write what it has. Everything below the gate
+// is unchanged: the same fence, the same checksum chain, the same idempotent insert.
+func (e *Engine) flushEventUngated(ctx context.Context, workflowID string, rec EventRecord, prevChecksum string) error {
 
 	// Everything below this point is PostgreSQL-dialect SQL. When the store
 	// says otherwise, hand the event to it instead -- see perStepEventFlusher.
@@ -614,7 +627,7 @@ func (e *Engine) flushEvent(ctx context.Context, workflowID string, rec EventRec
 			return fmt.Errorf("flush event (quota): %w", err)
 		}
 		if currentCount >= e.maxQuotaEvents {
-			return fmt.Errorf("flush event: event quota exceeded (max %d)", e.maxQuotaEvents)
+			return fmt.Errorf("flush event: %w (max %d)", ErrEventQuotaExceeded, e.maxQuotaEvents)
 		}
 		res, err := tx.ExecContext(ctx, insertEventSQL, workflowID, rec.Step, rec.EventType,
 			nullStr(rec.Service), nullStr(rec.Op), nullStr(stored.Request), nullStr(stored.Response), nullStr(stored.Err),
@@ -785,6 +798,28 @@ func (e *Engine) runDefers(ctx context.Context, wasmBytes []byte, deferrals map[
 	ctx, cancel := context.WithTimeout(ctx, budget)
 	defer cancel()
 
+	// NOT FOR A COMPONENT. This pass is the legacy per-defer convention: ask the backend to execute the entry point
+	// "cleat_defer_<id>". For a component that is not a drain, it is a second, fresh instance: the defer's closure lives in
+	// the instance the run was killed in, and a trapped component instance cannot be re-entered ("cannot enter component
+	// instance", measured), so the fresh one holds nothing to run. What it does do is start CPython again (about 1.7 s for
+	// Python on top of the kill), call `run` with an entry name no component honours, and -- for a guest that ignores the
+	// entry key -- execute the workflow body from the top. The host dispatchers return early when there is no handler.
+	// Two of runDefers' three callers (executor.go, the deadline and trap paths) pass context.Background(), which carries
+	// none; the third, executeCompiled, passes a handler but is the wazero path, which cannot hold a component. That is a
+	// property of the callers, not of this path, and a handler added to either of the first two would make it live. cleat#4079.
+	//
+	// The defers of a killed component run are therefore NOT run, and this says so instead of attempting something that
+	// cannot work and logging nothing but a type mismatch. A core module is unaffected: its defers are drained in place
+	// (runGuestDefersAfterKill) before this is reached, and this pass remains for the guest that exports per-defer functions.
+	if wasmBytes != nil && isComponentWasm(wasmBytes) {
+		if len(deferrals) > 0 {
+			e.log().WarnContext(ctx, "the defers of a killed component workflow were not run: a component instance cannot be "+
+				"re-entered after a trap, and a fresh instance does not hold the closures",
+				"workflow_id", e.workflowID, "defers_registered", len(deferrals))
+		}
+		return
+	}
+
 	type defEntry struct {
 		id     string
 		desc   string
@@ -872,4 +907,53 @@ func eventCreatedAt(rec EventRecord) time.Time {
 		return time.UnixMilli(rec.TimestampMs)
 	}
 	return time.Now()
+}
+
+// flushUnflushedEvents writes, on a FAILED execution, the events recorded while per-step flush was off. cleat#4079.
+//
+// With per-step flush on, every event is durable as it is recorded, so a killed or failed run's history is already in the
+// database when the worker writes the terminal failure. With it off the engine writes nothing as it goes and relies on the
+// worker's finalization at segment end, which a failed run never reaches: FailWorkflow takes no events. Measured on all three
+// dialects, a guest killed after two events left 0 of 2 in the database with the flag off and 2 of 2 with it on. This makes the
+// flag-off failure path behave like the flag-on one: the same fenced, chained, idempotent writer (flushEventUngated), run before
+// Execute returns, so the worker's terminal write always lands after it.
+//
+// Called from a defer on Execute's named results, so it covers EVERY terminal error return (the epoch kill, the instruction
+// limit, a trap, a host error, a guest that returns an error), not one branch.
+//
+//   - A fence lost here means another worker owns the run now. Nothing more is written, and the error Execute returns is the
+//     fence error, not the guest's, so the worker does not report a failure for a run it no longer owns. The first fenced insert
+//     is what finds out, so a bumped generation writes nothing at all.
+//   - Idempotent: the insert is ON CONFLICT (tenant_id, workflow_id, step) DO UPDATE ... WHERE <a pending await event>, a WHERE that
+//     cannot fire for a settled step, so an event a partial earlier flush already wrote is a no-op and not a duplicate. (The
+//     MySQL and SQL Server writers reach the same result through their own per-step insert.) Pinned by
+//     TestAnEventTheTailWritesAgainIsNotDuplicated.
+//   - Any other write error is logged and the guest's own error stands. The run has already failed, and a history that could not
+//     be written is the situation before this change, not a new one.
+func (s *execSession) flushUnflushedEvents(errp *error) {
+	if errp == nil || *errp == nil || len(s.unflushed) == 0 || s.engine == nil || s.engine.db == nil || !s.engine.noPerStepFlush {
+		return
+	}
+	// Not the execution's context: that is already cancelled or timed out in exactly the case this exists for.
+	ctx := context.Background()
+	pending := s.unflushed
+	s.unflushed = nil
+	for _, u := range pending {
+		u := u
+		ferr := retryFlushUntilDeadline(ctx, s.engine.flushRetryWindow, "failure-path flush", func() error {
+			return s.engine.flushEventUngated(ctx, s.workflowID, u.rec, u.prev)
+		})
+		if ferr == nil {
+			continue
+		}
+		if errors.Is(ferr, ErrFenceLost) {
+			s.engine.log().DebugContext(ctx, "failure-path flush: fence lost, workflow reassigned to another worker; nothing more written",
+				"workflow_id", s.workflowID, "step", u.rec.Step)
+			*errp = fmt.Errorf("host: workflow %s: %w (the run had failed with: %v)", s.workflowID, ErrFenceLost, *errp)
+			return
+		}
+		s.engine.log().ErrorContext(ctx, "failure-path flush failed; the failed run's history is incomplete",
+			"workflow_id", s.workflowID, "step", u.rec.Step, "event_type", u.rec.EventType, "error", ferr)
+		return
+	}
 }

@@ -30,6 +30,8 @@ var goFixtureExpectations = map[string]string{
 	// cleat#3383: CreatePromise -> AwaitPromise -> DurableCall on timeout, one
 	// entry point taking one struct. Must verify cleanly.
 	"awaitpromisebranch": "",
+	// cleat#4169: the fault-injection harness's script guest -- one entry point that interprets a list of operations. Must verify cleanly.
+	"chaosscript": "",
 	// cleat#3378: AwaitSignals -> PluginCall on timeout -> AwaitSignals, one
 	// entry point taking one struct. Must verify cleanly.
 	"awaittimeoutbranch": "",
@@ -66,12 +68,19 @@ var goFixtureExpectations = map[string]string{
 	// crash scenario starts through ChildWorkflow and counts the runs of. One
 	// DurableCall and nothing exotic; listed because a fixture holding Go files
 	// that is not listed is a fixture nothing checks.
-	"summarise":    "",
-	"deferfunc":    "",
-	"hotfixmarker": "",
-	"durablesend":  "",
-	"fencereentry": "",
-	"generics":     "",
+	"summarise": "",
+	"deferfunc": "",
+	// cleat#4285: a guest that recovers the suspension the SDK panics for a pending child await and then makes a DurableCall. It makes the call directly, so it
+	// verifies cleanly.
+	"ignoredsuspend": "",
+	"residentsleep":  "",
+	"hotfixmarker":   "",
+	// cleat#4079: a workflow that makes a call, registers a defer and then spins or fails, so the engine's failure path has a guest
+	// to be killed in. Must verify cleanly.
+	"killafterwork": "",
+	"durablesend":   "",
+	"fencereentry":  "",
+	"generics":      "",
 	// cleat#1967: the workflow README.md's first command runs. No DurableCall,
 	// so it must verify cleanly with nothing else running.
 	"hello": "",
@@ -124,6 +133,11 @@ var goFixtureExpectations = map[string]string{
 	// "it must fail" is satisfied by failing for any reason at all, including
 	// one this fixture was never written to exercise.
 	"errors": "does not have a HostCalls parameter",
+
+	// cleat#4123. Must verify cleanly HERE: this table measures entry-point threading and shape, which the fixture's functions satisfy (the typed
+	// ones return a string for that reason). The non-determinism rules it exists for (E001, E002, E003, E008...) belong to the closure scan and
+	// are asserted in internal/closure/side_effect_nondeterminism_test.go, which reads the same package.
+	"sideeffectnondet": "",
 
 	// cleat#1614. A method reaching the host through the package-level h.
 	// The substring is the part that is specific to a METHOD: the generic

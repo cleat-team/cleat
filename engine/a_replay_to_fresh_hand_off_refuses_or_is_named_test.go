@@ -1,0 +1,464 @@
+package engine
+
+// cleat#4143. A host call that leaves replay (exitReplay) and goes on to do new work is a HAND-OFF, and in a defer segment the body's
+// first new call arrives through it: the segment starts in replay whenever the run has history. Every hand-off therefore has to reach
+// the segment's refusal (stopBeforeNewWork), or be named here with the reason it need not.
+//
+// Six entry points had no refusal on this path and a terminated workflow's segment made the body's next call (see
+// a_defer_segment_refuses_new_work_at_the_replay_frontier_test.go). The inventories keyed on stop sites could not have found them: they
+// list the functions that DO contain a check, and a hand-off with none is the one thing a list of those cannot contain.
+//
+// WHAT COUNTS AS GUARDED. A function that calls exitReplay() is guarded when its own body calls stopBeforeNewWork() or
+// suspendingAwaitResult(), or when it calls a s.fresh*() method whose body does. The call is read as CODE (callsInCode), so a comment
+// quoting the name does not satisfy it.
+//
+// SCOPE. The first scan is an inventory of the exitReplay call sites, so it does not see a hand-off that leaves replay some other way.
+//
+// A SECOND KIND OF ENTRY ESCAPES IT, AND DID (cleat#4143, the lookup). A LOOKUP answers "is this already recorded?" and never leaves
+// replay itself: at the frontier it answers "no", and the CALLER goes on to do the work. SideEffectRecorded is the case: it decides
+// whether the user's function runs, answered "not recorded" at the frontier with no stop check, and so contained no exitReplay() for the
+// first scan to find. The second scan reads the other shape of the same hole: a function that SPELLS the frontier predicate
+// (s.stepCount >= len(s.history)) or ANSWERS with a *NotRecorded status must reach a refusal too, or be named in
+// frontierAnswersThatNeedNoRefusal.
+//
+// WHAT THE SECOND SCAN CANNOT SEE: a lookup that finds the frontier another way (a `<` test that falls through to a bare return) and
+// answers "no" with some other name. Naming a new "not recorded" status ending in NotRecorded is what makes it visible.
+//
+// Run the known positives below before trusting a pass: they show each scan reports an entry with no check.
+
+import (
+	"fmt"
+	goscan "go/scanner"
+	"go/token"
+	"os"
+	"regexp"
+	"sort"
+	"strings"
+	"testing"
+)
+
+// handOffsThatNeedNoRefusal are functions that call exitReplay() and are not stopped, each with the reason. A list that may only
+// SHRINK: an entry added to silence a failure is the next unguarded call site. TestEveryHandOffExemptionStillDescribesSomething
+// fails if one stops being true.
+var handOffsThatNeedNoRefusal = map[string]string{
+	"leaveReplay": "the dispatcher's one exit from replay (cleat#4152). Its only caller is step, which applies stopBeforeNewWork to every non-Pure step on the next lines, so the refusal is not skipped by reaching a call this way; that is the property the dispatcher exists to have.",
+	"fastForwardToStop": "the mechanism that makes a stop-at-last-stoppable segment refuse: it leaves replay so that the guest's NEXT call " +
+		"takes the non-replay half, where the refusal is.",
+	"leaveReplayAtPending": "the dispatcher's second exit from replay (cleat#4152, W3a): for a step that found its OWN pending record and does not consume it " +
+		"(OverPending). Its only caller is step, which applies the refusal on the next lines exactly as after leaveReplay, so reaching a call this way " +
+		"skips nothing.",
+}
+
+var (
+	handOffDecl = regexp.MustCompile(`(?m)^func \(s \*execSession\) ([A-Za-z_]\w*)\(`)
+	freshCallee = regexp.MustCompile(`\bs\.(fresh\w+)\(`)
+)
+
+// unrefusedHandOffs returns the functions in src (name -> body) that call exitReplay() and reach no refusal, plus how many hand-offs it
+// examined. It is a function of the text so a test can hand it a known positive.
+func unrefusedHandOffs(bodies map[string]string) (unrefused []string, examined int) {
+	refuses := func(body string) bool {
+		return callsInCode(body, "stopBeforeNewWork") || callsInCode(body, "suspendingAwaitResult")
+	}
+	for name, body := range bodies {
+		if name == "exitReplay" || !callsInCode(body, "exitReplay") {
+			continue
+		}
+		examined++
+		if refuses(body) {
+			continue
+		}
+		reached := false
+		for _, m := range freshCallee.FindAllStringSubmatch(body, -1) {
+			if b, ok := bodies[m[1]]; ok && refuses(b) {
+				reached = true
+			}
+		}
+		if !reached {
+			unrefused = append(unrefused, name)
+		}
+	}
+	sort.Strings(unrefused)
+	return unrefused, examined
+}
+
+// frontierAnswersThatNeedNoRefusal are functions that read the replay frontier or answer "not recorded" and need no refusal of their own,
+// each with the reason. A list that may only SHRINK, like handOffsThatNeedNoRefusal.
+var frontierAnswersThatNeedNoRefusal = map[string]string{}
+
+// blankComments returns src with every comment replaced by spaces, offsets and newlines untouched, so a comment that quotes a predicate, a
+// status name or a call cannot satisfy or trigger a scan that matches on text.
+func blankComments(src string) string {
+	fset := token.NewFileSet()
+	file := fset.AddFile("", fset.Base(), len(src))
+	var sc goscan.Scanner
+	sc.Init(file, []byte(src), func(token.Position, string) {}, goscan.ScanComments)
+	out := []byte(src)
+	for {
+		pos, tok, lit := sc.Scan()
+		if tok == token.EOF {
+			return string(out)
+		}
+		if tok != token.COMMENT {
+			continue
+		}
+		off := file.Offset(pos)
+		for i := off; i < off+len(lit) && i < len(out); i++ {
+			if out[i] != '\n' {
+				out[i] = ' '
+			}
+		}
+	}
+}
+
+var (
+	notRecordedStatus = regexp.MustCompile(`\b\w*NotRecorded\b`)
+	frontierBranch    = regexp.MustCompile(`s\.stepCount\s*>=\s*len\(s\.history\)\s*\{`)
+)
+
+// frontierBlocks returns the text of every `if s.stepCount >= len(s.history) { ... }` block in body's code, braces matched.
+func frontierBlocks(body string) []string {
+	code := blankComments(body)
+	var out []string
+	for _, loc := range frontierBranch.FindAllStringIndex(code, -1) {
+		depth, end := 1, -1
+		for i := loc[1]; i < len(code); i++ {
+			switch code[i] {
+			case '{':
+				depth++
+			case '}':
+				depth--
+			}
+			if depth == 0 {
+				end = i
+				break
+			}
+		}
+		if end < 0 {
+			end = len(code)
+		}
+		out = append(out, code[loc[1]:end])
+	}
+	return out
+}
+
+// answersAtTheFrontier reports whether a function's CODE reads the replay frontier predicate or names a *NotRecorded status.
+func answersAtTheFrontier(body string) bool {
+	return len(frontierBlocks(body)) > 0 || notRecordedStatus.MatchString(blankComments(body))
+}
+
+// unrefusedFrontierAnswers returns the functions that answer at the replay frontier and reach no refusal, plus how many it examined. It is
+// a function of the text so a test can hand it a known positive.
+//
+// THE REFUSAL MUST BE IN THE FRONTIER BRANCH, not just somewhere in the function. SideEffectRecorded already refuses on its non-replay half, so a
+// function-wide check is satisfied by the layer that was never the problem: remove the frontier refusal and the scan would stay green. For a
+// function that spells the predicate, every such branch must itself call stopBeforeNewWork() (or suspendingAwaitResult()) or hand off to a
+// s.fresh*() callee that does. A function that only answers a *NotRecorded status, with no predicate to locate, is checked as a whole.
+func unrefusedFrontierAnswers(bodies map[string]string, neverRefused map[string]bool) (unrefused []string, examined int) {
+	refuses := func(text string) bool {
+		// A call that goes through the step dispatcher is refused THERE, on both arrival paths, for every non-Pure step (step_dispatcher.go; the
+		// dispatcher's property tests run that over every spec on stepSpecs, each falsified), so it needs no stopBeforeNewWork() of its own
+		// (cleat#4152, G1a: SideEffectRecorded moved onto step and its frontier refusal with it). A MENTION of step in a comment is not a call.
+		return callsInCode(text, "stopBeforeNewWork") || callsInCode(text, "suspendingAwaitResult") || goesThroughStep(blankComments(text), neverRefused)
+	}
+	reaches := func(text string) bool {
+		if refuses(text) {
+			return true
+		}
+		for _, m := range freshCallee.FindAllStringSubmatch(text, -1) {
+			if b, ok := bodies[m[1]]; ok && refuses(b) {
+				return true
+			}
+		}
+		return false
+	}
+	for name, body := range bodies {
+		if !answersAtTheFrontier(body) {
+			continue
+		}
+		examined++
+		ok := true
+		if blocks := frontierBlocks(body); len(blocks) > 0 {
+			for _, blk := range blocks {
+				if !reaches(blk) {
+					ok = false
+				}
+			}
+		} else {
+			ok = reaches(body)
+		}
+		if !ok {
+			unrefused = append(unrefused, name)
+		}
+	}
+	sort.Strings(unrefused)
+	return unrefused, examined
+}
+
+// engineMethodBodies reads every non-test engine/*.go file and returns each *execSession method's text, name -> body.
+func engineMethodBodies(t *testing.T) map[string]string {
+	t.Helper()
+	entries, err := os.ReadDir(".")
+	if err != nil {
+		t.Fatalf("reading engine/: %v", err)
+	}
+	out := map[string]string{}
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".go") || strings.HasSuffix(e.Name(), "_test.go") {
+			continue
+		}
+		b, err := os.ReadFile(e.Name())
+		if err != nil {
+			t.Fatalf("reading %s: %v", e.Name(), err)
+		}
+		src := string(b)
+		locs := handOffDecl.FindAllStringSubmatchIndex(src, -1)
+		for i, loc := range locs {
+			end := len(src)
+			if i+1 < len(locs) {
+				end = locs[i+1][0]
+			}
+			out[src[loc[2]:loc[3]]] = src[loc[0]:end]
+		}
+	}
+	return out
+}
+
+// handOffCanaries are functions that must be seen calling exitReplay(): replay halves of the same kind as the ones that moved, that still leave replay themselves.
+// replaySetScope was a canary until SetScope moved onto the dispatcher (cleat#4211), which now owns that hand-off, replaySideEffect before it (cleat#4152,
+// G1a), replayCallWithHeartbeat, replayCall, replayPluginCall and replayPluginCallStreaming after it (G3). When one of these moves, replace it with another that does, and the failure names which one went.
+var handOffCanaries = []string{"DurableScheduleInvoke", "runDetached"}
+
+// handOffScanProblem says why the hand-off scan cannot be trusted on this tree, or "" when it saw what it is meant to see. It is a function of the scan's
+// OUTPUT so a known positive can hand it a scan that saw nothing (TestTheHandOffScanVacuityCheckRefusesAScanThatSawNothing).
+//
+// WHAT IT ASKS, and why it is not a count. This used to be `examined < 20`: a census of how many functions still call exitReplay(). That is a population
+// every migration onto the step dispatcher SHRINKS, by design, so the floor failed on the first migration that crossed it (cleat#4232: develop alone
+// stood at exactly 20 after #4256, and #4232 took it to 19) and would fail again at the next. A floor on a number that is meant to fall measures how
+// far the migration has got, not whether the scan is reading the right thing. What it asks instead holds at any size of that population:
+//   - the scan SAW the hand-offs it must (every canary calls exitReplay(), checked by the caller);
+//   - it saw at least one that is REFUSED, so it can tell a refused hand-off from an unrefused one (a scan that reports everything as unrefused, or
+//     nothing, is reading the wrong thing);
+//   - when any exemption is named, it saw at least one hand-off that is NAMED, not refused. That half is conditional on the exemption list being
+//     non-empty, because the list may only shrink and deleting its last entry is the intended outcome, not a failure of the scan
+//     (TestEveryHandOffExemptionStillDescribesSomething checks each entry is still a real unrefused hand-off);
+//   - a small bound, below the number of canaries, so an empty scan is refused even before the kinds are looked at.
+//
+// The dispatcher's own steps (stepSpecs) are deliberately NOT added to the population: len(stepSpecs) does not depend on the scan, so a scan that saw
+// nothing (examined 0) plus the registry's steps would still clear a combined floor, which is the vacuous pass this guards against.
+func handOffScanProblem(examined int, unrefused []string) string {
+	refused := examined - len(unrefused)
+	named := 0
+	for _, n := range unrefused {
+		if _, ok := handOffsThatNeedNoRefusal[n]; ok {
+			named++
+		}
+	}
+	switch {
+	case examined < len(handOffCanaries):
+		return fmt.Sprintf("the scan found %d function(s) that call exitReplay(), fewer than the %d canaries that must be seen; it is reading the wrong thing", examined, len(handOffCanaries))
+	case refused < 1:
+		return fmt.Sprintf("the scan found %d hand-off(s) and reported every one of them unrefused: it cannot tell a refused hand-off from an unrefused one, so it would not notice a missing check", examined)
+	case len(handOffsThatNeedNoRefusal) > 0 && named < 1:
+		return fmt.Sprintf("the scan found %d hand-off(s) and none of the %d named exemptions among its unrefused ones: it reports nothing unrefused, so it would pass whatever the tree said", examined, len(handOffsThatNeedNoRefusal))
+	}
+	return ""
+}
+
+func TestEveryReplayToFreshHandOffReachesARefusalOrIsNamed(t *testing.T) {
+	bodies := engineMethodBodies(t)
+	unrefused, examined := unrefusedHandOffs(bodies)
+
+	// Vacuity, per thing rather than per total: a floor alone is satisfied by the wrong things being present.
+	if problem := handOffScanProblem(examined, unrefused); problem != "" {
+		t.Fatal(problem)
+	}
+	for _, canary := range handOffCanaries {
+		if !callsInCode(bodies[canary], "exitReplay") {
+			t.Fatalf("canary %s was not seen calling exitReplay(); the scan is reading the wrong thing", canary)
+		}
+	}
+
+	var bad []string
+	for _, name := range unrefused {
+		if _, ok := handOffsThatNeedNoRefusal[name]; !ok {
+			bad = append(bad, name)
+		}
+	}
+	if len(bad) > 0 {
+		t.Errorf("function(s) %s call exitReplay() and reach no stopBeforeNewWork(), directly or through a s.fresh*() callee, and are not in "+
+			"handOffsThatNeedNoRefusal.\n\nA defer segment over a run with history starts in replay, so its body's first new call arrives "+
+			"through this hand-off and nothing refuses it (cleat#4143). Put the check at the top of the fresh* function the hand-off "+
+			"reaches, as freshCall does, or name the function here with the reason it needs none.", strings.Join(bad, ", "))
+	}
+}
+
+// TestTheHandOffScanVacuityCheckRefusesAScanThatSawNothing is the known positive for the check above: handed the output of a scan that read the wrong
+// thing, it must say so. A check that accepts every input also "passes" the tree.
+func TestTheHandOffScanVacuityCheckRefusesAScanThatSawNothing(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		examined  int
+		unrefused []string
+		wantSub   string
+	}{
+		{"the scan saw nothing", 0, nil, "fewer than"},
+		{"the scan saw only the registry's steps and no hand-off", 0, nil, "fewer than"},
+		{"every hand-off reported unrefused", 5, []string{"a", "b", "c", "d", "e"}, "cannot tell a refused hand-off"},
+		{"nothing reported unrefused, though exemptions are named", 5, nil, "none of the"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := handOffScanProblem(tc.examined, tc.unrefused)
+			if got == "" || !strings.Contains(got, tc.wantSub) {
+				t.Fatalf("handOffScanProblem(%d, %v) = %q, want a problem naming %q", tc.examined, tc.unrefused, got, tc.wantSub)
+			}
+		})
+	}
+	// And it accepts a scan that saw both kinds, at ANY size of the population: the live tree's shape, and a much smaller one.
+	var named []string
+	for n := range handOffsThatNeedNoRefusal {
+		named = append(named, n)
+	}
+	for _, examined := range []int{len(handOffCanaries) + len(named) + 1, 40, 400} {
+		if got := handOffScanProblem(examined, named); got != "" {
+			t.Errorf("handOffScanProblem(%d, the named exemptions) = %q, want none: a scan that saw both kinds must pass at any population size", examined, got)
+		}
+	}
+}
+
+// TestEveryHandOffExemptionStillDescribesSomething is the second direction. An exemption for a function that no longer exists, no longer
+// calls exitReplay(), or is now refused is a standing grant for whatever next takes that name.
+func TestEveryHandOffExemptionStillDescribesSomething(t *testing.T) {
+	bodies := engineMethodBodies(t)
+	unrefused, _ := unrefusedHandOffs(bodies)
+	isUnrefused := map[string]bool{}
+	for _, n := range unrefused {
+		isUnrefused[n] = true
+	}
+	for name := range handOffsThatNeedNoRefusal {
+		body, ok := bodies[name]
+		switch {
+		case !ok:
+			t.Errorf("%q is exempt but no such *execSession method exists; delete the entry", name)
+		case !callsInCode(body, "exitReplay"):
+			t.Errorf("%q is exempt but no longer calls exitReplay(); delete the entry", name)
+		case !isUnrefused[name]:
+			t.Errorf("%q is exempt but now reaches a refusal; the exemption no longer describes anything, so delete the entry", name)
+		}
+	}
+}
+
+// TestTheHandOffScanReportsAHandOffWithNoRefusal is the known positive. A scan that returns nothing for every input also "passes" the
+// tree, so show it reporting one hand-off that has no check, and not reporting the same hand-off once the check is added through a
+// fresh* callee or in the body itself, and not when the check is only a COMMENT.
+func TestTheHandOffScanReportsAHandOffWithNoRefusal(t *testing.T) {
+	const noCheck = "func (s *execSession) replayX() int64 {\n\ts.exitReplay()\n\treturn s.freshX()\n}\n"
+	cases := []struct {
+		name   string
+		bodies map[string]string
+		want   []string
+	}{
+		{"no check anywhere", map[string]string{
+			"replayX": noCheck,
+			"freshX":  "func (s *execSession) freshX() int64 {\n\treturn 1\n}\n",
+		}, []string{"replayX"}},
+		{"the check is only a comment", map[string]string{
+			"replayX": noCheck,
+			"freshX":  "func (s *execSession) freshX() int64 {\n\t// if s.stopBeforeNewWork() { return 1 }\n\treturn 1\n}\n",
+		}, []string{"replayX"}},
+		{"the check is in the fresh callee", map[string]string{
+			"replayX": noCheck,
+			"freshX":  "func (s *execSession) freshX() int64 {\n\tif s.stopBeforeNewWork() {\n\t\treturn 1\n\t}\n\treturn 2\n}\n",
+		}, nil},
+		{"the check is in the hand-off itself", map[string]string{
+			"replayX": "func (s *execSession) replayX() int64 {\n\ts.exitReplay()\n\tif s.stopBeforeNewWork() {\n\t\treturn 1\n\t}\n\treturn 2\n}\n",
+		}, nil},
+	}
+	for _, c := range cases {
+		got, _ := unrefusedHandOffs(c.bodies)
+		if strings.Join(got, ",") != strings.Join(c.want, ",") {
+			t.Errorf("%s: scan reported %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
+func TestEveryFrontierAnswerReachesARefusalOrIsNamed(t *testing.T) {
+	bodies := engineMethodBodies(t)
+	unrefused, examined := unrefusedFrontierAnswers(bodies, neverRefusedSpecs(t))
+
+	// Vacuity per thing: the lookup that escaped the first scan, and a function that spells the predicate and DOES refuse.
+	frontierCanaries := []string{"SideEffectRecorded", "SideEffect"}
+	for _, canary := range frontierCanaries {
+		if !answersAtTheFrontier(bodies[canary]) {
+			t.Fatalf("canary %s was not seen answering at the frontier; the scan is reading the wrong thing and would pass whatever the tree said", canary)
+		}
+	}
+	// The bound is the number of canaries, not a census: tied to the list so a canary added or removed cannot leave a stale literal behind.
+	if examined < len(frontierCanaries) {
+		t.Fatalf("the scan found %d frontier answers, want at least the %d canaries", examined, len(frontierCanaries))
+	}
+
+	var bad []string
+	for _, name := range unrefused {
+		if _, ok := frontierAnswersThatNeedNoRefusal[name]; !ok {
+			bad = append(bad, name)
+		}
+	}
+	if len(bad) > 0 {
+		t.Errorf("function(s) %s read the replay frontier or answer \"not recorded\" and reach no stopBeforeNewWork(), directly or through a "+
+			"s.fresh*() callee, and are not in frontierAnswersThatNeedNoRefusal.\n\nA defer segment over a run with history starts in replay, so its "+
+			"body's first new work arrives at this answer. A LOOKUP that says \"not recorded\" starts the caller's work, and refusing only the "+
+			"record after it is too late (cleat#4143: SideEffectRecorded let the user's function run).", strings.Join(bad, ", "))
+	}
+}
+
+func TestEveryFrontierAnswerExemptionStillDescribesSomething(t *testing.T) {
+	bodies := engineMethodBodies(t)
+	unrefused, _ := unrefusedFrontierAnswers(bodies, neverRefusedSpecs(t))
+	isUnrefused := map[string]bool{}
+	for _, n := range unrefused {
+		isUnrefused[n] = true
+	}
+	for name := range frontierAnswersThatNeedNoRefusal {
+		body, ok := bodies[name]
+		switch {
+		case !ok:
+			t.Errorf("%q is exempt but no such *execSession method exists; delete the entry", name)
+		case !answersAtTheFrontier(body):
+			t.Errorf("%q is exempt but no longer answers at the frontier; delete the entry", name)
+		case !isUnrefused[name]:
+			t.Errorf("%q is exempt but now reaches a refusal; the exemption no longer describes anything, so delete the entry", name)
+		}
+	}
+}
+
+// TestTheFrontierAnswerScanReportsALookupWithNoRefusal is the known positive for the second scan, shaped like the SideEffectRecorded that
+// escaped: no exitReplay anywhere, a frontier test, and a "not recorded" answer.
+func TestTheFrontierAnswerScanReportsALookupWithNoRefusal(t *testing.T) {
+	const lookup = "func (s *execSession) lookupX() int64 {\n\tif s.stepCount >= len(s.history) {\n%s\t\treturn packSimpleResult(xNotRecorded)\n\t}\n\treturn 0\n}\n"
+	cases := []struct {
+		name   string
+		bodies map[string]string
+		want   []string
+	}{
+		{"a lookup with no check", map[string]string{"lookupX": strings.Replace(lookup, "%s", "", 1)}, []string{"lookupX"}},
+		{"the check is only a comment", map[string]string{"lookupX": strings.Replace(lookup, "%s", "\t\t// if s.stopBeforeNewWork() { return 1 }\n", 1)}, []string{"lookupX"}},
+		{"a refusal on the non-replay half only does not count", map[string]string{"lookupX": "func (s *execSession) lookupX() int64 {\n\tif !s.isReplay {\n\t\tif s.stopBeforeNewWork() {\n\t\t\treturn 1\n\t\t}\n\t\treturn 0\n\t}\n\tif s.stepCount >= len(s.history) {\n\t\treturn packSimpleResult(xNotRecorded)\n\t}\n\treturn 0\n}\n"}, []string{"lookupX"}},
+		{"the check is in the lookup", map[string]string{"lookupX": strings.Replace(lookup, "%s", "\t\tif s.stopBeforeNewWork() {\n\t\t\treturn 1\n\t\t}\n", 1)}, nil},
+		{"a comment quoting the predicate is not a frontier answer", map[string]string{
+			"quotesIt": "func (s *execSession) quotesIt() int64 {\n\t// when s.stepCount >= len(s.history) the lookup answers xNotRecorded\n\treturn 0\n}\n"}, nil},
+		{"a lookup that goes through the step dispatcher", map[string]string{
+			"lookupZ": "func (s *execSession) lookupZ() int64 {\n\treturn s.step(ctx, m, &lookupZStep, stepArgs{})\n}\n\nvar lookupZStep = stepSpec{\n\tFresh: func(*stepCtx) int64 { return packSimpleResult(zNotRecorded) },\n}\n"}, nil},
+		{"step named only in a comment is not a refusal", map[string]string{
+			"lookupW": "func (s *execSession) lookupW() int64 {\n\t// goes through s.step(ctx, m, &spec, args) in a later change\n\tif s.stepCount >= len(s.history) {\n\t\treturn packSimpleResult(wNotRecorded)\n\t}\n\treturn 0\n}\n"}, []string{"lookupW"}},
+		{"a frontier answer that hands off to a refusing fresh function", map[string]string{
+			"replayY": "func (s *execSession) replayY() int64 {\n\tif s.stepCount >= len(s.history) {\n\t\treturn s.freshY()\n\t}\n\treturn 0\n}\n",
+			"freshY":  "func (s *execSession) freshY() int64 {\n\tif s.stopBeforeNewWork() {\n\t\treturn 1\n\t}\n\treturn 2\n}\n"}, nil},
+	}
+	for _, c := range cases {
+		got, _ := unrefusedFrontierAnswers(c.bodies, nil)
+		if strings.Join(got, ",") != strings.Join(c.want, ",") {
+			t.Errorf("%s: scan reported %v, want %v", c.name, got, c.want)
+		}
+	}
+}

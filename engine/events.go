@@ -153,6 +153,9 @@ type PluginCallStreamChunkEvent struct {
 	// EventRecord.StreamErrCode.
 	ErrCode int
 	Finish  bool
+	// Data is true for a chunk the plugin produced and false for the synthetic chunk that records a stream-level failure; see
+	// EventRecord.StreamData (cleat#4117).
+	Data bool
 }
 
 func (e PluginCallStreamChunkEvent) Step() int       { return e.step }
@@ -326,7 +329,7 @@ func EventRecordFromEvent(e Event) EventRecord {
 			PluginName: ev.PluginName, PluginFunc: ev.FuncName,
 			PluginInput: ev.Input, PluginOutput: ev.Output,
 			StreamChunkIndex: ev.ChunkIndex, StreamFinish: ev.Finish,
-			StreamErrCode: ev.ErrCode,
+			StreamErrCode: ev.ErrCode, StreamData: ev.Data,
 		}
 	case CreatePromiseEvent:
 		return EventRecord{
@@ -442,7 +445,7 @@ func EventFromRecord(r EventRecord) Event {
 			step: r.Step, PluginName: r.PluginName, FuncName: r.PluginFunc,
 			Input: r.PluginInput, Output: r.PluginOutput,
 			ChunkIndex: r.StreamChunkIndex, Finish: r.StreamFinish,
-			ErrCode: r.StreamErrCode,
+			ErrCode: r.StreamErrCode, Data: r.StreamData,
 		}
 	case EventTypeCreatePromise:
 		return CreatePromiseEvent{

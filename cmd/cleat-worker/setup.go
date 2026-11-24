@@ -2117,6 +2117,40 @@ type Worker struct {
 	// on it.
 	storeTenantID string
 
+	// rlsBypassReasons is what main()'s startup check found: empty when this
+	// connection is subject to row-level security (or when that could not be
+	// determined), non-empty when every read on it sees every tenant's rows.
+	//
+	// It exists for the window the startup refusal cannot close. #3772 refuses
+	// to START on such a connection when the database holds more than one
+	// tenant, but a tenant can appear afterwards -- direct SQL, or
+	// `--create-tenant` on an owner DSN, which is the documented provisioning
+	// path -- and a worker already running would keep serving both until it
+	// restarted. The dispatch loop checks at the TOP of every tick, at the cost of
+	// one count query per tick paid only on a connection like this one
+	// (cleat#3773). rlsBypassRole is the role the startup check connected as,
+	// only for that message.
+	//
+	// Both are empty for a worker that never ran the check (non-PostgreSQL
+	// drivers, tests), which is what makes the guard inert there.
+	rlsBypassReasons []engine.RLSBypassReason
+	rlsBypassRole    string
+
+	// exitFunc ends the process when the runtime tenant-isolation failure is
+	// found. It is os.Exit in production; a test substitutes it so the decision
+	// is observable without killing the test binary (cleat#3773).
+	exitFunc func(int)
+
+	// countTenantsForIsolation answers "how many tenants does this database
+	// hold", counting SUSPENDED ones, exactly as the startup refusal does. main()
+	// binds it to engine.CountTenants over the connection the startup check used.
+	//
+	// It is called on every dispatch tick, but ONLY when rlsBypassReasons is
+	// non-empty -- that is, on a connection where serving two tenants is the
+	// failure D82 refuses at startup. A worker subject to the policies never
+	// calls it and pays nothing (cleat#3773).
+	countTenantsForIsolation func(context.Context) (int, error)
+
 	// storeFactory opens a store scoped to a particular tenant. Execution uses
 	// it; the loops above do not.
 	//
@@ -2446,6 +2480,11 @@ type Worker struct {
 	// and the entry is dropped when a tick sees none of its runs.
 	groupHeartbeatOK sync.Map // map[tenantID]int64
 
+	// heartbeatTickMu serialises heartbeatAndFenceInFlight. The heartbeat loop was its only caller and never overlapped itself; a held run's claim check (claimStillMine) is
+	// a second, so two ticks can now be asked for at once. They must not run together: a check has to be answered by a tick that STARTED after the check was asked (a tick
+	// that began before the wake cannot have seen a terminate that landed before it), and two ticks storing lastHeartbeatOK out of order would move it backwards.
+	heartbeatTickMu sync.Mutex
+
 	// claimedAfter is, per (workflow id, generation) in flight, an instant at or
 	// BEFORE the claim that produced it: the start of the dispatch iteration that
 	// made the claim call. A group's clock is seeded from the earliest of its
@@ -2475,6 +2514,18 @@ type Worker struct {
 	// worker's heartbeat would have to lapse before being called dead.
 	// cleat#2005.
 	lastDBTrouble atomic.Int64
+
+	// dbTroubleSeen is set the first time recordDBTrouble runs, and never
+	// cleared. lastDBTrouble is SEEDED to the start time (see its doc), so a
+	// reaper tick inside the first reclaimAfter() window is closed by the gate
+	// whether or not anything has gone wrong; this is what tells a start-up
+	// tick from one that follows a real failure. cleat#3792.
+	dbTroubleSeen atomic.Bool
+
+	// startedAt is when this worker was constructed; the zero value (test
+	// constructors) means "no start-up window", so the gate behaves as it always
+	// did. See startingUp.
+	startedAt time.Time
 
 	// lastDBContactOK is the UnixNano of this worker's most recent CONFIRMED
 	// successful, bounded database round trip -- heartbeat (busy, via
@@ -2537,8 +2588,16 @@ type Worker struct {
 	internalDefsRefreshed sync.Map
 
 	// Compaction settings.
-	Metrics                 *prometheus.Metrics
-	compactionThreshold     int
+	Metrics             *prometheus.Metrics
+	compactionThreshold int
+	// compactionSkips is the per-worker memory of runs whose sealed compaction
+	// state this worker could not open (cleat#3853). It is built on first use
+	// by compactionSkipSetFor, so every construction path has one.
+	compactionSkips     *compactionSkipSet
+	compactionSkipsOnce sync.Once
+	// nowFunc is the clock compactionSkips uses. Nil means time.Now; tests set
+	// it to advance the skip window without sleeping.
+	nowFunc                 func() time.Time
 	compactionInterval      time.Duration
 	retentionInterval       time.Duration
 	stallThreshold          time.Duration
@@ -2568,7 +2627,10 @@ type Worker struct {
 	versionGCMinVersions int
 	versionGCMaxAge      time.Duration
 
-	memoryController                 *MemoryController
+	memoryController *MemoryController
+	// resident holds a run through a wait that is due soon instead of suspending it (cleat#4162). It is built for every worker and is a no-op unless
+	// --resident-max-runs is above zero, so the drain and pressure paths below call it without asking whether it is on.
+	resident                         *engine.ResidentSet
 	maxRetries                       int
 	memorySampleRetention            int
 	retentionDays                    int
@@ -2782,6 +2844,8 @@ const shutdownTailDuration = 2 * time.Second
 // call.
 func (w *Worker) gracefulShutdown(grace time.Duration, force <-chan struct{}) string {
 	w.draining.Store(true)
+	// A held run is in flight, so a drain that waited for it would wait for its wake. Send every one back and refuse any that follows (cleat#4162).
+	w.resident.Drain()
 	deadline := time.NewTimer(grace)
 	defer deadline.Stop()
 	tick := time.NewTicker(50 * time.Millisecond)
@@ -3236,6 +3300,8 @@ func (w *Worker) dispatchLoop() {
 				w.draining.Store(true)
 				w.logger.InfoContext(w.ctx, "shutdown signal received; draining in-flight workflows", "worker_id", w.id)
 			}
+			// Idempotent, and here as well as in gracefulShutdown because a cordon (POST /api/admin/drain) drains without it (cleat#2285).
+			w.resident.Drain()
 			inflight := 0
 			w.inflight.Range(func(_, _ any) bool { inflight++; return true })
 			if inflight == 0 {
@@ -3251,6 +3317,18 @@ func (w *Worker) dispatchLoop() {
 		}
 
 		w.healthTracker.recordRun("dispatch")
+
+		// cleat#3773. HERE, at the top of the tick, and not in a claim path:
+		// the claim loop is only reached when there is free capacity (so a
+		// worker saturated with long runs would never look), and
+		// --claim-across-tenants=false never enters claimRotating at all while
+		// still reading across tenants on a bypassing connection. The guard
+		// returns on its first line unless the startup check recorded a bypass
+		// reason, so a worker subject to the policies pays nothing.
+		if w.checkRuntimeTenantIsolation() {
+			return
+		}
+
 		// Memory-aware tick: read system memory, compute pressure, adjust concurrency.
 		w.memoryController.Tick(w.ctx)
 		state := w.memoryController.State()
@@ -3260,6 +3338,11 @@ func (w *Worker) dispatchLoop() {
 		w.Metrics.RecordConcurrencyLimit(w.ctx, int64(state.DynamicConcurrency))
 		w.Metrics.SetMemoryPressure(w.ctx, state.Pressure)
 		w.Metrics.SetScalingPressure(w.ctx, state.ScalingPressure)
+		// At the memory HARD limit a held run is the cheapest thing to give back: sending it back returns the stop the host would have returned anyway.
+		// Between the soft and hard limit nothing new is held (the set asks the controller) but what is held stays. A no-op when residency is off.
+		if state.Pressure >= 1.0 {
+			w.resident.EvictAll(engine.ResidentEvictedPressure)
+		}
 		for key, bytes := range w.memoryController.DefEstimates() {
 			w.Metrics.RecordWorkflowMemoryEstimate(w.ctx, key.tenantID, key.defName, bytes)
 		}
@@ -4153,6 +4236,14 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 	deferPhase := wf.PendingTerminalStatus != ""
 	if deferPhase {
 		engineOpts = append(engineOpts, engine.WithDeferPhase())
+		// A segment whose recorded outcome is a FAILURE is, for a component guest, the second phase of a run that was killed
+		// with its defers owed (markKilledRunForItsDefers), or of a child failed by a terminating parent. Both stop at the
+		// last stoppable event, which is what lets a body killed in a loop reach its defers (cleat#4079). The engine arms it
+		// for a component guest only; a core module's segment is unchanged. A terminate's or cancel's segment is not a
+		// failure and keeps stopping at its frontier.
+		if wf.PendingTerminalStatus == "failed" || wf.PendingTerminalStatus == "dead_lettered" {
+			engineOpts = append(engineOpts, engine.WithStopAtLastStoppable())
+		}
 	}
 	if f := w.workflowFetcherFor(caller); f != nil {
 		engineOpts = append(engineOpts, engine.WithFetcher(f))
@@ -4161,6 +4252,24 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 		// reads it, because a static reachability test passes with this block
 		// present and never run (cleat-review, cleat#3404).
 		w.logger.Debug("cleat_fetch is enabled for this execution", "workflow_id", wf.ID)
+	}
+	// Residency: only when it is on, so a worker that has not enabled it does not even read the guest's metadata for it. The handle carries what a wait
+	// is not told (which run, which language, how long its history is), and nil, which is what an off set hands out, changes nothing.
+	if w.resident.Enabled() {
+		engineOpts = append(engineOpts, engine.WithResidency(w.resident.ForRun(engine.ResidentRunInfo{
+			WorkflowID: wf.ID,
+			Language:   wasm.DetectLanguage(wasmBytes),
+			CodeKey:    engine.CodeID(wasmBytes),
+			EventCount: len(history),
+			// Without this nothing is held (engine.WithResidency): a held run has to be able to prove it still owns its claim before it goes back to the guest.
+			ClaimCheck: func(ctx context.Context) error { return w.claimStillMine(ctx, wf) },
+			// A held run never returns to the worker, and query state is written only when an execution returns, so what the guest set before its wait would be invisible to a
+			// client for the whole hold. This writes it at hold admission, fenced like the finalize it stands in for; a failure refuses the hold and the suspension writes it
+			// (cleat#4162, the AI agent platform scenario).
+			PublishState: func(ctx context.Context, state map[string]string) error {
+				return execStore.PublishQueryState(ctx, wf.ID, w.id, wf.Generation, state)
+			},
+		})))
 	}
 	eng := engine.NewEngine(nil, caller, engineOpts...)
 	eng.Metrics = w.Metrics
@@ -4227,6 +4336,12 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 			w.releaseForLimitsUnavailable(wf, err)
 			return
 		}
+		// A component the precompile child could not compile for want of memory: the guest never ran, so this is not the workflow's failure either. Released with the
+		// refusal's own retry-after, so it is not claimed again every few seconds and does not respawn a child that was just killed.
+		if errors.Is(err, engine.ErrComponentCompileRefused) {
+			w.releaseForComponentCompileRefused(wf, err)
+			return
+		}
 		if deferPhase {
 			// A defer segment that could not run is still a terminate that
 			// has to complete. The outcome was decided and recorded before
@@ -4254,6 +4369,12 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 			errorOp = ce.Op
 		}
 		errMsg := err.Error()
+		// A COMPONENT guest that was killed with defers still owed cannot run them in this process, so the run goes through
+		// a defer segment on a fresh instance instead of being failed here (cleat#4079). Nothing else changes for a run
+		// that owes no defers, a core module, or a guest that failed through its own entry point.
+		if w.markKilledRunForItsDefers(wf, eng, errMsg, errorCode, errorOp, history, resultHistory, queryState) {
+			return
+		}
 		// resultHistory, not history: the exhaustion that ended this workflow
 		// was recorded by the segment that just ran, so it is only in the
 		// post-execution history. Passing the pre-execution `history` here
@@ -4289,8 +4410,21 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 	if suspended != nil && suspended.Reason == "continue_as_new" {
 		// ContinueAsNew: atomically append events, create a new run, and
 		// complete the current one — all in a single database transaction.
-		w.logger.InfoContext(context.Background(), "continue_as_new: starting new run", "worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID)
-		newRunID, err := execStore.ContinueAsNew(w.ctx, wf.ID, w.id, wf.Generation, wf.DefName, wf.DefVersion, json.RawMessage(suspended.NewInput), newEvents, result, queryState, wf.Priority)
+		nextVersion, refusal, vErr := continuationVersion(w.ctx, execStore, wf, suspended.NewVersion)
+		if vErr != nil {
+			// A failed READ says nothing about the version. Release the run so a claim replays the segment and
+			// asks again, rather than failing a workflow over a transient store error.
+			w.logger.ErrorContext(context.Background(), "continue_as_new: could not check the requested version; releasing the run", "worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID, "requested_version", suspended.NewVersion, "error", vErr)
+			w.returnToQueueAfterBackoff(wf)
+			return
+		}
+		if refusal != "" {
+			w.logger.ErrorContext(context.Background(), "continue_as_new refused: requested version unavailable", "worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID, "requested_version", suspended.NewVersion, "current_version", wf.DefVersion)
+			w.recordTerminalFailure(wf, workflowStartTime, refusal, engine.ErrPermanent.String(), "")
+			return
+		}
+		w.logger.InfoContext(context.Background(), "continue_as_new: starting new run", "worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID, "next_version", nextVersion)
+		newRunID, err := execStore.ContinueAsNew(w.ctx, wf.ID, w.id, wf.Generation, wf.DefName, nextVersion, json.RawMessage(suspended.NewInput), newEvents, result, queryState, wf.Priority)
 		if errors.Is(err, engine.ErrFenceLost) {
 			// Normal and expected under reaping: another worker now owns
 			// this workflow (this one was reaped as stale and reclaimed).
@@ -4513,6 +4647,8 @@ func (w *Worker) heartbeatStoreForTenant(tenantID string) (engine.WorkflowStore,
 // that matters for how soon this worker's own reaper (and every other
 // worker's) trusts it again after a stall.
 func (w *Worker) heartbeatAndFenceInFlight() bool {
+	w.heartbeatTickMu.Lock()
+	defer w.heartbeatTickMu.Unlock()
 	tickStart := time.Now()
 	var runs []engine.GenerationKey
 	byTenant := map[string][]engine.GenerationKey{}
@@ -4756,6 +4892,73 @@ func (w *Worker) heartbeatAndFenceInFlight() bool {
 	return allAnswered
 }
 
+// errClaimLost is what a held run's claim check returns when the store no longer has the run assigned to this execution.
+var errClaimLost = errors.New("the run is no longer assigned to this execution")
+
+// errClaimUnknown is what it returns when the question could not be answered: the heartbeat did not land for every group, or this worker has no way to ask.
+var errClaimUnknown = errors.New("the store could not confirm that the run is still assigned to this execution")
+
+// claimStillMine is the engine's ClaimCheck for a held run (cleat#4162, PR 2c): asked every time the hold ends and before control goes back to the guest, it answers whether the
+// store still has THIS execution assigned to this worker.
+//
+// IT RUNS THE HEARTBEAT, and does not ask the store itself, for two reasons that are the same reason. "Lost" then means exactly what it means to the heartbeat and does exactly
+// what the heartbeat does (the run is marked fenced, so its next durable call is refused, and its execution is cancelled), because it is the heartbeat. And the heartbeat pool
+// is used from one place only (TestTheHeartbeatPoolIsUsedOnlyThroughHeartbeatBatchStore, cleat#3571): a second caller of its accessors is a second user of a pool whose
+// connections carry another tenant's session context on SQL Server, which that guard exists to refuse.
+//
+// WHY IT IS NOT LEFT TO THE HEARTBEAT'S TICKER. A terminate, a cancel or a reclaim bumps the lease's generation and clears assigned_to, and the ticker reports the run lost at
+// its next tick, up to --heartbeat later. A SUSPENDED run cannot act in that interval: there is no claim for it to win. A held one can, if its timer fires first, and measured on a
+// real worker (a_terminated_held_run_does_not_act_test.go) it did, reaching the outbound call after the terminate had committed.
+//
+// WHAT IT RETURNS. nil: the tick landed for every group and did not fence this run. errClaimLost: the run is fenced (by this tick or an earlier one). errClaimUnknown: the tick did
+// not land for every group, which includes a tenant's store this worker could not open and a different tenant's unreachable pool, so it can over-report unknown and never
+// under-report it. Unknown suspends WITHOUT the run being marked fenced: the heartbeat does not cancel on an error, because one blip would stop every execution, and here the one
+// thing at stake is a run that will be replayed if the suspension stands, so the safe reading and the cheap one agree. A run that was in fact fine costs one replay.
+func (w *Worker) claimStillMine(ctx context.Context, wf *engine.WorkflowInstance) error {
+	fenced := func() bool {
+		v, ok := w.fencedRuns.Load(wf.ID)
+		return ok && v.(int64) == wf.Generation
+	}
+	// THE CHECK ANSWERS FOR THIS EXECUTION, NOT FOR ITS RUN ID. The tick sends and fences whatever w.inflight holds for an ID, and claiming stores by ID alone, so a
+	// successor this SAME worker claimed (a store hand-off it won back before its next tick) replaces the held execution there: the tick then heartbeats the
+	// successor, never fences this one, and a check that read only the fence marker would call it still mine, so its outbound call could go out beside the
+	// successor's. The store's generation fence hides that for writes, not for a call. Absent or another generation means it is no longer the registered
+	// execution, which is lost. (cleat-review3 on #4276: held at generation 3, a successor registered at 4, the check answered nil.) Read again after the tick,
+	// because a claim can land while the tick is in flight.
+	superseded := func() bool {
+		v, ok := w.inflight.Load(wf.ID)
+		cur, isWf := v.(*engine.WorkflowInstance)
+		return !ok || !isWf || cur.Generation != wf.Generation
+	}
+	lostBecause := func() string {
+		switch {
+		case fenced():
+			return "terminated, cancelled or reclaimed while held"
+		case superseded():
+			return "replaced by a newer execution of the same run on this worker"
+		}
+		return ""
+	}
+	sendBack := func(why string) error {
+		w.logger.WarnContext(ctx, "a held run no longer holds its claim at its wake ("+why+"); it is suspended instead of resumed",
+			"worker_id", w.id, "workflow_id", wf.ID, "def_name", wf.DefName, "generation", wf.Generation)
+		return errClaimLost
+	}
+	if why := lostBecause(); why != "" {
+		return sendBack(why) // the ticker already learned of it, or a successor replaced this execution
+	}
+	landed := w.heartbeatAndFenceInFlight()
+	if why := lostBecause(); why != "" {
+		return sendBack(why)
+	}
+	if !landed {
+		w.logger.WarnContext(ctx, "a held run could not revalidate its claim; it is suspended instead of resumed",
+			"worker_id", w.id, "workflow_id", wf.ID, "def_name", wf.DefName)
+		return errClaimUnknown
+	}
+	return nil
+}
+
 // heartbeatGroupFor names the group a run's heartbeat belongs to: "" for the
 // worker's own tenant, which heartbeatBatchStore serves, and the tenant id for
 // every other, which heartbeatStoreForTenant serves. It tracks storeForTenant's own first
@@ -4903,7 +5106,21 @@ func (w *Worker) runIsFenced(workflowID string, generation int64) bool {
 // writes at once, itself included. See lastDBTrouble and reapingIsSafe.
 // cleat#2005.
 func (w *Worker) recordDBTrouble() {
+	w.dbTroubleSeen.Store(true)
 	w.lastDBTrouble.Store(time.Now().UnixNano())
+}
+
+// startingUp reports whether a closed reaper gate is only the start-up grace
+// period: no database trouble has been recorded, and the worker is younger than
+// twice its reclaim window. The bound is what keeps this from hiding a gate
+// that never opens for a reason other than trouble (lastDBContactOK never
+// confirmed, GAP3 in recordReapSkip's doc): past the window the tick is counted
+// and warned about exactly as before. cleat#3792.
+func (w *Worker) startingUp() bool {
+	if w.startedAt.IsZero() || w.dbTroubleSeen.Load() {
+		return false
+	}
+	return time.Since(w.startedAt) < 2*w.reclaimAfter()
 }
 
 // recordDBContactOK marks this worker's own database contact as having just
@@ -6223,6 +6440,19 @@ func (w *Worker) reapOnce() {
 	// from "my own observation of every worker just went dark, briefly,
 	// including of myself".
 	if !w.reapingIsSafe() {
+		if w.startingUp() {
+			// Nothing has gone wrong: a new worker has not yet proven a clean
+			// reclaim window, so it does not reclaim anyone's run. That is the
+			// gate working, and it used to say "recent database trouble" and
+			// then warn that the worker "has not reclaimed a stale run in a
+			// while" on a healthy first start (cleat#3792). Not counted as a
+			// skip: the streak alarm is for a gate that stays closed.
+			w.logger.InfoContext(w.ctx, "Reaper: a new worker waits out its start-up grace period before reclaiming stale runs; nothing is wrong",
+				"worker_id", w.id, "reclaim_after", w.reclaimAfter())
+			w.Metrics.RecordBackgroundLoop(w.ctx, "reaper", "skipped")
+			w.Metrics.SetBackgroundLoopDuration(w.ctx, "reaper", time.Since(reaperStart).Seconds())
+			return
+		}
 		skips := w.recordReapSkip()
 		w.logger.WarnContext(w.ctx, "Reaper: skipping this tick -- recent database trouble on this worker, waiting out the recovery grace period before trusting a stale heartbeat",
 			"worker_id", w.id, "reclaim_after", w.reclaimAfter(), "consecutive_skips", skips)
@@ -7147,15 +7377,15 @@ const compactionCandidatesPerTick = 10
 // tenant's would find nothing.
 func (w *Worker) compactOnce() {
 	compStart := time.Now()
-	candidates, err := w.compactStoreOnce(w.store)
+	candidates, err := w.compactStoreOnce(w.storeTenantID, w.store)
 	if err != nil {
 		w.logger.ErrorContext(w.ctx, "compaction: error finding candidates", "worker_id", w.id, "error", err)
 		w.Metrics.RecordBackgroundLoop(w.ctx, "compaction", "error")
 		w.Metrics.SetBackgroundLoopDuration(w.ctx, "compaction", time.Since(compStart).Seconds())
 		return
 	}
-	others := w.sweepOtherTenants("compaction", func(_ context.Context, st engine.WorkflowStore) (int64, error) {
-		n, err := w.compactStoreOnce(st)
+	others := w.sweepOtherTenants("compaction", func(_ context.Context, tenantID string, st engine.WorkflowStore) (int64, error) {
+		n, err := w.compactStoreOnce(tenantID, st)
 		return int64(n), err
 	})
 	w.Metrics.RecordBackgroundLoop(w.ctx, "compaction", "ok")
@@ -7164,19 +7394,67 @@ func (w *Worker) compactOnce() {
 }
 
 // compactStoreOnce finds one store's candidates and compacts each, returning how
-// many it found. A failure to compact one workflow is logged and does not stop the
-// rest; only failing to FIND candidates is returned.
-func (w *Worker) compactStoreOnce(st engine.WorkflowStore) (int, error) {
-	candidates, err := st.GetCompactionCandidates(w.ctx, w.compactionThreshold, compactionCandidatesPerTick)
+// many it ATTEMPTED -- not how many it fetched, and not how many compacted. The
+// caller publishes this as items processed, and a fetched-but-skipped run was not
+// processed: with ten remembered runs the over-fetch returns twenty and attempts
+// ten, and reporting twenty would say the loop did twice the work it did. A
+// failure to compact one workflow is logged and does not stop the rest; only
+// failing to FIND candidates is returned.
+//
+// cleat#3853: a run whose sealed compaction state this worker cannot open is
+// remembered and left out of the batch for compactionSkipWindow. The candidate
+// query cannot know which key the worker holds, so it offers such a run on every
+// tick, and enough of them fill the batch and starve every other run. The
+// over-fetch below is what lets the batch be filled from the runs BEHIND the
+// remembered ones; it is capped (compactionSkipBatchCap), so the starvation is
+// reduced rather than eliminated, and a capped pass in which every fetched
+// candidate was skipped is counted separately as the signal that it happened.
+func (w *Worker) compactStoreOnce(tenant string, st engine.WorkflowStore) (int, error) {
+	skips := w.compactionSkipSetFor()
+	skips.prune()
+	want := compactionCandidatesPerTick + skips.size(tenant)
+	limit := want
+	capped := want > compactionSkipBatchCap
+	if capped {
+		limit = compactionSkipBatchCap
+	}
+	candidates, err := st.GetCompactionCandidates(w.ctx, w.compactionThreshold, limit)
 	if err != nil {
 		return 0, err
 	}
+	attempts, skippedHere := 0, 0
 	for _, wfID := range candidates {
+		if attempts >= compactionCandidatesPerTick {
+			break
+		}
+		if skips.skipped(tenant, wfID) {
+			skippedHere++
+			continue
+		}
+		attempts++
 		if err := engine.CompactWorkflowHistory(w.ctx, st, wfID, w.compactionThreshold, w.Metrics); err != nil {
-			w.logger.ErrorContext(w.ctx, "compaction error", "worker_id", w.id, "workflow_id", wfID, "error", err)
+			// ONLY a decryption failure is remembered. A connection failure or a
+			// stopped worker is transient, and remembering it would park a healthy
+			// run for compactionSkipWindow. The whole error is matched, never a
+			// message: a full key rotation fails at GetWorkflowByID and a mixed row
+			// at LoadCompactionState, and both mean the same thing here.
+			if errors.Is(err, engine.ErrPayloadDecryption) {
+				if skips.remember(tenant, wfID) {
+					w.Metrics.RecordBackgroundLoop(w.ctx, "compaction", "sealed_skipped")
+					w.logger.WarnContext(w.ctx, "compaction: this worker cannot open the run's compaction state; leaving it out of the batch until the key is available",
+						"worker_id", w.id, "workflow_id", wfID, "tenant_id", tenant,
+						"skipped_for", compactionSkipWindow.String(), "error", err)
+				}
+			} else {
+				w.logger.ErrorContext(w.ctx, "compaction error", "worker_id", w.id, "workflow_id", wfID, "error", err)
+			}
 		}
 	}
-	return len(candidates), nil
+	w.Metrics.SetBackgroundLoopItemsProcessed(w.ctx, "compaction_skipped", int64(skips.sizeAll()))
+	if capped && len(candidates) > 0 && skippedHere == len(candidates) {
+		w.Metrics.RecordBackgroundLoop(w.ctx, "compaction", "skip_cap_hit")
+	}
+	return attempts, nil
 }
 
 func (w *Worker) memoryReloadLoop() {
@@ -7497,7 +7775,7 @@ func (w *Worker) runVersionGCSweep() {
 // --claim-across-tenants like the other cross-tenant loops, and a no-op for MySQL
 // and a sharded store, neither of which can list tenants.
 func (w *Worker) runVersionGCSweepOfOtherTenants(opts engine.GCOptions) {
-	removed := w.sweepOtherTenants("version gc", func(ctx context.Context, st engine.WorkflowStore) (int64, error) {
+	removed := w.sweepOtherTenants("version gc", func(ctx context.Context, _ string, st engine.WorkflowStore) (int64, error) {
 		res, err := engine.GarbageCollectVersions(ctx, st, opts)
 		if err != nil {
 			return 0, err
@@ -7806,7 +8084,7 @@ func (w *Worker) runRetentionSweepAt(sweptAt time.Time, retentionDays, completed
 // per-tenant label.
 func (w *Worker) retentionOfOtherTenants(sweptAt time.Time, retentionDays, completedWorkflowRetentionDays, deadLetterRetentionDays int) {
 	var events, cleared, completed, deadLettered int64
-	w.sweepOtherTenants("retention", func(ctx context.Context, st engine.WorkflowStore) (int64, error) {
+	w.sweepOtherTenants("retention", func(ctx context.Context, _ string, st engine.WorkflowStore) (int64, error) {
 		var first error
 		note := func(err error) {
 			if err != nil && first == nil {
@@ -7885,7 +8163,7 @@ func (w *Worker) cleanupMemorySamplesOnce(maxSamples int) {
 		w.Metrics.SetBackgroundLoopDuration(w.ctx, "memory_cleanup", time.Since(mcStart).Seconds())
 		return
 	}
-	deleted += w.sweepOtherTenants("memory cleanup", func(ctx context.Context, st engine.WorkflowStore) (int64, error) {
+	deleted += w.sweepOtherTenants("memory cleanup", func(ctx context.Context, _ string, st engine.WorkflowStore) (int64, error) {
 		return st.CleanupMemorySamples(ctx, maxSamples)
 	})
 	if deleted > 0 {
@@ -8255,6 +8533,72 @@ func classifyTerminalErrorCode(errorCode string, deadLettered bool) string {
 	return errorCode
 }
 
+// classifyTerminalFailure decides whether a terminal failure is dead-lettered and what error code it carries. One
+// function for the immediate write (writeTerminalFailure) and the two-phase mark (markKilledRunForItsDefers), so a run
+// that owes defers is classified exactly as one that does not.
+func classifyTerminalFailure(errorCode string, eligibleForDLQ bool, history []engine.EventRecord) (string, bool) {
+	deadLettered := eligibleForDLQ && endedOnAnExhaustedCall(history)
+	return classifyTerminalErrorCode(errorCode, deadLettered), deadLettered
+}
+
+// markKilledRunForItsDefers routes a failed COMPONENT run that was killed with its defers still owed through a defer
+// segment, and reports whether it did (cleat#4079). On true the caller writes nothing more: the run is 'terminating', its
+// outcome and error are recorded, and it will be claimed again to run its cleanup on a fresh instance.
+//
+// Why it exists. A killed component instance is trapped and cannot be re-entered, and a fresh instance does not hold the
+// closures, so the cleanup can only run by REPLAYING the run's history on a new instance and stopping at its last stoppable
+// event (engine.WithStopAtLastStoppable), which is a defer segment. The two-phase transition already carries one: mark the
+// outcome now, run the segment, then FinalizeDeferPhase applies the outcome.
+//
+// The outcome is classified here, once, by the same rule as an immediate failure (classifyTerminalFailure), so a killed run
+// that exhausted a call and was then killed in a loop is still dead-lettered, and keeps its retention.
+//
+// It returns false, and the caller falls back to the immediate terminal write, when the engine says the run owes nothing, the
+// store cannot mark a defer phase, or the mark failed for a reason other than a lost fence. In the last case the run still
+// fails, as it did before; only the cleanup is lost, and the log says so.
+func (w *Worker) markKilledRunForItsDefers(wf *engine.WorkflowInstance, eng *engine.Engine, errMsg, errorCode, errorOp string, history, resultHistory []engine.EventRecord, queryState map[string]string) bool {
+	if eng == nil || !eng.KilledWithDefersOwed() || w.shuttingDown() {
+		return false
+	}
+	st, release := w.storeFor(wf)
+	defer release()
+	ctx := context.Background()
+
+	dps, ok := st.(engine.DeferPhaseFailureMarker)
+	if !ok {
+		w.logger.WarnContext(ctx, "a killed run owes defers but its store cannot mark a defer phase; failing it without the cleanup",
+			"worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID)
+		return false
+	}
+
+	errorCode, deadLettered := classifyTerminalFailure(errorCode, true, resultHistory)
+	status := "failed"
+	if deadLettered {
+		status = "dead_lettered"
+	}
+	var held []engine.EventRecord
+	if len(resultHistory) > len(history) {
+		held = resultHistory[len(history):]
+	}
+
+	err := dps.MarkFailureForDeferPhase(ctx, wf.ID, w.id, wf.Generation, engine.DeferPhaseFailure{
+		Status: status, ErrorMsg: errMsg, ErrorCode: errorCode, ErrorOp: errorOp, QueryState: queryState,
+	}, held)
+	if errors.Is(err, engine.ErrFenceLost) {
+		w.logger.DebugContext(ctx, "killed run: fence lost, the run was reassigned to another worker",
+			"worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID)
+		return true
+	}
+	if err != nil {
+		w.logger.ErrorContext(ctx, "could not mark a killed run for its defer phase; failing it without the cleanup",
+			"worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID, "error", err)
+		return false
+	}
+	w.logger.InfoContext(ctx, "a killed run owes defers; marked for a defer segment on a fresh instance",
+		"worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID, "outcome", status, "events_written", len(held))
+	return true
+}
+
 // writeTerminalFailure writes a workflow's terminal failure, to the dead-letter
 // queue or to 'failed'.
 //
@@ -8339,8 +8683,6 @@ func (w *Worker) writeTerminalFailure(wf *engine.WorkflowInstance, errMsg, error
 	// the failure to a specific call. cleat#979 is why that had to go: it made
 	// retention depend on the workflow author wrapping with %w. See
 	// endedOnAnExhaustedCall for what replaced it and what it cannot tell.
-	deadLettered = eligibleForDLQ && endedOnAnExhaustedCall(history)
-
 	// ...and the same fact classifies the failure, which it did not before:
 	// error_code was ALWAYS "unknown" on this path. cleat#1009.
 	//
@@ -8363,7 +8705,9 @@ func (w *Worker) writeTerminalFailure(wf *engine.WorkflowInstance, errMsg, error
 	// reads retries_exhausted, and the panic path -- which passes
 	// eligibleForDLQ=false because a recovered panic is a crash rather than a
 	// call that ran out of attempts -- keeps its own code.
-	errorCode = classifyTerminalErrorCode(errorCode, deadLettered)
+	// Both of the facts above, from the one function the two-phase mark also calls (classifyTerminalFailure), so a run that owes
+	// defers is classified exactly as one that does not.
+	errorCode, deadLettered = classifyTerminalFailure(errorCode, eligibleForDLQ, history)
 
 	var err error
 	if deadLettered {
@@ -8562,16 +8906,58 @@ func (w *Worker) releaseForLimitsUnavailable(wf *engine.WorkflowInstance, cause 
 	w.returnToQueueAfterBackoff(wf)
 }
 
+// releaseForComponentCompileRefused returns a run to the queue because the precompile child that would have compiled its component was killed, almost certainly by the container's
+// memory limit (engine.ErrComponentCompileRefused). The guest never ran, so there is no outcome to record; the run is released, not failed, and it may be served by a worker with more
+// memory. It is released for the refusal's retry-after, which is also how long THIS worker refuses to start another child for that component.
+//
+// ERROR, rate-limited per run, and counted on cleat_workflow_releases_total{check="component_compile_refused"} with the memory limit, the compile mode and the reason (child_killed, or low_headroom for an in-process compile the container had no memory left for) as labels: a deployment
+// whose limit is too small for its component stops running that workflow here, and has to be able to see it.
+func (w *Worker) releaseForComponentCompileRefused(wf *engine.WorkflowInstance, cause error) {
+	ctx := context.Background()
+	const op = "component_compile_refused"
+	var ref *engine.ComponentCompileRefusedError
+	retryAfter := time.Duration(0)
+	attrs := []attribute.KeyValue{}
+	if errors.As(cause, &ref) {
+		retryAfter = ref.RetryAfter
+		// STRINGS: the text exposition renders a label value with AsString, which is empty for an int or bool attribute.
+		attrs = append(attrs, attribute.String("memory_limit_mib", strconv.FormatUint(ref.MemoryLimitBytes>>20, 10)),
+			attribute.String("parallel_compilation", strconv.FormatBool(ref.ParallelCompilation)),
+			attribute.String("reason", ref.ReasonLabel()))
+	}
+	if w.Metrics != nil {
+		w.Metrics.RecordWorkflowRelease(ctx, op, attrs...)
+	}
+	level := slog.LevelDebug
+	if w.shouldWarnUnservable(wf.ID, op, time.Now()) {
+		level = slog.LevelError
+	}
+	w.logger.Log(ctx, level,
+		"could not compile this workflow's component for want of memory; returning it to the queue rather than failing it",
+		"worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID,
+		"def_name", wf.DefName, "def_version", wf.DefVersion, "retry_after", retryAfter.Round(time.Second), "error", cause)
+	w.returnToQueueAfter(wf, retryAfter)
+}
+
 // returnToQueueAfterBackoff is the release both of the above end in: next_wake_at
 // goes forward by the unservable backoff, so a run nothing can serve right now
 // costs one claim-and-release per interval across the pool rather than a spin.
 func (w *Worker) returnToQueueAfterBackoff(wf *engine.WorkflowInstance) {
+	w.returnToQueueAfter(wf, 0)
+}
+
+// returnToQueueAfter releases wf with next_wake_at forward by the LONGER of the unservable backoff and at: a caller that knows how long a retry is pointless for says so, and the
+// shared backoff is the floor so nothing releases with none.
+func (w *Worker) returnToQueueAfter(wf *engine.WorkflowInstance, at time.Duration) {
 	ctx := context.Background()
 	st, release := w.storeFor(wf)
 	defer release()
 	backoff := w.unservableBackoff
 	if backoff <= 0 {
 		backoff = defaultUnservableBackoff
+	}
+	if at > backoff {
+		backoff = at
 	}
 	err := st.ReleaseWorkflow(ctx, wf.ID, w.id, wf.Generation, time.Now().Add(backoff))
 	if errors.Is(err, engine.ErrFenceLost) {
@@ -8726,6 +9112,17 @@ func (w *Worker) finishDeferPhase(wf *engine.WorkflowInstance, execStore engine.
 	// sweep, marked 'abandoned' rather than its real outcome. cleat#1976.
 	w.notifyTerminal(wf, wf.PendingTerminalStatus)
 
+	// A failure applied through the two-phase path is counted the way the immediate write counts it
+	// (recordTerminalFailureWithHistory), which it never reached. That was invisible while only a terminate, a cancel and a
+	// child of a terminating parent came through here; a killed component run (cleat#4079) is the first ordinary failure,
+	// and without this it would drop out of the failed and dead-lettered counts. Side effect: a 'failed' outcome from a
+	// force-fail or a terminating parent is counted now too, where it was not.
+	if wf.PendingTerminalStatus == "failed" || wf.PendingTerminalStatus == "dead_lettered" {
+		w.Metrics.RecordWorkflowFailed(ctx, wf.DefName, "")
+		if wf.PendingTerminalStatus == "dead_lettered" {
+			w.Metrics.RecordWorkflowsDeadLettered(ctx)
+		}
+	}
 	w.Metrics.RecordWorkflowDuration(ctx, time.Since(startedAt), wf.DefName, wf.PendingTerminalStatus, "")
 	w.logger.InfoContext(ctx, "defer phase complete; terminal outcome applied",
 		"worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID,
@@ -9423,4 +9820,36 @@ func checkRequiredDeploymentSecrets(ctx context.Context, plugins []*plugin.Loade
 		}
 	}
 	return nil
+}
+
+// continuationVersion decides which workflow version the run that follows a continue_as_new starts on.
+//
+// requested is the suspension's NewVersion: continue_as_new_versioned asks for a version, the plain form leaves
+// it 0, and 0 means "stay on the version this run is on". Until cleat#4041 the worker read wf.DefVersion
+// unconditionally, so the request was recorded, replayed and compacted and then ignored: a chain asked to move to
+// version 2 ended on version 1 and completed normally, with no error anywhere.
+//
+// A version that cannot serve the next run is REFUSED, loudly and naming the version (refusal != ""). It never
+// falls back to the current version: a long-lived chain that asked to migrate and silently did not is exactly the
+// defect this fixes. ValidateVersion is false for an undeployed version and for a deprecated one, the same
+// refusal the start route gives. The caller checks before ContinueAsNew so that nothing is written: that call
+// appends the segment's events and completes the old run in one transaction, and a refusal has to leave all of
+// it undone rather than half done.
+//
+// err is a failed READ of the definition, which says nothing about the version; the caller releases the run so a
+// later claim replays the segment and asks again.
+func continuationVersion(ctx context.Context, st interface {
+	ValidateVersion(ctx context.Context, defName string, defVersion int) (bool, error)
+}, wf *engine.WorkflowInstance, requested int) (version int, refusal string, err error) {
+	if requested == 0 || requested == wf.DefVersion {
+		return wf.DefVersion, "", nil
+	}
+	ok, err := st.ValidateVersion(ctx, wf.DefName, requested)
+	if err != nil {
+		return 0, "", err
+	}
+	if !ok {
+		return 0, fmt.Sprintf("continue_as_new: version %d of %q was requested for the next run but is not deployed (or is deprecated); the run is failed rather than continued on version %d", requested, wf.DefName, wf.DefVersion), nil
+	}
+	return requested, "", nil
 }

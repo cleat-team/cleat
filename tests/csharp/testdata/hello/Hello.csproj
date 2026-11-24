@@ -1,0 +1,40 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!--
+    The smallest C# component that exercises `cleat build` for the csharp target, end to end (cleat#4080, C# PR 2): the spike's hello
+    (cleat#4077) against the real WIT world, with the project properties and pinned package references the build chain needs.
+    It uses the generated bindings directly, because the Cleat C# SDK (PR 4) does not exist yet; the target at the bottom writes the
+    entry-point list that the SDK's source generator will write (WS-cleat3's contract on cleat#4080), so the CLI's stamping is
+    exercised against the real file shape. Not an example to copy.
+  -->
+  <PropertyGroup>
+    <OutputType>Library</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <AssemblyName>hello</AssemblyName>
+    <RootNamespace>CleatWorkflowWorld</RootNamespace>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <RuntimeIdentifier>wasi-wasm</RuntimeIdentifier>
+    <UseAppHost>false</UseAppHost>
+    <PublishTrimmed>true</PublishTrimmed>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <SelfContained>true</SelfContained>
+    <DebugType>none</DebugType>
+    <CleatEntryPointsFile>$(MSBuildProjectDirectory)/obj/cleat-entry-points.txt</CleatEntryPointsFile>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="BytecodeAlliance.Componentize.DotNet.Wasm.SDK" Version="0.8.0-preview00011" />
+    <!-- The host pack follows the build platform: NETCoreSdkPortableRuntimeIdentifier is linux-x64 or linux-arm64 in the container. -->
+    <PackageReference Include="runtime.$(NETCoreSdkPortableRuntimeIdentifier).microsoft.dotnet.ilcompiler.llvm" Version="10.0.0-rc.1.26306.1" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Wit Include="../../../../python-sdk/wit/cleat.wit" World="cleat-workflow" />
+  </ItemGroup>
+
+  <!-- Stands in for the SDK generator. One entry name per line, LF, no BOM, a final newline. No Encoding attribute: Encoding="UTF-8" makes MSBuild write a byte-order mark, which the contract forbids and `cleat build` refuses. -->
+  <Target Name="CleatWriteEntryPoints" BeforeTargets="CoreCompile">
+    <WriteLinesToFile File="$(CleatEntryPointsFile)" Lines="Hello" Overwrite="true" WriteOnlyWhenDifferent="true" />
+  </Target>
+</Project>

@@ -58,13 +58,15 @@ func TestAZeroTimeoutAwaitReportsTimedOutWithoutSuspending(t *testing.T) {
 				t.Errorf("a %dms await did not report timedOut; a wait with no deadline to "+
 					"expire has already expired", timeoutMs)
 			}
-			// No event recorded. Trading a livelock that writes nothing for one
-			// that appends a row per iteration would be a worse bargain: the
-			// guest loop is unchanged, and event_history would grow without
-			// bound instead of staying constant.
-			if len(s.history) != 0 {
-				t.Errorf("a %dms await appended %d history event(s); a call that neither waits nor "+
-					"resolves anything has nothing to replay", timeoutMs, len(s.history))
+			// ONE event is recorded, carrying the timeout (cleat#4153, reversing cleat#1331's choice, which this test used to pin as
+			// "no event recorded"). That choice worried that a poll loop would grow event_history without bound. It does grow by one
+			// row per poll, as any durable call in a loop does, and the event cap and compaction bound it. The alternative was
+			// measured to be wrong: with no event, a replay that ran after a signal arrived returned the signal where the original
+			// run had been told it timed out, and a replay that found a LATER event at this step fell out of the replay branch with
+			// history unread and re-ran every durable call recorded after the poll. See
+			// a_no_wait_await_replays_as_the_timeout_it_was_test.go for those cases, replayed.
+			if len(s.history) != 1 || s.history[0].EventType != EventTypeAwaitSignals || s.history[0].TimeoutMs != timeoutMs {
+				t.Errorf("a %dms await recorded %+v, want exactly one await_signals event carrying the timeout", timeoutMs, s.history)
 			}
 		})
 	}

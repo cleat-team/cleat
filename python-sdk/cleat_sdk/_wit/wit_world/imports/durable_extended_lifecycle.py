@@ -14,6 +14,30 @@ from componentize_py_types import Result, Ok, Err, Some
 
 
 
+@dataclass
+class SideEffectLookup_Recorded:
+    value: str
+
+
+@dataclass
+class SideEffectLookup_NotRecorded:
+    pass
+
+
+SideEffectLookup = Union[SideEffectLookup_Recorded, SideEffectLookup_NotRecorded]
+"""
+Whether the history already holds the value of the side effect at this
+step (cleat#4113).
+
+`recorded(v)`: it does, the step is consumed, and the guest must NOT run
+its function or call `side-effect`. `not-recorded`: nothing is recorded
+and nothing changes; the guest computes the value and calls
+`side-effect`, which records it. The function must make no host call
+between the two, because a host call consumes a step.
+"""
+
+
+
 def continue_as_new_versioned(input: str, new_version: int) -> int:
     """
     Continue as new with an explicit version.
@@ -24,6 +48,16 @@ def side_effect(value: str) -> str:
     Record non-deterministic computation result in event history.
     Returns the previously recorded result on replay.
     
+    On replay the host returns the RECORDED value whatever `value` is
+    (cleat#4113, owner decision: a side effect freezes a value). A guest
+    that wants the function not to run at all on replay asks
+    `side-effect-recorded` first.
+    
+    Raises: `componentize_py_types.Err(wit_world.imports.outcomes.CallFailure)`
+    """
+    raise NotImplementedError
+def side_effect_recorded() -> SideEffectLookup:
+    """
     Raises: `componentize_py_types.Err(wit_world.imports.outcomes.CallFailure)`
     """
     raise NotImplementedError

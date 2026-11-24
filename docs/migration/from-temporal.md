@@ -330,9 +330,16 @@ id, err := cleat.SideEffectTyped(h, func() (uuid.UUID, error) { return uuid.New(
 
 The function runs once on first execution and its result is recorded in the
 event history; every replay afterwards returns the recorded value without
-running it again. Available in the Go SDK (`cleat/runtime.go`,
-`SideEffectTyped` in `cleat/runtime_workflow.go`), the AssemblyScript SDK
-(`sideEffect()`), and exported by both WASM backends as `cleat_side_effect`.
+running it again (cleat#4113 made this true: before it, the Go SDK ran the
+function on every replay and the host failed the replay when its result
+differed, so the `uuid` example above failed its first replay; **v0.5.0 has
+that defect**). The function must not make host calls, the same rule Temporal
+states, because each host call consumes a step of the history. Run it through
+the tests with `cleattest` or the engine: both replay a side effect by step, so
+the function does not run again and its fresh value cannot differ from the
+recorded one. Available in the Go SDK (`cleat/runtime.go`,
+`SideEffectTyped` in `cleat/runtime_workflow.go`), and registered as `cleat_side_effect` by the wasmtime backend that
+runs workers and by the wazero runtime the dev tools use.
 
 `random()` remains available for deterministic randomness and does not need
 `SideEffect`.

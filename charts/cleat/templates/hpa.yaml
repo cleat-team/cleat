@@ -19,10 +19,12 @@ spec:
         target:
           type: Utilization
           averageUtilization: {{ .Values.autoscaling.targetCPU }}
+    {{- if .Values.autoscaling.targetMemory }}
     - type: Resource
       resource:
         name: memory
         target:
           type: Utilization
           averageUtilization: {{ .Values.autoscaling.targetMemory }}
+    {{- end }}
 {{- end }}

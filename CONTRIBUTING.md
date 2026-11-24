@@ -210,7 +210,7 @@ To build and test cleat you will need:
 | Rust toolchain | Stable | No | For `cleat-macro` / `cleat-sdk` crates and Rust workflows |
 | Python 3 | 3.10+ | No | For Python SDK |
 | Java | 17+ | No | For Java SDK |
-| Node.js | 20+ | No | For Svelte web UI and AssemblyScript SDK |
+| Node.js | 20+ | No | For the Svelte web UI |
 | MySQL | 8.0+ (Docker) | No | For MySQL backend integration tests |
 | SQL Server | 2017+ (Docker) | No | For MSSQL backend integration tests |
 | Docker | Latest | No | For cluster integration tests |
@@ -343,9 +343,6 @@ go build ./cmd/...
 cd crates/cleat-macro && cargo build && cd ../..
 cd crates/cleat-sdk && cargo build && cd ../..
 
-# Build AssemblyScript SDK (optional)
-cd packages/cleat-as && npm ci && npm run build && cd ../..
-
 # Build the Svelte web UI (optional, embeds into cleat-worker)
 cd web && npm ci && npm run build && cd ..
 
@@ -424,9 +421,6 @@ CLEAT_TEST_MSSQL=sqlserver://sa:CleatTest123!@localhost:1433?database=master \
 # Rust crates
 cd crates/cleat-macro && cargo test
 cd crates/cleat-sdk && cargo test
-
-# AssemblyScript SDK
-cd packages/cleat-as && npm test
 ```
 
 > **Note:** The `CLEAT_TEST_DB` environment variable is used by cluster
@@ -648,7 +642,7 @@ CI runs automatically on every push. The following checks must all pass:
 | Branch naming | Branch name follows `feature/`, `bugfix/`, `fix/`, `docs/`, `release/`, or `hotfix/` prefix convention |
 | CLA Assistant | The author has signed the ICLA, recorded in `signatures/version1/cla.json` on the `cla-signatures` branch |
 | Lint | `go vet`, `golangci-lint`, `ruff`, `shellcheck`, `clippy` |
-| Test | Go (1.22/1.23/1.24 matrix), Python (3.10–3.12), Java, Rust, AssemblyScript |
+| Test | Go (1.22/1.23/1.24 matrix), Python (3.10–3.12), Java, Rust |
 | Vulncheck | `govulncheck` for known vulnerabilities |
 | CodeQL | CodeQL static analysis |
 | Fuzz | Fuzz tests on the WASM runtime |
@@ -740,7 +734,6 @@ repo tag, and only one more has a publisher at all:
 | Python (`cleat-sdk`) | `0.3.0` | `python-sdk/pyproject.toml` | `.github/workflows/publish-pypi.yml` |
 | Rust (`cleat-sdk`, `cleat-macro`, `cleat-test`) | `0.3.0` | `crates/*/Cargo.toml` | **none** |
 | Java | `0.3.0` | `crates/cleat-java/build.gradle.kts` | **none** |
-| AssemblyScript | `0.3.0` | `packages/cleat-as/package.json` | **none** |
 
 The chart takes the same number (`charts/cleat/Chart.yaml`), and the number lives
 in more places than the manifests. Each SDK stamps its own version into the
@@ -748,8 +741,7 @@ metadata of every workflow it compiles, so a bump that stops at the manifest
 leaves the stamp behind — cleat#2452 moved
 `python-sdk/cleat_sdk/version.py`, `python-sdk/scripts/stamp_metadata.py`,
 `crates/cleat-sdk/src/bin/inject_metadata.rs`,
-`crates/cleat-java/scripts/inject-metadata.sh` and
-`packages/cleat-as/scripts/inject-metadata.js`. The Go module is the same story
+and `crates/cleat-java/scripts/inject-metadata.sh`. The Go module is the same story
 from the other side: five modules in this repo consume it, so each pins the
 version in its own `go.mod` — `cleat/`, `cleat/backendkit/`, `examples/`,
 `tests/cross-language/` and `tests/plugin-harness/` — and those move with the
@@ -767,8 +759,8 @@ number for the whole repo, so uniformity is worth more than an unclaimed first
 release. The cost is accepted rather than denied — **if crate or npm publishing is
 wired up later, its first release is numbered above `0.3.0`.**
 
-Until cleat#2452 the values on disk were Python `0.2.0`, and Rust, Java and
-AssemblyScript `0.1.0`.
+Until cleat#2452 the values on disk were Python `0.2.0`, and Rust and Java
+`0.1.0`.
 
 The Python number is different: it *is* load-bearing, because a publisher reads
 it. Historically it did not track the repo tag — `python-sdk` went `0.1.0` →
@@ -800,7 +792,7 @@ exercise it for the first time.
 
 ## Areas that need help
 
-- **Non-Go SDKs.** The AssemblyScript and Java SDKs have known issues (see
+- **Non-Go SDKs.** The Java SDK has known issues (see
   `prompts/fork_open_projects_issues.md`). Fixes are welcome.
 - **Examples.** Real-world examples that demonstrate cleat's capabilities.
 - **Documentation.** Clear, tested documentation for the Go SDK, WASM toolchain,

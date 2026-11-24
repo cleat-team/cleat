@@ -38,8 +38,8 @@ import (
 // WHAT ALREADY EXISTS AND WHY THIS IS NOT IT. The Java parity test
 // (java_sdk_stop_bit_parity_test.go) pins the host-side count and fires when it
 // moves -- it is what caught §3.111 -- but it checks ONE guest language, and
-// Rust and AssemblyScript have per-method coverage with no host-side pin at all,
-// so a ninth site passes both of them silently. This test is about the
+// Rust (and AssemblyScript, until cleat#4023 removed it) had per-method coverage
+// with no host-side pin at all, so a ninth site passed both of them silently. This test is about the
 // correspondence rather than about any one SDK.
 
 // exemption reasons. Constants rather than comments, because "why is this
@@ -62,6 +62,24 @@ const (
 	// cleat#3786 redesigned that signature, because a constant nothing carries is
 	// a reason nobody can be held to.
 	reasonNotInTheComponentWorld exemptReason = "not-in-the-component-world"
+
+	// reasonWitReturnsNothing: the WIT function IS declared but returns no value
+	// at all, so a component guest has no word and no case in which to receive a
+	// refusal. The refused call simply has no effect, which is the guarantee the
+	// host needs; the guest continues past it and the next new-work call it makes
+	// is refused in its own right. Today that is durable-delete-cron, and it is a
+	// wire-format gap rather than an SDK one: closing it is a WIT change, as for
+	// python-sdk's delete_cron (3.201).
+	reasonWitReturnsNothing exemptReason = "wit-returns-nothing"
+
+	// reasonWitReturnsAPlainString: the WIT function returns a bare string, which
+	// is neither result<string, call-failure> nor a 64-bit scalar, so a component
+	// guest receives a refusal as an empty string. The refused call has no effect
+	// and every later call that needs its answer (an empty promise id, an empty
+	// previous scope) is refused in its own right, so the host's guarantee holds;
+	// what is lost is the guest's chance to unwind at the call itself. Closing it
+	// is a WIT change, the same one the durable-defer redesign makes for that call.
+	reasonWitReturnsAPlainString exemptReason = "wit-returns-a-plain-string"
 )
 
 // stopSurface declares, for one host stop site, which Go adapters and which WIT
@@ -88,6 +106,27 @@ type stopSurface struct {
 }
 
 var stopSurfaces = map[string]stopSurface{
+	// The host stops a defer registration only in a segment over a KILLED run (WithStopAtLastStoppable, cleat#4079), where
+	// the registration can be the last stoppable event. WIT durable-defer returns result<string, call-failure> for that;
+	// both Go adapters carry the sentinel test even though no core module is given this stop today, because the host cannot
+	// know which language reads it and bit 31 is free in the layout.
+	"DurableDefer": {
+		adapters: []string{"DurableDefer", "DurableDeferFunc"},
+		wit:      []string{"durable-defer"},
+	},
+	// resolve_promise and reject_promise (cleat#4079): effects another run may be waiting on, so a defer segment's body must not make
+	// them. Both return a packed u64, so the stop rides in bit 31 like send's and run_detached's, decoded by every SDK
+	// (py names the Python methods; reply_to_signal is an SDK method over resolve_promise and needs no entry of its own).
+	"ResolvePromise": {
+		adapters: []string{"ResolvePromise"},
+		wit:      []string{"durable-resolve-promise"},
+		py:       []string{"resolve_promise"},
+	},
+	"RejectPromise": {
+		adapters: []string{"RejectPromise"},
+		wit:      []string{"durable-reject-promise"},
+		py:       []string{"reject_promise"},
+	},
 	"AcquireLock": {
 		// The first stop site whose WIT function returns a SCALAR rather than
 		// result<string, call-failure>, which is why witCallOutcomeFuncs now
@@ -148,6 +187,44 @@ var stopSurfaces = map[string]stopSurface{
 		adapters: []string{"ScheduleCron"},
 		wit:      []string{"durable-schedule-cron"},
 	},
+	// cleat#4113: the lookup that lets an SDK skip running a side effect's function on replay. A FRESH lookup in a stopped workflow is
+	// refused so the function, which may call an API, never runs.
+	"SideEffectRecorded": {
+		adapters: []string{"SideEffectRecorded"},
+		wit:      []string{"side-effect-recorded"},
+	},
+	// cleat#4159: a defer segment's body must not continue as new. Both calls return a packed u64 (a scalar), so the stop rides in bit 31
+	// and every SDK has to test it: Go's adapters are guarded, Java and Rust carry the check, C# tests it first in Packed.CheckHostResult,
+	// and py names the Python methods that do.
+	"ContinueAsNew": {
+		adapters: []string{"ContinueAsNew"},
+		wit:      []string{"durable-continue-as-new"},
+		py:       []string{"continue_as_new"},
+	},
+	"ContinueAsNewWithVersion": {
+		adapters: []string{"ContinueAsNewWithVersion"},
+		wit:      []string{"continue-as-new-versioned"},
+		py:       []string{"continue_as_new_versioned"},
+	},
+	// cleat#4083. Go's adapter is guarded; Java and Rust carry the check; a
+	// component guest cannot receive it because the WIT function has no return.
+	"DeleteCron": {
+		adapters: []string{"DeleteCron"},
+		witWhy:   reasonWitReturnsNothing,
+	},
+	// The cleat#4079 audit. Go's adapters are guarded; Java and Rust carry the
+	// check; a component guest cannot receive it because both WIT functions
+	// return a plain string.
+	"CreatePromise": {
+		adapters: []string{"CreatePromise"},
+		witWhy:   reasonWitReturnsAPlainString,
+	},
+	// Keyed by SetScope, the method that goes through step (the refusal is the dispatcher's, cleat#4211); it is also the Go adapter.
+	"SetScope": {
+		adapters: []string{"SetScope"},
+		witWhy:   reasonWitReturnsAPlainString,
+	},
+	// Keyed by DurableCall, the method that goes through step: the refusal is the dispatcher's (cleat#4152, G3), and the method is also the Go adapter.
 	"DurableCall": {
 		adapters: []string{"DurableCall"},
 		wit:      []string{"durable-call"},
@@ -156,6 +233,13 @@ var stopSurfaces = map[string]stopSurface{
 		adapters: []string{"DurableCallWithRetry"},
 		wit:      []string{"durable-call-retry"},
 	},
+	// The attempt loop of the same host call (cleat#4210): it stops between attempts after a refused event write, with the sentinel the call's
+	// entry returns, so the adapter and the WIT function are the ones above.
+	"freshCallWithRetry": {
+		adapters: []string{"DurableCallWithRetry"},
+		wit:      []string{"durable-call-retry"},
+	},
+	// Keyed by DurableCallWithHeartbeat, the method that goes through step: the refusal is the dispatcher's (cleat#4152, G3), and the method is also the Go adapter.
 	"DurableCallWithHeartbeat": {
 		adapters: []string{"DurableCallWithHeartbeat"},
 		wit:      []string{"durable-call-heartbeat"},
@@ -168,10 +252,12 @@ var stopSurfaces = map[string]stopSurface{
 		adapters: []string{"ChildWorkflow", "ChildWorkflowWithOptions"},
 		wit:      []string{"durable-child-workflow", "durable-child-workflow-with-options"},
 	},
+	// Keyed by PluginCall, the method that goes through step: the refusal is the dispatcher's (cleat#4152, G3).
 	"PluginCall": {
 		adapters: []string{"PluginCall"},
 		wit:      []string{"plugin-call"},
 	},
+	// Keyed by PluginCallStreaming, the method that goes through step: the refusal is the dispatcher's (cleat#4152, G3).
 	"PluginCallStreaming": {
 		adapters: []string{"PluginCallStreaming"},
 		wit:      []string{"plugin-call-streaming"},
@@ -307,12 +393,99 @@ func repoFile(t *testing.T, rel string) string {
 // first hand-run of this scan reported 8 where the answer was 7.
 func hostStopSites(t *testing.T) map[string]bool {
 	t.Helper()
+	return hostStopSitesIn(engineSources(t))
+}
+
+// hostStopSitesIn is the scan over sources already read (file name -> text), so the rule can be tested on text. It derives the set of specs that are
+// no stop site from the SAME sources (neverStopIn over their declarations), so there is no set to hand it wrong: a spec declared BEFORE its host call,
+// which no adjacency can attribute to that call, is how a test makes the set decide something.
+func hostStopSitesIn(sources map[string]string) map[string]bool {
+	unrefused := neverStopIn(specDeclsIn(sources))
+	decl := regexp.MustCompile(`(?m)^func \(s \*execSession\) ([A-Za-z_]\w*)\(`)
+	sites := map[string]bool{}
+	for _, src := range sources {
+		locs := decl.FindAllStringSubmatchIndex(src, -1)
+		for i, loc := range locs {
+			name := src[loc[2]:loc[3]]
+			end := len(src)
+			if i+1 < len(locs) {
+				end = locs[i+1][0]
+			}
+			// step is the dispatcher (cleat#4152): it consults stopBeforeNewWork for every host call that goes through it, so it is not a host
+			// call and counting it would name a site no guest can reach. The host calls that go through it ARE sites, and are found below.
+			//
+			// canPark is the park helper's eligibility test (cleat#4152, W2b): it consults stopBeforeNewWork to decide whether a wait may PARK, and
+			// it answers parkOrSuspend with a bool, never a refusal to a guest, so it is not a host call and counting it would name a site no guest
+			// can reach. The exemption says something about CALLERS, like leaveReplay's: canPark is called only from parkOrSuspend, and
+			// TestCanParkIsCalledOnlyByParkOrSuspend (park_test.go) fails if another function calls it, because a caller that used it to refuse a
+			// guest would consult canPark and never stopBeforeNewWork, and this scan could not see it.
+			if name == "stopBeforeNewWork" || name == "suspendingAwaitResult" || name == "step" || name == "canPark" {
+				continue
+			}
+			body := src[loc[0]:end]
+			if callsInCode(body, "stopBeforeNewWork") || callsInCode(body, "suspendingAwaitResult") || goesThroughStep(body, unrefused) {
+				sites[name] = true
+			}
+		}
+	}
+	return sites
+}
+
+// stepCall matches the dispatcher call a host call makes in code: s.step(ctx, m, &someStep, ...).
+var stepCall = regexp.MustCompile(`\bs\.step\(`)
+
+// stepCallSpec reads which spec a host call hands to the dispatcher: s.step(ctx, m, &someStep, ...).
+var stepCallSpec = regexp.MustCompile(`\bs\.step\(\s*[^,()]+,\s*[^,()]+,\s*&(\w+)`)
+
+// specDecl finds the package-level `var x = stepSpec{ ... }` declarations; the body ends at the first closing brace in column 0, which a
+// declaration's own closures (indented with tabs) never contain.
+var specDecl = regexp.MustCompile(`(?s)\nvar (\w+) = stepSpec\{(.*?)\n\}`)
+
+// neverRefusedSpecs names the specs declared `Refuse: neverRefuse`: steps the dispatcher does NOT refuse (cleat#4211). The scans that count REFUSAL
+// sites read it (the Java parity count of `stopBeforeNewWork` sites, the hand-off test): a call that goes through step is a refusal site only if its
+// spec can be refused, so counting every s.step caller one (as this scan did while every non-Pure step was refused) reports ReleaseLock as a call
+// the SDKs must guard, and the Java count one too high. Reading the declaration, not a list kept here, means a new spec that says
+// `Refuse: neverRefuse` is understood the day it is written. A spec with any OTHER Refuse is not in this set and so counts as a site: the scan
+// cannot prove an arbitrary Refuse never refuses, and over-counting fails loudly.
+func neverRefusedSpecs(t *testing.T) map[string]bool {
+	t.Helper()
+	out := map[string]bool{}
+	for name, body := range stepSpecDecls(t) {
+		if declaresNeverRefuse(body) {
+			out[name] = true
+		}
+	}
+	return out
+}
+
+// neverStopSpecs names the specs a host call can go through WITHOUT being a host STOP site: never refused AND unable to answer the guest with the stop
+// sentinel in any other way. "Never refused" and "never a stop site" are different claims, and conflating them was the defect W4 of cleat#4152
+// found. await_promise is declared `Refuse: neverRefuse` (it never asked stopBeforeNewWork: a defer body records and suspends), and it is STILL a
+// stop site, because a suspending await answers the guest with the sentinel (cleat#3383) and every SDK has to check the stop bit on it. So a spec
+// that can return suspendingAwaitResult() or callSuspendSentinel from its own declaration, or waits through awaitSuspendOrPark, is not in this set
+// whatever its Refuse says. Without that,
+// moving the call onto the dispatcher dropped it from the host stop sites and the SDK coverage test then told the SDKs to stop guarding it. Only the
+// stop-site scan (hostStopSites) reads this; the refusal counts read neverRefusedSpecs, because await_promise is not a REFUSAL site and the Java
+// parity count is one of refusals.
+func neverStopSpecs(t *testing.T) map[string]bool {
+	t.Helper()
+	return neverStopIn(stepSpecDecls(t))
+}
+
+// stepSpecDecls reads every `var x = stepSpec{ ... }` declaration in the engine's non-test source: name -> the declaration's body, comments blanked.
+func stepSpecDecls(t *testing.T) map[string]string {
+	t.Helper()
+	return specDeclsIn(engineSources(t))
+}
+
+// engineSources reads the engine's non-test Go source: file name -> text.
+func engineSources(t *testing.T) map[string]string {
+	t.Helper()
 	entries, err := os.ReadDir(".")
 	if err != nil {
 		t.Fatalf("reading engine/: %v", err)
 	}
-	decl := regexp.MustCompile(`(?m)^func \(s \*execSession\) ([A-Za-z_]\w*)\(`)
-	sites := map[string]bool{}
+	out := map[string]string{}
 	for _, e := range entries {
 		if e.IsDir() || !strings.HasSuffix(e.Name(), ".go") || strings.HasSuffix(e.Name(), "_test.go") {
 			continue
@@ -321,24 +494,76 @@ func hostStopSites(t *testing.T) map[string]bool {
 		if err != nil {
 			t.Fatalf("reading %s: %v", e.Name(), err)
 		}
-		src := string(b)
-		locs := decl.FindAllStringSubmatchIndex(src, -1)
-		for i, loc := range locs {
-			name := src[loc[2]:loc[3]]
-			end := len(src)
-			if i+1 < len(locs) {
-				end = locs[i+1][0]
-			}
-			if name == "stopBeforeNewWork" || name == "suspendingAwaitResult" {
-				continue
-			}
-			body := src[loc[0]:end]
-			if callsInCode(body, "stopBeforeNewWork") || callsInCode(body, "suspendingAwaitResult") {
-				sites[name] = true
-			}
+		out[e.Name()] = string(b)
+	}
+	return out
+}
+
+// specDeclsIn is stepSpecDecls over sources already read.
+func specDeclsIn(sources map[string]string) map[string]string {
+	out := map[string]string{}
+	for _, src := range sources {
+		for _, m := range specDecl.FindAllStringSubmatch(blankComments(src), -1) {
+			out[m[1]] = m[2]
 		}
 	}
-	return sites
+	return out
+}
+
+var neverRefuseDecl = regexp.MustCompile(`\bRefuse:\s*neverRefuse\b`)
+var sentinelToken = regexp.MustCompile(`\bcallSuspendSentinel\b`)
+
+// waitCall matches a call to awaitSuspendOrPark, the wait both awaits share. Its contract is the point: a wait that does not settle SUSPENDS the run and
+// hands the guest the stop word (suspendingAwaitResult), so a spec that waits through it is a stop site by construction. Reading only the two places a
+// spec spells the stop itself (an invented-deadline branch, an event-cap refusal) left that status resting on branches a refactor could move behind a
+// helper without changing what the call does (cleat-review, #4270). It has arguments, so callsInCode, which matches `name()`, cannot see it.
+var waitCall = regexp.MustCompile(`\bawaitSuspendOrPark\(`)
+
+// declaresNeverRefuse says whether a spec's declaration reads `Refuse: neverRefuse`.
+func declaresNeverRefuse(body string) bool { return neverRefuseDecl.MatchString(body) }
+
+// canAnswerWithTheStop says whether a spec's declaration can hand the guest the stop sentinel, by calling suspendingAwaitResult() or naming
+// callSuspendSentinel in code. The declaration is read with comments already blanked.
+func canAnswerWithTheStop(body string) bool {
+	return callsInCode(body, "suspendingAwaitResult") || sentinelToken.MatchString(body) || waitCall.MatchString(body)
+}
+
+// neverStopIn is neverStopSpecs over declarations already read, so the rule can be tested on text.
+func neverStopIn(decls map[string]string) map[string]bool {
+	out := map[string]bool{}
+	for name, body := range decls {
+		if declaresNeverRefuse(body) && !canAnswerWithTheStop(body) {
+			out[name] = true
+		}
+	}
+	return out
+}
+
+// goesThroughStep reports whether a host call's text (the method and the spec value that follows it, up to the next method) calls the
+// dispatcher with a spec the dispatcher can refuse. A call that went through step with a Pure spec would be wrongly counted a stop site; the
+// dispatcher's own tests assert no spec declares Pure and records (cleat#4152). A call to a spec in unrefused (`Refuse: neverRefuse`) is not a site.
+//
+// A step call whose spec this cannot read counts as a site: that over-reports, and an over-count fails loudly (the Java count's equality), where
+// an under-count would pass a call the SDKs do not guard.
+//
+// The text it reads runs from a method to the NEXT method, so a package-level helper (not a method) that calls s.step and sits between two
+// methods is attributed to the one before it. That can only ADD a site, and the Java count's equality then fails loudly: the safe direction.
+func goesThroughStep(body string, unrefused map[string]bool) bool {
+	code := blankComments(body)
+	calls := stepCall.FindAllStringIndex(code, -1)
+	if len(calls) == 0 {
+		return false
+	}
+	named := stepCallSpec.FindAllStringSubmatch(code, -1)
+	if len(named) < len(calls) {
+		return true
+	}
+	for _, m := range named {
+		if !unrefused[m[1]] {
+			return true
+		}
+	}
+	return false
 }
 
 // callsInCode reports whether src contains a call `name()` in CODE: the three
@@ -420,11 +645,21 @@ func adaptersWithSuspendCheck(t *testing.T) (wrapped, all map[string]bool) {
 // added quietly.
 func witCallOutcomeFuncs(t *testing.T) (outcome, scalar, all map[string]bool) {
 	t.Helper()
-	src := repoFile(t, "python-sdk/wit/cleat.wit")
-	fn := regexp.MustCompile(`(?s)\n\s*([a-z0-9-]+): func\(.*?\)\s*->\s*([^;]+);`)
+	return classifyWitFuncs(repoFile(t, "python-sdk/wit/cleat.wit"))
+}
+
+// witFuncDecl matches one WIT function declaration, with or without a return type. The parameters may not contain ';', which is what keeps a
+// function with NO return (`durable-defer-phase: func(on: bool);`) from swallowing the declaration after it: this used to read
+// `func\(.*?\)\s*->`, whose non-greedy body ran on past the first ';' to the next arrow. That attributed the next function's return to the
+// wrong name and dropped the next function from the set, so durable-continue-as-new, the declaration right after durable-defer-phase, was
+// invisible to every check that reads this (cleat#4159).
+var witFuncDecl = regexp.MustCompile(`(?s)\n\s*([a-z0-9-]+): func\(([^;]*?)\)\s*(?:->\s*([^;]+))?;`)
+
+// classifyWitFuncs is witCallOutcomeFuncs over a source text, so a test can hand it a known positive.
+func classifyWitFuncs(src string) (outcome, scalar, all map[string]bool) {
 	outcome, scalar, all = map[string]bool{}, map[string]bool{}, map[string]bool{}
-	for _, m := range fn.FindAllStringSubmatch(src, -1) {
-		name, ret := m[1], strings.TrimSpace(m[2])
+	for _, m := range witFuncDecl.FindAllStringSubmatch(src, -1) {
+		name, ret := m[1], strings.TrimSpace(m[3])
 		all[name] = true
 		switch {
 		case strings.Contains(ret, "call-failure"):
@@ -434,6 +669,25 @@ func witCallOutcomeFuncs(t *testing.T) (outcome, scalar, all map[string]bool) {
 		}
 	}
 	return outcome, scalar, all
+}
+
+// TestTheWitScanSeesTheFunctionAfterOneWithNoReturn is the known positive for the extractor above. The first declaration returns nothing, as
+// durable-defer-phase does, and the second returns a scalar, as durable-continue-as-new does.
+func TestTheWitScanSeesTheFunctionAfterOneWithNoReturn(t *testing.T) {
+	const src = "interface x {\n    /// a\n    durable-defer-phase: func(on: bool);\n\n    /// b\n    durable-continue-as-new: func(input: string) -> u64;\n\n" +
+		"    some-call: func(\n        input: string,\n    ) -> result<string, call-failure>;\n}\n"
+	outcome, scalar, all := classifyWitFuncs(src)
+	for _, name := range []string{"durable-defer-phase", "durable-continue-as-new", "some-call"} {
+		if !all[name] {
+			t.Errorf("%s is missing from the scanned set %v", name, all)
+		}
+	}
+	if !scalar["durable-continue-as-new"] || scalar["durable-defer-phase"] {
+		t.Errorf("scalar set = %v, want durable-continue-as-new and not durable-defer-phase", scalar)
+	}
+	if !outcome["some-call"] || len(outcome) != 1 {
+		t.Errorf("outcome set = %v, want exactly some-call", outcome)
+	}
 }
 
 // pySDKStopChecks reports which Python HostCalls methods test the stop sentinel

@@ -209,13 +209,8 @@ func TestDurableAwaitSignals_ReplayWrongEventType(t *testing.T) {
 	s.history = []EventRecord{{
 		Step: 0, EventType: EventTypeCall, // wrong type
 	}}
-
 	result := s.DurableAwaitSignals(context.Background(), nil, `my-signal`, 5000, 0, 0, 0, 0)
-
-	if s.isReplay {
-		t.Error("expected isReplay=false after exitReplay (wrong event type)")
-	}
-	_ = result
+	wantReplayDivergence(t, s, result, 1)
 }
 
 // ---------------------------------------------------------------------------

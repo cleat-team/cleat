@@ -1,0 +1,1 @@
+typescript-tier2	0	__UNATTRIBUTED__	no test in tests/typescript may skip: the job declares CLEAT_REQUIRE_TOOLCHAINS=typescript, so a missing toolchain is a failure, and the budget is zero from the first run (cleat#3825)

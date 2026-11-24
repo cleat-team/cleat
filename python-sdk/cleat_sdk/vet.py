@@ -23,6 +23,8 @@ import json
 import sys
 from typing import Any
 
+from ._stdlib_preload import PRELOADED_MODULES
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
@@ -41,6 +43,35 @@ ERROR_PRINT = "PY010"  # print()
 ERROR_NO_THREADING = "PY011"  # HostCalls param missing
 ERROR_ASYNC_FUNC = "PY012"  # async def decorated with @cleat_entry
 ERROR_MULTIPLE_ENTRIES = "PY013"  # multiple @cleat_entry functions
+
+#: WARNING codes (never errors, so they never refuse a build). Both are about the
+#: same documented limit of componentize-py (cleat#4266): the component contains
+#: only the standard-library modules that were imported while it was BUILT, so a
+#: module first imported at run time can be missing (ModuleNotFoundError).
+WARN_FUNCTION_IMPORT = "PY014"  # stdlib module imported inside a function
+WARN_LAZY_IMPORT_CALL = "PY015"  # call that imports a module the first time it runs
+
+#: A real-time clock read or sleep in workflow code (cleat#4396). A WARNING, never an error: it must not newly refuse a build that runs today.
+#: ``time.sleep`` written plainly is the PY004 error and is not reported twice; this covers the same call through an alias, and the clock reads
+#: that PY004 and PY005 never named.
+WARN_REAL_TIME_CLOCK = "PY016"
+
+#: The ``time`` functions that read the host's real monotonic clock. Measured 2026-11-23 (componentize-py 0.25.1): two runs of one workflow id read
+#: different values, so anything computed from them differs between a run and its replay. ``time.time`` is PY005's and ``time.sleep`` is PY004's.
+MONOTONIC_CLOCK_CALLS: tuple[str, ...] = (
+    "monotonic",
+    "monotonic_ns",
+    "perf_counter",
+    "perf_counter_ns",
+)
+
+#: The ``time`` functions that read the process's CPU-time clock. Measured 2026-11-23: two runs of one workflow id read -2.0412 and -2.0397 seconds
+#: (``process_time_ns``: -2041199250 and -2039663875), negative on both, so the value means nothing and differs between a run and its replay. Same
+#: warning as the monotonic reads, with a message that says what these actually read.
+PROCESS_TIME_CALLS: tuple[str, ...] = (
+    "process_time",
+    "process_time_ns",
+)
 
 #: SDK durable leaf function names --- HostCalls methods that the runtime
 #: journalises (i.e. they create events in the workflow history).
@@ -128,13 +159,14 @@ FORBIDDEN_API_RULES: dict[tuple[str | None, str], tuple[str, str, str]] = {
     ),
     ("time", "sleep"): (
         "PY004",
-        "time.sleep() is not allowed in durable functions: real-time sleep advances differently on each replay, breaking determinism.",
+        "time.sleep() is not allowed in durable functions: real-time sleep advances differently on each replay, breaking determinism. It also blocks its execution "
+        "for its whole duration, and the instance timeout does not interrupt it (cleat#4403).",
         "Use h.sleep() instead",
     ),
     ("time", "time"): (
         "PY005",
         "time.time() is not allowed in durable functions: wall-clock time differs across replays, causing divergent behavior.",
-        "Use h.Now() or the workflow clock instead",
+        "Use h.now() for the replayable workflow clock instead",
     ),
     ("random", "random"): (
         "PY006",
@@ -652,6 +684,375 @@ class ForbiddenAPIChecker(ast.NodeVisitor):
             )
 
 
+#: Standard-library modules compiled INTO the component's interpreter. They are
+#: present whenever the component runs, so importing one inside a function is
+#: harmless and PY014 stays quiet about it. Measured 2026-11-22 as the
+#: non-underscore names in the guest's ``sys.builtin_module_names`` (CPython
+#: 3.14.0 for wasi, componentize-py 0.25.1), each also imported at run time in a
+#: minimal guest. It describes one interpreter build and can change with
+#: componentize-py; the cost of it going stale is a missed warning, not a wrong
+#: one, because every other stdlib import still warns.
+INTERPRETER_BUILTIN_MODULES: frozenset[str] = frozenset(
+    {
+        "__future__",
+        "array",
+        "atexit",
+        "binascii",
+        "builtins",
+        "cmath",
+        "errno",
+        "faulthandler",
+        "gc",
+        "itertools",
+        "marshal",
+        "math",
+        "posix",
+        "pyexpat",
+        "select",
+        "sys",
+        "time",
+        "unicodedata",
+        "zlib",
+    }
+)
+
+#: THE PY015 TABLES BELOW NOW WARN ABOUT NOTHING that they list, because ``cleat_sdk._stdlib_preload`` imports every module they name and every
+#: workflow imports the SDK (cleat#4266). They stay as the record of what was measured, and the machinery stays for the next row: a call whose
+#: module is NOT preloaded still warns, so a row added here without adding the module to ``PRELOADED_MODULES`` is a live warning again.
+#:
+#: PY015 table, calls that import a module on first use, by METHOD NAME. Each row
+#: was measured (2026-11-22, same guest as above): in a guest that does not
+#: import the module at top level the call raises ModuleNotFoundError, and a
+#: guest whose ONLY extra import is the one named here runs it correctly.
+#: A row is a measured remedy, not a guess; add a row only after measuring it,
+#: and add its test. Name: (modules to import at top level, what the call does).
+LAZY_IMPORT_METHODS: dict[str, tuple[tuple[str, ...], str]] = {
+    "strptime": (
+        ("_strptime",),
+        "datetime.strptime() and time.strptime() import _strptime the first time they run",
+    ),
+    "most_common": (
+        ("heapq",),
+        "Counter.most_common() imports heapq the first time it runs",
+    ),
+}
+
+#: PY015 table, codecs that load a codec module on first use, keyed by the codec's
+#: MODULE name (what ``encodings.aliases`` resolves any spelling to). Codecs not
+#: listed are NOT checked: they are probably the same, but advice that was never
+#: measured is how ``encodings.idna`` alone nearly shipped as the remedy for
+#: "idna" (it also needs ``encodings.punycode``). utf-8, ascii, latin-1, utf-16
+#: and utf-32 need nothing (measured).
+LAZY_IMPORT_CODECS: dict[str, tuple[str, ...]] = {
+    "cp1252": ("encodings.cp1252",),
+    "shift_jis": ("encodings.shift_jis",),
+    "iso8859_15": ("encodings.iso8859_15",),
+    "utf_8_sig": ("encodings.utf_8_sig",),
+    "idna": ("encodings.idna", "encodings.punycode"),
+}
+
+
+def _module_level_imports(tree: ast.AST) -> set[str]:
+    """Every dotted module name imported while the module itself runs.
+
+    That is, at build time: statements at module level, in module-level ``if``/
+    ``try``/``with`` blocks and in class bodies, but NOT inside a function body,
+    which only runs when the workflow does. ``import a.b`` counts for ``a`` and
+    ``a.b``; ``from a import b`` counts for ``a`` and ``a.b``.
+    """
+    found: set[str] = set()
+
+    def add_path(dotted: str) -> None:
+        parts = dotted.split(".")
+        for i in range(1, len(parts) + 1):
+            found.add(".".join(parts[:i]))
+
+    def visit(child: ast.AST) -> None:
+        if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            return
+        if isinstance(child, ast.If):
+            # ``if TYPE_CHECKING:`` is False when the module runs, so its body is never
+            # executed at build time (only the ``else`` is), and ``if not TYPE_CHECKING:``
+            # is the reverse. Without this a type-only import silenced the warning.
+            kind = _type_checking_test(child.test)
+            if kind is not None:
+                for stmt in child.orelse if kind else child.body:
+                    visit(stmt)
+                return
+        if isinstance(child, ast.Import):
+            for alias in child.names:
+                add_path(alias.name)
+        elif isinstance(child, ast.ImportFrom) and child.level == 0 and child.module:
+            add_path(child.module)
+            for alias in child.names:
+                found.add(f"{child.module}.{alias.name}")
+        walk(child)
+
+    def walk(node: ast.AST) -> None:
+        for child in ast.iter_child_nodes(node):
+            visit(child)
+
+    walk(tree)
+    return found
+
+
+def _type_checking_test(test: ast.expr) -> bool | None:
+    """``True`` for ``TYPE_CHECKING`` (``typing.TYPE_CHECKING``), ``False`` for ``not`` it, else ``None``."""
+    if isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not):
+        inner = _type_checking_test(test.operand)
+        return None if inner is None else not inner
+    if isinstance(test, ast.Name) and test.id == "TYPE_CHECKING":
+        return True
+    if isinstance(test, ast.Attribute) and test.attr == "TYPE_CHECKING":
+        return True
+    return None
+
+
+def _codec_module(name: str) -> str:
+    """The ``encodings`` module a codec spelling resolves to (``sjis`` -> ``shift_jis``)."""
+    import encodings
+    import encodings.aliases
+
+    normalised = encodings.normalize_encoding(name).lower()
+    return encodings.aliases.aliases.get(normalised, normalised)
+
+
+class RealTimeClockChecker(ast.NodeVisitor):
+    """Warns about a real-time clock read or sleep in the code a workflow executes (cleat#4396).
+
+    The calls are ``MONOTONIC_CLOCK_CALLS`` and ``PROCESS_TIME_CALLS`` (``process_time`` reads a CPU-time clock that returned negative values and
+    differed between two runs), plus ``time.sleep`` through an alias.
+
+    The host's monotonic clock is real elapsed time and replay does not reproduce it: ``wasi:clocks/monotonic-clock`` is not shadowed, because a
+    shadow replaces the whole interface and its ``subscribe-*`` functions return pollables the host cannot supply. So ``time.monotonic()``,
+    ``monotonic_ns``, ``perf_counter`` and ``perf_counter_ns`` return a different value on a replay, and so does anything computed from one (an
+    elapsed time, a loop that runs until a deadline). The owner decided to keep the clock real and say so, which is what this is.
+
+    One warning code, PY016, over the same scope as the forbidden-API checker (the functions the entry points reach). A reference counts as well as
+    a call, because ``clock = time.perf_counter`` reads the clock later. Names are resolved through the file's own imports (``import time as t``,
+    ``from time import monotonic as m``); a bare ``time`` is taken to be the module as the existing rules do. A ``time.sleep`` written plainly is the
+    PY004 error and is skipped here; the same call through an alias is reported, as a warning, so it cannot newly refuse a build.
+    """
+
+    def __init__(self, filepath: str, tree: ast.AST, target_funcs: set[str]) -> None:
+        self.filepath = filepath
+        self.target_funcs = target_funcs
+        self.warnings: list[dict[str, Any]] = []
+        self._depth = 0  # >0 while inside a function whose code the workflow executes
+        # Names that mean the ``time`` module, and local names bound to one of its functions (``from time import x as y``).
+        self._modules: set[str] = {"time"}
+        self._functions: dict[str, str] = {}
+        interesting = set(MONOTONIC_CLOCK_CALLS) | set(PROCESS_TIME_CALLS) | {"sleep"}
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    if alias.name == "time" and alias.asname:
+                        self._modules.add(alias.asname)
+            elif isinstance(node, ast.ImportFrom) and node.module == "time" and node.level == 0:
+                for alias in node.names:
+                    if alias.name in interesting:
+                        self._functions[alias.asname or alias.name] = alias.name
+        # A module-level REFERENCE (``clock = time.perf_counter``) reads the clock when it is CALLED, which can be in the entry, at run time. A
+        # module-level CALL (``T0 = time.monotonic()``) is a build-time constant: componentize-py runs module code while it builds, so both runs of a
+        # workflow read the same value (measured in review, cleat#4428). So the reference is recorded here as an alias, and the call is not flagged.
+        for stmt in getattr(tree, "body", []):
+            value = stmt.value if isinstance(stmt, (ast.Assign, ast.AnnAssign)) else None
+            if not (isinstance(value, ast.Attribute) and isinstance(value.value, ast.Name)):
+                continue
+            if value.value.id not in self._modules or value.attr not in interesting:
+                continue
+            targets = stmt.targets if isinstance(stmt, ast.Assign) else [stmt.target]
+            for target in targets:
+                if isinstance(target, ast.Name):
+                    self._functions[target.id] = value.attr
+
+    def _warn(self, node: ast.AST, function: str) -> None:
+        if function == "sleep":
+            message = (
+                "time.sleep() really sleeps: it blocks its execution for its whole duration, the instance timeout does not interrupt it (cleat#4403), "
+                "and it is not durable. PY004 refuses `time.sleep` written plainly; this is the same call through an alias."
+            )
+            suggestion = "Use h.sleep(seconds) for a durable sleep"
+        elif function in PROCESS_TIME_CALLS:
+            message = (
+                f"time.{function}() reads the host's process-time clock, which replay does not reproduce: its value differs between a run and its replay "
+                "(measured: two runs of one workflow id read -2.0412 and -2.0397 seconds, negative on both, so it does not even measure CPU time here) (cleat#4396)."
+            )
+            suggestion = (
+                "Use h.now() for a replayable clock (milliseconds since the epoch; subtract two readings for an elapsed time) "
+                "and h.sleep(seconds) for a durable sleep"
+            )
+        else:
+            message = (
+                f"time.{function}() reads the host's real monotonic clock, which replay does not reproduce: its value, and anything computed from it "
+                "(an elapsed time, a loop that runs until a deadline), differs between a run and its replay (cleat#4396)."
+            )
+            suggestion = (
+                "Use h.now() for a replayable clock (milliseconds since the epoch; subtract two readings for an elapsed time) "
+                "and h.sleep(seconds) for a durable sleep"
+            )
+        self.warnings.append(
+            {
+                "code": WARN_REAL_TIME_CLOCK,
+                "file": self.filepath,
+                "line": getattr(node, "lineno", 0),
+                "column": getattr(node, "col_offset", 0),
+                "message": message,
+                "suggestion": suggestion,
+            }
+        )
+
+    def _check_function(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
+        if node.name in self.target_funcs:
+            self._depth += 1
+            self.generic_visit(node)
+            self._depth -= 1
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+        self._check_function(node)
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+        self._check_function(node)
+
+    def visit_Attribute(self, node: ast.Attribute) -> None:
+        if self._depth and isinstance(node.value, ast.Name) and node.value.id in self._modules:
+            if node.attr in MONOTONIC_CLOCK_CALLS or node.attr in PROCESS_TIME_CALLS:
+                self._warn(node, node.attr)
+            elif node.attr == "sleep" and node.value.id != "time":
+                self._warn(node, "sleep")
+        self.generic_visit(node)
+
+    def visit_Name(self, node: ast.Name) -> None:
+        if self._depth and isinstance(node.ctx, ast.Load) and node.id in self._functions:
+            self._warn(node, self._functions[node.id])
+
+
+class RuntimeImportChecker(ast.NodeVisitor):
+    """Warns about imports that happen only when the workflow RUNS (cleat#4266).
+
+    componentize-py keeps only the standard-library modules that were imported
+    while the component was being built, so anything first imported inside a
+    function can raise ModuleNotFoundError at run time, in production and not
+    at build. Two warnings, both about the file as written:
+
+    - PY014: a standard-library ``import`` inside a function.
+    - PY015: a call that is known to import a module on first use, when that
+      module is not imported at module level (``LAZY_IMPORT_METHODS`` and
+      ``LAZY_IMPORT_CODECS``).
+
+    These are warnings and not errors on purpose. An in-function ``import json``
+    works today because json is already in the component, so refusing the build
+    would break workflows that run; the warning says "may be missing", which is
+    the strongest claim the file alone supports.
+    """
+
+    def __init__(self, filepath: str, tree: ast.AST) -> None:
+        self.filepath = filepath
+        self.warnings: list[dict[str, Any]] = []
+        self._at_module_level = _module_level_imports(tree)
+        self._functions: list[str] = []
+        # Python 3.10+, which is all the SDK imports on (requires-python is >=3.10).
+        self._stdlib: frozenset[str] = sys.stdlib_module_names
+
+    def _warn(self, code: str, node: ast.AST, message: str, suggestion: str) -> None:
+        self.warnings.append(
+            {
+                "code": code,
+                "file": self.filepath,
+                "line": getattr(node, "lineno", 0),
+                "column": getattr(node, "col_offset", 0),
+                "message": message,
+                "suggestion": suggestion,
+            }
+        )
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+        self._functions.append(node.name)
+        self.generic_visit(node)
+        self._functions.pop()
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+        self.visit_FunctionDef(node)  # type: ignore[arg-type]
+
+    def _check_function_import(self, node: ast.AST, dotted: str, shown: str) -> None:
+        if not self._functions:
+            return
+        top = dotted.split(".")[0]
+        if top not in self._stdlib or top in INTERPRETER_BUILTIN_MODULES:
+            return
+        if dotted in self._at_module_level:
+            return
+        self._warn(
+            WARN_FUNCTION_IMPORT,
+            node,
+            f"`{shown}` inside function `{self._functions[-1]}()`: the component only contains "
+            "the standard-library modules that were imported when it was built, so a module "
+            "first imported at run time may be missing (ModuleNotFoundError).",
+            f"Move `{shown}` to the top level of the workflow module.",
+        )
+
+    def visit_Import(self, node: ast.Import) -> None:
+        for alias in node.names:
+            self._check_function_import(node, alias.name, f"import {alias.name}")
+
+    def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
+        if node.level == 0 and node.module:
+            self._check_function_import(node, node.module, f"from {node.module} import ...")
+
+    def _missing(self, modules: tuple[str, ...]) -> list[str]:
+        # A module the SDK preloads is in every component (cleat#4266), so a workflow that does not import it is fine.
+        return [m for m in modules if m not in self._at_module_level and m not in PRELOADED_MODULES]
+
+    def visit_Call(self, node: ast.Call) -> None:
+        if self._functions:
+            func = node.func
+            name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", None)
+            if name in LAZY_IMPORT_METHODS:
+                modules, why = LAZY_IMPORT_METHODS[name]
+                missing = self._missing(modules)
+                if missing:
+                    self._warn(
+                        WARN_LAZY_IMPORT_CALL,
+                        node,
+                        f"`{name}()`: {why}, and `{', '.join(missing)}` is only in the "
+                        "component if it was imported when the component was built.",
+                        "Add "
+                        + " and ".join(f"`import {m}`" for m in missing)
+                        + " at the top level of the workflow module.",
+                    )
+            elif isinstance(func, ast.Attribute) and func.attr in ("encode", "decode"):
+                codec = None
+                if (
+                    node.args
+                    and isinstance(node.args[0], ast.Constant)
+                    and isinstance(node.args[0].value, str)
+                ):
+                    codec = node.args[0].value
+                else:
+                    for kw in node.keywords:
+                        if (
+                            kw.arg == "encoding"
+                            and isinstance(kw.value, ast.Constant)
+                            and isinstance(kw.value.value, str)
+                        ):
+                            codec = kw.value.value
+                if codec is not None:
+                    modules = LAZY_IMPORT_CODECS.get(_codec_module(codec))
+                    missing = self._missing(modules) if modules else []
+                    if missing:
+                        self._warn(
+                            WARN_LAZY_IMPORT_CALL,
+                            node,
+                            f"`.{func.attr}({codec!r})` loads its codec module the first time it is used, "
+                            f"and `{', '.join(missing)}` is only in the component if it was imported "
+                            "when the component was built.",
+                            "Add "
+                            + " and ".join(f"`import {m}`" for m in missing)
+                            + " at the top level of the workflow module.",
+                        )
+        self.generic_visit(node)
+
+
 class ThreadingChecker(ast.NodeVisitor):
     """Verifies HostCalls threading through the durable closure.
 
@@ -940,6 +1341,33 @@ def analyze_file(filepath: str) -> AnalysisResult:
     checker.visit(tree)
     result.errors.extend(checker.errors)
 
+    # --- Imports that only happen at run time (warnings; cleat#4266) ---
+    # Over the WHOLE file, not just the determinism scope: any function that
+    # runs hits the limit, whether or not it reaches a host call.
+    runtime_imports = RuntimeImportChecker(filepath, tree)
+    runtime_imports.visit(tree)
+    for warning in runtime_imports.warnings:
+        result.add_warning(
+            warning["code"],
+            warning["line"],
+            warning["message"],
+            warning["suggestion"],
+            warning["column"],
+        )
+
+    # --- A real-time clock read or sleep (warning; cleat#4396) ---
+    # Same scope as the forbidden-API checker: what the workflow executes.
+    real_time = RealTimeClockChecker(filepath, tree, to_check)
+    real_time.visit(tree)
+    for warning in real_time.warnings:
+        result.add_warning(
+            warning["code"],
+            warning["line"],
+            warning["message"],
+            warning["suggestion"],
+            warning["column"],
+        )
+
     # Also check imports at module level that might affect closure functions
     # (module-level imports are already caught by the checker visiting the root)
 
@@ -959,8 +1387,8 @@ def analyze_file(filepath: str) -> AnalysisResult:
     # `h`, and demanding it would be noise on every string or arithmetic helper
     # a workflow uses. Measured while fixing the AssemblyScript twin
     # (cleat#1799), where the same substitution made SIX pure helpers in
-    # examples/as-workflow -- extractStringField, isDigit, parseI64 and
-    # friends -- fail E005 on an unmodified example.
+    # examples/as-workflow (removed with the AssemblyScript SDK, cleat#4023) -- extractStringField,
+    # isDigit, parseI64 and friends -- fail E005 on an unmodified example.
     #
     # The question the check actually asks is "can this function obtain the `h`
     # it needs?", and that is only meaningful for a function that BOTH

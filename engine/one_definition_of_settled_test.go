@@ -41,6 +41,27 @@ func settledSet() map[string]bool {
 // A plausible reason written from the code alone is the failure mode this map
 // exists to prevent, and the author is not exempt from it.
 var narrowerThanSettled = map[string]string{
+	"engine/store_signals.go:cancelled,done": "" +
+		"DeliverSignal's delivery statement (cleat#4340). It refuses only the statuses whose stored signals NO run will ever read: done and cancelled can never be reopened, and a run that continued as " +
+		"new is a done run with a successor. failed, terminated and dead_lettered are settled but REDRIVABLE under the same run id (reReplayableStatuses; retry also reopens dead_lettered), and the " +
+		"signals already stored for them stay in place, so 'signal a dead-lettered run, then retry it' works and keeps working. THIS NARROWING IS CONTESTED, NOT SETTLED: the coordinator ruled it " +
+		"on 2026-11-22 after review showed refusing all five removed that pattern, and whether the redrivable three should refuse instead is the owner's decision, cleat#4345. If that is " +
+		"decided 'refuse', this list becomes the full settled list and these three entries are deleted.",
+
+	"engine/mysql_store.go:cancelled,done": "" +
+		"DeliverSignal's delivery statement (cleat#4340). It refuses only the statuses whose stored signals NO run will ever read: done and cancelled can never be reopened, and a run that continued as " +
+		"new is a done run with a successor. failed, terminated and dead_lettered are settled but REDRIVABLE under the same run id (reReplayableStatuses; retry also reopens dead_lettered), and the " +
+		"signals already stored for them stay in place, so 'signal a dead-lettered run, then retry it' works and keeps working. THIS NARROWING IS CONTESTED, NOT SETTLED: the coordinator ruled it " +
+		"on 2026-11-22 after review showed refusing all five removed that pattern, and whether the redrivable three should refuse instead is the owner's decision, cleat#4345. If that is " +
+		"decided 'refuse', this list becomes the full settled list and these three entries are deleted.",
+
+	"engine/mssql_signals_promises.go:cancelled,done": "" +
+		"DeliverSignal's delivery statement (cleat#4340). It refuses only the statuses whose stored signals NO run will ever read: done and cancelled can never be reopened, and a run that continued as " +
+		"new is a done run with a successor. failed, terminated and dead_lettered are settled but REDRIVABLE under the same run id (reReplayableStatuses; retry also reopens dead_lettered), and the " +
+		"signals already stored for them stay in place, so 'signal a dead-lettered run, then retry it' works and keeps working. THIS NARROWING IS CONTESTED, NOT SETTLED: the coordinator ruled it " +
+		"on 2026-11-22 after review showed refusing all five removed that pattern, and whether the redrivable three should refuse instead is the owner's decision, cleat#4345. If that is " +
+		"decided 'refuse', this list becomes the full settled list and these three entries are deleted.",
+
 	"engine/retention_predicates.go:done,failed": "" +
 		"DeleteExpiredEvents -- the on-by-default --retention-days sweep. The narrowing " +
 		"is DELIBERATE and measured, in cleat#1023: 'done' and 'failed' rows have no " +

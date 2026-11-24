@@ -14,6 +14,16 @@ public class HostCallEntry {
     private static final Class<?> EXPORT_REF =
         HostCallFixture_exerciseHostCall_Export.class;
 
+    // cleat#4113: the second entry point, for the side-effect test. Same reason as above: without it the build declares the entry and
+    // the module does not export it.
+    private static final Class<?> SIDE_EFFECT_EXPORT_REF =
+        HostCallFixture_sideEffectOnce_Export.class;
+
+    // cleat#4285: the third entry point, which awaits a pending child and then makes a call. Same reason again, and the build says so plainly:
+    // "cleat.metadata would declare 1 entry point(s) not actually exported by the compiled .wasm".
+    private static final Class<?> AWAIT_THEN_CALL_EXPORT_REF =
+        HostCallFixture_awaitThenCall_Export.class;
+
     public static void main(String[] args) {
         System.out.println("Cleat host-call fixture: " + HostCallFixture.class.getName());
     }

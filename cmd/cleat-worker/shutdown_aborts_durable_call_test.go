@@ -171,6 +171,11 @@ func (s ctxBlindStore) FinalizeWorkflowSegment(ctx context.Context, runID, worke
 	return s.WorkflowStore.FinalizeWorkflowSegment(context.WithoutCancel(ctx), runID, workerID, generation, newEvents, finalStatus, result, errorCode, errorOp, queryState, nextWakeAt)
 }
 
+// PublishQueryState: the test double writes nothing and reports no fence loss (cleat#4162); a test that needs otherwise overrides it on its own type.
+func (s ctxBlindStore) PublishQueryState(ctx context.Context, runID, workerID string, generation int64, queryState map[string]string) error {
+	return nil
+}
+
 func (s ctxBlindStore) FailWorkflow(ctx context.Context, workflowID, workerID string, generation int64, errorMsg, errorCode, errorOp string, queryState map[string]string) error {
 	return s.WorkflowStore.FailWorkflow(context.WithoutCancel(ctx), workflowID, workerID, generation, errorMsg, errorCode, errorOp, queryState)
 }

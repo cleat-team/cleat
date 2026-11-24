@@ -56,7 +56,18 @@ run-name: >-
 
 on:
   push:
-    branches: [main, develop]
+    # develop is NOT here (cleat#3958): every job in this workflow ran,
+    # and passed, in a merge_group run on the same commit before it landed
+    # -- the queue's merge commit IS the develop commit, so the develop
+    # push was a second full pass over an identical tree (905/339/190/142
+    # runner-minutes a day across the four workflows).
+    #
+    # main stays: it has no merge queue behind it, so a push there is the
+    # only run that tree will get. tier1-gate.yml's
+    # `develop-push-was-queued` job asserts the merge_group run actually
+    # exists for every develop commit and fails the Tier 1 run when it
+    # does not.
+    branches: [main]
   pull_request:
     # cleat#2483: `branches` filters on the PR's BASE branch, and a
     # release branch was absent -- so every PR targeting one ran none of
@@ -132,8 +143,79 @@ concurrency:
 
 permissions:
   contents: read
+  # The PR-edit gate below reads this workflow's own runs and jobs for the head
+  # to decide whether they already passed.
+  actions: read
 
 jobs:
+  # ---------------------------------------------------------------------------
+  # A title/body edit re-runs every required context on a head this workflow
+  # has already tested. cleat#3958's inventory found exactly one job in the
+  # repository that reads `pull_request.body` (closing-reference-check.yml) and
+  # none that reads `.title` for anything but a display name, so a body-edit run
+  # here measures a tree that has not changed.
+  #
+  # `edit-gate` decides whether skipping is SAFE, which is not the same question
+  # as whether it is cheap. A skipped job reports as Success and does not block
+  # a required check (GitHub docs, "Using conditions to control job execution"),
+  # so skipping unconditionally would launder a RED head into a green one: edit
+  # the body of a failing PR and its red check-runs become green skips. The gate
+  # therefore says `skip=true` only when every job's latest NON-skipped
+  # conclusion on this head is `success` -- see scripts/pr-edit-already-green.py,
+  # whose --self-test covers the failure-then-skip sequence by name.
+  #
+  # It runs ONLY for an `edited` whose base did not change. Every other event
+  # leaves it skipped, and `needs.edit-gate.outputs.skip` is then the empty
+  # string, which is not 'true', so every job below runs exactly as before.
+  # That is why their conditions carry `!cancelled()` or `always()`: a job whose
+  # `needs` dependency was skipped is itself skipped unless its `if` uses a
+  # status function. Measured on cleat#3959 -- the plain `needs.*` form stayed
+  # skipped, the `!cancelled()` form ran.
+  # ---------------------------------------------------------------------------
+  edit-gate:
+    name: PR edit gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    if: github.event_name == 'pull_request' && github.event.action == 'edited' && !github.event.changes.base
+    outputs:
+      skip: ${{ steps.gate.outputs.skip }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          sparse-checkout: scripts
+      - name: Has this head already passed this workflow?
+        id: gate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          # Passed through the environment, never interpolated into the script:
+          # a branch name is attacker-controlled and can carry `$(...)`, which
+          # the runner would execute. actionlint's `expression` rule flags the
+          # inline form, correctly.
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+        run: |
+          set -uo pipefail
+          # `-e` is on: GitHub runs this as `bash -e {0}` and `set -u` below does not
+          # clear it, so a bare `out=$(...)` exits the step the moment the script
+          # exits 2 -- before `rc=$?` -- leaving the job RED with an empty output.
+          # The output still fails open (nothing publishes skip=true), but a red
+          # gate check holds the PR un-CLEAN until the next push (cleat-review).
+          rc=0
+          out=$(python3 scripts/pr-edit-already-green.py \
+                  --repo "$GITHUB_REPOSITORY" \
+                  --workflow tier2-gate.yml \
+                  --sha "${{ github.event.pull_request.head.sha }}" \
+                  --branch "$HEAD_REF" \
+                  --exclude-run "${{ github.run_id }}") || rc=$?
+          echo "$out"
+          if [ "$rc" -ne 0 ]; then
+            # UNMEASURED: a gate that could not look must not skip.
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          case "$out" in
+            skip=true*) echo "skip=true" >> "$GITHUB_OUTPUT" ;;
+            *)          echo "skip=false" >> "$GITHUB_OUTPUT" ;;
+          esac
   # SPLIT INTO A WORKER JOB (this one) AND A SEPARATE AGGREGATOR (`tier2`,
   # below) named `Tier 2 Gate` -- cleat#2847. Until this split, this single
   # job WAS the required context `Tier 2 Gate`, so its "Upload the tier-2
@@ -152,6 +234,8 @@ jobs:
   # success.
   tier2-run:
     name: Tier 2 Gate -- run
+    if: ${{ !cancelled() && needs.edit-gate.outputs.skip != 'true' }}
+    needs: [edit-gate]
     runs-on: ubuntu-latest
     # The gate ran 1567 tests in six patterns plus one module when this was written,
     # with -p 1, in well under two minutes of test time locally. 30 is generous; a gate
@@ -173,6 +257,10 @@ jobs:
           --health-timeout 5s
           --health-retries 5
 
+      # `--health-start-period` is load-bearing: mysql:8.4 starts a server twice
+      # (initialize, then run) and a loaded runner can take over 50s to boot, which
+      # is the whole budget without it (cleat#3936). Guarded by
+      # scripts/check-workflow-guards.py.
       mysql:
         image: mirror.gcr.io/library/mysql:8.4.11@sha256:b3b90af2a6552ae30c266fdb7d5dd55f3afb72404bb78d37fe8a23eb857fd3fb
         env:
@@ -184,7 +272,8 @@ jobs:
           --health-cmd "mysqladmin ping -h 127.0.0.1 -u root -pcleat"
           --health-interval 10s
           --health-timeout 5s
-          --health-retries 5
+          --health-retries 15
+          --health-start-period 60s
 
       # mssql/server:2022, deliberately not the azure-sql-edge image used in local
       # sandboxes. Measured 2026-08-07 against edge: plugins/kvstore and
@@ -346,12 +435,19 @@ jobs:
   # check for its three shards; this is the one-shard version of it.
   tier2:
     name: Tier 2 Gate
-    needs: [tier2-run]
-    if: always()
+    needs: [tier2-run, edit-gate]
+    if: ${{ always() }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
+      # A required context must still report SUCCESS on a body edit: a
+      # `skipped` one beside its `success` twin leaves the PR un-mergeable
+      # (cleat#3958, measured on #3960). So the job runs and does nothing.
+      - name: Nothing to do -- this head already passed
+        if: ${{ needs.edit-gate.outputs.skip == 'true' }}
+        run: echo "the PR head already passed this workflow; nothing to re-run"
       - name: Aggregate the gate result
+        if: ${{ needs.edit-gate.outputs.skip != 'true' }}
         env:
           RUN: ${{ needs.tier2-run.result }}
         run: |

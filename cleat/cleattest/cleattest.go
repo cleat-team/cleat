@@ -388,6 +388,9 @@ type TestEnv struct {
 	replayHistory []RecordedCall
 	// replayDivergence counts calls during replay not found in history.
 	replayDivergence int
+	// replaySideEffectCursor is how many recorded side effects this replay has handed back. A side effect replays BY STEP, as the engine does
+	// (cleat#4113): the n-th SideEffect of the replay gets the n-th SideEffect recorded, whatever value its function would compute now.
+	replaySideEffectCursor int
 	// replayRecording is true during the recording phase (set by EnableReplay,
 	// cleared by StartReplay). During recording, calls are recorded but never
 	// checked against history or counted as divergent.
@@ -486,6 +489,7 @@ func (e *TestEnv) hostCallsOptions() cleat.HostCallsOptions {
 		ReleaseLock:                   e.releaseLockImpl,
 		AwaitCondition:                e.awaitConditionImpl,
 		SideEffect:                    e.sideEffectImpl,
+		SideEffectRecorded:            e.sideEffectRecordedImpl,
 	}
 }
 
@@ -818,6 +822,7 @@ func (e *TestEnv) Reset() {
 	e.replayHistory = nil
 	e.replayDivergence = 0
 	e.replayRecording = false
+	e.replaySideEffectCursor = 0
 	e.continued = false
 	e.continuedInput = ""
 }
@@ -841,6 +846,7 @@ func (e *TestEnv) StartReplay() {
 	defer e.mu.Unlock()
 	e.replayRecording = false
 	e.replayDivergence = 0
+	e.replaySideEffectCursor = 0
 }
 
 // AssertReplayDivergence fails the test if the actual number of divergent
@@ -1974,13 +1980,40 @@ func (e *TestEnv) durableScheduleInvokeImpl(service, operation, requestJSON stri
 	return nil
 }
 
+// sideEffectRecordedImpl answers the question HostCallsImpl.SideEffect asks before it runs its function: during a replay, the next recorded
+// side effect, by step, so the function does not run and its fresh value cannot differ from the recorded one (cleat#4113). Outside a replay,
+// or past the end of the recorded side effects, nothing is recorded and the function runs.
+func (e *TestEnv) sideEffectRecordedImpl() (value string, recorded bool, err error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if !e.replayMode || e.replayRecording {
+		return "", false, nil
+	}
+	n := 0
+	for _, rec := range e.replayHistory {
+		if rec.Function != "SideEffect" {
+			continue
+		}
+		if n == e.replaySideEffectCursor {
+			e.replaySideEffectCursor++
+			return rec.Response, true, rec.Err
+		}
+		n++
+	}
+	return "", false, nil
+}
+
 func (e *TestEnv) sideEffectImpl(computedResult string) (resp string, retErr error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
 	replayKey := "SideEffect|" + computedResult
-	if cachedResp, cachedErr, matched := e.replayLookup("SideEffect", replayKey); matched {
-		return cachedResp, cachedErr
+	if e.replayMode && !e.replayRecording {
+		// Reached in a replay only when sideEffectRecordedImpl found nothing recorded at the cursor: the function RAN, with nothing to freeze,
+		// past the end of the recorded side effects. That is a divergence whatever value it computed, so it is counted unconditionally: the
+		// by-value match replayLookup does would hand back a recorded value for an equal one and report no divergence (cleat#4146 review).
+		e.replayDivergence++
+		return computedResult, nil
 	}
 	defer func() { e.replayRecord("SideEffect", replayKey, resp, retErr) }()
 

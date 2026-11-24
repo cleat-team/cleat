@@ -13,15 +13,8 @@ import (
 )
 
 func (s *MSSQLStore) DeliverSignal(ctx context.Context, workflowID, signalName, payload string) error {
-	tx, err := s.beginTxWithContext(ctx)
-	if err != nil {
-		return fmt.Errorf("deliver signal: begin: %w", err)
-	}
-	defer tx.Rollback()
-	if err := s.deliverSignalTx(ctx, tx, workflowID, signalName, payload); err != nil {
-		return err
-	}
-	return tx.Commit()
+	_, err := s.DeliverSignalReceipt(ctx, workflowID, signalName, payload, "")
+	return err
 }
 
 // DeliverSignalIdempotent implements SignalIdempotencyStore. See the
@@ -30,31 +23,62 @@ func (s *MSSQLStore) DeliverSignal(ctx context.Context, workflowID, signalName, 
 // A guarded INSERT ... WHERE NOT EXISTS rather than ON CONFLICT or INSERT
 // IGNORE, neither of which T-SQL has. @@ROWCOUNT of zero is the duplicate.
 func (s *MSSQLStore) DeliverSignalIdempotent(ctx context.Context, workflowID, signalName, payload, idempotencyKey string) (bool, error) {
-	if idempotencyKey == "" {
-		return false, s.DeliverSignal(ctx, workflowID, signalName, payload)
+	r, err := s.DeliverSignalReceipt(ctx, workflowID, signalName, payload, idempotencyKey)
+	return r.Replay, err
+}
+
+// DeliverSignalReceipt implements SignalReceiptStore: a delivery, keyed when idempotencyKey is not empty, that says where the signal went (cleat#4340). The signal goes to the END of the
+// addressed run's chain; see signal_forward.go and PostgresStore.DeliverSignalReceipt.
+func (s *MSSQLStore) DeliverSignalReceipt(ctx context.Context, workflowID, signalName, payload, idempotencyKey string) (SignalReceipt, error) {
+	// A delivery is ONE transaction, so a deadlock victim (1205) is retried as a whole: SQL Server has rolled the victim back entirely, the idempotency key claimed inside it with it, so a replay
+	// is exactly-once safe (withRollbackGuaranteedRetry retries only errors the server guarantees it undid). It is bounded, mssqlTxRetries retries with a doubling delay, and a delivery that
+	// is still a victim after that returns the error as it always would have: the loop ends because the budget does, not because the deadlock stops.
+	//
+	// This exists because one delivery in 96 was chosen as a victim in CI's race test (cleat#4340) and the cause was never found: it did not reproduce in about 100 local runs, so the locking
+	// argument that said it could not happen was wrong in a way nobody has seen the inside of.
+	var receipt SignalReceipt
+	err := withRollbackGuaranteedRetry(ctx, "deliver signal", mssqlTxRetries, mssqlTxRetryDelay, func() error {
+		var err error
+		receipt, err = s.deliverSignalReceiptOnce(ctx, workflowID, signalName, payload, idempotencyKey)
+		return err
+	})
+	if err != nil {
+		return SignalReceipt{}, err
+	}
+	return receipt, nil
+}
+
+// deliverSignalReceiptOnce is one attempt: the whole delivery in one transaction.
+func (s *MSSQLStore) deliverSignalReceiptOnce(ctx context.Context, workflowID, signalName, payload, idempotencyKey string) (SignalReceipt, error) {
+	// An UNLOCKED read of the chain's end, before the transaction so its second connection is not held while this call holds one; lockChainEnd checks it again under the lock.
+	hint, err := latestRunInChain(ctx, workflowID, s.successorOfRun)
+	if err != nil {
+		return SignalReceipt{}, fmt.Errorf("deliver signal: resolve the chain: %w", err)
 	}
 
 	tx, err := s.beginTxWithContext(ctx)
 	if err != nil {
-		return false, fmt.Errorf("deliver signal: begin: %w", err)
+		return SignalReceipt{}, fmt.Errorf("deliver signal: begin: %w", err)
 	}
 	defer tx.Rollback()
 
-	// expires_at from the CONFIGURED TTL, not the column default.
-	//
-	// idempotency_keys.expires_at defaults to now() + 7 days, and the
-	// store's idempotencyKeyTTL defaults to 720 hours. The start path sets
-	// it explicitly; this one did not when it was added in cleat#1266, so a
-	// SIGNAL token silently stopped working after 7 days while the
-	// configured and documented lifetime was 30 -- a retry on day 8 would
-	// be delivered a second time, which is the whole thing the token exists
-	// to prevent.
-	//
-	// Same shape as cleat#1261, where cleanup deleted at created_at + 7
-	// days against the same 720h default and swept LIVE keys 23 days early:
-	// idempotency that stops working long before it says it does, silently,
-	// because nothing compares the two numbers.
-	res, err := tx.ExecContext(ctx, `
+	if idempotencyKey != "" {
+
+		// expires_at from the CONFIGURED TTL, not the column default.
+		//
+		// idempotency_keys.expires_at defaults to now() + 7 days, and the
+		// store's idempotencyKeyTTL defaults to 720 hours. The start path sets
+		// it explicitly; this one did not when it was added in cleat#1266, so a
+		// SIGNAL token silently stopped working after 7 days while the
+		// configured and documented lifetime was 30 -- a retry on day 8 would
+		// be delivered a second time, which is the whole thing the token exists
+		// to prevent.
+		//
+		// Same shape as cleat#1261, where cleanup deleted at created_at + 7
+		// days against the same 720h default and swept LIVE keys 23 days early:
+		// idempotency that stops working long before it says it does, silently,
+		// because nothing compares the two numbers.
+		res, err := tx.ExecContext(ctx, `
 		INSERT INTO idempotency_keys (key_hash, workflow_id, expires_at, tenant_id)
 		SELECT @p1, @p2, DATEADD(SECOND, @p4, SYSUTCDATETIME()), @p3
 		WHERE NOT EXISTS (
@@ -62,22 +86,61 @@ func (s *MSSQLStore) DeliverSignalIdempotent(ctx context.Context, workflowID, si
 			WHERE key_hash = @p1 AND tenant_id = @p3
 		)
 	`, signalIdempotencyHash(idempotencyKey), workflowID, s.tenantID,
-		int(s.idempotencyKeyTTL.Seconds()))
-	if err != nil {
-		return false, fmt.Errorf("deliver signal: claim idempotency key: %w", err)
-	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return false, fmt.Errorf("deliver signal: rows affected: %w", err)
-	}
-	if n == 0 {
-		return true, tx.Commit()
+			int(s.idempotencyKeyTTL.Seconds()))
+		if err != nil {
+			return SignalReceipt{}, fmt.Errorf("deliver signal: claim idempotency key: %w", err)
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return SignalReceipt{}, fmt.Errorf("deliver signal: rows affected: %w", err)
+		}
+		if n == 0 {
+			return SignalReceipt{Replay: true}, tx.Commit()
+		}
 	}
 
-	if err := s.deliverSignalTx(ctx, tx, workflowID, signalName, payload); err != nil {
-		return false, err
+	to, err := s.deliverForwardedTx(ctx, tx, workflowID, hint, signalName, payload)
+	if err != nil {
+		// The idempotency key claimed above rolls back with this transaction, so a refused delivery does not spend the token.
+		return SignalReceipt{}, err
 	}
-	return false, tx.Commit()
+	// The key is recorded against the run that HOLDS the signal (cleat#4340). It was claimed above against the addressed run, which for a forwarded signal is a completed run the retention sweep
+	// deletes, and a sweep deletes the keys of the runs it removes: the key would go while the signal still sits on a live run, and a retry under it would deliver the signal a second time.
+	if idempotencyKey != "" && to != workflowID {
+		if _, err := tx.ExecContext(ctx, `UPDATE idempotency_keys SET workflow_id = @p1 WHERE key_hash = @p2 AND tenant_id = @p3`, to, signalIdempotencyHash(idempotencyKey), s.tenantID); err != nil {
+			return SignalReceipt{}, fmt.Errorf("deliver signal: record the key against the run that holds the signal: %w", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return SignalReceipt{}, err
+	}
+	return receiptFor(workflowID, to), nil
+}
+
+// deliverForwardedTx stores a signal on the END of the chain the addressed run belongs to, under the lock that orders it against that run's continue-as-new (cleat#4340). The run's row is taken
+// with UPDLOCK, which a transaction holds to its end, so a continue that wants the row waits for this delivery and the carry-over that follows it sees the signal.
+func (s *MSSQLStore) deliverForwardedTx(ctx context.Context, tx *sql.Tx, workflowID, hint, signalName, payload string) (string, error) {
+	end, err := lockChainEnd(workflowID, hint,
+		func(run string) (string, bool, error) {
+			var status string
+			switch err := tx.QueryRowContext(ctx, `SELECT status FROM workflow_instances WITH (UPDLOCK, ROWLOCK) WHERE id = @p1 AND tenant_id = @p2`, run, s.tenantID).Scan(&status); {
+			case errors.Is(err, sql.ErrNoRows):
+				return "", false, nil
+			case err != nil:
+				return "", false, fmt.Errorf("deliver signal: lock the run: %w", err)
+			}
+			return status, true, nil
+		},
+		func(run string) (string, error) {
+			return successorScan(tx.QueryRowContext(ctx, `SELECT id FROM workflow_instances WHERE continued_from = @p1 AND tenant_id = @p2`, run, s.tenantID))
+		})
+	if err != nil {
+		return "", err
+	}
+	if err := s.deliverSignalTx(ctx, tx, end, signalName, payload); err != nil {
+		return "", refusalFor(err, workflowID, end)
+	}
+	return end, nil
 }
 
 func (s *MSSQLStore) deliverSignalTx(ctx context.Context, tx *sql.Tx, workflowID, signalName, payload string) error {
@@ -130,7 +193,7 @@ func (s *MSSQLStore) deliverSignalTx(ctx context.Context, tx *sql.Tx, workflowID
 	res, err := tx.ExecContext(ctx, `
 		INSERT INTO workflow_signals (workflow_id, signal_name, payload, tenant_id)
 		SELECT @p1, @p2, @p3, @p4
-		WHERE EXISTS (SELECT 1 FROM workflow_instances WHERE id = @p1 AND tenant_id = @p4)
+		WHERE EXISTS (SELECT 1 FROM workflow_instances WHERE id = @p1 AND tenant_id = @p4 AND status NOT IN ('done', 'cancelled'))
 	`, workflowID, signalName, encodeJSONPayload(payload), s.tenantID)
 	if err != nil {
 		if isMSSQLSignalsWorkflowFKViolation(err) {
@@ -141,7 +204,15 @@ func (s *MSSQLStore) deliverSignalTx(ctx context.Context, tx *sql.Tx, workflowID
 	if n, err := res.RowsAffected(); err != nil {
 		return fmt.Errorf("deliver signal: rows affected: %w", err)
 	} else if n == 0 {
-		return ErrWorkflowNotFound
+		// Nothing was written: no run of this tenant by this id, or a SETTLED one (cleat#4340). See signalRefusal.
+		var status string
+		switch err := tx.QueryRowContext(ctx, `SELECT status FROM workflow_instances WHERE id = @p1 AND tenant_id = @p2`, workflowID, s.tenantID).Scan(&status); {
+		case errors.Is(err, sql.ErrNoRows):
+			return ErrWorkflowNotFound
+		case err != nil:
+			return fmt.Errorf("deliver signal: classify refusal: %w", err)
+		}
+		return signalRefusal(workflowID, status, true)
 	}
 
 	// Scoped for the same reason as the INSERT above: without it, delivering
@@ -425,11 +496,12 @@ func (s *MSSQLStore) StartChildWorkflowAtomic(ctx context.Context, childID, pare
 
 	// The same encoder every other event_history writer calls (cleat#2328;
 	// see PostgresStore.StartChildWorkflowAtomic). MSSQL does not support
-	// encryption at rest -- s.encryptSensitivePayloads is always false here,
-	// so this is a no-op transform today -- but routing through it anyway
-	// means there is exactly one place that builds the payload column and
-	// the payload_encoding column, rather than a second hand-rolled copy
-	// that would need to be found again if MSSQL ever gains encryption.
+	// encryption at rest: WithEncryption refuses to enable it (cleat#3906),
+	// so s.encryptSensitivePayloads is false here and this is a no-op
+	// transform. Routing through it anyway means there is exactly one place
+	// that builds the payload column and the payload_encoding column, rather
+	// than a second hand-rolled copy that would need to be found again if
+	// MSSQL ever gains encryption.
 	// The checksum above is computed BEFORE this call, over the plaintext
 	// event, for the same reason encodeEventForStorage's doc gives: it must
 	// match what VerifyWorkflowEvents recomputes from the decrypted record.
@@ -475,15 +547,17 @@ func (s *MSSQLStore) StartChildWorkflowAtomic(ctx context.Context, childID, pare
 func (s *MSSQLStore) GetChildResult(ctx context.Context, runID string) (ChildOutcome, error) {
 	// Resolve the chain first -- see PostgresStore.GetChildResult for why: a
 	// child that continued as new leaves its first run 'done' with an empty
-	// result, and that is the run the parent holds the id of (cleat#955).
-	runID, err := terminalRunID(ctx, runID, s.successorOfRun)
-	if err != nil {
-		return ChildOutcome{}, err
-	}
+	// result, and that is the run the parent holds the id of (cleat#955). And
+	// ask for a successor again after the row is read (cleat#4069).
+	return readChildOutcomeFollowingTheChain(ctx, runID, s.successorOfRun, s.readChildOutcome)
+}
+
+// readChildOutcome reads ONE run's row and says what it settled as. It does not follow the chain.
+func (s *MSSQLStore) readChildOutcome(ctx context.Context, runID string) (ChildOutcome, error) {
 	var result string
 	var status string
 	var errMsg sql.NullString
-	err = s.db.QueryRowContext(ctx, `
+	err := s.db.QueryRowContext(ctx, `
 		SELECT ISNULL(result, '{}'), status, error_msg FROM workflow_instances WHERE id = @p1
 	`, runID).Scan(&result, &status, &errMsg)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -780,6 +854,9 @@ func (s *MSSQLStore) GetPendingUpdateRequests(ctx context.Context, workflowID st
 			return nil, err
 		}
 		req.Payload = decodeJSONPayload(req.Payload)
+		// cleat#3929: a result is JSON text, compacted on every dialect; SQL
+		// Server was the only reader that handed back the caller's spacing.
+		req.Result = compactJSONString(req.Result)
 		requests = append(requests, req)
 	}
 	return requests, rows.Err()

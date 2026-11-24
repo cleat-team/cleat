@@ -69,7 +69,7 @@ func (s *apiServer) searchSealedQueryState(w http.ResponseWriter, r *http.Reques
 		s.writeError(w, http.StatusUnprocessableEntity, err.Error())
 		return true
 	case err != nil:
-		s.writeListWorkflowsError(w, err)
+		s.writeListWorkflowsError(w, r, err)
 		return true
 	}
 

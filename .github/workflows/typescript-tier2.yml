@@ -1,0 +1,514 @@
+name: TypeScript Tier 2
+
+# The TypeScript guest (cleat#3825) is IN DEVELOPMENT and NOT SUPPORTED: see tiers.yaml. This job is where its
+# toolchain is provisioned and its tests run, on Linux, which is where nothing was measured before it existed (the
+# prototype ran on macOS arm64 only, and no Linux javy binary had ever been executed).
+#
+# NOT A REQUIRED CHECK: TypeScript Tier 2 (Linux x86_64)
+# It is not to be added to any ruleset: tier 2 must RUN and may fail, so it is deliberately not in tiers.yaml's
+# required_contexts. It also has no merge_group trigger, for the same reason: nothing here gates a merge.
+#
+# Every download is verified against packages/cleat-ts/toolchain.lock BEFORE it is run (bootstrap.sh), and a mismatch
+# fails the job closed. The tests declare the toolchain with CLEAT_REQUIRE_TOOLCHAINS=typescript, so a setup step that
+# stopped installing it turns every test into a FAILURE, not a skip; and scripts/check-skip-budget.sh holds the skip
+# count at zero.
+#
+# Only x86_64 is run here. The repository's workflows use no arm runner, and an arm64 number from this job would be an
+# invention; arm64 is measured separately and labelled as container-measured where it is reported.
+
+# cleat#3073: surfaces the triggering activity type in the run's display title, so a PR body edit's run set is
+# distinguishable from the one it shares a SHA with. Full rationale in ci.yml, next to the same expression.
+run-name: >-
+  ${{ github.event.pull_request.title || github.event.head_commit.message || github.ref_name }}${{ github.event.action && format(' [{0}]', github.event.action) || '' }}
+
+on:
+  push:
+    branches: [main, develop]
+    paths:
+      - "packages/cleat-ts/**"
+      - "crates/cleat-js-plugin/**"
+      - "crates/cleat-js-link/**"
+      - "crates/cleat-sdk/**"
+      - "crates/cleat-macro/**"
+      - "cmd/cleat-ts-check/**"
+      - "cmd/cleat-ts-meta/**"
+      - "cmd/cleat-ts-run/**"
+      - "cmd/cleat/**"
+      - "tests/typescript/**"
+      - "examples/ts-workflow/**"
+      - "wasm/**"
+      - "python-sdk/**"
+      - "go.mod"
+      - "go.sum"
+      - ".github/workflows/typescript-tier2.yml"
+  pull_request:
+    branches: [main, develop, "release/**"]
+    paths:
+      - "packages/cleat-ts/**"
+      - "crates/cleat-js-plugin/**"
+      - "crates/cleat-js-link/**"
+      - "crates/cleat-sdk/**"
+      - "crates/cleat-macro/**"
+      - "cmd/cleat-ts-check/**"
+      - "cmd/cleat-ts-meta/**"
+      - "cmd/cleat-ts-run/**"
+      - "cmd/cleat/**"
+      - "tests/typescript/**"
+      - "examples/ts-workflow/**"
+      - "wasm/**"
+      - "python-sdk/**"
+      - "go.mod"
+      - "go.sum"
+      - ".github/workflows/typescript-tier2.yml"
+    # `edited` is required, not decorative: it is the activity type a BASE CHANGE fires. Without it a PR retargeted
+    # onto this branch filter would never trigger this workflow at all. scripts/check-workflow-pr-triggers.sh guards this.
+    types: [opened, synchronize, reopened, edited]
+  workflow_dispatch:
+
+# Least-privilege token: this job only checks out code and runs tests.
+permissions:
+  contents: read
+
+concurrency:
+  # Every push gets its own group; PR runs share one per ref and supersede. A BODY EDIT MUST NOT SUPERSEDE THE RUN IT
+  # RACES (cleat#1688, cleat#3809): an `edited` that did not change the base gets its own group, so it cancels nothing.
+  # ONE LINE ON PURPOSE: scripts/check-workflow-concurrency.sh reads the single line matching `^\s*group:`.
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && (github.event.action == 'edited' && !github.event.changes.base && github.run_id || github.ref) || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  # Declares the toolchain to the tests themselves, so a missing one is a failure here and a skip on a laptop.
+  # `postgres` is declared too: the worker smoke tests need a database, and an unset DSN must be a failure here. `python`
+  # likewise: the numbers test builds a Python twin with componentize-py, and an absent one must fail, not drop the language.
+  CLEAT_REQUIRE_TOOLCHAINS: typescript,postgres,python
+  # 127.0.0.1, not localhost -- see test-go's identical comment on the ::1-vs-IPv4 hazard.
+  CLEAT_TEST_POSTGRES: postgres://postgres:sandbox@127.0.0.1:5432/postgres?sslmode=disable
+  TS_NUMBERS_OUT: ${{ github.workspace }}/typescript-numbers.json
+
+jobs:
+  typescript-tier2:
+    name: TypeScript Tier 2 (Linux x86_64)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    # A plain PostgreSQL service for the worker smoke tests (tests/typescript/typescript_worker_test.go), which run a real
+    # cleat-worker as a host process against a scratch database each. Same image pin as the other jobs here.
+    services:
+      postgres:
+        image: mirror.gcr.io/library/postgres:16.14@sha256:95206741a5b214807675e14165369d05b93a9cf692223b616d07cca227e74b0b
+        env:
+          POSTGRES_PASSWORD: sandbox
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Setup Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      # wasm32-wasip1 is the target the Javy plugin and the linker's input are built for.
+      - name: Setup Rust + wasm32-wasip1
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip1
+
+      - name: Setup Node
+        uses: actions/setup-node@v7
+        with:
+          # 24, not 20: the URL conformance tests use Node as the oracle, and Node 20's URL parser predates two changes to the
+          # specification (see needNodeAtLeast in tests/typescript/typescript_conformance_test.go).
+          node-version: "24"
+
+      # The verifier's own negative control runs first, every time: a bootstrap whose refusal cannot be shown to
+      # work is the thing this step exists to prevent.
+      - name: Prove the checksum verifier refuses a tampered file
+        run: packages/cleat-ts/bootstrap.sh --self-test
+
+      # Downloads javy, checks its sha256 against toolchain.lock BEFORE decompressing or executing it, runs
+      # `npm ci` and checks the pinned esbuild. Exit 2 (UNMEASURED) on a mismatch: nothing was executed.
+      - name: Install the pinned toolchain
+        run: packages/cleat-ts/bootstrap.sh
+
+      # componentize-py builds the Python twin of the numbers workflow. The version and every file's sha256 live in
+      # python-sdk/componentize-py-requirements.txt, which scripts/install-componentize-py.sh installs with --require-hashes and checks.
+      - name: Setup Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Install the pinned componentize-py
+        run: bash scripts/install-componentize-py.sh
+
+      - name: Tests (the TypeScript tests, toolchain declared)
+        run: |
+          set -o pipefail
+          go test -count=1 -timeout 20m -json ./tests/typescript/... | tee typescript-tier2-report.json > /dev/null
+
+      # The harness's OWN test (cleat#3828), run under node rather than go test because the harness is TypeScript: it
+      # builds an example's module, runs it through cleat-ts-run, and then runs a deliberately broken workflow that MUST
+      # fail. Both directions or neither: a harness that never detected a failure would pass the first assertion alone.
+      # Separate from the Go step because `go test`'s counts below are keyed on Go test names and cannot see these.
+      - name: The test harness runs a built module and fails a broken one
+        run: |
+          set -o pipefail
+          # examples/ts-workflow/workflow.test.ts is the one place the commands in docs/tutorials/typescript-quick-start.md run:
+          # it builds the example with `cleat build --target ts` and runs it through the harness. build-documented-examples.sh
+          # cannot, because that job has no TypeScript toolchain (its KNOWN_BROKEN entry for the example says so).
+          node --test packages/cleat-ts/testing.test.ts examples/ts-workflow/workflow.test.ts | tee node-harness-report.txt
+          # The COUNT, not the exit status. `node --test` exits 0 when nothing ran: measured, a file with no tests
+          # exits 0 and so does one whose tests all skip. Without this the step would pass on a harness whose tests had
+          # been deleted or disabled -- the same class as this job's Go floor below, and the same reason for it.
+          #
+          # THE EXPECTED COUNT IS DERIVED, NOT WRITTEN DOWN (cleat#3827), as the Go floor below is. This was a hand-pinned 15
+          # ("the thirteen in testing.test.ts and the two in examples/ts-workflow/workflow.test.ts"), already one short of the
+          # sixteen that existed, and with ten groups each adding harness tests it was one line in ten PRs.
+          # `declared` counts the top-level `test(` / `test.skip(` / `test.todo(` declarations in the same two files the
+          # command above runs, so a test that is skipped or disabled is declared and NOT passed, and fails here.
+          # WHAT IT GIVES UP: a test registered in a loop or under a helper (not at column 0 as `test(`) is invisible to the
+          # count, which only weakens the floor and never fails the job; a deleted test leaves both numbers, and shows in
+          # the diff. The sanity constant is set once and is not raised when tests are added: a grep that matched nothing
+          # (a renamed helper, a moved file) would otherwise read 0 >= 0 and pass.
+          # `|| true`: grep exits 1 when NOTHING matched, and under `-e` plus pipefail that would end the step here, silently, before
+          # the sanity line below could say why.
+          declared=$({ grep -hcE '^test(\.[a-z]+)?\(' packages/cleat-ts/testing.test.ts examples/ts-workflow/workflow.test.ts || true; } | awk '{s += $1} END {print s + 0}')
+          [ "$declared" -ge 15 ] || { echo "found only $declared test declarations in the two harness test files (at least 15 exist); the grep is broken, so the count below would be 0 >= 0" >&2; exit 1; }
+          # `|| true` for the same reason as the grep above: a summary with no `pass` line made this pipeline exit 1 and end the step
+          # silently under -e and pipefail, before `${passed:-no}` below could say so.
+          passed=$(grep -E '^.{0,3}pass [0-9]+$' node-harness-report.txt | grep -oE '[0-9]+$' || true)
+          [ -n "$passed" ] && [ "$passed" -ge "$declared" ] || { echo "only ${passed:-no} of the $declared declared harness tests passed; every one must run" >&2; exit 1; }
+
+      # The three numbers, not the exit status: a package that did not build contributes nothing to a count keyed
+      # on "Test", and `go test` exits 0 for a pattern that matches nothing.
+      # `if: always()`, because without it a FAILING test hides its own name: the step above pipes -json into a report
+      # and sends stdout to /dev/null, so this step is the only thing that ever prints which test failed -- and it was
+      # skipped exactly when that mattered (cleat#3826: the first run of a new test failed, and the log showed only
+      # "Process completed with exit code 1").
+      # cleat#4051: the full-package report on the PostgreSQL job, uploaded so a PACKAGE failure (a timeout names the test that was
+      # running only in this file, and the runner is gone by the time anyone looks) can be read. `if: always()` because a failing
+      # step is exactly when it is wanted. No run_attempt in the name and overwrite, as in ci.yml's report uploads (cleat#3955): a
+      # partial re-run must replace, not fork, the one report for this sha.
+      - name: Upload the report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: typescript-tier2-postgres-report-${{ github.sha }}
+          path: typescript-tier2-report.json
+          overwrite: true
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Read the result (failures, package failures, tests that ran)
+        if: always()
+        run: |
+          f=typescript-tier2-report.json
+          fail=$(grep '"Action":"fail"' "$f" | grep -c '"Test":' || true)
+          pkgfail=$(grep '"Action":"fail"' "$f" | grep -vc '"Test":' || true)
+          passed=$(grep '"Action":"pass"' "$f" | grep -c '"Test":' || true)
+          # Top-level tests only: a subtest name carries a "/", and counting subtests let a floor of N be met while a top-level test
+          # had not run at all (cleat-review, on #3888).
+          top=$(grep '"Action":"pass"' "$f" | grep '"Test":' | grep -vc '"Test":"[^"]*/' || true)
+          echo "tests failed: $fail, package failures: $pkgfail, tests passed: $passed (top-level: $top)"
+          # A `go test -timeout` expiry is a PACKAGE failure with no failing test (cleat#4051), and the counts above cannot tell it from
+          # a build failure. Say so, and name what was running: the report is uploaded now, but the log is what gets read first.
+          if grep -q '"Output":"panic: test timed out' "$f"; then
+            echo "TIMED OUT (go test -timeout, not a test failure):" >&2
+            grep -oE '"Output":"panic: test timed out after [^\\]*' "$f" | head -1 | sed 's/"Output":"//' >&2
+            grep -A12 'running tests:' "$f" | grep -oE '"Output":"\\t\\t[^\\]+' | sed 's/"Output":"\\t\\t/  running: /' | sort -u >&2
+          fi
+          # NAME the failures. The counts above say something broke; without this line the reader still has to re-run
+          # the job to find out WHICH test, because the report itself is on a runner that is already gone and nothing
+          # uploads it (cleat#3826: "tests failed: 1" with no name, twice).
+          if [ "$fail" != 0 ]; then
+            grep '"Action":"fail"' "$f" | grep '"Test":' \
+              | sed -E 's/.*"Test":"([^"]+)".*/  FAILED: \1/' | sort -u | head -20 >&2
+            # AND WHAT IT SAID. A name with no message costs another full cycle to interpret -- measured here, three
+            # times: the name alone does not say whether the segment failed to stop, stopped at the wrong place, or
+            # never started. Shell only, no heredoc: a heredoc's terminator must sit at column 0 and a YAML block
+            # scalar requires every line to be indented, so the two cannot both be satisfied.
+            failed_tests=$(grep '"Action":"fail"' "$f" | grep -oE '"Test":"[^"]+"' | sed 's/"Test":"//; s/"$//' | sort -u)
+            for t in $failed_tests; do
+              echo "--- output for $t ---" >&2
+              # -F, AND A TWO-STEP SUBSTITUTION RATHER THAN ONE GREEDY ONE. Both fix defects this printer shipped with
+              # (cleat#3995), and both were measured on a fixture rather than reasoned about:
+              #   - without -F a Go subtest named TestX/case[1] matches nothing, because [1] is a character class, so a
+              #     correct heading printed over an empty body -- which reads as "the test said nothing";
+              #   - '(.*)' is greedy, so it captured to the LAST quote on the line and every output line ended with
+              #     '","OutputType":"frame'.
+              grep -F "\"Test\":\"$t\"" "$f" | grep '"Action":"output"' \
+                | sed -E 's/^.*"Output":"/  | /; s/(","OutputType":"[^"]*)?"\}$//' | head -30 >&2
+            done
+          fi
+          if [ "$pkgfail" != 0 ]; then
+            grep '"Action":"fail"' "$f" | grep -v '"Test":' | head -3 >&2
+          fi
+          [ "$fail" = 0 ] && [ "$pkgfail" = 0 ] || { echo "a failure or a package that did not build" >&2; exit 1; }
+          # TestTypeScriptLabelIsRoutedToWasmtime and the binding-inventory tests need no toolchain; the build tests,
+          # the `cleat build --target ts` test, the conformance tests, the host-call binding tests and the worker smoke
+          # tests do (the last also need PostgreSQL), and the numbers test needs componentize-py where declared.
+          #
+          # THE EXPECTED COUNT IS DERIVED, NOT WRITTEN DOWN (cleat#3827). This line used to be a hand-pinned floor that had
+          # to be raised by whoever added a test: it was 14 while 15 tests existed, 30 while 36 existed, and 36 while 39
+          # existed, each caught by review and not by the job, and with ten groups adding tests in parallel it was one
+          # line in ten PRs, so every merge left the others conflicting. What the floor is FOR is "every test that exists
+          # ran and passed", and `go test -list` says what exists, so the step asks it.
+          #
+          # SAME PACKAGE PATTERN, SAME ENVIRONMENT as the test step above: `./tests/typescript/...`, no -tags, the
+          # workflow-level env, CGO as the runner has it. Otherwise `listed` and `top` would measure different packages.
+          # Re-derive by hand with: go test -list '^Test' ./tests/typescript/... | grep -c '^Test'  (NOT grep for
+          # '^func Test': the dialect guard's fixtures contain such lines in raw strings, so it over-counts).
+          #
+          # WHAT THIS CATCHES: a test that stopped running. `top` counts passes, so a test that skips, does not build or is
+          # filtered out leaves `top` below `listed`.
+          # WHAT IT GIVES UP: a test file compiled out by a build tag, or deleted, disappears from BOTH counts, which the
+          # hand-pinned number would have flagged. A deletion is visible in the diff; a build tag added to a file is not
+          # caught here, so a reviewer of such a change has to ask.
+          # THE SECOND LINE IS NOT DECORATION: if `-list` printed nothing (a build failure, a bad pattern), `top >= listed`
+          # would read 0 >= 0 and pass. The sanity constant is set once and is not raised when tests are added.
+          listed=$(go test -list '^Test' ./tests/typescript/... | grep -c '^Test' || true)
+          [ "$listed" -ge 30 ] || { echo "go test -list found only $listed top-level tests (at least 30 exist); the listing is broken, so the count below would be 0 >= 0" >&2; exit 1; }
+          [ "$top" -ge "$listed" ] || { echo "only $top of the $listed top-level tests in tests/typescript passed; every one that exists must run" >&2; exit 1; }
+          [ -s "$TS_NUMBERS_OUT" ] || { echo "the numbers test passed but wrote no $TS_NUMBERS_OUT" >&2; exit 1; }
+
+      - name: "Skip budget (zero, because the toolchain was declared)"
+        run: scripts/check-skip-budget.sh typescript-tier2 typescript-tier2-report.json
+
+      # The first Linux numbers for this guest. Not a performance claim: one run on a shared runner, reported as
+      # measured, with the machine it ran on.
+      - name: Record what was measured on this runner
+        run: |
+          {
+            echo "### TypeScript guest, Linux $(uname -m), measured on a shared GitHub runner"
+            echo
+            echo "- kernel: $(uname -sr); cpu: $(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2 | xargs)"
+            echo "- javy: $(packages/cleat-ts/.tools/javy --version) (archive pinned in toolchain.lock, verified before running)"
+            echo "- esbuild: $(packages/cleat-ts/node_modules/.bin/esbuild --version); rustc: $(rustc --version); go: $(go version | cut -d' ' -f3)"
+            echo "- plugin (initialised): $(stat -c %s packages/cleat-ts/.work/cleat-plugin.wasm) bytes"
+            for m in hello sleeper; do
+              [ -f "packages/cleat-ts/.work/$m.wasm" ] && echo "- module $m: $(stat -c %s "packages/cleat-ts/.work/$m.wasm") bytes"
+            done
+            echo
+            echo '### Startup and replay, TypeScript vs its Go and Python twins (in-process, wasmtime, compiled module cached)'
+            echo
+            echo 'Indicative only: one run on a shared runner. `best_round_ms`/`worst_round_ms` give the spread across three interleaved rounds.'
+            echo
+            echo '```json'
+            cat "$TS_NUMBERS_OUT"
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+  # ------------------------------------------------------------------------------------------------------------------
+  # MySQL: the worker tests that need a database, on mysql (cleat#3988, part b).
+  #
+  # NOT A REQUIRED CHECK: TypeScript Tier 2 (Linux x86_64, MySQL)
+  # (the same reason as the job above: tier 2 must run and may fail, so it gates no merge)
+  #
+  # ONE JOB PER DIALECT, not a matrix, deliberately: scripts/check-workflow-guards.py inspects literal `services:` blocks
+  # (floating image tags, MSSQL_MEMORY_LIMIT_MB, the MySQL health start period of cleat#3936), and a matrix that templated
+  # `image:` would route around every one of those checks. The service block below is copied VERBATIM from multi-db-ci.yml.
+  # The jobs run in parallel with the one above, so the wall time is the slowest of them and not their sum.
+  #
+  # ONLY the tests that touch the database run here, and tests/typescript/typescript_dialect_jobs_test.go fails if one is missing from the lists below. The other tests are not dialect-dependent, and running them three
+  # times would triple the cost and prove nothing new. The CLEAT_TS_DIALECT selection is tests/typescript/typescript_dialect_test.go.
+  # ------------------------------------------------------------------------------------------------------------------
+  typescript-tier2-mysql:
+    name: TypeScript Tier 2 (Linux x86_64, MySQL)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      # Overrides the workflow-level list: this job declares ITS database, so an unset or unreachable DSN is a failure here.
+      CLEAT_REQUIRE_TOOLCHAINS: typescript,mysql
+      CLEAT_TS_DIALECT: mysql
+      CLEAT_TEST_MYSQL: root:cleat@tcp(127.0.0.1:3306)/cleat?tls=false&parseTime=true
+
+    services:
+      mysql:
+        image: mirror.gcr.io/library/mysql:8.4.11@sha256:b3b90af2a6552ae30c266fdb7d5dd55f3afb72404bb78d37fe8a23eb857fd3fb
+        env:
+          MYSQL_ROOT_PASSWORD: cleat
+          MYSQL_DATABASE: cleat
+        options: >-
+          --health-cmd "mysqladmin ping -h 127.0.0.1 -u root -pcleat"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 15
+          --health-start-period 60s
+          --publish 3306:3306
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Setup Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      - name: Setup Rust + wasm32-wasip1
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip1
+
+      - name: Setup Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+
+      # Verifies javy against toolchain.lock BEFORE running it, and exits 2 (UNMEASURED) on a mismatch.
+      - name: Install the pinned toolchain
+        run: packages/cleat-ts/bootstrap.sh
+
+      - name: "Tests (the worker tests, on mysql)"
+        run: |
+          set -o pipefail
+          go test -count=1 -timeout 20m -json -run '^(TestTypeScriptRunsAllThreeSuspensionsOnARealWorker|TestTypeScriptRunSurvivesAKillInTheMiddleOfExecution|TestTypeScriptDeferSegmentRunsOnARealWorker|TestTypeScriptLocksOnARealWorker|TestTypeScriptCronSchedulesOnARealWorker|TestTypeScriptContinueAsNewOnARealWorker|TestTypeScriptContinueAsNewStartsTheNextRunOnTheRequestedVersion)$' ./tests/typescript/ | tee typescript-tier2-mysql-report.json > /dev/null
+
+      # By NAME, not by count: a -run pattern that matches nothing exits 0 and prints ok, and this job's whole subject is that a
+      # green can hide a test that never ran. Both tests must have PASSED, on this dialect.
+      # `if: always()`, for the reason the job above gives (cleat#3980): the step before sends stdout to /dev/null, so this
+      # step is the only thing that ever prints WHICH test failed, and it must not be skipped exactly when that matters.
+      - name: Read the result (failures, package failures, every database-backed test passed)
+        if: always()
+        run: |
+          f=typescript-tier2-mysql-report.json
+          fail=$(grep '"Action":"fail"' "$f" | grep -c '"Test":' || true)
+          pkgfail=$(grep '"Action":"fail"' "$f" | grep -vc '"Test":' || true)
+          echo "tests failed: $fail, package failures: $pkgfail"
+          # NAME the failures, and print what each said: the report is on a runner that is already gone.
+          if [ "$fail" != 0 ]; then
+            grep '"Action":"fail"' "$f" | grep '"Test":' \
+              | sed -E 's/.*"Test":"([^"]+)".*/  FAILED: \1/' | sort -u | head -20 >&2
+            failed_tests=$(grep '"Action":"fail"' "$f" | grep -oE '"Test":"[^"]+"' | sed 's/"Test":"//; s/"$//' | sort -u)
+            for t in $failed_tests; do
+              echo "--- output for $t ---" >&2
+              # -F and a non-greedy-equivalent substitution: see the PostgreSQL step's comment above for the two
+              # defects (cleat#3995) -- a subtest name is not a pattern, and a greedy capture swallows OutputType.
+              grep -F "\"Test\":\"$t\"" "$f" | grep '"Action":"output"' \
+                | sed -E 's/^.*"Output":"/  | /; s/(","OutputType":"[^"]*)?"\}$//' | head -30 >&2
+            done
+          fi
+          if [ "$pkgfail" != 0 ]; then
+            grep '"Action":"fail"' "$f" | grep -v '"Test":' | head -3 >&2
+          fi
+          [ "$fail" = 0 ] && [ "$pkgfail" = 0 ] || { echo "a failure or a package that did not build" >&2; exit 1; }
+          for t in TestTypeScriptRunsAllThreeSuspensionsOnARealWorker TestTypeScriptRunSurvivesAKillInTheMiddleOfExecution TestTypeScriptDeferSegmentRunsOnARealWorker TestTypeScriptLocksOnARealWorker TestTypeScriptCronSchedulesOnARealWorker TestTypeScriptContinueAsNewOnARealWorker TestTypeScriptContinueAsNewStartsTheNextRunOnTheRequestedVersion; do
+            grep '"Action":"pass"' "$f" | grep -q "\"Test\":\"$t\"" || { echo "$t did not pass on mysql" >&2; exit 1; }
+          done
+
+      - name: "Skip budget (zero, because the database was declared)"
+        run: scripts/check-skip-budget.sh typescript-tier2-mysql typescript-tier2-mysql-report.json
+
+  # ------------------------------------------------------------------------------------------------------------------
+  # SQL Server: the worker tests that need a database, on mssql (cleat#3988, part b).
+  #
+  # NOT A REQUIRED CHECK: TypeScript Tier 2 (Linux x86_64, SQL Server)
+  # (the same reason as the job above: tier 2 must run and may fail, so it gates no merge)
+  #
+  # ONE JOB PER DIALECT, not a matrix, deliberately: scripts/check-workflow-guards.py inspects literal `services:` blocks
+  # (floating image tags, MSSQL_MEMORY_LIMIT_MB, the MySQL health start period of cleat#3936), and a matrix that templated
+  # `image:` would route around every one of those checks. The service block below is copied VERBATIM from multi-db-ci.yml.
+  # The jobs run in parallel with the one above, so the wall time is the slowest of them and not their sum.
+  #
+  # ONLY the tests that touch the database run here, and tests/typescript/typescript_dialect_jobs_test.go fails if one is missing from the lists below. The other tests are not dialect-dependent, and running them three
+  # times would triple the cost and prove nothing new. The CLEAT_TS_DIALECT selection is tests/typescript/typescript_dialect_test.go.
+  # ------------------------------------------------------------------------------------------------------------------
+  typescript-tier2-mssql:
+    name: TypeScript Tier 2 (Linux x86_64, SQL Server)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      # Overrides the workflow-level list: this job declares ITS database, so an unset or unreachable DSN is a failure here.
+      CLEAT_REQUIRE_TOOLCHAINS: typescript,mssql
+      CLEAT_TS_DIALECT: mssql
+      CLEAT_TEST_MSSQL: sqlserver://sa:CleatTest123!@127.0.0.1:1433?database=master
+
+    services:
+      mssql:
+        # Pinned by digest 2026-08-07; `2022-latest` is a moving tag and this is
+        # a required check. Full rationale, the re-derive commands, and why the
+        # `ancestor=` filters had to move with it: tier1-gate.yml's mssql
+        # service. Bump all six sites together or `Lint` fails the PR.
+        image: mcr.microsoft.com/mssql/server@sha256:ba4c8329f48fb8f02e1416be6a930ebfd71268caee78aa985f3af4315e457c89
+        env:
+          ACCEPT_EULA: Y
+          MSSQL_SA_PASSWORD: CleatTest123!
+          # SQL Server on Linux sizes its buffer pool to 80% of VISIBLE host
+          # memory by default, with no awareness it shares a runner with
+          # Postgres, MySQL and everything else in this job (cleat#2101).
+          # 2048 is comfortably above what the tier1/multi-db fixtures need
+          # and caps the worst case where several mssql services land on one
+          # runner at once. Bump all six sites together, per the note above.
+          MSSQL_MEMORY_LIMIT_MB: "2048"
+        options: >-
+          --health-cmd "/opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P 'CleatTest123!' -Q 'SELECT 1' -C"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 15
+          --health-start-period 30s
+          --publish 1433:1433
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Setup Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      - name: Setup Rust + wasm32-wasip1
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip1
+
+      - name: Setup Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+
+      # Verifies javy against toolchain.lock BEFORE running it, and exits 2 (UNMEASURED) on a mismatch.
+      - name: Install the pinned toolchain
+        run: packages/cleat-ts/bootstrap.sh
+
+      - name: "Tests (the worker tests, on mssql)"
+        run: |
+          set -o pipefail
+          go test -count=1 -timeout 20m -json -run '^(TestTypeScriptRunsAllThreeSuspensionsOnARealWorker|TestTypeScriptRunSurvivesAKillInTheMiddleOfExecution|TestTypeScriptDeferSegmentRunsOnARealWorker|TestTypeScriptLocksOnARealWorker|TestTypeScriptCronSchedulesOnARealWorker|TestTypeScriptContinueAsNewOnARealWorker|TestTypeScriptContinueAsNewStartsTheNextRunOnTheRequestedVersion)$' ./tests/typescript/ | tee typescript-tier2-mssql-report.json > /dev/null
+
+      # By NAME, not by count: a -run pattern that matches nothing exits 0 and prints ok, and this job's whole subject is that a
+      # green can hide a test that never ran. Both tests must have PASSED, on this dialect.
+      # `if: always()`, for the reason the job above gives (cleat#3980): the step before sends stdout to /dev/null, so this
+      # step is the only thing that ever prints WHICH test failed, and it must not be skipped exactly when that matters.
+      - name: Read the result (failures, package failures, every database-backed test passed)
+        if: always()
+        run: |
+          f=typescript-tier2-mssql-report.json
+          fail=$(grep '"Action":"fail"' "$f" | grep -c '"Test":' || true)
+          pkgfail=$(grep '"Action":"fail"' "$f" | grep -vc '"Test":' || true)
+          echo "tests failed: $fail, package failures: $pkgfail"
+          # NAME the failures, and print what each said: the report is on a runner that is already gone.
+          if [ "$fail" != 0 ]; then
+            grep '"Action":"fail"' "$f" | grep '"Test":' \
+              | sed -E 's/.*"Test":"([^"]+)".*/  FAILED: \1/' | sort -u | head -20 >&2
+            failed_tests=$(grep '"Action":"fail"' "$f" | grep -oE '"Test":"[^"]+"' | sed 's/"Test":"//; s/"$//' | sort -u)
+            for t in $failed_tests; do
+              echo "--- output for $t ---" >&2
+              # -F and a non-greedy-equivalent substitution: see the PostgreSQL step's comment above for the two
+              # defects (cleat#3995) -- a subtest name is not a pattern, and a greedy capture swallows OutputType.
+              grep -F "\"Test\":\"$t\"" "$f" | grep '"Action":"output"' \
+                | sed -E 's/^.*"Output":"/  | /; s/(","OutputType":"[^"]*)?"\}$//' | head -30 >&2
+            done
+          fi
+          if [ "$pkgfail" != 0 ]; then
+            grep '"Action":"fail"' "$f" | grep -v '"Test":' | head -3 >&2
+          fi
+          [ "$fail" = 0 ] && [ "$pkgfail" = 0 ] || { echo "a failure or a package that did not build" >&2; exit 1; }
+          for t in TestTypeScriptRunsAllThreeSuspensionsOnARealWorker TestTypeScriptRunSurvivesAKillInTheMiddleOfExecution TestTypeScriptDeferSegmentRunsOnARealWorker TestTypeScriptLocksOnARealWorker TestTypeScriptCronSchedulesOnARealWorker TestTypeScriptContinueAsNewOnARealWorker TestTypeScriptContinueAsNewStartsTheNextRunOnTheRequestedVersion; do
+            grep '"Action":"pass"' "$f" | grep -q "\"Test\":\"$t\"" || { echo "$t did not pass on mssql" >&2; exit 1; }
+          done
+
+      - name: "Skip budget (zero, because the database was declared)"
+        run: scripts/check-skip-budget.sh typescript-tier2-mssql typescript-tier2-mssql-report.json

@@ -29,9 +29,11 @@ import (
 	_ "net/http/pprof" //nolint:gosec // G108: registers /debug/pprof on DefaultServeMux, which this worker never serves. The API listener builds its own http.NewServeMux; pprof gets a separate opt-in listener behind --pprof-addr, empty by default. See the comment at the pprof server below.
 	"os"
 	"os/signal"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -365,12 +367,22 @@ func signalPluginWorkflow(ctx context.Context, store engine.WorkflowStore, workf
 		scoped = scopeToTenant(store, tid.String())
 	}
 	if err := scoped.DeliverSignal(ctx, workflowID, signalName, payload); err != nil {
-		if errors.Is(err, engine.ErrWorkflowNotFound) {
-			return plugin.ErrWorkflowNotFound
-		}
-		return err
+		return translateSignalDeliveryError(err)
 	}
 	return nil
+}
+
+// translateSignalDeliveryError maps a store's refusal to the plugin vocabulary. A run that is no longer open (cleat#4340) is TERMINAL for a plugin exactly as a missing one is: nothing will ever
+// read a signal sent to it, so a retry cannot succeed and an awaiter registered for it must be dropped (plugins/eventtriggers unregisters on plugin.ErrWorkflowNotFound and retries anything
+// else). It therefore wraps plugin.ErrWorkflowNotFound, and keeps the store's own error in the chain so the message still says which state refused.
+func translateSignalDeliveryError(err error) error {
+	switch {
+	case errors.Is(err, engine.ErrWorkflowNotFound):
+		return plugin.ErrWorkflowNotFound
+	case errors.Is(err, engine.ErrWorkflowNotOpen):
+		return fmt.Errorf("%w: %w", plugin.ErrWorkflowNotFound, err)
+	}
+	return err
 }
 
 // signalPluginWorkflowWithAuth is signalPluginWorkflow plus the
@@ -408,13 +420,10 @@ func signalPluginWorkflowWithAuth(ctx context.Context, store engine.WorkflowStor
 		return err
 	}
 	if !signalCallerAllowed(callers, pluginName) {
-		return fmt.Errorf("signal auth denied: %s not in allowed_signals of %s", pluginName, workflowID)
+		return fmt.Errorf("signal auth denied: %s not in allowed_signals of %s: %w", pluginName, workflowID, plugin.ErrSignalNotAllowed)
 	}
 	if err := scoped.DeliverSignal(ctx, workflowID, signalName, payload); err != nil {
-		if errors.Is(err, engine.ErrWorkflowNotFound) {
-			return plugin.ErrWorkflowNotFound
-		}
-		return err
+		return translateSignalDeliveryError(err)
 	}
 	return nil
 }
@@ -436,7 +445,20 @@ func payloadKeyVersionsFromFlags() payloadKeyVersions {
 }
 
 func main() {
+	// The precompile child. Matched on os.Args[1] BEFORE flag parsing and before anything else main does, so no flag, workflow, HTTP route or environment reaches it: only an exec of this binary with
+	// exactly this first argument does, and the parent that does it is a worker with --component-precompile (see engine.ComponentPrecompile).
+	if len(os.Args) > 1 && os.Args[1] == engine.SerializeComponentArg {
+		os.Exit(engine.RunSerializeComponentChild(os.Args[2:], os.Stdout, os.Stderr))
+	}
+
 	flag.Parse()
+
+	// The residency policy, validated where an operator reads it. On by default (--resident-max-runs is 8; 0 turns it off), and a nonsense policy is refused either way.
+	residencyCfg, residencyErr := residencyConfigFromFlags()
+	if residencyErr != nil {
+		fmt.Fprintln(os.Stderr, residencyErr)
+		os.Exit(1)
+	}
 
 	if err := validateReclaimTimeout(*reclaimTimeout, *heartbeatInterval); err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -451,6 +473,10 @@ func main() {
 		os.Exit(1)
 	}
 	if err := validateQueryStateSearchWindow(*queryStateSearchWindow); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	if err := validateWasmInstanceTimeout(*wasmInstanceTimeout); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
@@ -485,8 +511,12 @@ func main() {
 	resolveDBURL()
 
 	// Set WASM output buffer size before any Runtime is created.
-	engine.OutBufSize = uint32(*wasmOutputBufferSize)
-	engine.MaxWasmStringLen = uint32(*wasmMaxStringLen)
+	applyEngineGlobalsFromFlags()
+	if *wasmMaxResponseBytes < 1 || *wasmMaxResponseBytes > 1<<24-1 {
+		// A result word carries the response length in 24 bits (packDurableCallResult), so a larger value would wrap and report a short response.
+		log.Fatalf("--wasm-max-response-bytes must be between 1 and %d, got %d", 1<<24-1, *wasmMaxResponseBytes)
+	}
+	engine.MaxHostCallResponseBytes = uint32(*wasmMaxResponseBytes)
 
 	workerID := generateWorkerID()
 
@@ -1995,15 +2025,24 @@ func main() {
 
 	// Now that the schema (and its policies) exist, check that the *runtime*
 	// connection is actually subject to them. See engine.CheckRLSEnforced:
-	// GetWorkflowByID and ListWorkflows have no application-level tenant
-	// filter, so on a connection that bypasses RLS they return every tenant's
-	// data. Every configuration cleat shipped connected as a superuser.
+	// The plain workflow listing and count are scoped by row-level security
+	// alone, so on a connection that bypasses RLS a plain list returns every
+	// tenant's data. Every configuration cleat shipped connected as a superuser.
 	//
 	// cleat#3772, owner decision D82: a connection that is not subject to the policies and would serve
 	// MORE THAN ONE tenant refuses to start, whatever --require-auth and -rls-check say. The check runs
 	// under -rls-check=off too, because the guard is not the warning that flag silences: it is what stops
 	// two tenants sharing a connection that keeps them apart by nothing (cleat#3740). One tenant is the
 	// single-tenant laptop configuration the tutorial documents, and still starts.
+	// rlsBypassReasons and rlsBypassRole are what the check below found, kept
+	// so the dispatch loop can notice a second tenant appearing AFTER startup --
+	// the window the startup refusal cannot close (cleat#3773). Empty reasons
+	// means this connection is subject to the policies (or that could not be
+	// determined), and nothing below may act on that.
+	var (
+		rlsBypassReasons []engine.RLSBypassReason
+		rlsBypassRole    string
+	)
 	if *driver == "postgres" {
 		reasons, rErr := engine.CheckRLSEnforced(ctx, db)
 		switch {
@@ -2017,6 +2056,10 @@ func main() {
 				logger.InfoContext(context.Background(), "row-level security is enforced on this connection", "worker_id", workerID)
 			}
 		default:
+			rlsBypassReasons = reasons
+			if role, roleErr := engine.CurrentRole(ctx, db); roleErr == nil {
+				rlsBypassRole = role
+			}
 			// FAILS OPEN when the tenants cannot be counted, as the check beside it does when it cannot tell
 			// whether the connection bypasses (above), and for the same reason: refusing on an inconclusive
 			// read makes a database hiccup fatal. It matters only where nothing below would refuse anyway
@@ -2253,28 +2296,12 @@ func main() {
 	// former wazero fallback was removed rather than kept as a degraded
 	// option -- it could not fence a compute-bound guest, so silently
 	// running on it was a safety-relevant degradation no operator asked for.
-	//
-	// Bound wasmtime execution: epoch interruption (wall-clock, primary
-	// defense against a runaway workflow hanging the worker — see
-	// IMPROVEMENT-PLAN.md 1.5) and StoreLimits (memory/table/instance
-	// ceilings), plus optional fuel-based instruction metering when
-	// --wasm-instruction-limit is set.
-	wasmtimeMemoryLimitBytes := int64(0) // 0 => wasmtimeBackend applies its own default
-	if *wasmMemoryMaxMB > 0 {
-		wasmtimeMemoryLimitBytes = int64(*wasmMemoryMaxMB) * 1024 * 1024
-	}
-	wt, wasmtimeErr := engine.NewWasmtimeBackend(ctx,
-		engine.WithWasmtimeExecutionTimeout(*wasmInstanceTimeout),
-		engine.WithWasmtimeInstructionLimit(uint64(*wasmInstructionLimit)),
-		engine.WithWasmtimeMemoryLimits(wasmtimeMemoryLimitBytes, 0, 0),
-		engine.WithWasmtimeDeferBudget(*wasmDeferBudget),
-		engine.WithWasmtimeModuleCacheMaxEntries(*wasmModuleCacheMaxEntries),
-		engine.WithWasmtimeModuleCacheMaxBytes(int64(*wasmModuleCacheMaxMB)<<20),
-		// Without this the backend writes to slog.Default(), and this worker's
-		// configured handler never sees the one record that says whether a
-		// KILLED workflow's defers ran. See WithWasmtimeLogger.
-		engine.WithWasmtimeLogger(logger),
-	)
+	// The options it is built with are wasmtimeOptionsFromFlags.
+	wt, wasmtimeErr := engine.NewWasmtimeBackend(ctx, append(wasmtimeOptionsFromFlags(logger),
+		// Counts each component a failed precompile child sent back to this worker to compile itself (cleat_component_precompile_fallbacks_total).
+		engine.WithWasmtimeComponentPrecompileFallbackHook(func(reason string) {
+			metricsInstance.RecordComponentPrecompileFallback(context.Background(), reason)
+		}))...)
 	if wasmtimeErr != nil {
 		logger.ErrorContext(context.Background(), "wasmtime backend failed to initialize; wasmtime is the only WASM backend cleat has, there is no fallback", "worker_id", workerID, "error", wasmtimeErr)
 		os.Exit(1)
@@ -2292,14 +2319,16 @@ func main() {
 	}
 
 	var wasmtimeBackend engine.WasmBackend = wt
-	logger.InfoContext(context.Background(), "wasmtime backend registered for Go WASM", "worker_id", workerID, "instance_timeout", *wasmInstanceTimeout, "wall_clock_ceiling", *wasmWallClockCeiling, "instruction_limit", *wasmInstructionLimit, "memory_limit_bytes", wasmtimeMemoryLimitBytes, "defer_budget", *wasmDeferBudget)
+	logger.InfoContext(context.Background(), "wasmtime backend registered for Go WASM", "worker_id", workerID, "instance_timeout", *wasmInstanceTimeout, "wall_clock_ceiling", *wasmWallClockCeiling, "instruction_limit", *wasmInstructionLimit, "memory_limit_bytes", wasmtimeMemoryLimitBytes(*wasmMemoryMaxMB), "defer_budget", *wasmDeferBudget)
 
 	// Start PostgreSQL NOTIFY listener for low-latency dispatch wake-up.
 	var notifyCh chan struct{}
 	var closeNotify func()
+	var residentForNudge atomic.Pointer[engine.ResidentSet]
 	if *driver == "postgres" && *notifyChannel != "" {
 		notifyCh = make(chan struct{}, 1)
-		closeNotify = startNotifyListener(*dbURL, *notifyChannel, notifyCh, logger)
+		// The resident set is built later in main (it needs the worker), so the listener reaches it through a pointer set then. Nil until then, and Nudge is nil-safe.
+		closeNotify = startNotifyListener(*dbURL, *notifyChannel, notifyCh, func() { residentForNudge.Load().Nudge() }, logger)
 		defer closeNotify()
 	}
 
@@ -2477,12 +2506,18 @@ func main() {
 	}
 
 	w := &Worker{
-		Metrics:                          metricsInstance,
-		id:                               workerID,
-		logger:                           logger,
-		store:                            store,
-		heartbeatStore:                   heartbeatStore,
-		storeTenantID:                    defaultTenantID,
+		Metrics:          metricsInstance,
+		id:               workerID,
+		logger:           logger,
+		store:            store,
+		heartbeatStore:   heartbeatStore,
+		storeTenantID:    defaultTenantID,
+		rlsBypassReasons: rlsBypassReasons,
+		rlsBypassRole:    rlsBypassRole,
+		exitFunc:         os.Exit,
+		countTenantsForIsolation: func(ctx context.Context) (int, error) {
+			return engine.CountTenants(ctx, db)
+		},
 		storeFactory:                     factory,
 		taskQueues:                       taskQueues,
 		claimAcrossTenants:               *claimAcrossTenants,
@@ -2586,16 +2621,34 @@ func main() {
 	// of database contact either, and its reaper must not act on anyone
 	// else's staleness until it has.
 	w.lastDBTrouble.Store(time.Now().UnixNano())
+	w.startedAt = time.Now()
 
 	// Initialize memory-aware concurrency controller.
 	monitor := NewMemoryMonitor(*memoryCheckInterval)
 	monitor.logger = logger
+	// Say what the backstop is measuring against, once: --memory-soft-limit and --memory-hard-limit are fractions of this total (cleat#4431).
+	if mi := monitor.Read(); mi.Source != "" {
+		logger.Info("memory monitor", "source", mi.Source, "total_mib", mi.TotalBytes>>20, "used_mib", mi.UsedBytes>>20,
+			"soft_limit", *memorySoftLimit, "hard_limit", *memoryHardLimit)
+	}
 	mc := NewMemoryController(monitor, store, workerID, *concurrency, *memorySoftLimit, *memoryHardLimit)
 	mc.logger = logger
 	if err := mc.LoadEstimates(ctx, defaultTenantID); err != nil {
 		logger.WarnContext(context.Background(), "failed to load memory estimates", "worker_id", workerID, "error", err)
 	}
 	w.memoryController = mc
+	residencyCfg.Pressure = mc.Pressure
+	residencyCfg.Metrics = metricsInstance
+	resident, residentErr := engine.NewResidentSet(residencyCfg)
+	if residentErr != nil {
+		logger.ErrorContext(context.Background(), "residency is misconfigured", "worker_id", workerID, "error", residentErr)
+		os.Exit(1)
+	}
+	w.resident = resident
+	residentForNudge.Store(resident)
+	// A held run pins the compiled code it executes even after the cache evicts it, so when the cache evicts a module or component every held run of it is sent back:
+	// a hold never outlives its code's cache entry (engine.ResidentSet.EvictCode). Backends made per execution share the cache, so the root backend is enough.
+	resident.AttachToCodeCache(wt)
 	metricsInstance.RecordDesiredConcurrency(context.Background(), int64(*concurrency))
 	globalWorker = w
 
@@ -2628,6 +2681,7 @@ func main() {
 			store:                  store,
 			worker:                 w,
 			maxBodySize:            *maxBodySize,
+			maxDefinitionBodySize:  *maxDefinitionBodySize,
 			maxPriorityMagnitude:   *maxPriorityMagnitude,
 			queryStateSearchWindow: *queryStateSearchWindow,
 			db:                     db,
@@ -3140,4 +3194,130 @@ func flushRetryWindowAdvice(flushWindow, reclaim, heartbeat time.Duration) strin
 			"and a retry that succeeds after that loses its fence. Raise --reclaim-timeout to at least "+
 			"%v to make the extra retrying reachable, or ignore this if nothing else reaps for this deployment.",
 		flushWindow, window, flushWindow)
+}
+
+// applyEngineGlobalsFromFlags sets the engine's two package-level knobs from their flags: the WASM output buffer and the maximum string length. They have no
+// option path (the engine reads them from package variables), so this is the only place a worker applies them. It is a function, called unconditionally from
+// main, so that a test can run the same code main runs: until cleat#4212 these were two bare assignments in a function no test executes, which is how a
+// 32 KiB override of the engine's 1 MiB survived unnoticed (cleat#4171).
+func applyEngineGlobalsFromFlags() {
+	engine.OutBufSize = uint32(*wasmOutputBufferSize)
+	engine.MaxWasmStringLen = uint32(*wasmMaxStringLen)
+}
+
+// wasmtimeOptionsFromFlags is every option the worker builds its wasmtime backend with, taken from the flags.
+//
+// Bound wasmtime execution: epoch interruption (wall-clock, primary defense against a runaway workflow hanging the worker -- see IMPROVEMENT-PLAN.md 1.5)
+// and StoreLimits (memory/table/instance ceilings), plus optional fuel-based instruction metering when --wasm-instruction-limit is set.
+// The memory limit is the flag's value, or the engine's default (256 MiB) for 0: see wasmtimeMemoryLimitBytes.
+func wasmtimeOptionsFromFlags(logger *slog.Logger) []engine.WasmtimeOption {
+	return append(append(componentPrecompileOptionFromFlags(logger), compileHeadroomOptionFromFlags(logger)...), []engine.WasmtimeOption{
+		engine.WithWasmtimeExecutionTimeout(*wasmInstanceTimeout),
+		engine.WithWasmtimeInstructionLimit(uint64(*wasmInstructionLimit)),
+		engine.WithWasmtimeMemoryLimits(wasmtimeMemoryLimitBytes(*wasmMemoryMaxMB), 0, 0),
+		engine.WithWasmtimeDeferBudget(*wasmDeferBudget),
+		engine.WithWasmtimeModuleCacheMaxEntries(*wasmModuleCacheMaxEntries),
+		engine.WithWasmtimeModuleCacheMaxBytes(int64(*wasmModuleCacheMaxMB) << 20),
+		// Without this the backend writes to slog.Default(), and this worker's
+		// configured handler never sees the one record that says whether a
+		// KILLED workflow's defers ran. See WithWasmtimeLogger.
+		engine.WithWasmtimeLogger(logger),
+	}...)
+}
+
+// componentPrecompileOptionFromFlags compiles components in a child process unless --component-precompile=false (ON by default since 0.6.0). The child is THIS binary, found with
+// os.Executable and resolved once, here, to an absolute path: never a PATH lookup, so it is guaranteed to be the same build and the same engine-config code. If the path cannot be resolved the
+// feature is left off and says so; the worker compiles in-process, as it always did.
+func componentPrecompileOptionFromFlags(logger *slog.Logger) []engine.WasmtimeOption {
+	if !*componentPrecompile {
+		return nil
+	}
+	exe, err := os.Executable()
+	if err == nil {
+		exe, err = filepath.EvalSymlinks(exe)
+	}
+	if err != nil || !filepath.IsAbs(exe) {
+		logger.Warn("--component-precompile is on but the worker's own executable could not be resolved to an absolute path; compiling in-process", "error", err)
+		return nil
+	}
+	if msg := oomGroupWarning(readOOMGroup()); msg != "" {
+		logger.Warn(msg)
+	}
+	var total uint64
+	if mi := NewMemoryMonitor(*memoryCheckInterval).Read(); mi.Source != "" {
+		total = mi.TotalBytes
+	}
+	parallel, reason, err := resolvePrecompileParallel(*componentPrecompileParallel, total)
+	if err != nil {
+		logger.Warn("--component-precompile is on but its parallel setting is not usable; compiling in-process", "error", err)
+		return nil
+	}
+	logger.Info("component precompile in a child process is ON", "parallel_compilation", parallel, "why", reason, "child", exe)
+	return []engine.WasmtimeOption{engine.WithWasmtimeComponentPrecompile(engine.ComponentPrecompile{
+		Executable:          exe,
+		Timeout:             *componentPrecompileTimeout,
+		RefusalWindow:       *componentPrecompileRefusalWindow,
+		MemoryLimitBytes:    total,
+		ParallelCompilation: parallel,
+	})}
+}
+
+// cgroupOOMGroupPath says whether an out-of-memory kill takes the whole cgroup (1) or one process (0).
+const cgroupOOMGroupPath = "/sys/fs/cgroup/memory.oom.group"
+
+func readOOMGroup() (string, error) {
+	b, err := os.ReadFile(cgroupOOMGroupPath)
+	return string(b), err
+}
+
+// oomGroupWarning is the warning --component-precompile owes when the container's out-of-memory kill is per-cgroup. The refusal path assumes the kernel kills the child and leaves the worker;
+// under memory.oom.group=1 it kills every process in the cgroup, the worker included, so the child's death is not survivable and nothing in the worker can protect it. Measured on Docker, where the
+// file reads 0 (cleat-review3 on #4398); that Kubernetes sets it to 1 by default on cgroup v2 (and that the kubelet's singleProcessOOMKill restores per-process kills) is from its documentation and
+// was NOT measured here. An unreadable file (no cgroup v2, not Linux) says nothing: the caller gets "".
+func oomGroupWarning(content string, readErr error) string {
+	if readErr != nil || strings.TrimSpace(content) != "1" {
+		return ""
+	}
+	return "--component-precompile is on, and this container's memory.oom.group is 1: an out-of-memory kill takes EVERY process in the cgroup, this worker included, so a killed " +
+		"compile child is not survivable and the worker's refusal cannot protect it. The flag lowers the steady state only; the memory limit must hold the compile peak"
+}
+
+// precompileParallelFloorBytes is the memory limit under which the precompile child compiles with parallel_compilation off. Measured on one machine (cleat-77,
+// component-compile-config-2026-11-23): the Python compile's high-water was +490 MiB parallel and +265 MiB not, so under 1 GiB the parallel peak plus the worker's
+// baseline leaves little headroom. It is a default for a judgement, not a measured threshold; --component-precompile-parallel overrides it.
+const precompileParallelFloorBytes = 1 << 30
+
+// resolvePrecompileParallel turns --component-precompile-parallel into the child's setting and says why, so the log names the reason. totalBytes is the worker's memory limit as the
+// memory monitor reads it (the cgroup limit, else the host's), 0 if it could not be read.
+func resolvePrecompileParallel(mode string, totalBytes uint64) (parallel bool, why string, err error) {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "true":
+		return true, "set by --component-precompile-parallel=true", nil
+	case "false":
+		return false, "set by --component-precompile-parallel=false", nil
+	case "auto", "":
+		switch {
+		case totalBytes == 0:
+			return true, "auto: the memory limit could not be read, so the default (parallel) applies", nil
+		case totalBytes < precompileParallelFloorBytes:
+			return false, fmt.Sprintf("auto: the memory limit is %d MiB, under 1 GiB, so the child compiles without parallelism to lower its peak", totalBytes>>20), nil
+		default:
+			return true, fmt.Sprintf("auto: the memory limit is %d MiB, at least 1 GiB", totalBytes>>20), nil
+		}
+	}
+	return false, "", fmt.Errorf("--component-precompile-parallel=%q: want auto, true or false", mode)
+}
+
+// wasmtimeMemoryLimitBytes is the per-store memory limit to hand the wasmtime backend, in bytes: the flag's value, or the engine's own default
+// for 0 (so what is logged and what is enforced are the same number, never an ambiguous 0).
+//
+// A stock worker passes the flag's default, which is engine.DefaultWasmtimeMemoryLimitBytes (256 MiB, cleat#4171). This used to pass
+// a limit only when the flag was explicitly SET, because the flag's old default (32) was not a decision and passing it would have pinned
+// a C# guest to 32 MiB, under the 52 MiB it needs to start; the engine raised the default for C# through a per-language floor. The
+// default is now above every runtime's minimum, so the floor and the gate were both removed.
+func wasmtimeMemoryLimitBytes(mb int) int64 {
+	if mb > 0 {
+		return int64(mb) * 1024 * 1024
+	}
+	return engine.DefaultWasmtimeMemoryLimitBytes
 }

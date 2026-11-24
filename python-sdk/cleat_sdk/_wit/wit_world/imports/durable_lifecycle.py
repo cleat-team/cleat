@@ -17,7 +17,21 @@ from componentize_py_types import Result, Ok, Err, Some
 def durable_defer(desc: str) -> str:
     """
     Register a deferred cleanup action to run on workflow exit.
-    Returns the generated defer ID.
+    
+    ``ok`` carries the generated defer ID. ``err`` is a stop or a failure --
+    see ``outcomes``. The stop is how a run that was killed mid-flight is cut
+    short so its defers can run (cleat#4079): the host consumes the
+    registration, answers ``err(suspended)``, and the guest must unwind
+    without making another call. A guest must store its closure BEFORE
+    calling this, because the stop arrives after the host has recorded the
+    registration and the cleanup is what the segment exists to run.
+    
+    This returned a bare ``string`` until cleat#4079: a lifted string has no
+    bits to carry a stop, so there was nowhere to say "stop here" at a
+    registration. A component built against the old signature is refused on
+    its first call, before the host runs.
+    
+    Raises: `componentize_py_types.Err(wit_world.imports.outcomes.CallFailure)`
     """
     raise NotImplementedError
 def durable_defer_phase(on: bool) -> None:

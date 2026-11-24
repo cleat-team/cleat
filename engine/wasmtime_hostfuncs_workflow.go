@@ -526,6 +526,21 @@ func (b *wasmtimeBackend) registerCleatSideEffect(linker *wasmtime.Linker) error
 	})
 }
 
+func (b *wasmtimeBackend) registerCleatSideEffectRecorded(linker *wasmtime.Linker) error {
+	if b.skipIfNotNeeded("cleat_side_effect_recorded") {
+		return nil
+	}
+
+	return b.hostFunc(linker, "env", "cleat_side_effect_recorded", func(caller *wasmtime.Caller,
+		outPtr, outMaxLen int32) int64 {
+		buf, _, err := callerMemBuf(caller)
+		if err != nil {
+			return errBadParamInt64
+		}
+		return b.handler.SideEffectRecorded(ctxWithMem(context.Background(), buf), nil, uint32(outPtr), uint32(outMaxLen))
+	})
+}
+
 func (b *wasmtimeBackend) registerCleatRegisterQueryHandler(linker *wasmtime.Linker) error {
 	if b.skipIfNotNeeded("cleat_register_query_handler") {
 		return nil

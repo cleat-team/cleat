@@ -20,17 +20,7 @@ import (
 // requireDB is like testStore but skips if CLEAT_TEST_DB is unavailable.
 func requireDB(t *testing.T) (*sql.DB, *engine.PostgresStore) {
 	t.Helper()
-	if testing.Short() {
-		t.Skip("Skipping in short mode")
-	}
-	db, err := sql.Open("postgres", ClusterDSN())
-	if err != nil {
-		t.Skipf("Skipping: no database available: %v", err)
-	}
-	if err := db.Ping(); err != nil {
-		t.Skipf("Skipping: cannot ping database: %v", err)
-	}
-	t.Cleanup(func() { db.Close() })
+	db := openClusterDB(t)
 	return db, engine.NewPostgresStore(db, TestQueue1, TestQueue2, TestQueue3)
 }
 
@@ -216,10 +206,12 @@ func TestKillPostgresAndRestart(t *testing.T) {
 	defer db.Exec(`DELETE FROM workflow_instances WHERE id = $1`, runID)
 
 	// Kill postgres container.
-	killCmd := exec.Command("docker", "stop", "cleat-postgres")
-	if out, err := killCmd.CombinedOutput(); err != nil {
-		t.Skipf("Skipping: cannot stop postgres container: %v\n%s", err, string(out))
-	}
+	// Three states, and they are different questions (cleat#3952): no
+	// container at all means this job does not run the cluster stack (Tier 2
+	// has docker and no compose stack, and tests/cluster is in tier2.packages),
+	// which is a skip naming the environment; a container that exists but will
+	// not stop means the test's premise is broken, which is a failure.
+	stopPostgresContainer(t)
 
 	// Wait briefly, then restart.
 	time.Sleep(2 * time.Second)
