@@ -345,14 +345,14 @@ func (s *PostgresStore) CompleteCallIntent(ctx context.Context, workflowID strin
 	// safe for a plain (non-locking) EXISTS read.
 	res, err := tx.ExecContext(ctx, `
 		UPDATE event_history
-		SET response = $3, error = $4, payload = $5, checksum = $6, intent_at = NULL
+		SET response = $3, error = $4, payload = $5, checksum = $6, intent_at = NULL, created_at = $10
 		WHERE workflow_id = $1 AND step = $2 AND tenant_id = $7
 		  AND intent_at IS NOT NULL AND checksum IS NULL
 		  AND ($8 = '' OR EXISTS (
 		      SELECT 1 FROM workflow_leases WHERE id = $1 AND assigned_to = $8 AND generation = $9
 		  ))
 	`, workflowID, rec.Step, nullStr(stored.Response), nullStr(stored.Err), storedPayload,
-		checksum, s.tenantID, workerID, generation)
+		checksum, s.tenantID, workerID, generation, eventCreatedAt(rec))
 	if err != nil {
 		return fmt.Errorf("complete call intent: step %d: %w", rec.Step, err)
 	}
@@ -435,13 +435,13 @@ func (s *MySQLStore) CompleteCallIntent(ctx context.Context, workflowID string, 
 
 	res, err := tx.ExecContext(ctx, `
 		UPDATE event_history
-		SET response = ?, error = ?, payload = ?, checksum = ?, intent_at = NULL
+		SET response = ?, error = ?, payload = ?, checksum = ?, created_at = ?, intent_at = NULL
 		WHERE workflow_id = ? AND step = ? AND tenant_id = ?
 		  AND intent_at IS NOT NULL AND checksum IS NULL
 		  AND (? = '' OR EXISTS (
 		      SELECT 1 FROM workflow_instances WHERE id = ? AND assigned_to = ? AND generation = ?
 		  ))
-	`, nullStr(rec.Response), nullStr(rec.Err), nullStr(string(payload)), checksum,
+	`, nullStr(rec.Response), nullStr(rec.Err), nullStr(string(payload)), checksum, eventCreatedAt(rec),
 		workflowID, rec.Step, s.tenantID, workerID, workflowID, workerID, generation)
 	if err != nil {
 		return fmt.Errorf("complete call intent: step %d: %w", rec.Step, err)
@@ -528,14 +528,14 @@ func (s *MSSQLStore) CompleteCallIntent(ctx context.Context, workflowID string, 
 
 	res, err := tx.ExecContext(ctx, `
 		UPDATE event_history
-		SET response = @p3, error = @p4, payload = @p5, checksum = @p6, intent_at = NULL
+		SET response = @p3, error = @p4, payload = @p5, checksum = @p6, intent_at = NULL, created_at = @p12
 		WHERE workflow_id = @p1 AND step = @p2 AND tenant_id = @p7
 		  AND intent_at IS NOT NULL AND checksum IS NULL
 		  AND (@p8 = '' OR EXISTS (
 		      SELECT 1 FROM workflow_instances WHERE id = @p9 AND assigned_to = @p10 AND generation = @p11
 		  ))
 	`, workflowID, rec.Step, nullStr(rec.Response), nullStr(rec.Err), nullStr(string(payload)),
-		checksum, s.tenantID, workerID, workflowID, workerID, generation)
+		checksum, s.tenantID, workerID, workflowID, workerID, generation, eventCreatedAt(rec))
 	if err != nil {
 		return fmt.Errorf("complete call intent: step %d: %w", rec.Step, err)
 	}

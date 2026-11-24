@@ -236,7 +236,10 @@ func (s *MySQLStore) appendEventsInTxOpts(ctx context.Context, tx *sql.Tx, workf
 			error = IF(@cleat_pending, VALUES(error), error),
 			promise_result = IF(@cleat_pending, VALUES(promise_result), promise_result),
 			promise_error = IF(@cleat_pending, VALUES(promise_error), promise_error),
-			event_type = IF(@cleat_pending, VALUES(event_type), event_type)
+			event_type = IF(@cleat_pending, VALUES(event_type), event_type),
+			-- The answer's own time, under the same frozen guard (cleat#4465): the row keeps the await's START otherwise, and a replay's Now() is
+			-- made from this column. Last, because it only READS @cleat_pending like every line above it.
+			created_at = IF(@cleat_pending, VALUES(created_at), created_at)
 	`)
 	if err != nil {
 		return fmt.Errorf("append events in tx: prepare: %w", err)
