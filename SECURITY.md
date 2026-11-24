@@ -165,7 +165,7 @@ threat model assumes:
   `engine/imports.go` disagree). They cannot access the filesystem, network, environment
   variables, or system clock except through these host functions.
 - **Memory isolation**: Each WASM module has its own linear memory. The wasmtime
-  store enforces memory bounds (32 MiB per module by default,
+  store enforces memory bounds (256 MiB per module by default,
   `--wasm-memory-max-mb`); modules cannot read or write outside their
   allocated memory region.
 - **A second runtime, outside the worker**: [wazero](https://github.com/tetratelabs/wazero)

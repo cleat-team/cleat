@@ -62,7 +62,7 @@ func (s *apiServer) refusePluginDeps(w http.ResponseWriter, r *http.Request, nam
 	case errors.Is(err, engine.ErrPluginSourceUnavailable), errors.Is(err, engine.ErrOverrideNotRecordable):
 		s.writeJSON(w, http.StatusNotImplemented, map[string]string{"error": err.Error()})
 	default:
-		s.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		s.writeStoreError(w, r, err)
 	}
 	return true
 }

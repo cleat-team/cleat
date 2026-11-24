@@ -4,7 +4,7 @@ Provides the :class:`HostCalls` class that wraps all 29 WASM host function
 imports in Pythonic methods matching the patterns from:
 
 * Rust: ``crates/cleat-sdk/src/host_calls.rs``
-* AssemblyScript: ``packages/cleat-as/assembly/host-calls.ts``
+* AssemblyScript (SDK removed, cleat#4023; last at ``71026ace``): ``packages/cleat-as/assembly/host-calls.ts``
 * Java: ``crates/cleat-java/src/main/java/cleat/HostCalls.java``
 * ABI: ``ABI.md``
 
@@ -52,16 +52,13 @@ from typing import Any, TypeVar
 
 from .memory import (
     CALL_SUSPEND_SENTINEL,
-    OUT_BUF_SIZE,
     OUTPUT_OFFSET,
-    SCRATCH_BASE,
     SLEEP_STATUS_SUSPEND,
     SUSPEND_SENTINEL,
     decode_await_promise_result,
     decode_simple_result,
     decode_sleep_result,
     read_string,
-    write_string,
 )
 from .signal_envelope import decode_signal_envelope, encode_signal_envelope
 
@@ -134,6 +131,9 @@ try:
         durable_schedule_cron as _import_cleat_schedule_cron,
     )
     from wit_world.imports.durable_extended_lifecycle import (
+        SideEffectLookup_Recorded as _SideEffectLookupRecorded,
+    )
+    from wit_world.imports.durable_extended_lifecycle import (
         continue_as_new_versioned as _import_continue_as_new_versioned,
     )
     from wit_world.imports.durable_extended_lifecycle import (
@@ -141,6 +141,9 @@ try:
     )
     from wit_world.imports.durable_extended_lifecycle import (
         side_effect as _import_side_effect,
+    )
+    from wit_world.imports.durable_extended_lifecycle import (
+        side_effect_recorded as _import_side_effect_recorded,
     )
     from wit_world.imports.durable_fetch import (
         fetch as _import_fetch,
@@ -290,6 +293,11 @@ except ImportError:
 
     class _AwaitOutcomeTimedOut:  # type: ignore[no-redef]
         """Stand-in for ``await-outcome.timed-out`` outside the WASM runtime."""
+
+    class _SideEffectLookupRecorded:  # type: ignore[no-redef]
+        """Stand-in for ``side-effect-lookup.recorded`` outside the WASM runtime."""
+
+        value: str = ""
 
     class _SignalOutcomeReceived:  # type: ignore[no-redef]
         """Stand-in for ``signal-outcome.received`` outside the WASM runtime.
@@ -541,6 +549,37 @@ def _error_code_name(code: int) -> str:
 # Sentinel value meaning "wait indefinitely" for signal/promise waits.
 # Passed to the host as i64::MAX when no timeout is desired.
 INFINITE_TIMEOUT_MS: int = 9223372036854775807  # i64::MAX / 2^63 - 1
+
+
+def _seconds_to_timeout_ms(seconds: float | None) -> int:
+    """Seconds to the milliseconds a wait is given, without letting a POSITIVE timeout become 0.
+
+    ``int(seconds * 1000)`` truncates: ``0.0004`` is 0 ms, and a 0 in :meth:`HostCalls.await_signals_ms` means do not wait (cleat#4144),
+    so a caller who asked for a tenth of a millisecond would not wait at all. A positive value that would truncate to 0 is 1 ms, so a
+    positive timeout never becomes the value that means something else. A non-positive value is returned as the caller's own, unchanged
+    (:func:`_host_timeout_ms` turns it into the 0 the host is given), and one too large for the host saturates at
+    :data:`INFINITE_TIMEOUT_MS` instead of raising.
+    """
+    if seconds is None:
+        return INFINITE_TIMEOUT_MS
+    ms = seconds * 1000
+    if ms >= INFINITE_TIMEOUT_MS:
+        return INFINITE_TIMEOUT_MS
+    ms = int(ms)
+    if ms == 0 and seconds > 0:
+        return 1
+    return ms
+
+
+def _host_timeout_ms(timeout_ms: int | None) -> int:
+    """The timeout a wait hands the host: ``None`` waits without a limit, and 0 or less is 0, which means do not wait (cleat#4144).
+
+    The WIT's ``timeout-ms`` is a ``u64``. A negative Python int cannot be lowered into it: componentize-py's ``wit_dylib_pop_u64`` raises
+    ``OverflowError``, which is an uncatchable wasm trap, so the run fails (found in review of cleat#4189, measured on a real guest). So a
+    negative value is clamped to 0 HERE, at the one place the SDK hands a wait's timeout to the host, rather than relied on to be
+    refused by the host as it was before.
+    """
+    return INFINITE_TIMEOUT_MS if timeout_ms is None else max(timeout_ms, 0)
 
 
 # ========================================================================
@@ -1265,7 +1304,7 @@ class HostCalls:
 
     Reference implementations:
         * Rust: ``crates/cleat-sdk/src/host_calls.rs``
-        * AssemblyScript: ``packages/cleat-as/assembly/host-calls.ts``
+        * AssemblyScript (SDK removed, cleat#4023; last at ``71026ace``): ``packages/cleat-as/assembly/host-calls.ts``
         * Java: ``crates/cleat-java/src/main/java/cleat/HostCalls.java``
     """
 
@@ -1355,6 +1394,10 @@ class HostCalls:
             The previous scope as a JSON string (empty string if none was
             set).
         """
+        # A defer segment's body is refused here too (cleat#4079 audit), and like
+        # create_promise the refusal arrives as an empty string because the WIT
+        # function returns a plain string: no scope key is taken, and the guest
+        # reads an empty previous scope. A WIT change would carry it.
         prev_scope = _import_set_scope(object_type, instance_key)
 
         # Keep local scope in sync for _scoped_key compatibility.
@@ -2018,7 +2061,15 @@ class HostCalls:
         RuntimeError
             If the host reports an error from the fetch.
         """
-        result = _import_fetch(method, url, headers, body)
+        try:
+            result = _import_fetch(method, url, headers, body)
+        except _WitErr as err:
+            # ``err(call-failure)``: a stop unwinds, a host failure raises. This used
+            # to escape as the raw ``Err``, so a stop surfaced as an ordinary guest
+            # failure that user code could catch and swallow, and the workflow ran
+            # on past a call the engine had refused (cleat#4079).
+            _raise_call_failure("fetch", "host_fetch", err.value)
+            raise  # unreachable; _raise_call_failure always raises
         if isinstance(result, str):
             return result
         resp_len, err_code = decode_simple_result(result)
@@ -2033,7 +2084,7 @@ class HostCalls:
     # 12. await_signals — wait for signals
     # --------------------------------------------------------------------
 
-    def await_signals(self, signal_names: list[str], timeout_seconds: float) -> SignalResult:
+    def await_signals(self, signal_names: list[str], timeout_seconds: float | None) -> SignalResult:
         """Wait for one or more external signals, with a timeout in seconds.
 
         Compatible with Temporal/DBOS timeout conventions.
@@ -2045,11 +2096,15 @@ class HostCalls:
         ----------
         signal_names : list[str]
             List of signal names to wait for.
-        timeout_seconds : float
-            Maximum wait time in seconds.  Pass ``0`` or a negative
-            value to wait indefinitely (no timeout).  When waiting
-            indefinitely the host suspends the workflow until a matching
-            signal arrives.
+        timeout_seconds : float | None
+            Maximum wait time in seconds.  ``0`` or a negative value means
+            DO NOT WAIT: a signal that is already waiting is returned, and
+            otherwise the result is ``timed_out`` at once.  A positive value
+            below a millisecond waits 1 ms.  To wait without a limit pass
+            ``None`` (or :data:`INFINITE_TIMEOUT_MS` to
+            :meth:`await_signals_ms`); the host then suspends the workflow
+            until a matching signal arrives.  Before cleat#4144 a timeout of
+            ``0`` waited for ever.
 
         Returns
         -------
@@ -2064,9 +2119,9 @@ class HostCalls:
         RuntimeError
             If the host reports an error.
         """
-        return self.await_signals_ms(signal_names, int(timeout_seconds * 1000))
+        return self.await_signals_ms(signal_names, _seconds_to_timeout_ms(timeout_seconds))
 
-    def await_signals_ms(self, signal_names: list[str], timeout_ms: int) -> SignalResult:
+    def await_signals_ms(self, signal_names: list[str], timeout_ms: int | None) -> SignalResult:
         """Wait for one or more external signals, with a timeout in milliseconds.
 
         Prefer the seconds-based :meth:`await_signals` variant.
@@ -2078,11 +2133,13 @@ class HostCalls:
         ----------
         signal_names : list[str]
             List of signal names to wait for.
-        timeout_ms : int
-            Maximum wait time in milliseconds.  Pass ``0`` or a negative
-            value to wait indefinitely (no timeout).  When waiting
-            indefinitely the host suspends the workflow until a matching
-            signal arrives.
+        timeout_ms : int | None
+            Maximum wait time in milliseconds.  ``0`` or a negative value
+            means DO NOT WAIT: a signal that is already waiting is returned,
+            and otherwise the result is ``timed_out`` at once.  To wait
+            without a limit pass ``None`` or :data:`INFINITE_TIMEOUT_MS`; the
+            host then suspends the workflow until a matching signal arrives.
+            Before cleat#4144 a timeout of ``0`` waited for ever.
 
         Returns
         -------
@@ -2100,10 +2157,9 @@ class HostCalls:
         self.dispatch_updates()  # dispatch point; see dispatch_updates
         names_json = json.dumps(signal_names)
 
-        # Support indefinite wait: timeout_ms <= 0 means "wait forever".
-        effective_timeout = timeout_ms
-        if timeout_ms <= 0:
-            effective_timeout = INFINITE_TIMEOUT_MS
+        # Waiting without a limit is explicit: ``None``. A timeout of 0 or less is 0, which the host reads as "do not wait"
+        # (cleat#4144), the same as for await_promise; see _host_timeout_ms for why a negative one is clamped here.
+        effective_timeout = _host_timeout_ms(timeout_ms)
 
         try:
             outcome = _import_cleat_await_signals(names_json, effective_timeout)
@@ -2464,13 +2520,18 @@ class HostCalls:
         RuntimeError
             If the host reports an error.
         """
+        # The host refuses this in a defer segment's workflow body, past recorded
+        # history (cleat#4079 audit), but `durable-create-promise` returns a plain
+        # string, so the refusal reaches a component guest as an empty id and cannot
+        # be told apart from a reply. The call has no effect; the first call that
+        # needs the id is refused in its own right. Closing that is a WIT change.
         return _import_cleat_create_promise(name, ttl_ms or 0)
 
     # --------------------------------------------------------------------
     # 24. await_promise — await a cleat promise
     # --------------------------------------------------------------------
 
-    def await_promise(self, promise_id: str, timeout_seconds: float) -> PromiseResult:
+    def await_promise(self, promise_id: str, timeout_seconds: float | None) -> PromiseResult:
         """Wait for a cleat promise to resolve, with a timeout in seconds.
 
         Compatible with Temporal/DBOS timeout conventions.
@@ -2479,8 +2540,10 @@ class HostCalls:
         ----------
         promise_id : str
             The promise ID to wait for.
-        timeout_seconds : float
-            Maximum wait time in seconds.
+        timeout_seconds : float | None
+            Maximum wait time in seconds.  ``0`` or a negative value means
+            do not wait (an already-settled promise is returned; otherwise
+            ``timed_out`` at once).  Pass ``None`` to wait without a limit.
 
         Returns
         -------
@@ -2492,9 +2555,9 @@ class HostCalls:
         RuntimeError
             If the host reports an error.
         """
-        return self.await_promise_ms(promise_id, int(timeout_seconds * 1000))
+        return self.await_promise_ms(promise_id, _seconds_to_timeout_ms(timeout_seconds))
 
-    def await_promise_ms(self, promise_id: str, timeout_ms: int) -> PromiseResult:
+    def await_promise_ms(self, promise_id: str, timeout_ms: int | None) -> PromiseResult:
         """Wait for a cleat promise to resolve, with a timeout in milliseconds.
 
         Prefer the seconds-based :meth:`await_promise` variant.
@@ -2504,7 +2567,13 @@ class HostCalls:
         promise_id : str
             The promise ID to wait for.
         timeout_ms : int
-            Maximum wait time in milliseconds.
+            Maximum wait time in milliseconds. Zero or negative means DO NOT
+            WAIT (cleat#4144), as for :meth:`await_signals_ms`: an
+            already-settled promise is returned, and a pending one reports a
+            timeout at once, recording one event. A loop of such polls records
+            one event per iteration, so prefer a positive timeout to a
+            zero-timeout poll loop. To wait without a limit pass ``None`` or
+            ``INFINITE_TIMEOUT_MS``.
 
         Returns
         -------
@@ -2518,7 +2587,7 @@ class HostCalls:
         """
         self.dispatch_updates()  # dispatch point; see dispatch_updates
         try:
-            result = _import_cleat_await_promise(promise_id, timeout_ms)
+            result = _import_cleat_await_promise(promise_id, _host_timeout_ms(timeout_ms))
         except _WitErr as err:
             # ``err(call-failure)``: a stop unwinds, a host failure raises.
             # Neither is an outcome of the promise (cleat#3425).
@@ -2855,7 +2924,12 @@ class HostCalls:
         RuntimeError
             If the host reports an error.
         """
-        return _import_cleat_defer(description)
+        try:
+            return _import_cleat_defer(description)
+        except _WitErr as err:
+            # ``err(call-failure)`` (cleat#4079): a stop unwinds, a host failure raises.
+            _raise_call_failure("lifecycle", "defer", err.value)
+            raise  # unreachable; _raise_call_failure always raises
 
     def defer_func(self, fn: Callable[[], None]) -> str:
         """Register cleanup **with a body**, run when the workflow finishes.
@@ -2881,7 +2955,13 @@ class HostCalls:
             The defer ID the host minted, which is also the key the body is
             stored under.
         """
-        from .defer import defer_phase_refusal, in_defer_phase, register_defer
+        from .defer import (
+            commit_defer,
+            defer_phase_refusal,
+            discard_defer,
+            in_defer_phase,
+            reserve_defer,
+        )
 
         # Refused BEFORE the host call -- IMPROVEMENT-PLAN 3.35 phase 4.
         # Registering here used to mint a real defer ID and write a durable
@@ -2890,8 +2970,25 @@ class HostCalls:
         if in_defer_phase():
             raise RuntimeError(defer_phase_refusal("defer_func"))
 
-        defer_id = _import_cleat_defer("deferred function")
-        register_defer(defer_id, fn)
+        # The body goes into the table BEFORE the host call (cleat#4079). The host
+        # can answer ``err(suspended)``: it stopped a run that was killed
+        # mid-flight, and the registration it stopped at is already in the
+        # history. A stop has no id to store the body under, and the drain that
+        # follows the unwind must still find it, or the cleanup the stop exists
+        # to run would be the one that is missing.
+        entry = reserve_defer(fn)
+        try:
+            defer_id = _import_cleat_defer("deferred function")
+        except _WitErr as err:
+            if isinstance(err.value, _CallFailureSuspended):
+                # A stop, not a failure: leave the body in the table and unwind.
+                raise SuspendSentinel() from None
+            # The host refused the registration, so nothing was recorded for it
+            # and the body must not run as though it had been.
+            discard_defer(entry)
+            _raise_call_failure("lifecycle", "defer_func", err.value)
+            raise  # unreachable; _raise_call_failure always raises
+        commit_defer(entry, defer_id)
         return defer_id
 
     # --------------------------------------------------------------------
@@ -2997,31 +3094,60 @@ class HostCalls:
     # 27d. side_effect — record non-deterministic computation result
     # --------------------------------------------------------------------
 
-    def side_effect(self, result: str) -> str:
-        """Record a non-deterministic computation result in event history.
+    def side_effect(self, fn: Callable[[], str] | str) -> str:
+        """Freeze a non-deterministic value in the event history (cleat#4113).
 
-        Calls the host ``durable-extended-lifecycle.side-effect`` import.
-        This allows the workflow to capture the result of a non-deterministic
-        operation (e.g. reading a random value, calling an external API
-        directly) so it can be replayed deterministically.
+        Pass a **function**: on first execution it is called once and its
+        result is recorded; on every replay the recorded value is returned and
+        the function is **not called**. So a value that is not reproducible (a
+        uuid, a clock read, an API answer) is the same on every replay, and an
+        API call made inside the function is made once.
+
+        The function must not make host calls: each consumes a step of the
+        history, and the record this call writes would land at the wrong one.
+
+        Passing a **string** (the form this method had before cleat#4113) still
+        works, but the value was computed *before* the host could be asked, so
+        the computation runs on every replay; the host now hands back the
+        recorded value rather than failing the replay when the two differ. Use
+        the function form.
 
         Parameters
         ----------
-        result : str
-            The result of the non-deterministic computation (JSON string).
+        fn : Callable[[], str] | str
+            The function that computes the value (a JSON string, or a value
+            that is marshalled to one), or the already computed value.
 
         Returns
         -------
         str
-            The recorded side-effect identifier or value from the host.
+            The recorded value: the function's result on first execution, the
+            history's on replay.
 
         Raises
         ------
-        RuntimeError
-            If the host reports an error.
+        CleatCallError
+            If the host reports an error, including a replay divergence at
+            this step.
         """
+        if callable(fn):
+            # Ask first. On a host that predates cleat#4113 the import does not
+            # exist and the component would not have instantiated, so there is
+            # no fallback to write here.
+            try:
+                lookup = _import_side_effect_recorded()
+            except _WitErr as err:
+                _raise_call_failure("lifecycle", "side_effect", err.value)
+                raise  # unreachable; _raise_call_failure always raises
+            if isinstance(lookup, _SideEffectLookupRecorded):
+                return lookup.value
+            value = fn()
+        else:
+            value = fn
+        if not isinstance(value, str):
+            value = self._marshal(value)
         # result<string, call-failure> since IMPROVEMENT-PLAN 3.300.
-        return _call_or_raise("lifecycle", "side_effect", _import_side_effect, result)
+        return _call_or_raise("lifecycle", "side_effect", _import_side_effect, value)
 
     # --------------------------------------------------------------------
     # 28. run_detached — execute detached from cancellation
@@ -3280,7 +3406,7 @@ class HostCalls:
             If the host reports an error or the timeout expires.
         """
         return self.send_signal_and_wait_ms(
-            target_run_id, signal_name, payload, int(timeout_seconds * 1000)
+            target_run_id, signal_name, payload, _seconds_to_timeout_ms(timeout_seconds)
         )
 
     def send_signal_and_wait_ms(
@@ -3448,7 +3574,27 @@ class HostCalls:
 
         Unlike :meth:`send_signal_and_wait`, this method does not wait for a
         response.  The signal is enqueued and the workflow continues
-        immediately.  This is a recorded (journaled) operation.
+        immediately.  This is a recorded (journaled) operation, and what is
+        recorded is the OUTCOME: a replay returns the same result, success or
+        failure, without sending again.
+
+        Raises
+        ------
+        RuntimeError
+            If the host refuses the signal. The message carries the host's
+            error code: 2 = signal authorization refused the target; 3 = the
+            signal store returned an error and NOTHING was delivered (a later
+            attempt may succeed); 4 = the target does not exist or belongs to
+            another tenant (the host reports one outcome for both, on purpose).
+            Before cleat#4102 a failed delivery returned normally, so a workflow
+            that ignored the result and carried on now fails here unless it
+            catches the error.
+
+        Notes
+        -----
+        Delivery is at-least-once: the host sends first and records after, so a
+        crash between the two replays the call and the target can receive the
+        signal twice.
 
         Parameters
         ----------
@@ -3537,6 +3683,11 @@ class HostCalls:
         # function in that file that is. A failed deletion is therefore
         # unreportable to a component guest, and closing that needs a WIT
         # change rather than an SDK one. See IMPROVEMENT-PLAN 3.201.
+        #
+        # The same goes for a REFUSED delete (cleat#4083): the host refuses it in
+        # a defer segment's workflow body, past recorded history, and the schedule
+        # is untouched, but the refusal cannot reach this call either, so the
+        # guest continues and its next new-work call is refused in its own right.
         _import_cleat_delete_cron(schedule_id)
 
     # --------------------------------------------------------------------
@@ -3597,8 +3748,10 @@ class HostCalls:
         RuntimeError
             If the host reports an error.
         """
-        key_len = write_string(SCRATCH_BASE, key, OUT_BUF_SIZE)
-        result = _import_cleat_acquire_lock(SCRATCH_BASE, key_len, ttl_ms)
+        # The component binding takes the key itself: (key: str, ttl_ms: int).
+        # This used to pass a scratch pointer and a length -- the core-module
+        # ABI -- and raised TypeError before the host was reached (cleat#4081).
+        result = _import_cleat_acquire_lock(key, ttl_ms)
 
         # Before decoding: this layout puts `acquired` at bit 8 and errCode in
         # the low byte, so a stop would decode as errCode=0, acquired=False --
@@ -3633,8 +3786,8 @@ class HostCalls:
         RuntimeError
             If the host reports an error.
         """
-        key_len = write_string(SCRATCH_BASE, key, OUT_BUF_SIZE)
-        result = _import_cleat_release_lock(SCRATCH_BASE, key_len)
+        # (key: str) on the component binding; see acquire_lock_ms.
+        result = _import_cleat_release_lock(key)
 
         err_code = result & 0xFF
         if err_code != 0:
@@ -3828,6 +3981,18 @@ if not _USING_WASM:
 
     def _import_side_effect(result: str) -> str:
         """Stub for WASM import ``(import "env" "cleat_side_effect")``."""
+        raise NotImplementedError(
+            "side_effect can only be called within a cleat WASM runtime."
+        )
+
+
+# -- durable-extended-lifecycle.side-effect-recorded (cleat#4113) --------------
+
+
+if not _USING_WASM:
+
+    def _import_side_effect_recorded() -> Any:
+        """Stub for WASM import ``(import "env" "cleat_side_effect_recorded")``."""
         raise NotImplementedError(
             "side_effect can only be called within a cleat WASM runtime."
         )

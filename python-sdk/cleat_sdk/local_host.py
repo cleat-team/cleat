@@ -40,6 +40,7 @@ from .host_calls import (
     PromiseResult,
     RetryPolicy,
     SignalResult,
+    _seconds_to_timeout_ms,
 )
 from .signal_envelope import decode_signal_envelope, encode_signal_envelope
 
@@ -644,13 +645,18 @@ class LocalHostCalls:
             name=sig["name"], payload=payload, timed_out=False, reply_to=reply_to
         )
 
-    def await_signals(self, signal_names: list[str], timeout_seconds: float) -> SignalResult:
-        """Wait for one or more external signals, with a timeout in seconds."""
-        return self.await_signals_ms(signal_names, int(timeout_seconds * 1000))
+    def await_signals(self, signal_names: list[str], timeout_seconds: float | None) -> SignalResult:
+        """Wait for one or more external signals, with a timeout in seconds. ``None`` waits without a limit."""
+        return self.await_signals_ms(signal_names, _seconds_to_timeout_ms(timeout_seconds))
 
-    def await_signals_ms(self, signal_names: list[str], timeout_ms: int) -> SignalResult:
-        """Wait for one or more external signals, with a timeout in milliseconds."""
+    def await_signals_ms(self, signal_names: list[str], timeout_ms: int | None) -> SignalResult:
+        """Wait for one or more external signals, with a timeout in milliseconds.
+
+        ``<= 0`` is do not wait, and ``None`` or ``INFINITE_TIMEOUT_MS`` waits without a limit (cleat#4144).
+        """
         self.dispatch_updates()  # dispatch point; see dispatch_updates
+        if timeout_ms is None:
+            timeout_ms = INFINITE_TIMEOUT_MS
         if self._mode == "replay":
             return self._replay_next("await_signals_ms")
 
@@ -1079,13 +1085,18 @@ class LocalHostCalls:
     # 36. await_promise
     # ------------------------------------------------------------------
 
-    def await_promise(self, promise_id: str, timeout_seconds: float) -> PromiseResult:
-        """Wait for a cleat promise to resolve, with a timeout in seconds."""
-        return self.await_promise_ms(promise_id, int(timeout_seconds * 1000))
+    def await_promise(self, promise_id: str, timeout_seconds: float | None) -> PromiseResult:
+        """Wait for a cleat promise to resolve, with a timeout in seconds. ``None`` waits without a limit."""
+        return self.await_promise_ms(promise_id, _seconds_to_timeout_ms(timeout_seconds))
 
-    def await_promise_ms(self, promise_id: str, timeout_ms: int) -> PromiseResult:
-        """Wait for a cleat promise to resolve, with a timeout in milliseconds."""
+    def await_promise_ms(self, promise_id: str, timeout_ms: int | None) -> PromiseResult:
+        """Wait for a cleat promise to resolve, with a timeout in milliseconds.
+
+        ``<= 0`` is do not wait, and ``None`` or ``INFINITE_TIMEOUT_MS`` waits without a limit (cleat#4144).
+        """
         self.dispatch_updates()  # dispatch point; see dispatch_updates
+        if timeout_ms is None:
+            timeout_ms = INFINITE_TIMEOUT_MS
         if self._mode == "replay":
             return self._replay_next("await_promise_ms")
         ps = self._promises.get(promise_id)

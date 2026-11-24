@@ -63,6 +63,28 @@ func DeferSurvivesSuspension(h cleat.HostCalls, input string) (string, error) {
 	return `{"status":"ok"}`, nil
 }
 
+// DeferThenCall registers cleanup and then makes a call of its OWN, with nothing that waits in between.
+//
+// cleat#4143. A run killed after the registration and before the call has the history [defer]. A terminate's defer segment replays that
+// and the body's next call arrives at the REPLAY FRONTIER. That call is new work for a workflow that is being terminated, and
+// work/body is its observable: a segment that performs it has broken the contract that a segment runs the defers and nothing else.
+//
+// Nothing waits between the two on purpose. A sleep or an await is also a dispatch point: the SDK polls for updates before it, and a
+// defer segment refuses that poll, which stops the body there. So a body that waits before its call never reaches the frontier with the
+// call to make (measured: a registered defer, a 200ms sleep and then a call was stopped at the sleep in a terminate's segment).
+func DeferThenCall(h cleat.HostCalls, input string) (string, error) {
+	if _, err := h.DurableDeferFunc(func() {
+		h.DurableCall("cleanup", "after_defer_then_call", `{}`)
+	}); err != nil {
+		return "", err
+	}
+
+	if _, err := h.DurableCall("work", "body", `{}`); err != nil {
+		return "", err
+	}
+	return `{"status":"ok"}`, nil
+}
+
 // DeferRegistration checks the registration contract rather than the body: the
 // ID handed back is the host's, and it is what the body is keyed by.
 func DeferRegistration(h cleat.HostCalls, input string) (string, error) {
@@ -134,6 +156,23 @@ func DeferContinuesAsNew(h cleat.HostCalls, input string) (string, error) {
 		return "", err
 	}
 	h.DurableCall("cleanup", "body", `{}`)
+	return `{"ok":true}`, nil
+}
+
+// DeferThenContinueAsNew registers cleanup and then, in the BODY, continues as new, with nothing that waits in between.
+//
+// cleat#4143. A defer segment replays [defer] and the body's next call, here a ContinueAsNew, arrives at the REPLAY FRONTIER. Unlike
+// DeferContinuesAsNew, whose continue-as-new is inside the defer body, this one is the workflow's own: new work for a workflow that is being
+// terminated. Its observables are the history (a continue_as_new event) and the run chain (a new run).
+func DeferThenContinueAsNew(h cleat.HostCalls, input string) (string, error) {
+	if _, err := h.DurableDeferFunc(func() {
+		h.DurableCall("cleanup", "after_defer_then_continue", `{}`)
+	}); err != nil {
+		return "", err
+	}
+	if err := h.ContinueAsNew(`{"round":2}`); err != nil {
+		return "", err
+	}
 	return `{"ok":true}`, nil
 }
 
@@ -255,6 +294,21 @@ func DeferOnLongRetryPolicy(h cleat.HostCalls, input string) (string, error) {
 	return "", err
 }
 
+// RetryOnHostFirstAttemptSucceeds calls the LOW-LEVEL retry entry directly, which the Go SDK documents as having NO
+// fallback: a refusal comes back as a CallError with CallErrorRetryPolicyTooLong and the caller must handle it.
+//
+// It exists for cleat#4032's regression test, and for the SDKs that behave the same way -- AssemblyScript, Java and
+// Python have no code-6 fallback at all. A refused policy is a hard failure for them, so a replay that refuses a call
+// the host actually ran is a regression on shipped code rather than a retry.
+func RetryOnHostFirstAttemptSucceeds(h cleat.HostCalls, input string) (string, error) {
+	return h.DurableCallWithRetry("succeeds", "op", `{}`, cleat.RetryPolicy{
+		MaxAttempts:        3,
+		InitialInterval:    time.Millisecond,
+		BackoffCoefficient: 2.0,
+		MaxInterval:        time.Millisecond,
+	})
+}
+
 // TwoSequentialCalls has no defer at all -- it is cleat#2008's fixture, not
 // 3.112's. It makes two plain DurableCalls back to back, so a test can put an
 // external side effect (the first call reaching the service) between them and
@@ -324,6 +378,46 @@ func RetryBacksOffOnHost(h cleat.HostCalls, input string) (string, error) {
 		},
 	}, "always-fails", "op", `{}`)
 	return "", err
+}
+
+// SleepThenRetryCall is cleat#4152's fixture: one recorded call, a durable sleep, then a call under a retry policy that is short enough to
+// run on the host. The run suspends on the sleep, and the claim that resumes it replays [work/before] and meets the retried call at the
+// replay frontier. The same call in a run's first segment gets its whole policy.
+//
+// THE FIRST CALL IS LOAD-BEARING. A sleep records no event, so a run that sleeps and has recorded nothing resumes with an EMPTY history and
+// a session that is not replaying; the retried call is then fresh and gets its policy. The defect needs at least one recorded event ahead
+// of the suspension.
+//
+// 5 attempts at 1ms, so a service that fails twice and then succeeds is retried to success in a few milliseconds, and a call that gets
+// ONE attempt fails.
+func SleepThenRetryCall(h cleat.HostCalls, input string) (string, error) {
+	if _, err := h.DurableCall("work", "before", `{}`); err != nil {
+		return "", err
+	}
+	h.DurableSleepMs(300)
+	return RetryCallOnly(h, input)
+}
+
+// CallThenRetryCall is cleat#4152's fixture without the wait: one recorded call and then the retried call, nothing in between that waits.
+// A run lost after the first call (a worker crash, a reclaim, a deploy) resumes with history [work/before] and meets the retried call at
+// the replay frontier with no dispatch point ahead of it.
+func CallThenRetryCall(h cleat.HostCalls, input string) (string, error) {
+	if _, err := h.DurableCall("work", "before", `{}`); err != nil {
+		return "", err
+	}
+	return RetryCallOnly(h, input)
+}
+
+// RetryCallOnly is SleepThenRetryCall's control: the same call under the same policy, made by a session that has nothing to replay.
+func RetryCallOnly(h cleat.HostCalls, input string) (string, error) {
+	return h.DurableCallWithOptions(cleat.CallOptions{
+		Retry: &cleat.RetryPolicy{
+			MaxAttempts:        5,
+			InitialInterval:    time.Millisecond,
+			BackoffCoefficient: 1.0,
+			MaxInterval:        time.Millisecond,
+		},
+	}, "flaky", "op", `{}`)
 }
 
 // RetryThenCompensate is cleat#2285's fixture: RetryBacksOffOnHost, plus what a saga does when a call fails.

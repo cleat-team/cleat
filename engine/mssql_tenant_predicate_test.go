@@ -281,7 +281,9 @@ var tenantPredicateAllowlist = map[string]stmtExemption{
 		SQL:    "select cast(compaction_state as nvarchar(max)) from workflow_instances where i",
 		Reason: scopedByCaller,
 	},
-	"mssql_signals_promises.go:GetChildResult#18eaf4c5f15d": {
+	// The function name moved from GetChildResult to readChildOutcome (cleat#4069: GetChildResult now follows the chain around a one-run read); the SQL and so the digest did not, and the
+	// reason is a claim about that SQL, which is unchanged.
+	"mssql_signals_promises.go:readChildOutcome#18eaf4c5f15d": {
 		SQL:    "select isnull(result, '{}'), status, error_msg from workflow_instances where ",
 		Reason: scopedByCaller,
 	},

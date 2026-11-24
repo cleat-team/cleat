@@ -21,34 +21,34 @@ package engine
 //     wasmtime_error_message(err, msg);
 // }
 //
-// // cbid_as_env turns a callback-registry id into the opaque `void *env`
-// // wasmtime stores alongside a host function and hands back to
-// // goComponentCallback, which converts it straight back with lookupCB.
-// //
-// // The cast lives here, in C, on purpose. Written on the Go side as
-// // unsafe.Pointer(uintptr(cbID)) it is two things at once: a go vet unsafeptr
-// // finding, and a value that is not a valid Go pointer sitting in a
-// // pointer-typed Go slot, which the garbage collector is entitled to reject
-// // when it scans the frame. The id is a small counter, never dereferenced by
-// // anyone -- it is a token, and C is where a token may legally be spelled as
-// // a pointer.
-// //
-// // go vet never said so before 2026-08-05 because this file was excluded from
-// // every default build by the wasmtime_component_cgo tag, so nothing vetted
-// // it. Compiling it by default is what surfaced this.
-// static void *cbid_as_env(uintptr_t id) { return (void *)id; }
 //
 // extern wasmtime_error_t *goComponentCallback(
 //     void *env, wasmtime_context_t *ctx,
 //     wasmtime_component_func_type_t *ty,
 //     wasmtime_component_val_t *args, size_t nargs,
 //     wasmtime_component_val_t *results, size_t nresults);
+//
+// // add_func_with_id registers goComponentCallback on a linker instance with a callback-registry id as the host data wasmtime hands back to it,
+// // which goComponentCallback converts straight back with lookupCB.
+// //
+// // The id is a small counter, a token and not an address, and C is the only place a token may be spelled as a pointer. It must not even be
+// // RETURNED from C to Go as one: a `void *` result arrives in Go as an unsafe.Pointer temporary, and while it is live, in a pointer-typed stack
+// // slot holding a value below the smallest legal address, any stack copy aborts the whole process -- "fatal error: invalid pointer found on
+// // stack" -- which is rare, unrecoverable, and takes every run on the worker with it (cleat#4417). So the cast and the call that consumes it
+// // both stay in this function and Go passes the id as the integer it is.
+// static wasmtime_error_t *add_func_with_id(
+//     wasmtime_component_linker_instance_t *inst, const char *name, size_t name_len, uintptr_t id) {
+//     return wasmtime_component_linker_instance_add_func(
+//         inst, name, name_len, (wasmtime_component_func_callback_t)goComponentCallback, (void *)id, NULL);
+// }
 import "C"
 import (
 	"context"
 	"encoding/binary"
 	"fmt"
 	"log/slog"
+	"regexp"
+	"sort"
 	"unsafe"
 
 	"github.com/cleat-team/cleat/wasm"
@@ -69,13 +69,16 @@ func (b *wasmtimeBackend) dispatchDurableCallString(
 	if !ok {
 		return refuseNameWithCallFailure(results, nresults, "durable-call", "op")
 	}
-	req := readStrArg(args, 2, nargs)
+	req, reqOK := readPayloadArg(args, 2, nargs)
+	if !reqOK {
+		return refuseOversizeWithCallFailure(results, nresults, "durable-call", "req", len(req))
+	}
 
-	buf := make([]byte, 65536)
-	packed := b.handler.DurableCall(ctxWithMem(context.Background(), buf), nil, svc, op, req, 0, 65536)
+	resp, respCtx := newResponseBuf(context.Background())
+	packed := b.handler.DurableCall(respCtx, nil, svc, op, req, 0, hostCallResponseLimit())
 
 	setResultCallOutcome(results, nresults,
-		decodeCallOutcome(packed, buf, extractStringFromPacked))
+		decodeCallOutcome(packed, resp.bytes(), durableCallLayout))
 	return nil
 }
 
@@ -95,19 +98,25 @@ func (b *wasmtimeBackend) dispatchDurableCallRetry(
 	if !ok {
 		return refuseNameWithCallFailure(results, nresults, "durable-call-retry", "op")
 	}
-	req := readStrArg(args, 2, nargs)
+	req, reqOK := readPayloadArg(args, 2, nargs)
+	if !reqOK {
+		return refuseOversizeWithCallFailure(results, nresults, "durable-call-retry", "req", len(req))
+	}
 	maxAttempts := int64(readU64Arg(args, 3, nargs))
 	initialInterval := int64(readU64Arg(args, 4, nargs))
 	backoffCoeff := int64(readU64Arg(args, 5, nargs))
 	maxInterval := int64(readU64Arg(args, 6, nargs))
-	nonRetryable := readStrArg(args, 7, nargs)
+	nonRetryable, nonRetryableOK := readPayloadArg(args, 7, nargs)
+	if !nonRetryableOK {
+		return refuseOversizeWithCallFailure(results, nresults, "durable-call-retry", "nonRetryable", len(nonRetryable))
+	}
 
-	buf := make([]byte, 65536)
-	packed := b.handler.DurableCallWithRetry(ctxWithMem(context.Background(), buf), nil,
-		svc, op, req, maxAttempts, initialInterval, backoffCoeff, maxInterval, nonRetryable, 0, 65536)
+	resp, respCtx := newResponseBuf(context.Background())
+	packed := b.handler.DurableCallWithRetry(respCtx, nil,
+		svc, op, req, maxAttempts, initialInterval, backoffCoeff, maxInterval, nonRetryable, 0, hostCallResponseLimit())
 
 	setResultCallOutcome(results, nresults,
-		decodeCallOutcome(packed, buf, extractStringFromPacked))
+		decodeCallOutcome(packed, resp.bytes(), durableCallLayout))
 	return nil
 }
 
@@ -127,15 +136,18 @@ func (b *wasmtimeBackend) dispatchDurableCallHeartbeat(
 	if !ok {
 		return refuseNameWithCallFailure(results, nresults, "durable-call-heartbeat", "op")
 	}
-	req := readStrArg(args, 2, nargs)
+	req, reqOK := readPayloadArg(args, 2, nargs)
+	if !reqOK {
+		return refuseOversizeWithCallFailure(results, nresults, "durable-call-heartbeat", "req", len(req))
+	}
 	heartbeatInterval := int64(readU64Arg(args, 3, nargs))
 
-	buf := make([]byte, 65536)
-	packed := b.handler.DurableCallWithHeartbeat(ctxWithMem(context.Background(), buf), nil,
-		svc, op, req, heartbeatInterval, 0, 65536)
+	resp, respCtx := newResponseBuf(context.Background())
+	packed := b.handler.DurableCallWithHeartbeat(respCtx, nil,
+		svc, op, req, heartbeatInterval, 0, hostCallResponseLimit())
 
 	setResultCallOutcome(results, nresults,
-		decodeCallOutcome(packed, buf, extractStringFromPacked))
+		decodeCallOutcome(packed, resp.bytes(), durableCallLayout))
 	return nil
 }
 
@@ -191,7 +203,10 @@ func (b *wasmtimeBackend) dispatchDurableLog(
 	if int(nargs) < 1 || b.handler == nil {
 		return nil
 	}
-	msg := readStrArg(args, 0, nargs)
+	msg, msgOK := readPayloadArg(args, 0, nargs)
+	if !msgOK {
+		return refuseNameWithBadParam(results, nresults)
+	}
 	r := b.handler.DurableLog(context.Background(), nil, msg)
 	setResultU64(results, nresults, uint64(r))
 	return nil
@@ -231,7 +246,17 @@ func (b *wasmtimeBackend) dispatchMinVersion(
 // durable-lifecycle interface
 // ---------------------------------------------------------------------------
 
-// dispatchDurableDefer handles (string) -> string.
+// dispatchDurableDefer handles (string) -> result<string, call-failure>.
+//
+// This was (string) -> string, and a lifted string has no bits to carry a stop,
+// so a defer registration could never say "the engine stopped this workflow
+// here". The result type gives it somewhere to (cleat#4079): ok carries the
+// defer id, err(suspended) is the stop, and err(failed) is a host failure.
+// DurableDefer returns the stop (cleat#4079): in a defer segment armed to stop at the last
+// stoppable event, the registration that is that event is answered err(suspended) after the
+// host has recorded it, and the adapter wraps it with withSuspendCheck. A guest has to put its
+// body on its table BEFORE this call for the cleanup the registration exists to run to survive
+// the unwind (python-sdk/cleat_sdk/defer.py, packages/cleat-csharp DeferTable.Register).
 func (b *wasmtimeBackend) dispatchDurableDefer(
 	args *C.wasmtime_component_val_t, nargs C.size_t,
 	results *C.wasmtime_component_val_t, nresults C.size_t,
@@ -239,13 +264,16 @@ func (b *wasmtimeBackend) dispatchDurableDefer(
 	if int(nargs) < 1 || b.handler == nil {
 		return nil
 	}
-	desc := readStrArg(args, 0, nargs)
+	desc, descOK := readPayloadArg(args, 0, nargs)
+	if !descOK {
+		return b.refuseOversizeWithoutAResult("durable-defer", "desc", len(desc), results, nresults)
+	}
 
-	buf := make([]byte, 65536)
-	packed := b.handler.DurableDefer(ctxWithMem(context.Background(), buf), nil, desc, 0, 65536)
-	response := extractStringFromSimplePacked(packed, buf)
+	resp, respCtx := newResponseBuf(context.Background())
+	packed := b.handler.DurableDefer(respCtx, nil, desc, 0, hostCallResponseLimit())
 
-	setResultString(results, nresults, response)
+	setResultCallOutcome(results, nresults,
+		decodeCallOutcome(packed, resp.bytes(), simpleLayout))
 	return nil
 }
 
@@ -257,7 +285,10 @@ func (b *wasmtimeBackend) dispatchContinueAsNew(
 	if int(nargs) < 1 || b.handler == nil {
 		return nil
 	}
-	input := readStrArg(args, 0, nargs)
+	input, inputOK := readPayloadArg(args, 0, nargs)
+	if !inputOK {
+		return refuseNameWithBadParam(results, nresults)
+	}
 	r := b.handler.ContinueAsNew(context.Background(), nil, input)
 	setResultU64(results, nresults, uint64(r))
 	return nil
@@ -272,9 +303,9 @@ func (b *wasmtimeBackend) dispatchPollCancellation(
 		return nil
 	}
 
-	buf := make([]byte, 65536)
-	packed := b.handler.PollCancellation(ctxWithMem(context.Background(), buf), nil, 0, 65536)
-	response := extractStringFromSimplePacked(packed, buf)
+	resp, respCtx := newResponseBuf(context.Background())
+	packed := b.handler.PollCancellation(respCtx, nil, 0, hostCallResponseLimit())
+	response := extractStringFromSimplePacked(packed, resp.bytes())
 
 	setResultString(results, nresults, response)
 	return nil
@@ -309,7 +340,10 @@ func (b *wasmtimeBackend) dispatchAwaitSignals(
 	if int(nargs) < 2 || b.handler == nil {
 		return nil
 	}
-	names := readStrArg(args, 0, nargs)
+	names, namesOK := readPayloadArg(args, 0, nargs)
+	if !namesOK {
+		return refuseOversizeWithCallFailure(results, nresults, "durable-await-signals", "names", len(names))
+	}
 	timeoutMs := int64(readU64Arg(args, 1, nargs))
 
 	// The name at offset 0, the payload straight after it.
@@ -359,9 +393,9 @@ func (b *wasmtimeBackend) dispatchPollSignal(
 		return b.refuseNameWithoutAResult("durable-poll-signal", "name", results, nresults)
 	}
 
-	buf := make([]byte, 65536)
-	packed := b.handler.PollSignal(ctxWithMem(context.Background(), buf), nil, name, 0, 65536)
-	response := extractStringFromSimplePacked(packed, buf)
+	resp, respCtx := newResponseBuf(context.Background())
+	packed := b.handler.PollSignal(respCtx, nil, name, 0, hostCallResponseLimit())
+	response := extractStringFromSimplePacked(packed, resp.bytes())
 
 	setResultString(results, nresults, response)
 	return nil
@@ -383,7 +417,10 @@ func (b *wasmtimeBackend) dispatchSignalWorkflow(
 	if !ok {
 		return refuseNameWithBadParam(results, nresults)
 	}
-	payload := readStrArg(args, 2, nargs)
+	payload, payloadOK := readPayloadArg(args, 2, nargs)
+	if !payloadOK {
+		return refuseNameWithBadParam(results, nresults)
+	}
 	r := b.handler.SignalWorkflow(context.Background(), nil, target, sigName, payload)
 	setResultU64(results, nresults, uint64(r))
 	return nil
@@ -405,13 +442,16 @@ func (b *wasmtimeBackend) dispatchChildWorkflow(
 	if !ok {
 		return refuseNameWithCallFailure(results, nresults, "durable-child-workflow", "name")
 	}
-	input := readStrArg(args, 1, nargs)
+	input, inputOK := readPayloadArg(args, 1, nargs)
+	if !inputOK {
+		return refuseOversizeWithCallFailure(results, nresults, "durable-child-workflow", "input", len(input))
+	}
 
-	buf := make([]byte, 65536)
-	packed := b.handler.ChildWorkflow(ctxWithMem(context.Background(), buf), nil, name, input, 0, 65536)
+	resp, respCtx := newResponseBuf(context.Background())
+	packed := b.handler.ChildWorkflow(respCtx, nil, name, input, 0, hostCallResponseLimit())
 
 	setResultCallOutcome(results, nresults,
-		decodeCallOutcome(packed, buf, extractStringFromSimplePacked))
+		decodeCallOutcome(packed, resp.bytes(), simpleLayout))
 	return nil
 }
 
@@ -428,12 +468,12 @@ func (b *wasmtimeBackend) dispatchAwaitChild(
 		return b.refuseNameWithoutAResult("durable-await-child", "runID", results, nresults)
 	}
 
-	buf := make([]byte, 65536)
-	packed := b.handler.AwaitChild(ctxWithMem(context.Background(), buf), nil, runID, 0, 65536)
+	resp, respCtx := newResponseBuf(context.Background())
+	packed := b.handler.AwaitChild(respCtx, nil, runID, 0, hostCallResponseLimit())
 	if packed == packAwaitChildResultSuspend() {
 		return b.stopAtPendingChildAwait("await_child", results, nresults)
 	}
-	response := extractStringFromSimplePacked(packed, buf)
+	response := extractStringFromSimplePacked(packed, resp.bytes())
 
 	setResultString(results, nresults, response)
 	return nil
@@ -531,10 +571,10 @@ func (b *wasmtimeBackend) dispatchPollChild(
 		return b.refuseNameWithoutAResult("durable-poll-child", "runID", results, nresults)
 	}
 
-	buf := make([]byte, 65536)
-	packed := b.handler.PollChild(ctxWithMem(context.Background(), buf), nil, runID, 0, 65536)
+	resp, respCtx := newResponseBuf(context.Background())
+	packed := b.handler.PollChild(respCtx, nil, runID, 0, hostCallResponseLimit())
 
-	setResultString(results, nresults, extractChildAnswer(packed, buf))
+	setResultString(results, nresults, extractChildAnswer(packed, resp.bytes()))
 	return nil
 }
 
@@ -546,15 +586,18 @@ func (b *wasmtimeBackend) dispatchAwaitAnyChild(
 	if int(nargs) < 1 || b.handler == nil {
 		return nil
 	}
-	runIDsJSON := readStrArg(args, 0, nargs)
+	runIDsJSON, runIDsJSONOK := readPayloadArg(args, 0, nargs)
+	if !runIDsJSONOK {
+		return b.refuseOversizeWithoutAResult("durable-await-any-child", "runIDsJSON", len(runIDsJSON), results, nresults)
+	}
 
-	buf := make([]byte, 65536)
-	packed := b.handler.AwaitAnyChild(ctxWithMem(context.Background(), buf), nil, runIDsJSON, 0, 65536)
+	resp, respCtx := newResponseBuf(context.Background())
+	packed := b.handler.AwaitAnyChild(respCtx, nil, runIDsJSON, 0, hostCallResponseLimit())
 	if packed == packAwaitChildResultSuspend() {
 		return b.stopAtPendingChildAwait("await_any_child", results, nresults)
 	}
 
-	setResultString(results, nresults, extractChildAnswer(packed, buf))
+	setResultString(results, nresults, extractChildAnswer(packed, resp.bytes()))
 	return nil
 }
 
@@ -566,14 +609,17 @@ func (b *wasmtimeBackend) dispatchAwaitAllChildren(
 	if int(nargs) < 1 || b.handler == nil {
 		return nil
 	}
-	runIDsJSON := readStrArg(args, 0, nargs)
+	runIDsJSON, runIDsJSONOK := readPayloadArg(args, 0, nargs)
+	if !runIDsJSONOK {
+		return b.refuseOversizeWithoutAResult("durable-await-all-children", "runIDsJSON", len(runIDsJSON), results, nresults)
+	}
 
-	buf := make([]byte, 65536)
-	packed := b.handler.AwaitAllChildren(ctxWithMem(context.Background(), buf), nil, runIDsJSON, 0, 65536)
+	resp, respCtx := newResponseBuf(context.Background())
+	packed := b.handler.AwaitAllChildren(respCtx, nil, runIDsJSON, 0, hostCallResponseLimit())
 	if packed == packAwaitChildResultSuspend() {
 		return b.stopAtPendingChildAwait("await_all_children", results, nresults)
 	}
-	response := extractStringFromSimplePacked(packed, buf)
+	response := extractStringFromSimplePacked(packed, resp.bytes())
 
 	setResultString(results, nresults, response)
 	return nil
@@ -591,7 +637,10 @@ func (b *wasmtimeBackend) dispatchChildWorkflowWithOptions(
 	if !ok {
 		return refuseNameWithCallFailure(results, nresults, "durable-child-workflow-with-options", "name")
 	}
-	input := readStrArg(args, 1, nargs)
+	input, inputOK := readPayloadArg(args, 1, nargs)
+	if !inputOK {
+		return refuseOversizeWithCallFailure(results, nresults, "durable-child-workflow-with-options", "input", len(input))
+	}
 	version := int64(readU64Arg(args, 2, nargs))
 	priority := int64(readU64Arg(args, 3, nargs))
 	policy, ok := readOptionalNameArg(args, 4, nargs)
@@ -599,12 +648,12 @@ func (b *wasmtimeBackend) dispatchChildWorkflowWithOptions(
 		return refuseNameWithCallFailure(results, nresults, "durable-child-workflow-with-options", "policy")
 	}
 
-	buf := make([]byte, 65536)
-	packed := b.handler.ChildWorkflowWithOptions(ctxWithMem(context.Background(), buf), nil,
-		name, input, version, priority, policy, 0, 65536)
+	resp, respCtx := newResponseBuf(context.Background())
+	packed := b.handler.ChildWorkflowWithOptions(respCtx, nil,
+		name, input, version, priority, policy, 0, hostCallResponseLimit())
 
 	setResultCallOutcome(results, nresults,
-		decodeCallOutcome(packed, buf, extractStringFromSimplePacked))
+		decodeCallOutcome(packed, resp.bytes(), simpleLayout))
 	return nil
 }
 
@@ -626,9 +675,9 @@ func (b *wasmtimeBackend) dispatchCreatePromise(
 		return b.refuseNameWithoutAResult("durable-create-promise", "name", results, nresults)
 	}
 
-	buf := make([]byte, 65536)
-	packed := b.handler.CreatePromise(ctxWithMem(context.Background(), buf), nil, name, 0, 65536)
-	response := extractStringFromSimplePacked(packed, buf)
+	resp, respCtx := newResponseBuf(context.Background())
+	packed := b.handler.CreatePromise(respCtx, nil, name, 0, hostCallResponseLimit())
+	response := extractStringFromSimplePacked(packed, resp.bytes())
 
 	setResultString(results, nresults, response)
 	return nil
@@ -666,8 +715,8 @@ func (b *wasmtimeBackend) dispatchAwaitPromise(
 	}
 	timeoutMs := int64(readU64Arg(args, 1, nargs))
 
-	buf := make([]byte, 65536)
-	packed := b.handler.AwaitPromise(ctxWithMem(context.Background(), buf), nil, id, timeoutMs, 0, 65536)
+	resp, respCtx := newResponseBuf(context.Background())
+	packed := b.handler.AwaitPromise(respCtx, nil, id, timeoutMs, 0, hostCallResponseLimit())
 
 	// The stop is tested FIRST and by mask, for the reason decodeCallOutcome
 	// gives. In this layout bit 31 sits in the byte at bits 24-31 (the
@@ -682,7 +731,7 @@ func (b *wasmtimeBackend) dispatchAwaitPromise(
 	}
 
 	u := uint64(packed)
-	payload := extractStringFromSimplePacked(packed, buf)
+	payload := extractStringFromSimplePacked(packed, resp.bytes())
 	if errCode := uint16(u & 0xFFFF); errCode != 0 {
 		if r, ok := b.handler.(awaitRejectionReporter); ok && r.lastAwaitPromiseRejected() {
 			setResultAwaitOutcome(results, nresults, awaitRejected, payload)
@@ -713,7 +762,10 @@ func (b *wasmtimeBackend) dispatchResolvePromise(
 	if !ok {
 		return refuseNameWithBadParam(results, nresults)
 	}
-	val := readStrArg(args, 1, nargs)
+	val, valOK := readPayloadArg(args, 1, nargs)
+	if !valOK {
+		return refuseNameWithBadParam(results, nresults)
+	}
 	r := b.handler.ResolvePromise(context.Background(), nil, id, val)
 	setResultU64(results, nresults, uint64(r))
 	return nil
@@ -731,7 +783,10 @@ func (b *wasmtimeBackend) dispatchRejectPromise(
 	if !ok {
 		return refuseNameWithBadParam(results, nresults)
 	}
-	errMsg := readStrArg(args, 1, nargs)
+	errMsg, errMsgOK := readPayloadArg(args, 1, nargs)
+	if !errMsgOK {
+		return refuseNameWithBadParam(results, nresults)
+	}
 	r := b.handler.RejectPromise(context.Background(), nil, id, errMsg)
 	setResultU64(results, nresults, uint64(r))
 	return nil
@@ -753,7 +808,10 @@ func (b *wasmtimeBackend) dispatchSetQueryState(
 	if !ok {
 		return refuseNameWithBadParam(results, nresults)
 	}
-	val := readStrArg(args, 1, nargs)
+	val, valOK := readPayloadArg(args, 1, nargs)
+	if !valOK {
+		return refuseNameWithBadParam(results, nresults)
+	}
 	r := b.handler.SetQueryState(context.Background(), nil, key, val)
 	setResultU64(results, nresults, uint64(r))
 	return nil
@@ -814,10 +872,10 @@ func (b *wasmtimeBackend) dispatchPollUpdate(
 	if b.handler == nil {
 		return nil
 	}
-	buf := make([]byte, 65536)
-	packed := b.handler.DurablePollUpdate(ctxWithMem(context.Background(), buf), nil, 0, 65536)
+	resp, respCtx := newResponseBuf(context.Background())
+	packed := b.handler.DurablePollUpdate(respCtx, nil, 0, hostCallResponseLimit())
 	// found=false packs as 0, and extractStringFromSimplePacked then yields "".
-	envelope := extractStringFromSimplePacked(packed, buf)
+	envelope := extractStringFromSimplePacked(packed, resp.bytes())
 	setResultString(results, nresults, envelope)
 	return nil
 }
@@ -830,9 +888,18 @@ func (b *wasmtimeBackend) dispatchCompleteUpdate(
 	if int(nargs) < 3 || b.handler == nil {
 		return nil
 	}
-	requestID := readStrArg(args, 0, nargs)
-	result := readStrArg(args, 1, nargs)
-	errMsg := readStrArg(args, 2, nargs)
+	requestID, requestIDOK := readPayloadArg(args, 0, nargs)
+	if !requestIDOK {
+		return refuseNameWithBadParam(results, nresults)
+	}
+	result, resultOK := readPayloadArg(args, 1, nargs)
+	if !resultOK {
+		return refuseNameWithBadParam(results, nresults)
+	}
+	errMsg, errMsgOK := readPayloadArg(args, 2, nargs)
+	if !errMsgOK {
+		return refuseNameWithBadParam(results, nresults)
+	}
 	r := b.handler.DurableCompleteUpdate(context.Background(), nil, requestID, result, errMsg)
 	setResultU64(results, nresults, uint64(r))
 	return nil
@@ -854,7 +921,10 @@ func (b *wasmtimeBackend) dispatchDurableSend(
 	if !ok {
 		return refuseNameWithBadParam(results, nresults)
 	}
-	req := readStrArg(args, 2, nargs)
+	req, reqOK := readPayloadArg(args, 2, nargs)
+	if !reqOK {
+		return refuseNameWithBadParam(results, nresults)
+	}
 	r := b.handler.DurableSend(context.Background(), nil, svc, op, req)
 	setResultU64(results, nresults, uint64(r))
 	return nil
@@ -876,7 +946,10 @@ func (b *wasmtimeBackend) dispatchScheduleInvoke(
 	if !ok {
 		return refuseNameWithBadParam(results, nresults)
 	}
-	req := readStrArg(args, 2, nargs)
+	req, reqOK := readPayloadArg(args, 2, nargs)
+	if !reqOK {
+		return refuseNameWithBadParam(results, nresults)
+	}
 	delayMs := int64(readU64Arg(args, 3, nargs))
 	r := b.handler.DurableScheduleInvoke(context.Background(), nil, svc, op, req, delayMs)
 	setResultU64(results, nresults, uint64(r))
@@ -896,9 +969,9 @@ func (b *wasmtimeBackend) dispatchWorkflowID(
 		return nil
 	}
 
-	buf := make([]byte, 65536)
-	packed := b.handler.WorkflowID(ctxWithMem(context.Background(), buf), nil, 0, 65536)
-	response := extractStringFromSimplePacked(packed, buf)
+	resp, respCtx := newResponseBuf(context.Background())
+	packed := b.handler.WorkflowID(respCtx, nil, 0, hostCallResponseLimit())
+	response := extractStringFromSimplePacked(packed, resp.bytes())
 
 	setResultString(results, nresults, response)
 	return nil
@@ -913,9 +986,9 @@ func (b *wasmtimeBackend) dispatchRunID(
 		return nil
 	}
 
-	buf := make([]byte, 65536)
-	packed := b.handler.RunID(ctxWithMem(context.Background(), buf), nil, 0, 65536)
-	response := extractStringFromSimplePacked(packed, buf)
+	resp, respCtx := newResponseBuf(context.Background())
+	packed := b.handler.RunID(respCtx, nil, 0, hostCallResponseLimit())
+	response := extractStringFromSimplePacked(packed, resp.bytes())
 
 	setResultString(results, nresults, response)
 	return nil
@@ -941,13 +1014,16 @@ func (b *wasmtimeBackend) dispatchPluginCall(
 	if !ok {
 		return refuseNameWithCallFailure(results, nresults, "plugin-call", "funcName")
 	}
-	input := readStrArg(args, 2, nargs)
+	input, inputOK := readPayloadArg(args, 2, nargs)
+	if !inputOK {
+		return refuseOversizeWithCallFailure(results, nresults, "plugin-call", "input", len(input))
+	}
 
-	buf := make([]byte, 65536)
-	packed := b.handler.PluginCall(ctxWithMem(context.Background(), buf), nil, pluginName, funcName, input, 0, 65536)
+	resp, respCtx := newResponseBuf(context.Background())
+	packed := b.handler.PluginCall(respCtx, nil, pluginName, funcName, input, 0, hostCallResponseLimit())
 
 	setResultCallOutcome(results, nresults,
-		decodeCallOutcome(packed, buf, extractStringFromPacked))
+		decodeCallOutcome(packed, resp.bytes(), durableCallLayout))
 	return nil
 }
 
@@ -967,13 +1043,16 @@ func (b *wasmtimeBackend) dispatchPluginCallStreaming(
 	if !ok {
 		return refuseNameWithCallFailure(results, nresults, "plugin-call-streaming", "funcName")
 	}
-	input := readStrArg(args, 2, nargs)
+	input, inputOK := readPayloadArg(args, 2, nargs)
+	if !inputOK {
+		return refuseOversizeWithCallFailure(results, nresults, "plugin-call-streaming", "input", len(input))
+	}
 
-	buf := make([]byte, 65536)
-	packed := b.handler.PluginCallStreaming(ctxWithMem(context.Background(), buf), nil, pluginName, funcName, input, 0, 65536)
+	resp, respCtx := newResponseBuf(context.Background())
+	packed := b.handler.PluginCallStreaming(respCtx, nil, pluginName, funcName, input, 0, hostCallResponseLimit())
 
 	setResultCallOutcome(results, nresults,
-		decodeCallOutcome(packed, buf, extractStringFromPacked))
+		decodeCallOutcome(packed, resp.bytes(), durableCallLayout))
 	return nil
 }
 
@@ -995,7 +1074,7 @@ func (b *wasmtimeBackend) dispatchAcquireLock(
 	}
 	ttlMs := int64(readU64Arg(args, 1, nargs))
 	r := b.handler.AcquireLock(context.Background(), nil, key, ttlMs)
-	setResultU64(results, nresults, uint64(r))
+	setResultS64(results, nresults, r)
 	return nil
 }
 
@@ -1012,7 +1091,7 @@ func (b *wasmtimeBackend) dispatchReleaseLock(
 		return refuseNameWithBadParam(results, nresults)
 	}
 	r := b.handler.ReleaseLock(context.Background(), nil, key)
-	setResultU64(results, nresults, uint64(r))
+	setResultS64(results, nresults, r)
 	return nil
 }
 
@@ -1037,9 +1116,9 @@ func (b *wasmtimeBackend) dispatchSetScope(
 		return b.refuseNameWithoutAResult("set-scope", "instKey", results, nresults)
 	}
 
-	buf := make([]byte, 65536)
-	packed := b.handler.SetScope(ctxWithMem(context.Background(), buf), nil, objType, instKey, 0, 65536)
-	response := extractStringFromSimplePacked(packed, buf)
+	resp, respCtx := newResponseBuf(context.Background())
+	packed := b.handler.SetScope(respCtx, nil, objType, instKey, 0, hostCallResponseLimit())
+	response := extractStringFromSimplePacked(packed, resp.bytes())
 
 	setResultString(results, nresults, response)
 	return nil
@@ -1092,11 +1171,14 @@ func (b *wasmtimeBackend) dispatchUUID(
 	if int(nargs) < 1 || b.handler == nil {
 		return nil
 	}
-	seed := readStrArg(args, 0, nargs)
+	seed, seedOK := readPayloadArg(args, 0, nargs)
+	if !seedOK {
+		return b.refuseOversizeWithoutAResult("uuid", "seed", len(seed), results, nresults)
+	}
 
-	buf := make([]byte, 65536)
-	packed := b.handler.UUID(ctxWithMem(context.Background(), buf), nil, seed, 0, 65536)
-	response := extractStringFromSimplePacked(packed, buf)
+	resp, respCtx := newResponseBuf(context.Background())
+	packed := b.handler.UUID(respCtx, nil, seed, 0, hostCallResponseLimit())
+	response := extractStringFromSimplePacked(packed, resp.bytes())
 
 	setResultString(results, nresults, response)
 	return nil
@@ -1128,7 +1210,10 @@ func (b *wasmtimeBackend) dispatchRunDetached(
 	if !ok {
 		return refuseNameWithBadParam(results, nresults)
 	}
-	input := readStrArg(args, 1, nargs)
+	input, inputOK := readPayloadArg(args, 1, nargs)
+	if !inputOK {
+		return refuseNameWithBadParam(results, nresults)
+	}
 	r := b.handler.RunDetached(context.Background(), nil, name, input)
 	setResultU64(results, nresults, uint64(r))
 	return nil
@@ -1160,7 +1245,10 @@ func (b *wasmtimeBackend) dispatchContinueAsNewVersioned(
 	if int(nargs) < 2 || b.handler == nil {
 		return nil
 	}
-	input := readStrArg(args, 0, nargs)
+	input, inputOK := readPayloadArg(args, 0, nargs)
+	if !inputOK {
+		return refuseNameWithBadParam(results, nresults)
+	}
 	newVersion := int(readU32Arg(args, 1, nargs))
 	r := b.handler.ContinueAsNewWithVersion(context.Background(), nil, input, newVersion)
 	setResultU64(results, nresults, uint64(r))
@@ -1175,16 +1263,48 @@ func (b *wasmtimeBackend) dispatchSideEffect(
 	if int(nargs) < 1 || b.handler == nil {
 		return nil
 	}
-	result := readStrArg(args, 0, nargs)
+	result, resultOK := readPayloadArg(args, 0, nargs)
+	if !resultOK {
+		return refuseOversizeWithCallFailure(results, nresults, "durable-side-effect", "result", len(result))
+	}
 
-	buf := make([]byte, 65536)
-	packed := b.handler.SideEffect(ctxWithMem(context.Background(), buf), nil, result, 0, 65536)
+	resp, respCtx := newResponseBuf(context.Background())
+	packed := b.handler.SideEffect(respCtx, nil, result, 0, hostCallResponseLimit())
 	// result<string, call-failure>, not a bare string: decodeCallOutcome tests
 	// the stop sentinel by mask BEFORE reading any field, so a refusal reaches
 	// the component guest as the `suspended` case rather than as a response the
 	// service could also have produced. setResultString discarded those bits.
 	setResultCallOutcome(results, nresults,
-		decodeCallOutcome(packed, buf, extractStringFromSimplePacked))
+		decodeCallOutcome(packed, resp.bytes(), simpleLayout))
+	return nil
+}
+
+// dispatchSideEffectRecorded handles () -> result<side-effect-lookup, call-failure> (cleat#4113).
+//
+// The status is the low byte of a simple-pack word: 0 a recorded value, 1 an error with its message, sideEffectNotRecorded nothing recorded.
+// The stop sentinel is read FIRST like everywhere else. A FRESH lookup in a stopped workflow returns it (stopBeforeNewWork: the value would
+// be new work), and so does a debugger's ReplayQuit; a lookup that finds a recorded value, or past the end of a replay, never does.
+func (b *wasmtimeBackend) dispatchSideEffectRecorded(
+	args *C.wasmtime_component_val_t, nargs C.size_t,
+	results *C.wasmtime_component_val_t, nresults C.size_t,
+) *C.wasmtime_error_t {
+	if b.handler == nil {
+		return nil
+	}
+	resp, respCtx := newResponseBuf(context.Background())
+	packed := b.handler.SideEffectRecorded(respCtx, nil, 0, hostCallResponseLimit())
+	if uint64(packed)&uint64(callSuspendSentinel) != 0 {
+		setResultCallOutcome(results, nresults, callOutcome{suspended: true})
+		return nil
+	}
+	switch status := byte(uint64(packed) & 0xFF); status {
+	case 0:
+		setResultSideEffectLookup(results, nresults, true, extractStringFromSimplePacked(packed, resp.bytes()))
+	case sideEffectNotRecorded:
+		setResultSideEffectLookup(results, nresults, false, "")
+	default:
+		setResultCallOutcome(results, nresults, callOutcome{failed: true, code: 0, payload: extractStringFromSimplePacked(packed, resp.bytes())})
+	}
 	return nil
 }
 
@@ -1204,15 +1324,24 @@ func (b *wasmtimeBackend) dispatchFetch(
 	if !ok {
 		return refuseNameWithCallFailure(results, nresults, "fetch", "method")
 	}
-	url := readStrArg(args, 1, nargs)
-	headers := readStrArg(args, 2, nargs)
-	body := readStrArg(args, 3, nargs)
+	url, urlOK := readPayloadArg(args, 1, nargs)
+	if !urlOK {
+		return refuseOversizeWithCallFailure(results, nresults, "durable-fetch", "url", len(url))
+	}
+	headers, headersOK := readPayloadArg(args, 2, nargs)
+	if !headersOK {
+		return refuseOversizeWithCallFailure(results, nresults, "durable-fetch", "headers", len(headers))
+	}
+	body, bodyOK := readPayloadArg(args, 3, nargs)
+	if !bodyOK {
+		return refuseOversizeWithCallFailure(results, nresults, "durable-fetch", "body", len(body))
+	}
 
-	buf := make([]byte, 65536)
-	packed := b.handler.Fetch(ctxWithMem(context.Background(), buf), nil, method, url, headers, body, 0, 65536)
+	resp, respCtx := newResponseBuf(context.Background())
+	packed := b.handler.Fetch(respCtx, nil, method, url, headers, body, 0, hostCallResponseLimit())
 
 	setResultCallOutcome(results, nresults,
-		decodeCallOutcome(packed, buf, extractStringFromSimplePacked))
+		decodeCallOutcome(packed, resp.bytes(), simpleLayout))
 	return nil
 }
 
@@ -1257,19 +1386,28 @@ func (b *wasmtimeBackend) dispatchScheduleCron(
 	if !ok {
 		return refuseNameWithCallFailure(results, nresults, "durable-schedule-cron", "workflowName")
 	}
-	cronExpr := readStrArg(args, 1, nargs)
-	timezone := readStrArg(args, 2, nargs)
-	input := readStrArg(args, 3, nargs)
+	cronExpr, cronExprOK := readPayloadArg(args, 1, nargs)
+	if !cronExprOK {
+		return refuseOversizeWithCallFailure(results, nresults, "durable-schedule-cron", "cronExpr", len(cronExpr))
+	}
+	timezone, timezoneOK := readPayloadArg(args, 2, nargs)
+	if !timezoneOK {
+		return refuseOversizeWithCallFailure(results, nresults, "durable-schedule-cron", "timezone", len(timezone))
+	}
+	input, inputOK := readPayloadArg(args, 3, nargs)
+	if !inputOK {
+		return refuseOversizeWithCallFailure(results, nresults, "durable-schedule-cron", "input", len(input))
+	}
 
-	buf := make([]byte, 65536)
-	packed := b.handler.ScheduleCron(ctxWithMem(context.Background(), buf), nil,
-		workflowName, cronExpr, timezone, input, 0, 65536)
+	resp, respCtx := newResponseBuf(context.Background())
+	packed := b.handler.ScheduleCron(respCtx, nil,
+		workflowName, cronExpr, timezone, input, 0, hostCallResponseLimit())
 	// result<string, call-failure>, not a bare string: decodeCallOutcome tests
 	// the stop sentinel by mask BEFORE reading any field, so a refusal reaches
 	// the component guest as the `suspended` case rather than as a response the
 	// service could also have produced. setResultString discarded those bits.
 	setResultCallOutcome(results, nresults,
-		decodeCallOutcome(packed, buf, extractStringFromSimplePacked))
+		decodeCallOutcome(packed, resp.bytes(), simpleLayout))
 	return nil
 }
 
@@ -1306,9 +1444,9 @@ func (b *wasmtimeBackend) dispatchListCrons(
 		return nil
 	}
 
-	buf := make([]byte, 65536)
-	packed := b.handler.ListCrons(ctxWithMem(context.Background(), buf), nil, 0, 65536)
-	response := extractStringFromSimplePacked(packed, buf)
+	resp, respCtx := newResponseBuf(context.Background())
+	packed := b.handler.ListCrons(respCtx, nil, 0, hostCallResponseLimit())
+	response := extractStringFromSimplePacked(packed, resp.bytes())
 
 	setResultString(results, nresults, response)
 	return nil
@@ -1363,6 +1501,19 @@ func (b *wasmtimeBackend) dispatchWasiWallClockResolution(
 	results *C.wasmtime_component_val_t, nresults C.size_t,
 ) *C.wasmtime_error_t {
 	setResultDatetime(results, nresults, 1)
+	return nil
+}
+
+// dispatchWasiInsecureSeed handles wasi:random/insecure-seed#insecure-seed() -> tuple<u64, u64>: two draws of the workflow's seeded source, so a
+// guest that seeds a hash table or a PRNG from it gets the same pair on every replay of the workflow (cleat#4396).
+func (b *wasmtimeBackend) dispatchWasiInsecureSeed(
+	args *C.wasmtime_component_val_t, nargs C.size_t,
+	results *C.wasmtime_component_val_t, nresults C.size_t,
+) *C.wasmtime_error_t {
+	if b.handler == nil {
+		return nil
+	}
+	setResultU64Pair(results, nresults, uint64(b.handler.Random(context.Background())), uint64(b.handler.Random(context.Background())))
 	return nil
 }
 
@@ -1522,6 +1673,7 @@ var witTypeMap = map[string]map[string]cbType{
 	"cleat:host-calls/durable-extended-lifecycle": {
 		"continue-as-new-versioned": cbTypeContinueAsNewVersioned,
 		"side-effect":               cbTypeSideEffect,
+		"side-effect-recorded":      cbTypeSideEffectRecorded,
 		"durable-run-detached":      cbTypeRunDetached,
 	},
 	"cleat:host-calls/durable-fetch": {
@@ -1550,6 +1702,12 @@ var witTypeMap = map[string]map[string]cbType{
 // TestAPythonGuestsWasiImportsAreAllShadowed is what makes that loud: it walks
 // a freshly compiled guest's import section and fails if it imports a
 // wall-clock or random interface this list does not name.
+//
+// THE VERSION IS NO LONGER ONLY THIS ONE. It is the default, always registered, but registerWasiDeterminismImports
+// now also registers every version the component itself imports (wasiDeterminismVersionsOf), because the pin was a
+// property of the componentize-py build and a C# component built with componentize-dotnet imports @0.2.6: its
+// DateTime.UtcNow, Random and Guid read the host's real clock and entropy and differed on every replay, with no
+// error anywhere. Measured, cleat#4078.
 const wasiDeterminismVersion = "@0.2.9"
 
 // wasiDeterminismInterfaces are the WASI interfaces cleat shadows so a
@@ -1568,21 +1726,77 @@ const wasiDeterminismVersion = "@0.2.9"
 // which it uses and "insecure" is a statement about entropy quality, not about
 // determinism. A guest reaching randomness through either must replay.
 var wasiDeterminismInterfaces = map[string]map[string]cbType{
-	"wasi:clocks/wall-clock" + wasiDeterminismVersion: {
+	"wasi:clocks/wall-clock": {
 		"now":        cbTypeWasiWallClockNow,
 		"resolution": cbTypeWasiWallClockResolution,
 	},
-	"wasi:random/random" + wasiDeterminismVersion: {
+	"wasi:random/random": {
 		"get-random-bytes": cbTypeWasiRandomBytes,
 		"get-random-u64":   cbTypeWasiRandomU64,
 	},
-	"wasi:random/insecure" + wasiDeterminismVersion: {
+	"wasi:random/insecure": {
 		"get-insecure-random-bytes": cbTypeWasiRandomBytes,
 		"get-insecure-random-u64":   cbTypeWasiRandomU64,
 	},
-	"wasi:random/insecure-seed" + wasiDeterminismVersion: {
-		"insecure-seed": cbTypeWasiRandomU64,
+	"wasi:random/insecure-seed": {
+		// A tuple<u64, u64>, NOT a u64: registered as cbTypeWasiRandomU64 this trapped every guest that called it with "type mismatch:
+		// expected tuple, found u64" (cleat#4396, measured by the probe-insecure fixtures). It was in this table, so it read as shadowed.
+		"insecure-seed": cbTypeWasiRandomSeed,
 	},
+}
+
+// wasiDeterminismImportRE matches an import of one of the shadowed interfaces and captures its version. 0.2.x only: a later
+// WASI generation is a different set of function shapes, and shadowing it with 0.2 callbacks would be wrong, not safe.
+var wasiDeterminismImportRE = regexp.MustCompile(
+	`wasi:(?:clocks/wall-clock|random/random|random/insecure-seed|random/insecure)@(0\.2\.\d+)`)
+
+// wasiDeterminismVersionsOf returns every "@x.y.z" the shadows must be registered under for this component: the
+// default, plus each version the component imports one of the shadowed interfaces at. Sorted and distinct.
+//
+// It reads only the component's own top-level IMPORT sections (id 10). A componentize-py build is ~19 MB nearly all of
+// it core modules, and a regexp over that on every execution would cost more than the call it guards, so the section
+// table is walked and everything but section 10 is skipped by its length. Registering a version the guest does not
+// import is harmless (nothing resolves to it), so this only has to find a superset, never to be exact; bytes that are
+// not a component, or a table that does not parse, give the default alone, which is what the engine did before.
+func wasiDeterminismVersionsOf(wasmBytes []byte) []string {
+	versions := map[string]bool{wasiDeterminismVersion: true}
+	// A component is an 8-byte header ("\0asm", version, layer 0x01) and then (id, LEB size, contents) sections.
+	if len(wasmBytes) > 8 && string(wasmBytes[:4]) == "\x00asm" && wasmBytes[6] == 0x01 && wasmBytes[7] == 0x00 {
+		const componentImportSection = 10
+		for pos := 8; pos < len(wasmBytes); {
+			id := wasmBytes[pos]
+			pos++
+			size, n := uleb128(wasmBytes[pos:])
+			if n == 0 || size > uint64(len(wasmBytes)-pos-n) {
+				break
+			}
+			pos += n
+			if id == componentImportSection {
+				for _, m := range wasiDeterminismImportRE.FindAllSubmatch(wasmBytes[pos:pos+int(size)], -1) {
+					versions["@"+string(m[1])] = true
+				}
+			}
+			pos += int(size)
+		}
+	}
+	out := make([]string, 0, len(versions))
+	for v := range versions {
+		out = append(out, v)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// uleb128 decodes an unsigned LEB128 and returns the value and the bytes it took (0 if it does not terminate).
+func uleb128(b []byte) (uint64, int) {
+	var v uint64
+	for i := 0; i < len(b) && i < 10; i++ {
+		v |= uint64(b[i]&0x7f) << (7 * uint(i))
+		if b[i]&0x80 == 0 {
+			return v, i + 1
+		}
+	}
+	return 0, 0
 }
 
 // registerWasiDeterminismImports shadows the WASI interfaces a guest would
@@ -1592,26 +1806,27 @@ var wasiDeterminismInterfaces = map[string]map[string]cbType{
 // already true at the one call site; this comment exists because the ordering
 // is invisible at a glance and reversing it produces no error, only a guest
 // that keeps the real clock.
-func (b *wasmtimeBackend) registerWasiDeterminismImports(linker *C.wasmtime_component_linker_t) error {
+func (b *wasmtimeBackend) registerWasiDeterminismImports(linker *C.wasmtime_component_linker_t, versions []string, scope *cbScope) error {
 	root := C.wasmtime_component_linker_root(linker)
 	if root == nil {
 		return fmt.Errorf("component linker root is nil")
 	}
-	for iface, funcs := range wasiDeterminismInterfaces {
-		nameBytes := []byte(iface)
-		var sub *C.wasmtime_component_linker_instance_t
-		if err := C.wasmtime_component_linker_instance_add_instance(
-			root, (*C.char)(unsafe.Pointer(&nameBytes[0])), C.size_t(len(iface)), &sub); err != nil {
-			return fmt.Errorf("shadow %s: %s", iface, componentErrorMessage(err))
-		}
-		for fnName, fnType := range funcs {
-			fnBytes := []byte(fnName)
-			cbID := registerCB(b, fnType)
-			if err := C.wasmtime_component_linker_instance_add_func(
-				sub, (*C.char)(unsafe.Pointer(&fnBytes[0])), C.size_t(len(fnName)),
-				C.wasmtime_component_func_callback_t(C.goComponentCallback),
-				C.cbid_as_env(C.uintptr_t(cbID)), nil); err != nil {
-				return fmt.Errorf("shadow %s.%s: %s", iface, fnName, componentErrorMessage(err))
+	for _, version := range versions {
+		for ifaceBase, funcs := range wasiDeterminismInterfaces {
+			iface := ifaceBase + version
+			nameBytes := []byte(iface)
+			var sub *C.wasmtime_component_linker_instance_t
+			if err := C.wasmtime_component_linker_instance_add_instance(
+				root, (*C.char)(unsafe.Pointer(&nameBytes[0])), C.size_t(len(iface)), &sub); err != nil {
+				return fmt.Errorf("shadow %s: %s", iface, componentErrorMessage(err))
+			}
+			for fnName, fnType := range funcs {
+				fnBytes := []byte(fnName)
+				cbID := scope.register(b, fnType)
+				if err := C.add_func_with_id(
+					sub, (*C.char)(unsafe.Pointer(&fnBytes[0])), C.size_t(len(fnName)), C.uintptr_t(cbID)); err != nil {
+					return fmt.Errorf("shadow %s.%s: %s", iface, fnName, componentErrorMessage(err))
+				}
 			}
 		}
 	}
@@ -1628,7 +1843,7 @@ func componentErrorMessage(err *C.wasmtime_error_t) string {
 	return s
 }
 
-func (b *wasmtimeBackend) registerCleatComponentImports(linker *C.wasmtime_component_linker_t) error {
+func (b *wasmtimeBackend) registerCleatComponentImports(linker *C.wasmtime_component_linker_t, scope *cbScope) error {
 	root := C.wasmtime_component_linker_root(linker)
 	if root == nil {
 		return fmt.Errorf("component linker root is nil")
@@ -1662,8 +1877,8 @@ func (b *wasmtimeBackend) registerCleatComponentImports(linker *C.wasmtime_compo
 			if len(fnBytes) > 0 {
 				fnPtr = (*C.char)(unsafe.Pointer(&fnBytes[0]))
 			}
-			cbID := registerCB(b, fnType)
-			err := C.wasmtime_component_linker_instance_add_func(sub, fnPtr, C.size_t(len(witFuncName)), C.wasmtime_component_func_callback_t(C.goComponentCallback), C.cbid_as_env(C.uintptr_t(cbID)), nil)
+			cbID := scope.register(b, fnType)
+			err := C.add_func_with_id(sub, fnPtr, C.size_t(len(witFuncName)), C.uintptr_t(cbID))
 			if err != nil {
 				var msg C.wasm_byte_vec_t
 				C.get_error_message(err, &msg)

@@ -55,15 +55,113 @@ func walkToTerminalRun(
 		return nil, nil
 	}
 
+	// The walk and the read are separate statements, and a chain moves between
+	// them. cleat#4061: the run the walk settled on can continue as new before
+	// its row is read, and a run that continues is finalised as `done` with an
+	// empty result -- so the reply was an INTERMEDIATE run, status done, result
+	// {}, that a client polling for a terminal status takes for the answer. The
+	// real end was one or two rows further on. TestTypeScriptContinueAsNewOnARealWorker
+	// saw it on SQL Server and then on MySQL.
+	//
+	// So the successor is asked again AFTER the row is read, and the walk goes on
+	// if one has appeared. What this returns is then a row that had no successor
+	// at a moment later than the moment it was read, which is the strongest
+	// "last run as of now" a client can be given without one transaction across
+	// the whole walk. It costs one extra successor lookup per call (a fan-out
+	// per shard on a ShardedStore).
+	cur, row := id, head
+	for hops := 0; ; hops++ {
+		if hops >= maxContinueAsNewChainWalk {
+			return nil, fmt.Errorf("%w: gave up at %s after %d re-reads",
+				ErrContinueAsNewChainTooLong, cur, hops)
+		}
+		end, err := terminalRunID(ctx, cur, successorOf)
+		if err != nil {
+			return nil, err
+		}
+		if end != cur {
+			cur, row = end, nil
+		}
+		if row == nil {
+			row, err = get(ctx, cur)
+			if err != nil {
+				return nil, err
+			}
+			if row == nil {
+				return nil, nil
+			}
+		}
+		next, err := successorOf(ctx, cur)
+		if err != nil {
+			return nil, err
+		}
+		if next == "" {
+			return row, nil
+		}
+		// cur continued while its row was being read: that row is the run the
+		// chain LEFT. Keep walking from its successor.
+		cur, row = next, nil
+	}
+}
+
+// readChildOutcomeFollowingTheChain is walkToTerminalRun for GetChildResult (cleat#4069).
+//
+// GetChildResult resolves the chain to its last run (cleat#955) and then reads that run's row in a SEPARATE statement, and the chain moves between the two: the run the walk settled on can
+// continue as new before its row is read. A continued run is finalised `done` with an EMPTY result ("done because it was superseded, not because it finished"), so what that read returned was a
+// settled outcome carrying `{}` for a child that had not finished, and AwaitChild records the outcome durably in the PARENT's history. #4061 was the same shape for GetTerminalRun, which hands a
+// polling client a row it can poll again; this hands a workflow a wrong answer it cannot take back. Reproduced on PostgreSQL, MySQL and SQL Server (a_child_result_never_settles_on_a_run_the_chain_has_left_test.go).
+//
+// So the successor is asked for again AFTER the row is read, and the walk goes on if one has appeared, exactly as walkToTerminalRun does. A run that continues is marked done and its successor
+// inserted in ONE transaction, so a read that sees the superseded `done` row is a read taken at or after the commit that created the successor, and the lookup that follows it (a later
+// snapshot) cannot miss it. What is returned is the outcome of a run that had no successor at a moment later than the moment it was read: the strongest "last run as of now" without one
+// transaction across the whole walk. It costs one extra successor lookup per call (a fan-out per shard on a ShardedStore).
+//
+// read returns the zero ChildOutcome for a run it cannot find, as every GetChildResult does, and that is returned as it is.
+func readChildOutcomeFollowingTheChain(
+	ctx context.Context,
+	id string,
+	successorOf func(context.Context, string) (string, error),
+	read func(context.Context, string) (ChildOutcome, error),
+) (ChildOutcome, error) {
 	cur, err := terminalRunID(ctx, id, successorOf)
 	if err != nil {
-		return nil, err
+		return ChildOutcome{}, err
 	}
+	for hops := 0; ; hops++ {
+		if hops >= maxContinueAsNewChainWalk {
+			return ChildOutcome{}, fmt.Errorf("%w: gave up at %s after %d re-reads",
+				ErrContinueAsNewChainTooLong, cur, hops)
+		}
+		out, err := read(ctx, cur)
+		if err != nil {
+			return ChildOutcome{}, err
+		}
+		next, err := successorOf(ctx, cur)
+		if err != nil {
+			return ChildOutcome{}, err
+		}
+		if next == "" {
+			return out, nil
+		}
+		// cur continued while its row was being read: that outcome is the run the chain LEFT. Keep going from its successor.
+		if cur, err = terminalRunID(ctx, next, successorOf); err != nil {
+			return ChildOutcome{}, err
+		}
+	}
+}
 
-	if cur == id {
-		return head, nil
+// latestRunInChain returns the last run of the chain id belongs to as of now, or "" when id has no successor (it did not continue). It is ADVICE for an error message (cleat#4340): nothing
+// reads a row after it, so there is no walk-then-read here to go stale, and it lives in this file because terminalRunID may not be called anywhere else.
+func latestRunInChain(
+	ctx context.Context,
+	id string,
+	successorOf func(context.Context, string) (string, error),
+) (string, error) {
+	end, err := terminalRunID(ctx, id, successorOf)
+	if err != nil || end == id {
+		return "", err
 	}
-	return get(ctx, cur)
+	return end, nil
 }
 
 // terminalRunID walks a ContinueAsNew chain forward and returns the id of its

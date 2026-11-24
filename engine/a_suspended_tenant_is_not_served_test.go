@@ -38,23 +38,61 @@ func TestASuspendedTenantIsNotEnumerated(t *testing.T) {
 		_, _ = owner.Exec(`DELETE FROM admin.tenants WHERE tenant_id = ANY($1)`,
 			"{"+live+","+held+"}")
 	})
-	for _, tc := range []struct {
-		id        string
-		name      string
-		suspended bool
-	}{
-		{live, "suspend-live-" + live[:8], false},
-		{held, "suspend-held-" + held[:8], true},
-	} {
+	// A previous failed run can leave these rows behind, and the ON CONFLICT below
+	// would then UPDATE rather than insert them -- so clear them first, because
+	// the delta assertions further down would otherwise measure nothing.
+	store := NewPostgresStore(owner)
+	if _, err := owner.ExecContext(ctx,
+		`DELETE FROM admin.tenants WHERE tenant_id = ANY($1)`, "{"+live+","+held+"}"); err != nil {
+		t.Fatalf("clearing a previous run's rows: %v", err)
+	}
+	seed := func(id, name string, suspended bool) {
+		t.Helper()
 		if _, err := owner.ExecContext(ctx,
 			`INSERT INTO admin.tenants (tenant_id, name, suspended) VALUES ($1, $2, $3)
 			 ON CONFLICT (tenant_id) DO UPDATE SET suspended = EXCLUDED.suspended`,
-			tc.id, tc.name, tc.suspended); err != nil {
-			t.Fatalf("seeding tenant %s: %v", tc.name, err)
+			id, name, suspended); err != nil {
+			t.Fatalf("seeding tenant %s: %v", name, err)
 		}
 	}
 
-	store := NewPostgresStore(owner)
+	seed(live, "suspend-live-"+live[:8], false)
+	countWithLive, err := CountTenants(ctx, owner)
+	if err != nil {
+		t.Fatalf("CountTenants: %v", err)
+	}
+	enumeratedWithLive, err := store.ListTenantIDs(ctx)
+	if err != nil {
+		t.Fatalf("ListTenantIDs: %v", err)
+	}
+
+	seed(held, "suspend-held-"+held[:8], true)
+
+	// cleat#3773: the runtime guard's predicate is CountTenants, because
+	// suspension stops starts and not reads, and a suspended tenant's rows are
+	// still readable through a bypassing connection. So the two functions must
+	// disagree about WHICH rows they count: every row, versus every live one.
+	// Asserted as a DELTA around the suspended row rather than an absolute
+	// count, because admin.tenants is shared with other tests in this package.
+	// Without this, adding `WHERE NOT suspended` to CountTenants would break the
+	// guard's whole premise and nothing would go red.
+	countAfter, err := CountTenants(ctx, owner)
+	if err != nil {
+		t.Fatalf("CountTenants after seeding a suspended tenant: %v", err)
+	}
+	if got := countAfter - countWithLive; got != 1 {
+		t.Errorf("CountTenants counted %d of the SUSPENDED tenant just seeded, want 1: it is "+
+			"the runtime guard's predicate and must count suspended tenants (cleat#3773)", got)
+	}
+	enumeratedAfter, err := store.ListTenantIDs(ctx)
+	if err != nil {
+		t.Fatalf("ListTenantIDs after seeding a suspended tenant: %v", err)
+	}
+	if got := len(enumeratedAfter) - len(enumeratedWithLive); got != 0 {
+		t.Errorf("ListTenantIDs enumerated %d more rows after a SUSPENDED tenant was seeded, "+
+			"want 0", got)
+	}
+
 	ids, err := store.ListTenantIDs(ctx)
 	if err != nil {
 		t.Fatalf("ListTenantIDs: %v", err)

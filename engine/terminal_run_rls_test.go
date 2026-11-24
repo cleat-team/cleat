@@ -150,11 +150,13 @@ func TestGetTerminalRunFollowsARealChainUnderRLS(t *testing.T) {
 	// is why the sibling assertions above had to be moved off it.
 	// It asks successorOfRun DIRECTLY rather than through GetTerminalRun, and
 	// that narrowing is not tidiness. GetTerminalRun begins with
-	// GetWorkflowByID, whose PostgreSQL SELECT is `WHERE id = $1` with no
-	// tenant predicate of its own -- it relies wholly on the policy. So over a
-	// bypassing connection the walk returns tenant A's HEAD before it ever
-	// reaches a successor, and a control written at that level fails on a
-	// correctly fixed tree. Measured: it did, naming the head id.
+	// GetWorkflowByID. When this test was written that read carried no tenant
+	// predicate of its own (`WHERE id = $1`), so over a bypassing connection
+	// the walk returned tenant A's HEAD before it ever reached a successor, and
+	// a control written at that level failed on a correctly fixed tree
+	// (measured: it did, naming the head id). GetWorkflowByID now scopes on
+	// `l.tenant_id = $2`; successorOfRun is still asked directly so the
+	// assertion is about the statement under test.
 	//
 	// That is a real observation about GetWorkflowByID and it is reported
 	// separately rather than folded in here. What this control must isolate is

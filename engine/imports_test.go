@@ -120,6 +120,9 @@ func (h *stubHostHandler) ReleaseLock(_ context.Context, _ api.Module, _ string)
 func (h *stubHostHandler) SideEffect(_ context.Context, _ api.Module, _ string, _, _ uint32) int64 {
 	return 0
 }
+func (h *stubHostHandler) SideEffectRecorded(_ context.Context, _ api.Module, _, _ uint32) int64 {
+	return packSimpleResult(sideEffectNotRecorded)
+}
 func (h *stubHostHandler) WorkflowID(_ context.Context, _ api.Module, _, _ uint32) int64 { return 0 }
 func (h *stubHostHandler) RunID(_ context.Context, _ api.Module, _, _ uint32) int64      { return 0 }
 func (h *stubHostHandler) ResolvePromise(_ context.Context, _ api.Module, _, _ string) int64 {
@@ -1185,6 +1188,37 @@ func TestHostFunc_CleatSideEffect(t *testing.T) {
 	}
 	if handler.result != resultJSON {
 		t.Errorf("side effect result = %q, want %q", handler.result, resultJSON)
+	}
+}
+
+// cleat#4113, wazero registration. The handler answers a distinctive status, so a registration that dropped the call or read another handler
+// method's answer would not return it.
+type sideEffectLookupRecorder struct {
+	stubHostHandler
+	calls  int
+	ptr    uint32
+	maxLen uint32
+}
+
+func (h *sideEffectLookupRecorder) SideEffectRecorded(_ context.Context, _ api.Module, respPtr, respMaxLen uint32) int64 {
+	h.calls++
+	h.ptr, h.maxLen = respPtr, respMaxLen
+	return packSimpleResult(sideEffectNotRecorded)
+}
+
+func TestHostFunc_CleatSideEffectRecorded(t *testing.T) {
+	handler := &sideEffectLookupRecorder{}
+	h := newTestHostFuncHarness(t, "cleat_side_effect_recorded", []byte{wasmI32, wasmI32}, []byte{wasmI64}, true, handler)
+
+	result, err := h.call(256, 100)
+	if err != nil {
+		t.Fatalf("call cleat_side_effect_recorded: %v", err)
+	}
+	if byte(result) != sideEffectNotRecorded {
+		t.Errorf("status = %d, want the handler's %d", byte(result), sideEffectNotRecorded)
+	}
+	if handler.calls != 1 || handler.ptr != 256 || handler.maxLen != 100 {
+		t.Errorf("handler saw calls=%d ptr=%d maxLen=%d, want 1, 256, 100", handler.calls, handler.ptr, handler.maxLen)
 	}
 }
 

@@ -40,6 +40,12 @@ type Plugin struct {
 	// Background retry metrics.
 	eventsProcessed  atomic.Int64
 	eventsDeadLetter atomic.Int64
+
+	// Awaiter reconciler (reconcile.go). awaitersReconciled counts stored
+	// events the sweep delivered to a waiter; backoff is its per-worker delay
+	// table.
+	awaitersReconciled atomic.Int64
+	backoff            reconcileBackoff
 }
 
 // Info returns plugin metadata for discovery and documentation.

@@ -570,6 +570,15 @@ func (s *ShardedStore) Heartbeat(ctx context.Context, workflowID, workerID strin
 	return shard.Store.Heartbeat(ctx, workflowID, workerID, generation)
 }
 
+// PublishQueryState goes to the shard that owns the run, as Heartbeat does.
+func (s *ShardedStore) PublishQueryState(ctx context.Context, runID, workerID string, generation int64, queryState map[string]string) error {
+	shard := s.getShard(runID)
+	if shard == nil {
+		return fmt.Errorf("publish query state: no shard available -- check shard configuration in CLEAT_SHARD_CONFIG")
+	}
+	return shard.Store.PublishQueryState(ctx, runID, workerID, generation, queryState)
+}
+
 // HeartbeatBatchFenced groups runs by shard -- routed by WorkflowID, as every
 // per-ID method here is -- and issues one batched, fenced heartbeat call per
 // shard rather than one call per run. cleat#2008.
@@ -728,7 +737,31 @@ func (s *ShardedStore) DeliverSignal(ctx context.Context, workflowID, signalName
 	if shard == nil {
 		return fmt.Errorf("deliver_signal: no shard available -- check shard configuration in CLEAT_SHARD_CONFIG")
 	}
-	return shard.Store.DeliverSignal(ctx, workflowID, signalName, payload)
+	// A refusal for a continued run names the end of its chain, and a chain crosses shards routinely, so the shard's own (shard-local) answer is replaced by the cross-shard one (cleat#4340).
+	return withContinuedTo(ctx, shard.Store.DeliverSignal(ctx, workflowID, signalName, payload), s.successorAcrossShards)
+}
+
+// DeliverSignalReceipt routes by workflow ID like its siblings and says where the signal went (cleat#4340). A run's chain is on the shard that holds the run, because a continue inserts the
+// successor on the shard of the run it continues, so forwarding works for a signal addressed to ANY run that shard holds. What it cannot do is reach a successor by ITS OWN id: getShard hashes that
+// id, which names a shard that need not hold the run. That routing is not new and not about signals; see cleat#4340's sharding note.
+func (s *ShardedStore) DeliverSignalReceipt(ctx context.Context, workflowID, signalName, payload, idempotencyKey string) (SignalReceipt, error) {
+	shard := s.getShard(workflowID)
+	if shard == nil {
+		return SignalReceipt{}, fmt.Errorf("deliver_signal: no shard available -- check shard configuration in CLEAT_SHARD_CONFIG")
+	}
+	if rs, ok := shard.Store.(SignalReceiptStore); ok {
+		r, err := rs.DeliverSignalReceipt(ctx, workflowID, signalName, payload, idempotencyKey)
+		return r, withContinuedTo(ctx, err, s.successorAcrossShards)
+	}
+	if idempotencyKey != "" {
+		si, ok := shard.Store.(SignalIdempotencyStore)
+		if !ok {
+			return SignalReceipt{}, fmt.Errorf("shard %q: %T cannot absorb a duplicate signal", shard.Config.Name, shard.Store)
+		}
+		replay, err := si.DeliverSignalIdempotent(ctx, workflowID, signalName, payload, idempotencyKey)
+		return SignalReceipt{DeliveredTo: workflowID, Replay: replay}, withContinuedTo(ctx, err, s.successorAcrossShards)
+	}
+	return SignalReceipt{DeliveredTo: workflowID}, withContinuedTo(ctx, shard.Store.DeliverSignal(ctx, workflowID, signalName, payload), s.successorAcrossShards)
 }
 
 // DeliverSignalIdempotent routes to the shard owning the workflow, like its
@@ -747,7 +780,8 @@ func (s *ShardedStore) DeliverSignalIdempotent(ctx context.Context, workflowID, 
 	if !ok {
 		return false, fmt.Errorf("shard %q: %T cannot absorb a duplicate signal", shard.Config.Name, shard.Store)
 	}
-	return si.DeliverSignalIdempotent(ctx, workflowID, signalName, payload, idempotencyKey)
+	replay, err := si.DeliverSignalIdempotent(ctx, workflowID, signalName, payload, idempotencyKey)
+	return replay, withContinuedTo(ctx, err, s.successorAcrossShards)
 }
 
 // ConsumeSignal routes by workflow ID.
@@ -803,6 +837,9 @@ func (s *ShardedStore) StartNewRunWithConcurrencyKey(ctx context.Context, runID,
 // StartNewRunWithOptions routes like StartNewRun -- by RUN id -- and refuses
 // rather than silently dropping what it cannot record. See StartOptions.
 func (s *ShardedStore) StartNewRunWithOptions(ctx context.Context, runID, defName string, defVersion int, input json.RawMessage, idempotencyKey string, tenantID string, priority int, opts StartOptions) (string, bool, error) {
+	if err := opts.Validate(); err != nil {
+		return "", false, err
+	}
 	if runID == "" {
 		runID = uuid.New().String()
 	}
@@ -868,15 +905,17 @@ func (s *ShardedStore) GetChildResult(ctx context.Context, runID string) (ChildO
 	// local walk sees no successor and answers with run 1's empty result: the
 	// original defect, reappearing on exactly the deployment the per-store fix
 	// looks like it covers.
-	terminal, err := terminalRunID(ctx, runID, s.successorAcrossShards)
-	if err != nil {
-		return ChildOutcome{}, err
-	}
-	shard := s.getShard(terminal)
-	if shard == nil {
-		return ChildOutcome{}, fmt.Errorf("get_child_result: no shard available -- check shard configuration in CLEAT_SHARD_CONFIG")
-	}
-	return shard.Store.GetChildResult(ctx, terminal)
+	//
+	// And ask again AFTER the read (cleat#4069), across shards for the same reason: the shard's own
+	// GetChildResult follows its own successors, but a successor on ANOTHER shard is invisible to it,
+	// so the chain can move to a different shard between this walk and that shard's read.
+	return readChildOutcomeFollowingTheChain(ctx, runID, s.successorAcrossShards, func(ctx context.Context, terminal string) (ChildOutcome, error) {
+		shard := s.getShard(terminal)
+		if shard == nil {
+			return ChildOutcome{}, fmt.Errorf("get_child_result: no shard available -- check shard configuration in CLEAT_SHARD_CONFIG")
+		}
+		return shard.Store.GetChildResult(ctx, terminal)
+	})
 }
 
 // ReapStaleInstances runs on every shard and returns the total reclaimed count.
@@ -1864,6 +1903,43 @@ func (s *ShardedStore) CancelWorkflow(ctx context.Context, workflowID, reason st
 		return fmt.Errorf("cancel_workflow: no shard available -- check shard configuration in CLEAT_SHARD_CONFIG")
 	}
 	return shard.Store.CancelWorkflow(ctx, workflowID, reason)
+}
+
+// CancelWorkflowReceipt, TerminateWorkflowReceipt and RequestCancellationReceipt implement SettleReceiptStore by routing to the shard owning the ADDRESSED workflow (cleat#4340). The
+// chain walk happens inside that shard, which holds a run's successor (a continue inserts it on the old run's shard). A shard whose store has no receipt form still does the verb,
+// and its receipt says only that the addressed run was acted on; see the sharding note on #4340: a successor addressed by its OWN id routes by that id's hash and can reach a shard
+// that does not hold it.
+func (s *ShardedStore) CancelWorkflowReceipt(ctx context.Context, workflowID, reason string) (SettleReceipt, error) {
+	shard := s.getShard(workflowID)
+	if shard == nil {
+		return SettleReceipt{}, fmt.Errorf("cancel_workflow: no shard available -- check shard configuration in CLEAT_SHARD_CONFIG")
+	}
+	if rs, ok := shard.Store.(SettleReceiptStore); ok {
+		return rs.CancelWorkflowReceipt(ctx, workflowID, reason)
+	}
+	return SettleReceipt{SettledRun: workflowID}, shard.Store.CancelWorkflow(ctx, workflowID, reason)
+}
+
+func (s *ShardedStore) TerminateWorkflowReceipt(ctx context.Context, workflowID, reason string) (SettleReceipt, error) {
+	shard := s.getShard(workflowID)
+	if shard == nil {
+		return SettleReceipt{}, fmt.Errorf("terminate_workflow: no shard available -- check shard configuration in CLEAT_SHARD_CONFIG")
+	}
+	if rs, ok := shard.Store.(SettleReceiptStore); ok {
+		return rs.TerminateWorkflowReceipt(ctx, workflowID, reason)
+	}
+	return SettleReceipt{SettledRun: workflowID}, shard.Store.TerminateWorkflow(ctx, workflowID, reason)
+}
+
+func (s *ShardedStore) RequestCancellationReceipt(ctx context.Context, workflowID, reason string) (SettleReceipt, error) {
+	shard := s.getShard(workflowID)
+	if shard == nil {
+		return SettleReceipt{}, fmt.Errorf("request_cancellation: no shard available -- check shard configuration in CLEAT_SHARD_CONFIG")
+	}
+	if rs, ok := shard.Store.(SettleReceiptStore); ok {
+		return rs.RequestCancellationReceipt(ctx, workflowID, reason)
+	}
+	return SettleReceipt{SettledRun: workflowID}, shard.Store.RequestCancellation(ctx, workflowID, reason)
 }
 
 // LoadEventHistoryBatch returns event histories for multiple workflow IDs

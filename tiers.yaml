@@ -162,6 +162,12 @@ tier1:
     # producing the error the worker dead-letters on. Same toolchain dependency, same
     # reason -- it would skip in the tier-1 gate, where a skip is a failure.
     - "^TestARustGuestReachesTheHostRetryLoop$"
+    # tier 2 -- rust. cleat#4132: a Rust guest receives a response over 64 KiB on the call after the one that truncated. Builds examples/rust-workflow
+    # like the two entries above, and would skip in the tier-1 gate.
+    - "^TestARustGuestReceivesAResponseOverSixtyFourKiBOnTheCallAfterTheTruncation$"
+    # tier 2 -- rust. cleat#4113: a Rust guest's side_effect function runs once across a first run and its replay. Builds examples/rust-workflow like
+    # the entries around it, and would skip in the tier-1 gate (no cargo there), where a skip is a failure.
+    - "^TestRustSideEffectFunctionRunsOnceAcrossFirstRunAndReplay$"
     # tier 2 -- rust. The other side of 3.88's threshold: a policy too long to hold a
     # worker for must suspend rather than reach the host loop. Same toolchain dependency
     # as the entry above -- both build examples/rust-workflow.
@@ -208,17 +214,6 @@ tier1:
     # leave a pair whose halves run in different jobs.
     - "^TestJavaDeferSegmentRunsOnlyTheDefers$"
     - "^TestJavaOrdinarySegmentRunsTheBody$"
-    # tier 2 -- assemblyscript. engine/as_workflow_e2e_test.go and the npx-based
-    # transform/vet checks; all need node.
-    - "^TestAssemblyScriptWorkflowExecute$"
-    # tier 2 -- assemblyscript. engine/as_defer_segment_e2e_test.go (3.106); needs node.
-    #
-    # No control alongside it, unlike the Java pair above: TestAssemblyScriptWorkflowDefersRun
-    # in engine/as_workflow_e2e_test.go already plays that part and is covered by the
-    # ^TestAssemblyScript prefix the e2e job selects on.
-    - "^TestAssemblyScriptDeferSegmentRunsOnlyTheDefers$"
-    - "^TestASTransform$"
-    - "^TestVetAS$"
     #
     # ------------------------------------------------------------------------
     # 2026-09-03, IMPROVEMENT-PLAN 3.109. Everything below builds a tier-2
@@ -260,15 +255,6 @@ tier1:
     # would also take TestAssemblyScriptImportsAllExist and
     # TestTheAssemblyScriptSDKAgreesOnTheStopBit, which build nothing and cost
     # nothing and belong in this gate. Tiering follows what a test NEEDS.
-    - "^TestAssemblyScriptWorkflowDefersRun$"
-    - "^TestAssemblyScriptDefersDoNotRunOnSuspension$"
-    - "^TestAssemblyScriptExportsTheDeferRunner$"
-    - "^TestADeferBodyCannotContinueAsNew$"
-    - "^TestADeferBodyCannotRegisterAnotherDefer$"
-    - "^TestAMissingDeferExportIsNotReportedAsAFailure$"
-    - "^TestTheBackendLogsToTheConfiguredLogger$"
-    - "^TestTheWazeroPathRunsDefersOfATrappedWorkflow$"
-    - "^TestTheHostRunsDefersOfAKilledAssemblyScriptWorkflow$"
     - "^TestJavaExportsTheDeferRunner$"
     - "^TestTheHostRunsDefersOfAKilledJavaWorkflow$"
     # tier 2 -- java and assemblyscript, in cmd/cleat (cleat#3690, from cleat#3689).
@@ -289,7 +275,8 @@ tier1:
     # -skip; the guard checks all four of those facts rather than the leg's name.
     #
     # Six of the thirteen cmd/cleat tests that reach a builder, not all thirteen,
-    # and the rest are deliberate. Measured 2026-11-08 with no java, node, npx,
+    # and the rest are deliberate. (Measured when AssemblyScript was one of the three
+    # languages; cleat#4023 removed its tests, so the counts are history.) Measured 2026-11-08 with no java, node, npx,
     # cargo or gradle on PATH: these six SKIPPED; the other seven PASSED
     # (TestRunBuild_{Java,Rust,AS}Target_*, TestJavaBuildRefusesNondeterminism,
     # TestRustBuildRefusesNondeterminism, TestRustBuildAcceptsProseNamingAForbiddenPattern)
@@ -300,9 +287,6 @@ tier1:
     - "^TestJavaBuildRefusesAStaleManifest$"
     - "^TestJavaBuildRefusesMultipleManifests$"
     - "^TestJavaExampleEntryPointResolutionLive$"
-    - "^TestAssemblyScriptBuildRefusesAStaleManifest$"
-    - "^TestAssemblyScriptExampleEntryPointResolutionLive$"
-    - "^TestASBuildRefusesNondeterminism$"
     # tier 2 -- rust, java and assemblyscript, in tests/crash (cleat#3692, the last of
     # the three guard findings cleat#3690 left open).
     #
@@ -723,59 +707,181 @@ tier2:
            SDK gaps still open: no saga abstraction, JsonHelper.parse only supports
            String.class, no getQueryState, durableDefer takes a description not a closure"
 
-    - id: sdk-assemblyscript
-      decision: DECIDED 2026-08-06    # D4 -- see open_items; same shape as Java was
+    - id: sdk-typescript
+      decision: DECIDED 2026-11-17    # owner: tier 2 in the PR after the cleat#3898 fix, once no SILENT divergence remains
       why: |
-        Moved up from tier 3 on 2026-08-06, on the same kind of measurement and with the
-        same caveat as Java. Measured that day: TestAssemblyScriptWorkflowExecute PASSES
-        on wasmtime -- inventory.Reserve -> payments.Charge -> shipping.CreateShipment ->
-        notifications.SendEmail, four calls in order -- and the SDK's own as-pect suite is
-        106/106 across three spec files.
+        TypeScript guests on Javy (QuickJS), static mode, tier 2. It carried
+        "IN DEVELOPMENT -- NOT SUPPORTED" from its first commit (cleat#3825) so that having a
+        tier would not be read as having support; that was removed in the PR fixing
+        cleat#3898, on the owner's condition that no silent divergence from Node remains.
 
-        It has since had #347's treatment (#350): the six best-effort t.Skipf sites are
-        failures, the one legitimate environmental skip goes through
-        toolchainRequired("assemblyscript"), the AssemblyScript Tests job no longer
-        carries continue-on-error, and it is first-class in e2e-cross-language.yml's
-        CLEAT_REQUIRE_TOOLCHAINS.
+        What the claim rests on, measured 2026-11-17 against Node 26.4.0 and Node 24 (the
+        version CI pins) and held by tests (packages/cleat-ts/DIVERGENCES.md row 2 carries
+        the commands and the numbers): the URL shim answers IPv6 hosts, file: URLs and
+        internationalised hosts; every code point U+0000-U+10FFFF was swept in a raw and an
+        already-Punycode-encoded host label, by accept/refuse AND by resulting host VALUE,
+        with ZERO code points the guest accepts and Node refuses and ZERO value differences
+        where both accept; 48 contextual probes cover UTS46's CheckJoiners and CheckBidi
+        (zero silent); and the IDNA answers where Node's own versions disagree are pinned as
+        literals rather than compared. The loud direction -- the guest refusing what Node
+        accepts -- is named in that row: single code points whose case mapping needs the
+        UTS46 table, the joiner labels whose CheckJoiners rule is not implemented, and the
+        bidi-AN digit labels. TestTypeScriptURLHostCodePointSweep,
+        TestTypeScriptURLContextualRules, TestTypeScriptURLIDNAContextRules,
+        TestTypeScriptURLIDNASpecRefusesMalformedLabels and
+        TestTypeScriptURLFileSpecShortening hold them.
+        scripts/check-typescript-tier.py fails if LANGUAGE_SUPPORT.md's language table or
+        README.md says more than this file. The table is parsed; the README check is a LINE
+        HEURISTIC (TypeScript or JavaScript beside a support word or a check mark, one line
+        at a time), so a claim split over two lines, or hidden behind a negation of another
+        language on the same line, is missed. That is the whole of what it checks: the rest of
+        docs/ is NOT scanned, because a scan there measured two hits, both comparisons with
+        other products, so a rule over it would be noise. A support claim in another doc is
+        therefore caught by review, not by CI.
 
-        Making it able to fail found two real defects the same day, which is the argument
-        for tier 2 rather than tier 1 far better than any list of open items:
+        What exists on develop (as of 2026-11-17; re-derive from the tree, do not trust this
+        sentence): a build chain (packages/cleat-ts/build.sh and `cleat build --target ts`),
+        an SDK, a subset of the host-call bindings, a test harness, a Linux tier-2 CI job
+        (.github/workflows/typescript-tier2.yml, ubuntu-latest), and a recorded list of
+        divergences from Node (packages/cleat-ts/DIVERGENCES.md). What does not: see
+        open_items. The status changes in the PR that adds the LANGUAGE_SUPPORT.md row,
+        which is the last of the series.
 
-          * No data flowed between the saga's steps. examples/as-workflow read
-            reservationID / totalCents / chargeID out of responses spelling them
-            reservation_id / total_cents / charge_id, so payments.Charge was invoked for
-            zero and the result carried an empty reservation_id. The test asserted only
-            "result non-empty" and the call sequence, so it passed throughout.
-          * The example could not be installed from a clean checkout at all.
-            package-lock.json recorded its two `file:` devDependencies in a form `npm ci`
-            refuses, and had for as long as the file has been in that shape. Invisible
-            because it reached a best-effort skip, and because node_modules is untracked
-            -- anyone who had ever run `npm install` there kept a working tree.
-
-        Both are fixed, and the e2e now asserts each value that has to survive a hop.
-        Tier 1 wants a record, not a good day; revisit after the open item below.
+        Where its tests live, and why it matters (the exclusion is structural, not a list):
+        every toolchain-dependent TypeScript test is named TestTypeScript* and lives in
+        tests/typescript/, a package in tier2.packages and in NO tier-1 pattern, so it
+        cannot run in the Tier 1 gate, where a skip is a failure. This is the shape that
+        has leaked three times -- a tier-2 test in a tier-1 package. The guard refuses a
+        TestTypeScript* function anywhere else, and refuses to pass if tests/typescript/
+        holds none.
       open_items:
-        - "RESOLVED 2026-08-09: isReplaying() removed rather than implemented. It was hardcoded
-           `return false` with no host call behind it in any SDK, so every 'only on first
-           execution' branch fired on every replay -- duplicate logs, metrics and
-           notifications after each worker restart, with nothing failing. A raw replay flag
-           is a determinism footgun regardless: branching workflow LOGIC on it records
-           different events on replay than on execution. sideEffect() already covers the one
-           safe use and is replay-consistent by construction. Documented in
-           docs/determinism.md and the Temporal migration guide, which had never mentioned
-           it despite Temporal's own IsReplaying() being a well-known footgun"
-        - "RESOLVED 2026-09-02 (§3.73): HostCalls.defer registered a DESCRIPTION and nothing
-           else -- the host recorded that a defer existed and no code anywhere could run it,
-           while the doc comment said it registers 'cleanup to run on workflow exit'. Same
-           defect as Go's §3.70, in the fourth and last SDK. deferFunc(h, description, fn,
-           payload) now carries a body, drained LIFO by the generated wrapper. State is
-           passed rather than captured because --runtime stub has no closures, which is this
-           SDK's existing idiom (saga.ts). The guard that matters is the suspend one: unlike
-           the other three SDKs, AssemblyScript does not suspend by unwinding, so the drain
-           is only correct because it sits after an explicit isWorkflowSuspended() check --
-           pinned by TestAssemblyScriptDefersDoNotRunOnSuspension, verified by moving the
-           drain one line earlier. __cleat_run_deferred is emitted too, so §3.35 phase 4's
-           kill-path cleanup reaches AssemblyScript guests"
+        - "CheckJoiners (cleat#4020): a ZWNJ or ZWJ in a label is refused whatever its context, so a Devanagari, Malayalam
+           or Arabic host that Node accepts is refused here -- 12 of the 48 contextual probes, all loud"
+        - "silent divergences from Node (the dangerous kind: a plausible wrong answer, no
+           error). Date setters given a non-finite argument: FIXED, held by
+           TestTypeScriptDateSettersAgreeWithNode (631 cases against Node, recorded
+           2026-11-17 in DIVERGENCES.md row 1). URL: FIXED and measured, row 2 (cleat#3898).
+           The shim answers IPv6 hosts, file: URLs and internationalised hosts, and the IDNA
+           claim is the code-point sweep by accept/refuse AND by host value (zero silent on
+           both) plus the pairs probes and the pinned version-split answers. The list covers
+           what was looked at (four npm packages, 27 cases); it is not closed"
+        - "dialects, as of 2026-11-17 (re-derive from .github/workflows/typescript-tier2.yml):
+           the database-backed worker tests run on PostgreSQL, MySQL and SQL Server, one
+           tier-2 job each (cleat#3997, #4006). ONLY those tests run on MySQL and SQL
+           Server, not the whole package, and no job gates a merge; tier 2 must run and may
+           fail. A guard test fails if a database-backed test is added and a dialect job
+           does not run it. The wrong-password control (a set DSN that does not connect
+           FAILS, never skips) was run locally in cleat#3992; CI's own control is each
+           job's CLEAT_REQUIRE_TOOLCHAINS declaration, under which an unset DSN fails.
+           On MySQL and SQL Server those jobs deploy through deploy-workflow; cleatctl deploy
+           workflow works there too since cleat#4004, and only cleatctl deploy plugin stays
+           PostgreSQL-only (cleat#4005)"
+        - "host-call bindings: every host call is bound or deliberately unbound, and none is
+           pending, as of 2026-11-18. Four are deliberately unbound, each with a `permanent:`
+           reason in packages/cleat-ts/host-calls.json (cleat_poll_work, cleat_complete,
+           cleat_register_query_handler, cleat_interrupt_requested); the pending ones lived in
+           packages/cleat-ts/host-calls.d/*.json and every group there is empty. Re-derive it by
+           reading BOTH files and asserting that no `unbound` reason starts with `pending:`
+           (TestEveryHostCallIsBoundOrListed reads both and fails when a call is in neither
+           list, so they cannot drift from the engine). This said 'the remaining host-call
+           bindings, which include workflow updates' on 2026-11-17, and the groups of
+           cleat#3827 (updates, signals, children, detached, locks, schedules, calls, plugins,
+           continue-as-new, fetch and json_parse) were bound the same week. A killed
+           workflow's defers now run (cleat#3922, cleat#4053), except for a guest whose work
+           never returns to the bytecode loop, which is stated in packages/cleat-ts/
+           DIVERGENCES.md D1. Delivered since the previous revision: harness stores for
+           promises, signals and children (cleat#3828), updates, locks, plugins and fetch, and
+           defer segments, so javascript is in engine.deferSegmentLanguages (cleat#3826). The
+           getting-started page and the LANGUAGE_SUPPORT.md row landed with the flip
+           (cleat#3831)"
+        - "module size, measured 2026-11-17 on macOS arm64: the example module is 1,446,426
+           bytes and the Javy plugin it embeds is 1,296,266 (re-derive: cleat build --target
+           ts -o <dir> examples/ts-workflow/workflow.ts:greet, then packages/cleat-ts/.work/
+           cleat-plugin.wasm). An earlier revision said about 1.1 MB and 1.07 MB, a
+           prototype-era figure the plugin has since outgrown. The 100 KB line applies to
+           dynamic mode only, which is out of scope"
+
+    - id: sdk-csharp
+      decision: DECIDED 2026-11-19    # owner: C# is a tier-2 language; recorded at https://github.com/cleat-team/cleat/issues/4080#issuecomment-7034279024; promotion in C# PR 7 of cleat#4080, after the determinism vet (PR 6)
+      why: |
+        C# guests as Component Model components built with componentize-dotnet against the
+        existing `cleat-workflow` world in python-sdk/wit/cleat.wit (Route B of the cleat#4077
+        spike), tier 2. It carried "IN DEVELOPMENT -- NOT SUPPORTED" from its first commit
+        (cleat#4080, PR 1) so that having a label and a test package would not be read as
+        having support; that was removed in the last of the seven PRs, on the owner's decision
+        of 2026-11-19.
+
+        What the claim rests on (re-derive from the tree; do not trust this sentence): every
+        function in python-sdk/wit/cleat.wit is bound by the SDK except durable-register-query-
+        handler, which no SDK has and which stays listed in tests/csharp/unbound.d/ on purpose
+        (tests/csharp/unbound_drift_test.go fails if a function is neither bound nor listed);
+        each binding group is driven through the real engine and wasmtime backend by a
+        conformance component (packages/cleat-csharp/conformance/), and the Go-side tests are
+        every function named TestCSharp* in tests/csharp/ (`grep -h '^func TestCSharp'
+        tests/csharp/*.go | wc -l`); the engine's default per-store memory limit
+        (DefaultWasmtimeMemoryLimitBytes, 256 MiB, engine/wasmtime_options.go) is above the 52
+        MiB a .NET guest needs to start, which TestTheDefaultMemoryLimitClearsTheLargestRuntime
+        keeps true, and "csharp" is in deferSegmentLanguages (engine/engine.go), so a failed,
+        terminated or killed run's registered cleanup runs. The walk-through in docs/tutorials/csharp-quick-start.md is a real project,
+        examples/csharp-workflow, built by `cleat build --target csharp` and run on the engine
+        by TestCSharpQuickStartExampleSuspendsResumesFromHistoryAndRunsItsDefer, so the page
+        cannot drift from a workflow that works.
+
+        What it does NOT rest on, stated plainly (each is an open item below): the toolchain is
+        a prerelease, there is no NuGet package, no C# workflow has been run on a real worker
+        against a database, and a suspension is an exception that user code can catch.
+
+        Where its tests live, and why it matters (the exclusion is structural, not a list):
+        every Go-side C# test is named TestCSharp* and lives in tests/csharp/, a package in
+        tier2.packages and in NO tier-1 pattern, so it cannot run in the Tier 1 gate, where a
+        skip is a failure. scripts/check-csharp-tier.py refuses a TestCSharp* function anywhere
+        else, refuses a test that names the C# toolchain outside that package, and refuses to
+        pass if tests/csharp/ holds none. The tests run in two places: the required Tier 2 Gate
+        (./tests/csharp/... is in tier2.packages; its x86_64 runner cannot execute arm64, so the
+        linux/arm64 lock leg skips there), and the NON-required workflow
+        .github/workflows/csharp-tier2.yml, which also runs the SDK's managed unit tests in the
+        pinned container with the toolchain DECLARED (a missing docker fails there, not skips),
+        and a native linux/arm64 job. That workflow is deliberately not a required check: it
+        sits behind a `paths:` filter, which a required context must not. LANGUAGE_SUPPORT.md's
+        C#/.NET row is checked against this entry by scripts/check-typescript-tier.py, which
+        compares every row of the table with tiers.yaml.
+      open_items:
+        - "the toolchain is a PRERELEASE: Microsoft.DotNet.ILCompiler.LLVM 10.0.0-rc.1.* is a
+           release candidate from the dotnet-experimental feed (not on nuget.org) and
+           componentize-dotnet is 0.8.0-preview. Both are pinned by digest and hash in
+           packages/cleat-csharp/toolchain.env and toolchain.packages.tsv, and a build refuses
+           anything else, but a pin is not a support commitment from upstream. Builds are NOT
+           byte-reproducible (same size, different bytes)"
+        - "there is no NuGet package: the SDK is a SOURCE package a project imports by path from a
+           cleat checkout (build/Cleat.Sdk.props), so a C# workflow is built inside a checkout.
+           The compiler only runs on x64 Linux or Windows, so `cleat build --target csharp` runs
+           it in the pinned linux container (amd64, or arm64 natively on an arm64 host); there
+           is no native macOS build"
+        - "the determinism vet (`cleat vet --lang csharp`, run by `cleat build --target csharp`; C# PR
+           6) is a text scan with no type information: aliases declared in another file,
+           reflection, a delegate from a variable and an extension method wrapping a refused
+           API are invisible to it. It refuses what was MEASURED to differ or fail on the real
+           engine (Environment.TickCount[64] and Stopwatch differ on replay, Thread.Sleep holds
+           the worker, Task.Run/Task.Delay/threads/File/HttpClient fail) and warns on a catch
+           that swallows CleatSuspendException. DateTime.UtcNow, Random and Guid.NewGuid()
+           were measured replay-stable and are not refused"
+        - "no test runs a C# component on a real cleat-worker against a database: tests/csharp
+           drives the engine in process with a recording caller, and tests/crash has no C#
+           client. Kill-and-resume of a C# workflow is covered at the engine level (the
+           terminate and defer-segment tests), not by killing a real worker; MySQL and SQL
+           Server have not been measured for C# at all"
+        - "a suspension is an exception, and it can be caught: a `catch (Exception)` that swallows
+           CleatSuspendException does not change the run's outcome but lets the workflow keep
+           running past it, and the host calls it then makes are real. Go and Rust abort at once.
+           packages/cleat-csharp/README.md says never to swallow it; the determinism vet is the
+           mechanism that flags it"
+        - "async/await over host calls works only because every awaited task is already complete;
+           Task.Delay, Task.Run and a blocking wait on an incomplete task throw
+           PlatformNotSupportedException. To wait, call HostCalls.Sleep"
+        - "typed (record) entries go through a source-generated JsonSerializerContext the author
+           writes, and the first typed record costs about 1.6 MB and about 140 ms of first
+           execution (measured 2026-11-18 under amd64 emulation: packages/cleat-csharp/README.md)"
+        - "cleat-gen-plugin has no C# target: typed plugin clients are not generated for C#"
 
     - id: plugins
       why: 22 built-in, all with unit tests; 10 covered by the integration harness.
@@ -890,7 +996,7 @@ tier2:
            a hole -- but it is the file a reader checks first"
 
     - id: workflow-callable-cron
-      status: SUPPORTED in go, assemblyscript and python
+      status: SUPPORTED in go and python
       why: |
         Added 2026-08-08. A workflow can register, remove and list recurring triggers for
         other workflows: cleat_schedule_cron / cleat_delete_cron / cleat_list_crons, on
@@ -1223,13 +1329,22 @@ tier2:
     # pins a tagged tarball, builds the worker with CGO, and runs it in its test
     # block). Release tooling is real, and it is not a product support claim.
     - ./packaging/...
+    # Added with the TypeScript tier-2 scaffolding (cleat#3825). The TypeScript tests live
+    # here and nowhere else, so this is the one place that decides they are tier 2: the
+    # package is in no tier-1 pattern, and scripts/check-typescript-tier.py checks both
+    # halves. It must hold at least one test, or "must run" is satisfied by nothing.
+    - ./tests/typescript/...
+    # Added with the C# tier-2 scaffolding (cleat#4080), the same shape as ./tests/typescript/... above: the Go-side C# tests live
+    # here and nowhere else, the package is in no tier-1 pattern, and scripts/check-csharp-tier.py checks both halves. It must hold
+    # at least one test, or "must run" is satisfied by nothing.
+    - ./tests/csharp/...
 
   # Tier-2 suites gated by a dedicated job rather than by scripts/tier2-gate.sh, because
   # that job already enforces something STRICTER than this gate would.
   #
   # Both entries below run under `scripts/check-skip-budget.sh <name> <report.json>` with a
   # budget of 0, and e2e-cross-language.yml additionally sets
-  # CLEAT_REQUIRE_TOOLCHAINS=rust,python,java,assemblyscript so an absent toolchain is a
+  # CLEAT_REQUIRE_TOOLCHAINS=rust,python,java so an absent toolchain is a
   # Fatal rather than a skip. tier2.rules.skips_allowed is true, so routing these through
   # tier2-gate.sh would permit skips that their own jobs currently fail on.
   #
@@ -1294,9 +1409,9 @@ tier2:
       job: "Layer 2 — WASM Integration"
       workflow: .github/workflows/plugin-harness-ci.yml
       why: >-
-        Two things, not one. The Go, Rust, AssemblyScript and Python guest PLUGINS
+        Two things, not one. The Go, Rust, Java and Python guest PLUGINS
         (TestPluginCalls_Wasm), and since 2026-09-05 the host-call execution HARNESS
-        (TestHostCalls*, IMPROVEMENT-PLAN 3.406) -- Go, Rust and AssemblyScript guests
+        (TestHostCalls*, IMPROVEMENT-PLAN 3.406) -- Go, Rust and Java guests
         each making all 24 wave-1 host calls against a real host, one call per
         invocation, checked against recorded outcome tables. Both are named explicitly
         in the job's -run pattern, and neither is run by any other workflow: every job
@@ -1329,8 +1444,8 @@ tier2:
         Self-contained; brings up postgres and minio as service containers. Note the minio
         image is pinned to :latest, which is a real fragility now that this gates merges.
 
-    # The three non-Go SDKs. These are tier-2 COMPONENTS (sdk-rust, sdk-java,
-    # sdk-assemblyscript above) rather than Go packages, so tier2-gate.sh cannot run them
+    # The two non-Go SDKs. These are tier-2 COMPONENTS (sdk-rust and sdk-java; sdk-assemblyscript
+    # was a third until cleat#4023) rather than Go packages, so tier2-gate.sh cannot run them
     # -- it drives `go test -json` and these need cargo, gradle and npm.
     #
     # Every one of them was already tested on every pull request and none of it gated.
@@ -1345,7 +1460,7 @@ tier2:
     #   gh run list --workflow=ci.yml --branch develop --limit 8 \
     #     --json databaseId --jq '.[].databaseId' | while read r; do
     #       gh run view "$r" --json jobs --jq '[.jobs[]
-    #         |select(.name=="Test Rust" or .name=="Java Tests" or .name=="AssemblyScript Tests")
+    #         |select(.name=="Test Rust" or .name=="Java Tests")
     #         |"\(.name)=\(.conclusion)"]|join("  ")'; done
     - suite: crates/cleat-sdk, crates/cleat-macro
       job: "Test Rust"
@@ -1358,9 +1473,6 @@ tier2:
       job: "Java Tests"
       workflow: .github/workflows/ci.yml
       why: gradle test. Measured 2026-08-07 - 280 tests, 0 failures, 0 skipped.
-    - suite: packages/cleat-as
-      job: "AssemblyScript Tests"
-      workflow: .github/workflows/ci.yml
 
     # NOT gated, and deliberately named rather than silently omitted:
     #
@@ -1369,11 +1481,9 @@ tier2:
     #   double the registry exposure for the same signal, and D5's whole argument is
     #   about how much registry surface a blocking check should have.
     #
-    #   "AssemblyScript WASM Build" (ci.yml) and "AssemblyScript SDK Integration"
-    #   (ecosystem-ci.yml) both carried continue-on-error until 2026-08-07. It was
-    #   removed -- measured, every step in both was already passing -- so they can now
-    #   fail. They are left unrequired for the same duplicate-coverage reason: they
-    #   should be able to fail visibly first, and be promoted only if that proves useful.
+    #   (There were two more, "AssemblyScript WASM Build" in ci.yml and "AssemblyScript SDK
+    #   Integration" in ecosystem-ci.yml, unrequired for the same duplicate-coverage reason.
+    #   cleat#4023 removed both with the SDK.)
 
   # Separate Go modules, tested from inside their own directory -- `go test ./cleat/...`
   # from the root fails with "main module does not contain package".
@@ -1495,7 +1605,7 @@ tier2:
 #
 #     WHAT CHANGED with cleat#3692, and it is wider than the race detector. The Tier 1
 #     Gate no longer runs ALL of ./tests/crash/...: the tier-2 agent clients (rust,
-#     java, assemblyscript) are
+#     java, and assemblyscript until cleat#4023 removed it) are
 #     TestCrashMidAgentLoopInATierTwoLanguageResumesWithoutReaskingTheModel, which
 #     tier1.exclude_tests removes, so this unrequired job is the only one that runs
 #     them. A failure there is red and visible and does not stop a merge. That is what
@@ -1549,7 +1659,7 @@ required_contexts:
   # `measured` is the date the declared list below was last compared against branch
   # protection itself, not the date this file was last edited. Only --check-live and the
   # default run's live attempt can move it; an entry added from a PR description cannot.
-  measured: 2026-09-29
+  measured: 2026-11-23
   total: 35
 
   # `covers` is one of:
@@ -1670,21 +1780,13 @@ required_contexts:
         cluster-and-scale among the suites that do). It is required because multi-worker
         claim/fence behaviour has no other blocking coverage: the tier-1 engine suite
         runs one process.
-    - context: AssemblyScript Tests
-      workflow: ci.yml
-      job: test-assemblyscript
-      covers: tier2
-      why_required: |
-        tier2.components sdk-assemblyscript. Required because the SDK ships to npm and
-        its stop-bit parity with the host is one of the boundaries §3.400 lists as
-        guarded; an unrequired check there would let the guest and host drift apart
-        between releases.
     - context: Java Tests
       workflow: ci.yml
       job: test-java
       covers: tier2
       why_required: |
-        tier2.components sdk-java, and the same parity argument as AssemblyScript.
+        tier2.components sdk-java, and the same parity argument that made the AssemblyScript
+        Tests job required until cleat#4023 removed it.
         Note gradle's own trap, recorded because it cost a session: `gradle test` prints
         green with every task UP-TO-DATE and zero tests executed.
     - context: Test Rust
@@ -1745,6 +1847,30 @@ required_contexts:
       workflow: ci.yml
       job: test-python
       covers: infra
+
+    # Required on 2026-11-23 (cleat#4169), once chaos.yml stopped using a workflow-level
+    # `paths:` filter and started reporting on every pull request and merge-queue entry.
+    - context: Chaos sample
+      workflow: chaos.yml
+      job: chaos-sample
+      covers: undeclared
+      why_required: |
+        The seeded fault-injection sample: `go test -tags chaos ./tests/chaos -run TestChaosSeeded`
+        against a real worker and database, 60 seeds, about seven minutes. `./tests/chaos` is in
+        no tier in this file, so this context gates a package that tiers.yaml neither claims nor
+        parks; that is the gap `covers: undeclared` exists to make visible, and it is recorded
+        here rather than closed by assigning the package a tier in a PR about something else.
+
+        It is required because it is the check that replays a run after a crash and compares it
+        with a fault-free one, which no other required context does. It is SKIPPED, and a skipped
+        job counts as passing, on a pull request whose diff touches none of the replay machinery
+        (`scripts/chaos-sample-relevant.sh` decides, from the diff, in the `Chaos sample
+        relevance` job) and on every merge-queue entry. A docs-only PR therefore reports it as
+        skipping, read from a real run on 2026-11-23 (#4411); the queue reports it skipped, read
+        from two (#4404, #4398).
+
+        `Chaos sample relevance` is deliberately NOT required: a failure to decide is read as
+        "run it", so the relevance job cannot let a relevant change through by failing.
 
     # --- tier2.gated_by suites, which have their own stricter jobs -------------------
     - context: Cross-Language WASM E2E
@@ -1818,6 +1944,9 @@ tier3:
 
   components:
     # sdk-java and sdk-assemblyscript were here. Both moved to tier 2 on 2026-08-06.
+    # sdk-assemblyscript is no longer in tier 2 either: it was REMOVED, not parked (cleat#4023,
+    # 2026-11-18). Nothing is built, shipped or claimed for it, and the engine refuses a module
+    # built with it, naming the removal. sdk-java is unaffected.
     #
     # Worth recording why they were ever here, because the mistake is repeatable: both
     # were parked on the output of their own e2e tests, and both of those tests degraded
@@ -1885,6 +2014,8 @@ tier3:
 #       this makes authentication a feature to build, not a header to add.
 #   D4  DECIDED 2026-08-06. Java and AssemblyScript are tier 2, not parked. Both were
 #       parked on the output of tests that could not fail; see the note in tier 3.
+#       SUPERSEDED FOR ASSEMBLYSCRIPT 2026-11-18: it was removed from the repository
+#       (cleat#4023). The decision for Java stands.
 #   D5  DECIDED 2026-08-06. The tier-1 gate filters lower-tier tests out; it does not
 #       provision their toolchains. Recorded inline above tier1.rules.
 #   D6  DECIDED 2026-09-02, IMPLEMENTED 2026-09-04 for TerminateWorkflow.

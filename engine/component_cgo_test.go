@@ -45,6 +45,7 @@ func TestExtractStringFromPacked(t *testing.T) {
 func TestRegisterCBLookupCB(t *testing.T) {
 	cbRegistry.Lock()
 	cbRegistry.entries = make(map[uintptr]cbEntry)
+	cbRegistry.next = 0
 	cbRegistry.Unlock()
 	b1 := &wasmtimeBackend{}
 	b2 := &wasmtimeBackend{}
@@ -74,6 +75,7 @@ func TestRegisterCBLookupCB(t *testing.T) {
 func TestRegisterCBConcurrent(t *testing.T) {
 	cbRegistry.Lock()
 	cbRegistry.entries = make(map[uintptr]cbEntry)
+	cbRegistry.next = 0
 	cbRegistry.Unlock()
 	b := &wasmtimeBackend{}
 	var wg sync.WaitGroup
@@ -654,7 +656,7 @@ func TestDispatchGetScopeReturnsTheScopeTheHandlerWrote(t *testing.T) {
 // =============================================================================
 
 func TestDispatchDurableCallString(t *testing.T) {
-	b := &wasmtimeBackend{handler: &mockHostHandler{ret: packStrLen(5)}}
+	b := &wasmtimeBackend{handler: &mockHostHandler{fill: 5, ret: packStrLen(5)}}
 	strPtr, _, freeArgs := cgotestMakeStrArgs("svc", "op", "req")
 	defer freeArgs()
 	resultPtr := cgotestAllocResult()
@@ -665,7 +667,7 @@ func TestDispatchDurableCallString(t *testing.T) {
 }
 
 func TestDispatchDurableCallRetry(t *testing.T) {
-	b := &wasmtimeBackend{handler: &mockHostHandler{ret: packStrLen(5)}}
+	b := &wasmtimeBackend{handler: &mockHostHandler{fill: 5, ret: packStrLen(5)}}
 	argsPtr, _, freeArgs := cgotestMakeMixedArgs("svc", "op", "req", uint64(0), uint64(0), uint64(0), uint64(0), "none")
 	defer freeArgs()
 	resultPtr := cgotestAllocResult()
@@ -676,7 +678,7 @@ func TestDispatchDurableCallRetry(t *testing.T) {
 }
 
 func TestDispatchDurableCallHeartbeat(t *testing.T) {
-	b := &wasmtimeBackend{handler: &mockHostHandler{ret: packStrLen(5)}}
+	b := &wasmtimeBackend{handler: &mockHostHandler{fill: 5, ret: packStrLen(5)}}
 	argsPtr, _, freeArgs := cgotestMakeMixedArgs("svc", "op", "req", uint64(5000))
 	defer freeArgs()
 	resultPtr := cgotestAllocResult()
@@ -728,7 +730,7 @@ func TestDispatchDurableCallStopIsNotAResponse(t *testing.T) {
 func TestDispatchDurableCallFailureIsNotAResponse(t *testing.T) {
 	// responseLen=7 ("timeout" would be in the buffer), callErrorCode=1
 	// (CallErrorTimeout), errCode=1.
-	b := &wasmtimeBackend{handler: &mockHostHandler{ret: packDurableCallResult(7, 1, 1)}}
+	b := &wasmtimeBackend{handler: &mockHostHandler{fill: 7, ret: packDurableCallResult(7, 1, 1)}}
 	strPtr, _, freeArgs := cgotestMakeStrArgs("svc", "op", "req")
 	defer freeArgs()
 	resultPtr := cgotestAllocResult()
@@ -738,21 +740,34 @@ func TestDispatchDurableCallFailureIsNotAResponse(t *testing.T) {
 	wantCallOutcome(t, resultPtr, "failed", 7, 1)
 }
 
+// TestDispatchDurableDefer: durable-defer is result<string, call-failure> since cleat#4079, and DurableDefer answers in the
+// packSimpleResult layout (length at bits 32-63), the same as the child-workflow starts.
 func TestDispatchDurableDefer(t *testing.T) {
-	b := &wasmtimeBackend{handler: &mockHostHandler{ret: packStrLen(10)}}
+	b := &wasmtimeBackend{handler: &mockHostHandler{fill: 10, ret: packSimpleStrLen(10)}}
 	strPtr, _, freeArgs := cgotestMakeStrArgs("desc")
 	defer freeArgs()
 	resultPtr := cgotestAllocResult()
 	if err := b.cgotestDispatchStr(3, strPtr, 1, resultPtr); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if !cgotestHasResultString(resultPtr) {
-		t.Error("expected non-nil string result")
+	wantCallOutcome(t, resultPtr, "ok", 10, 0)
+}
+
+// TestDispatchDurableDeferStopIsNotAnId is the reason the signature changed. A bare string has no bits to carry a stop, so
+// the host could not say "stop at this registration"; a stop must arrive as err(suspended), never as an id.
+func TestDispatchDurableDeferStopIsNotAnId(t *testing.T) {
+	b := &wasmtimeBackend{handler: &mockHostHandler{ret: callSuspendSentinel}}
+	strPtr, _, freeArgs := cgotestMakeStrArgs("desc")
+	defer freeArgs()
+	resultPtr := cgotestAllocResult()
+	if err := b.cgotestDispatchStr(3, strPtr, 1, resultPtr); err != nil {
+		t.Fatalf("unexpected error: %v", err)
 	}
+	wantCallOutcome(t, resultPtr, "suspended", 0, 0)
 }
 
 func TestDispatchChildWorkflow(t *testing.T) {
-	b := &wasmtimeBackend{handler: &mockHostHandler{ret: packSimpleStrLen(20)}}
+	b := &wasmtimeBackend{handler: &mockHostHandler{fill: 20, ret: packSimpleStrLen(20)}}
 	strPtr, _, freeArgs := cgotestMakeStrArgs("wf-name", "input")
 	defer freeArgs()
 	resultPtr := cgotestAllocResult()
@@ -763,7 +778,7 @@ func TestDispatchChildWorkflow(t *testing.T) {
 }
 
 func TestDispatchCreatePromise(t *testing.T) {
-	b := &wasmtimeBackend{handler: &mockHostHandler{ret: packStrLen(8)}}
+	b := &wasmtimeBackend{handler: &mockHostHandler{fill: 8, ret: packStrLen(8)}}
 	strPtr, _, freeArgs := cgotestMakeStrArgs("promise")
 	defer freeArgs()
 	resultPtr := cgotestAllocResult()
@@ -776,7 +791,7 @@ func TestDispatchCreatePromise(t *testing.T) {
 }
 
 func TestDispatchPluginCall(t *testing.T) {
-	b := &wasmtimeBackend{handler: &mockHostHandler{ret: packStrLen(15)}}
+	b := &wasmtimeBackend{handler: &mockHostHandler{fill: 15, ret: packStrLen(15)}}
 	strPtr, _, freeArgs := cgotestMakeStrArgs("plugin", "func", "input")
 	defer freeArgs()
 	resultPtr := cgotestAllocResult()
@@ -787,7 +802,7 @@ func TestDispatchPluginCall(t *testing.T) {
 }
 
 func TestDispatchSetScope(t *testing.T) {
-	b := &wasmtimeBackend{handler: &mockHostHandler{ret: packStrLen(12)}}
+	b := &wasmtimeBackend{handler: &mockHostHandler{fill: 12, ret: packStrLen(12)}}
 	strPtr, _, freeArgs := cgotestMakeStrArgs("type", "key")
 	defer freeArgs()
 	resultPtr := cgotestAllocResult()
@@ -800,7 +815,7 @@ func TestDispatchSetScope(t *testing.T) {
 }
 
 func TestDispatchPollCancellation(t *testing.T) {
-	b := &wasmtimeBackend{handler: &mockHostHandler{ret: packStrLen(5)}}
+	b := &wasmtimeBackend{handler: &mockHostHandler{fill: 5, ret: packStrLen(5)}}
 	resultPtr := cgotestAllocResult()
 	if err := b.cgotestDispatchStr(10, nil, 0, resultPtr); err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -811,7 +826,7 @@ func TestDispatchPollCancellation(t *testing.T) {
 }
 
 func TestDispatchWorkflowID(t *testing.T) {
-	b := &wasmtimeBackend{handler: &mockHostHandler{ret: packStrLen(20)}}
+	b := &wasmtimeBackend{handler: &mockHostHandler{fill: 20, ret: packStrLen(20)}}
 	resultPtr := cgotestAllocResult()
 	if err := b.cgotestDispatchStr(11, nil, 0, resultPtr); err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -822,7 +837,7 @@ func TestDispatchWorkflowID(t *testing.T) {
 }
 
 func TestDispatchRunID(t *testing.T) {
-	b := &wasmtimeBackend{handler: &mockHostHandler{ret: packStrLen(20)}}
+	b := &wasmtimeBackend{handler: &mockHostHandler{fill: 20, ret: packStrLen(20)}}
 	resultPtr := cgotestAllocResult()
 	if err := b.cgotestDispatchStr(12, nil, 0, resultPtr); err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -833,7 +848,7 @@ func TestDispatchRunID(t *testing.T) {
 }
 
 func TestDispatchUUID(t *testing.T) {
-	b := &wasmtimeBackend{handler: &mockHostHandler{ret: packStrLen(36)}}
+	b := &wasmtimeBackend{handler: &mockHostHandler{fill: 36, ret: packStrLen(36)}}
 	strPtr, _, freeArgs := cgotestMakeStrArgs("seed")
 	defer freeArgs()
 	resultPtr := cgotestAllocResult()
@@ -846,7 +861,7 @@ func TestDispatchUUID(t *testing.T) {
 }
 
 func TestDispatchSideEffect(t *testing.T) {
-	b := &wasmtimeBackend{handler: &mockHostHandler{ret: packSimpleStrLen(8)}}
+	b := &wasmtimeBackend{handler: &mockHostHandler{fill: 8, ret: packSimpleStrLen(8)}}
 	strPtr, _, freeArgs := cgotestMakeStrArgs("result")
 	defer freeArgs()
 	resultPtr := cgotestAllocResult()
@@ -859,8 +874,35 @@ func TestDispatchSideEffect(t *testing.T) {
 	wantCallOutcome(t, resultPtr, "ok", 8, 0)
 }
 
+// cleat#4113: side-effect-recorded returns result<side-effect-lookup, call-failure>. Each status the handler can answer must reach the guest as
+// its own case, and a handler answer must never be read as another's: "recorded" and "not recorded" differ only in the low byte.
+func TestDispatchSideEffectRecorded(t *testing.T) {
+	cases := []struct {
+		name     string
+		ret      int64
+		wantKind string
+	}{
+		{"a recorded value", packSimpleResult(0, 5), "recorded"},
+		{"nothing recorded", packSimpleResult(sideEffectNotRecorded), "not-recorded"},
+		{"a divergence", packSimpleResult(1, 5), "failed"},
+		{"a stop", callSuspendSentinel, "suspended"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			b := &wasmtimeBackend{handler: &mockHostHandler{ret: tc.ret}}
+			resultPtr := cgotestAllocResult()
+			if err := b.cgotestDispatchStr(30, nil, 0, resultPtr); err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if kind, _, _ := cgotestReadSideEffectLookup(resultPtr); kind != tc.wantKind {
+				t.Errorf("kind = %q, want %q", kind, tc.wantKind)
+			}
+		})
+	}
+}
+
 func TestDispatchFetch(t *testing.T) {
-	b := &wasmtimeBackend{handler: &mockHostHandler{ret: packSimpleStrLen(10)}}
+	b := &wasmtimeBackend{handler: &mockHostHandler{fill: 10, ret: packSimpleStrLen(10)}}
 	strPtr, _, freeArgs := cgotestMakeStrArgs("GET", "http://x", "{}", "")
 	defer freeArgs()
 	resultPtr := cgotestAllocResult()
@@ -871,7 +913,7 @@ func TestDispatchFetch(t *testing.T) {
 }
 
 func TestDispatchAwaitChild(t *testing.T) {
-	b := &wasmtimeBackend{handler: &mockHostHandler{ret: packStrLen(8)}}
+	b := &wasmtimeBackend{handler: &mockHostHandler{fill: 8, ret: packStrLen(8)}}
 	strPtr, _, freeArgs := cgotestMakeStrArgs("run-id")
 	defer freeArgs()
 	resultPtr := cgotestAllocResult()
@@ -884,7 +926,7 @@ func TestDispatchAwaitChild(t *testing.T) {
 }
 
 func TestDispatchAwaitAllChildren(t *testing.T) {
-	b := &wasmtimeBackend{handler: &mockHostHandler{ret: packStrLen(10)}}
+	b := &wasmtimeBackend{handler: &mockHostHandler{fill: 10, ret: packStrLen(10)}}
 	strPtr, _, freeArgs := cgotestMakeStrArgs(`["id1","id2"]`)
 	defer freeArgs()
 	resultPtr := cgotestAllocResult()
@@ -897,7 +939,7 @@ func TestDispatchAwaitAllChildren(t *testing.T) {
 }
 
 func TestDispatchPluginCallStreaming(t *testing.T) {
-	b := &wasmtimeBackend{handler: &mockHostHandler{ret: packStrLen(15)}}
+	b := &wasmtimeBackend{handler: &mockHostHandler{fill: 15, ret: packStrLen(15)}}
 	strPtr, _, freeArgs := cgotestMakeStrArgs("plugin", "func", "input")
 	defer freeArgs()
 	resultPtr := cgotestAllocResult()
@@ -908,7 +950,7 @@ func TestDispatchPluginCallStreaming(t *testing.T) {
 }
 
 func TestDispatchChildWorkflowWithOptions(t *testing.T) {
-	b := &wasmtimeBackend{handler: &mockHostHandler{ret: packSimpleStrLen(20)}}
+	b := &wasmtimeBackend{handler: &mockHostHandler{fill: 20, ret: packSimpleStrLen(20)}}
 	argsPtr, _, freeArgs := cgotestMakeMixedArgs("wf-name", "input", uint64(0), uint64(0), "policy")
 	defer freeArgs()
 	resultPtr := cgotestAllocResult()
@@ -934,12 +976,12 @@ func TestDispatchAwaitPromiseMapsEachPackedWordToItsOwnCase(t *testing.T) {
 		wantKind    string
 		wantPayload int
 	}{
-		{"resolved", &mockHostHandler{ret: packAwaitPromiseResult(5, false, 0)}, "resolved", 5},
+		{"resolved", &mockHostHandler{fill: 5, ret: packAwaitPromiseResult(5, false, 0)}, "resolved", 5},
 		{"resolved with an empty value", &mockHostHandler{ret: packAwaitPromiseResult(0, false, 0)}, "resolved", 0},
 		{"timeout", &mockHostHandler{ret: packAwaitPromiseResult(0, true, 0)}, "timed-out", 0},
 		{"timeout inside a host defer drain", &mockHostHandler{ret: packAwaitSignalsResult(0, 0, true, 0)}, "timed-out", 0},
-		{"host error", &mockHostHandler{ret: packAwaitPromiseResult(7, false, 1)}, "failed", 7},
-		{"rejection", rejectingHandler{&mockHostHandler{ret: packAwaitPromiseResult(6, false, 1)}}, "rejected", 6},
+		{"host error", &mockHostHandler{fill: 7, ret: packAwaitPromiseResult(7, false, 1)}, "failed", 7},
+		{"rejection", rejectingHandler{&mockHostHandler{fill: 6, ret: packAwaitPromiseResult(6, false, 1)}}, "rejected", 6},
 		// The stop sentinel is bit 31, which lands inside this layout's timed-out
 		// byte. Reading the fields first takes it for a timeout.
 		{"stop", &mockHostHandler{ret: callSuspendSentinel}, "suspended", 0},
@@ -967,7 +1009,7 @@ func TestDispatchAwaitPromiseMapsEachPackedWordToItsOwnCase(t *testing.T) {
 }
 
 func TestDispatchPollSignal(t *testing.T) {
-	b := &wasmtimeBackend{handler: &mockHostHandler{ret: packStrLen(6)}}
+	b := &wasmtimeBackend{handler: &mockHostHandler{fill: 6, ret: packStrLen(6)}}
 	strPtr, _, freeArgs := cgotestMakeStrArgs("signal")
 	defer freeArgs()
 	resultPtr := cgotestAllocResult()
@@ -1065,6 +1107,7 @@ func BenchmarkExtractStringFromPacked(b *testing.B) {
 func BenchmarkRegisterCB(b *testing.B) {
 	cbRegistry.Lock()
 	cbRegistry.entries = make(map[uintptr]cbEntry)
+	cbRegistry.next = 0
 	cbRegistry.Unlock()
 	backend := &wasmtimeBackend{}
 	b.ResetTimer()
@@ -1076,11 +1119,73 @@ func BenchmarkRegisterCB(b *testing.B) {
 func BenchmarkLookupCB(b *testing.B) {
 	cbRegistry.Lock()
 	cbRegistry.entries = make(map[uintptr]cbEntry)
+	cbRegistry.next = 0
 	cbRegistry.Unlock()
 	backend := &wasmtimeBackend{}
 	id := registerCB(backend, cbTypeDurableSleep)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		lookupCB(id)
+	}
+}
+
+// cleat#4107: a simple-packed word (extra<<32 | errCode) carries no failure classification. Its bits 8-39 are 24 zero bits and the LOW BYTE
+// OF THE MESSAGE LENGTH, so reading them as the code (right for packDurableCallResult) gave the guest (len(message) & 0xFF) << 24: a cron
+// refusal with a 48-character message arrived as code 0x30000000. The code is now 0 for every simple word.
+func TestDecodeCallOutcomeAFailedSimpleWordHasNoCodeWhateverTheMessageLength(t *testing.T) {
+	buf := make([]byte, 65536)
+	for _, n := range []uint32{1, 48, 85, 110, 255, 256, 257, 300, 513} {
+		got := decodeCallOutcome(packSimpleResult(1, n), buf, simpleLayout)
+		if !got.failed || got.code != 0 || len(got.payload) != int(n) {
+			t.Errorf("simple word, message length %d: %+v, want failed with code 0 and a %d-byte message", n, got, n)
+		}
+	}
+}
+
+// The control: the durable layout's code IS a classification and is still read, and the stop is still tested first in both layouts.
+func TestDecodeCallOutcomeTheDurableLayoutKeepsItsClassification(t *testing.T) {
+	buf := make([]byte, 65536)
+	got := decodeCallOutcome(packDurableCallResult(110, 3, 1), buf, durableCallLayout)
+	if !got.failed || got.code != 3 || len(got.payload) != 110 {
+		t.Errorf("durable word: %+v, want failed with code 3 and a 110-byte message", got)
+	}
+	for _, l := range []hostWordLayout{durableCallLayout, simpleLayout} {
+		if got := decodeCallOutcome(callSuspendSentinel, buf, l); !got.suspended || got.failed {
+			t.Errorf("layout %d: the stop sentinel decoded as %+v, want suspended", l, got)
+		}
+	}
+}
+
+// Through the real dispatchers, so the pairing at each call site is what is tested and not only the function: child-workflow and side-effect
+// answer in the simple layout, durable-call in the durable one.
+func TestDispatchersReadTheFailureCodeOfTheirOwnLayout(t *testing.T) {
+	cases := []struct {
+		name     string
+		method   int
+		nargs    int
+		args     []string
+		ret      int64
+		wantCode uint32
+	}{
+		{"child-workflow (simple)", 4, 2, []string{"child", "{}"}, packSimpleResult(1, 110), 0},
+		{"side-effect (simple)", 14, 1, []string{"x"}, packSimpleResult(1, 48), 0},
+		// Added with cleat#4079 part 3, which made durable-defer a result<string, call-failure> and brought a SIXTH simple-layout caller.
+		{"durable-defer (simple)", 3, 1, []string{"d"}, packSimpleResult(1, 110), 0},
+		{"durable-call (durable)", 0, 3, []string{"svc", "op", "{}"}, packDurableCallResult(110, 3, 1), 3},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			b := &wasmtimeBackend{handler: &mockHostHandler{ret: tc.ret}}
+			strPtr, _, free := cgotestMakeStrArgs(tc.args...)
+			defer free()
+			resultPtr := cgotestAllocResult()
+			if err := b.cgotestDispatchStr(tc.method, strPtr, tc.nargs, resultPtr); err != nil {
+				t.Fatalf("dispatch: %v", err)
+			}
+			kind, _, code := cgotestReadCallOutcome(resultPtr)
+			if kind != "failed" || code != tc.wantCode {
+				t.Errorf("kind=%q code=%d, want failed with code %d", kind, code, tc.wantCode)
+			}
+		})
 	}
 }

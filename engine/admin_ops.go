@@ -172,6 +172,12 @@ func ReReplay(ctx context.Context, store WorkflowStore, workflowID string, gener
 			// fatal, same reasoning as the failed LoadEventHistory case below.
 		}
 	}
+	// cleat#4094: refuse a terminated run whose defer segment has already run.
+	if herr == nil {
+		if err := refuseRedriveAfterADeferSegment(ctx, store, workflowID, "re-replay", "", history); err != nil {
+			return err
+		}
+	}
 	// A failed history load is deliberately not fatal here: it would turn a
 	// read this operation does not otherwise need into a reason the operation
 	// cannot run. The store call below is the one that must succeed. The one
@@ -225,6 +231,15 @@ func RetryWorkflow(ctx context.Context, store WorkflowStore, workflowID string) 
 			}
 		}
 	}
+	// cleat#4079: a dead-lettered run that ran a defer segment (a killed component run whose cleanup was run after the kill, and
+	// whose outcome was then applied as dead_lettered) cannot be replayed, for the reason refuseRedriveAfterADeferSegment gives.
+	// Only a MARKED event refuses here: no run could end dead_lettered through a segment before the marker existed, and a guest's
+	// own ordinary drain after an exhausted call is unmarked and retries as it always did.
+	if herr == nil {
+		if err := refuseRedriveAfterADeferSegment(ctx, store, workflowID, "retry", statusDeadLettered, history); err != nil {
+			return err
+		}
+	}
 	// A failed history load is deliberately not fatal here, same reasoning as
 	// ReReplay's identical fallback above: it would turn a read this operation
 	// does not otherwise need into a reason the operation cannot run.
@@ -234,5 +249,72 @@ func RetryWorkflow(ctx context.Context, store WorkflowStore, workflowID string) 
 	}
 
 	slog.WarnContext(ctx, "admin: retry dead-lettered workflow", "workflow_id", workflowID)
+	return nil
+}
+
+// refuseRedriveAfterADeferSegment refuses to redrive (ReReplay, RetryWorkflow) a run whose history holds events written by a
+// DEFER SEGMENT, which is a later execution of the run whose only job was to run its cleanup (cleat#4094, cleat#4079).
+//
+// Why it cannot be redriven. Replay is positional, and a segment appends its events AFTER the last event the body recorded,
+// which is not where the body's next call would land. A redrive replays the body, reaches that point and makes a fresh call
+// at a step the segment already filled, so it fails with "replay divergence". Measured on all three dialects with
+// testdata/deferfunc: the divergence is at the first call past the sleep.
+//
+// TWO WAYS TO KNOW A SEGMENT RAN, and the difference is the point:
+//
+//  1. A MARKED event (EventRecord.InDeferSegment). Host-observed and set on every event a segment records, so it is exact:
+//     a guest's own ordinary drain after a plain failure is never marked, and replays deterministically. Any marked event
+//     refuses, whatever the run's status. Only histories written after cleat#4079 can carry it.
+//
+//  2. For a TERMINATED or CANCELLED run only, and for histories written before the marker: an unmarked InDeferPhase event. A
+//     run terminated while running or sleeping never executes its body after the terminal decision, so such an event was
+//     written by a segment. That is the scan cleat#4094 shipped.
+//
+// KNOWN OVER-REFUSAL of the second way, pinned by a test so a later fix flips it on purpose: a DEAD-LETTERED run terminated off
+// the queue goes straight to terminated with no segment, but its history may hold an ordinary failure's own drain, whose events
+// carry InDeferPhase too, so it is refused although it would replay. There is no version signal that says a history was
+// written by a marker-aware engine, so a NEW run in that shape cannot be told from an OLD run that did run a segment. The
+// owner chose to state that residual and not to add one. A FAILED or DEAD-LETTERED run with no marked event is never refused by
+// this scan, for the same reason in the other direction.
+//
+// verb is "re-replay" or "retry", for the message. onlyIfStatus, when non-empty, limits the refusal to a run in that status:
+// RetryWorkflow acts only on a dead-lettered run and silently does nothing for any other, and a refusal about a segment would
+// be a worse answer than that. A failed lookup of the status is not fatal, the same reasoning as the failed history load: the
+// store call that follows reports a missing workflow itself.
+func refuseRedriveAfterADeferSegment(ctx context.Context, store WorkflowStore, workflowID, verb, onlyIfStatus string, history []EventRecord) error {
+	var marked, unmarkedPhase *EventRecord
+	for i := range history {
+		switch {
+		case history[i].InDeferSegment && marked == nil:
+			marked = &history[i]
+		case history[i].InDeferPhase && unmarkedPhase == nil:
+			unmarkedPhase = &history[i]
+		}
+	}
+	if marked == nil && unmarkedPhase == nil {
+		return nil
+	}
+	wf, err := store.GetWorkflowByID(ctx, workflowID)
+	if err != nil || wf == nil {
+		return nil
+	}
+	if onlyIfStatus != "" && wf.Status != onlyIfStatus {
+		return nil
+	}
+	if marked != nil {
+		return adminErrorf(ErrAdminStateConflict,
+			"%s: workflow %s ran a defer segment after its history ended (step %d was recorded by it). "+
+				"A redrive replays the body into a step the segment already filled and fails with a replay divergence. "+
+				"Start a new run instead; a dead-lettered run can be reprocessed from the dead-letter queue. "+
+				"See docs/reference/workflow-lifecycle.md",
+			verb, workflowID, marked.Step)
+	}
+	if verb == "re-replay" && (wf.Status == statusTerminated || wf.Status == statusCancelled) {
+		return adminErrorf(ErrAdminStateConflict,
+			"%s: workflow %s is %s and its defer segment has already run (step %d is a defer-phase event). "+
+				"Its history ends where the cleanup was recorded, so replaying it would fail with a replay divergence at the "+
+				"first call the body makes past that point. Start a new run instead. See docs/reference/workflow-lifecycle.md",
+			verb, workflowID, wf.Status, unmarkedPhase.Step)
+	}
 	return nil
 }

@@ -499,8 +499,8 @@ func TestFuelExhaustedError_Value(t *testing.T) {
 }
 
 func TestDefaultMemoryLimitPages_Value(t *testing.T) {
-	if DefaultMemoryLimitPages != 512 {
-		t.Errorf("DefaultMemoryLimitPages = %d, want 512", DefaultMemoryLimitPages)
+	if DefaultMemoryLimitPages != 4096 {
+		t.Errorf("DefaultMemoryLimitPages = %d, want 4096 (256 MiB, owner decision cleat#4171)", DefaultMemoryLimitPages)
 	}
 }
 

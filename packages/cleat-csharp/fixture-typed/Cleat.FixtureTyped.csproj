@@ -1,0 +1,37 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- A workflow written against the SDK, built to a real component. Everything under PropertyGroup/PackageReference
+       is the toolchain's pinned shape, measured working in cleat#4077 (see ../toolchain.env and PINS.md there);
+       PR 2 of cleat#4080 owns the full lock. -->
+  <PropertyGroup>
+    <OutputType>Library</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <RootNamespace>Cleat.FixtureTyped</RootNamespace>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <RuntimeIdentifier>wasi-wasm</RuntimeIdentifier>
+    <UseAppHost>false</UseAppHost>
+    <PublishTrimmed>true</PublishTrimmed>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <SelfContained>true</SelfContained>
+    <DebugType>none</DebugType>
+    <OptimizationPreference>Size</OptimizationPreference>
+    <StackTraceSupport>false</StackTraceSupport>
+    <IlcGenerateStackTraceData>false</IlcGenerateStackTraceData>
+    <EventSourceSupport>false</EventSourceSupport>
+    <!-- Deliberately NOT UseSystemResourceKeys: under it an exception's Message is a resource key
+         ("Arg_PlatformNotSupported"), and Message is what run-outcome::failed carries (cleat#4077). -->
+  </PropertyGroup>
+
+  <Import Project="../build/Cleat.Sdk.props" />
+
+  <ItemGroup>
+    <PackageReference Include="BytecodeAlliance.Componentize.DotNet.Wasm.SDK" Version="0.8.0-preview00011" />
+    <PackageReference Include="runtime.linux-x64.microsoft.dotnet.ilcompiler.llvm" Version="10.0.0-rc.1.26306.1" />
+    <ProjectReference Include="../generator/Cleat.Generator.csproj" OutputItemType="Analyzer" ReferenceOutputAssembly="false" />
+  </ItemGroup>
+
+  <Import Project="../build/Cleat.Sdk.targets" />
+
+</Project>

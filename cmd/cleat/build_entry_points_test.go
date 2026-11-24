@@ -6,12 +6,12 @@ import (
 	"testing"
 )
 
-// Java and AssemblyScript no longer predict entry points by scanning
-// source: cleat#2145 moved both onto the same model cleat#2113 gave Rust --
+// Java no longer predicts entry points by scanning source (nor did
+// AssemblyScript, until it was removed, cleat#4023): cleat#2145 moved it onto the same model cleat#2113 gave Rust --
 // each SDK's own codegen states the list in the artifact it produces (a
 // sidecar manifest for AS/Java, a linker-merged WASM section for Rust), and
 // cleat build reads THAT, rather than reconstructing it with a regex. See
-// build_as.go, build_java.go, build_rust.go and wasm.WriteEntryPointsSection
+// build_java.go, build_rust.go and wasm.WriteEntryPointsSection
 // / wasm.ReadEntryPointsSection. The live proof that each SDK's manifest
 // actually survives compilation and names real exports is
 // rust_entry_point_resolution_live_test.go,

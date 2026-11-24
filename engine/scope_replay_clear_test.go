@@ -67,7 +67,7 @@ func TestReplayDoesNotReleaseAScopeItAlreadyCleared(t *testing.T) {
 
 	s, store := scopeSession(t)
 	s.isReplay = true
-	s.history = []EventRecord{{Step: 0, EventType: EventTypeScopeAcquired}}
+	s.history = []EventRecord{{Step: 0, EventType: EventTypeScopeAcquired, ScopeKey: "vo:cart:c1"}}
 
 	s.SetScope(ctx, nil, "cart", "c1", 0, 0)
 	if len(s.heldScopes) != 1 {
@@ -176,7 +176,7 @@ func TestForgetHeldScopeLeavesOtherScopesAlone(t *testing.T) {
 //
 // Clearing a scope was not the only way to give one up: switching from one
 // virtual object to another releases the first key and drops it from the held
-// set, all inside freshSetScope. The replay branch appended the new key and
+// set, all inside attemptScope (freshSetScope, until cleat#4211). The replay branch appended the new key and
 // left the old one in place, so end-of-segment cleanup released an object this
 // workflow had switched away from -- and once another workflow holds it, that
 // is their lock.
@@ -193,8 +193,9 @@ func TestReplaySwitchingScopesDoesNotReleaseTheOldKey(t *testing.T) {
 	s, store := scopeSession(t)
 	s.isReplay = true
 	s.history = []EventRecord{
-		{Step: 0, EventType: EventTypeScopeAcquired},
-		{Step: 1, EventType: EventTypeScopeAcquired},
+		// Each record names the scope its call takes. They named none until cleat#4211, when a replay began to compare them.
+		{Step: 0, EventType: EventTypeScopeAcquired, ScopeKey: "vo:cart:c1"},
+		{Step: 1, EventType: EventTypeScopeAcquired, ScopeKey: "vo:order:o9"},
 	}
 
 	s.SetScope(ctx, nil, "cart", "c1", 0, 0)

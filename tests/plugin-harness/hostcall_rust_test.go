@@ -50,8 +50,8 @@ var rustHostCallOutcomes = map[string]expectedOutcome{
 		status: statusSuspended, detailContains: "await_all_children(00000000-0000-0000-0000-000000000001)",
 		why: "an incomplete child suspends, matching Go's row. This asserted statusOK and `1 child result(s)` until #754 made the call actually await; " +
 			"the count was green over a single child result whose content was `\"error\":\"child not completed\"`, which is what a count over a result hides. " +
-			"The suspend reason is produced by engine/children.go and is byte-identical across Go, Rust and AssemblyScript -- so unlike the OK rows, " +
-			"this one carries no binding-shape difference to record: all three now assert the same string",
+			"The suspend reason is produced by engine/children.go and is byte-identical across Go and Rust -- so unlike the OK rows, " +
+			"this one carries no binding-shape difference to record: both assert the same string",
 	},
 	"ChildWorkflow": {
 		status: statusOK, detailRegex: `^child-child-workflow-[0-9a-f]{8}$`,
@@ -130,7 +130,6 @@ var rustHostCallOutcomes = map[string]expectedOutcome{
 	// make it at all. Re-derive:
 	//
 	//     grep -c cron crates/cleat-sdk/src/host_calls.rs                     # 0
-	//     grep -c cleat_schedule_cron packages/cleat-as/assembly/host-calls.ts # non-zero
 	"ScheduleCron": {
 		status: statusError, detailContains: `cannot schedule "harness-workflow"`,
 		why: "MEASURED after 3.242 bound the cron family in Rust; it read statusUnsupported/`no cleat_schedule_cron import` before that, and the row existed to catch the gap closing silently. " +

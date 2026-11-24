@@ -160,7 +160,7 @@ func TestAnIntParameterIsDecodedRatherThanScanned(t *testing.T) {
 		// The argument is that zero-binding cannot tell "sent zero" from "sent
 		// nothing", permanently, for every caller -- the information is the
 		// caller's and it was destroyed at the boundary. An author who means
-		// absence declares it: *int in Go, a default in AssemblyScript and
+		// absence declares it: *int in Go, a default in
 		// Python, Option<T> in Rust.
 		//
 		// So the difference from #1046 is not the behaviour, which is the same

@@ -199,7 +199,7 @@ Each language needs a transformer that generates the WASM bindings and host adap
 | **Rust** | `wasm32-wasip1` target, wasm-bindgen | Production-ready | ~8 weeks |
 | **C** | Clang `--target=wasm32-wasip1` | Production-ready | ~6 weeks |
 | **Zig** | `zig build-exe -target wasm32-wasip1` | Production-ready | ~6 weeks |
-| **TypeScript** | AssemblyScript, Javy (Shopify) | Emerging, subset of JS | ~12 weeks |
+| **TypeScript** | Javy (Shopify) | Emerging, subset of JS | ~12 weeks |
 | **C#** | NativeAOT + wasm-experimental (.NET 9+) | Emerging | ~10 weeks |
 | **Python** | Pyodide / python2wasm | Not practical yet | Would need language subset |
 | **Java/Kotlin** | TeaVM, GraalVM native-image | Experimental | Would need language subset |
@@ -995,7 +995,7 @@ The design is strongest for Segment A, viable for Segment B, and a hard sell for
 
 > **2026-08-07:** The `wasm-demo/` directory described below has been deleted — it never
 > compiled, and every mechanism it sketched now has a real, tested implementation in
-> `engine/` (e.g. `engine/versioned_loader.go`, `engine/store_versioning.go`). The
+> `engine/` (e.g. `engine/store_versioning.go`). The
 > paragraphs below are kept as a historical record of what Phase 1 covered, not as a
 > pointer to code that still exists.
 
@@ -4925,7 +4925,8 @@ SELECT * FROM chain ORDER BY created_at;
 
 - It does **not** transfer local variables. The new instance starts with fresh state. Any data that must survive the boundary must be in the new `input`. This is identical to Temporal's design.
 - It does **not** preserve the event history. The old history is preserved for audit but is not consulted by the new instance.
-- It does **not** transfer signals, timers, or open defers. The new instance starts clean. If the workflow needs to carry forward a timer (e.g., "30 days until next billing"), the new input should encode the schedule.
+- It does **not** transfer timers or open defers. The new instance starts clean. If the workflow needs to carry forward a timer (e.g., "30 days until next billing"), the new input should encode the schedule.
+- It **does** carry signals: a signal is addressed to the workflow, not to a run, so one stored on the old instance and not yet read moves to the new instance in the same transaction, and one sent later to the old instance's `workflow_id` is delivered to the current instance (see *Signals and cancellation* below). This sentence used to say the opposite, and contradicted that one (cleat#4340).
 
 ---
 
@@ -4986,6 +4987,7 @@ ALTER TABLE workflow_defs ADD COLUMN history_policy JSONB NOT NULL DEFAULT '{
 - **Fencing token:** The compactor checks `assigned_to` and `epoch` before compacting a workflow. If a workflow is actively running, compaction is deferred. This prevents the compactor from racing with a live worker appending steps.
 - **Child workflows:** Continue-As-New does not affect child workflows. The parent-child tree is preserved across continuation instances. The new instance gets a new `id` but the `parent_workflow_id` column still points to the old (continued) instance's parent.
 - **Signals and cancellation:** Cancel requests and signals posted to the old instance's `workflow_id` are forwarded to the new instance at the database level. The worker checks `continued_to` on claim and redirects pending signals. This is handled by a trigger or application-level lookup in the signal delivery path (see section 8.1).
+  **As built (cleat#4340), for signals:** there is no `continued_to` column; the chain is `continued_from` on the successor. The delivery path walks it to the current run and stores the signal there, and `ContinueAsNew` moves the old run's unread signals to the successor in its own transaction. The delivery locks the old run's row before it decides and the continue's own update of that row waits for it, which orders a signal against a continue so a signal that races one lands on exactly one run. Cancel requests are not forwarded by this change.
 
 ### Comparison to Temporal
 

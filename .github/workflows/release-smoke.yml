@@ -75,7 +75,9 @@ jobs:
           if [ -z "$expected" ]; then
             expected="$(python3 -c "import tomllib; print(tomllib.load(open('python-sdk/pyproject.toml','rb'))['project']['version'])")"
           fi
-          fixture=tests/plugin-harness/testdata/asworkflow/prebuilt/workflow.wasm
+          # Any compiled module will do: the stamper adds a metadata section and the read-back checks it. This was the
+          # AssemblyScript prebuilt until cleat#4023 removed that SDK; the Java prebuilt is the one tracked module left.
+          fixture=tests/plugin-harness/testdata/javaworkflow/prebuilt/workflow.wasm
           python3 python-sdk/scripts/stamp_metadata.py "$fixture" \
             --name ReleaseSmoke --version 1 --min-version 1 --abi-version 1 \
             --output /tmp/stamped.wasm

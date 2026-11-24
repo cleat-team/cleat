@@ -74,10 +74,32 @@ func TestTheRustSDKAgreesOnTheStopBit(t *testing.T) {
 //
 // Eight, not nine: this SDK has no call_with_retry.
 var rustCallsTheHostCanRefuse = []sdkRefusableCall{
+	// The plain call goes through step, so its refusal is the dispatcher's and the host method is the site (cleat#4152, G3).
 	{"cleat_call", "DurableCall"},
+	// side_effect_recorded joined in cleat#4113: a fresh lookup in a stopped workflow is refused so the function never runs.
+	{"side_effect_recorded", "SideEffectRecorded"},
+	// delete_cron joined in cleat#4083, with the stop_requested guard in
+	// host_calls.rs. The simple layout reads a stop as error code 0, which is a
+	// successful delete.
+	{"delete_cron", "DeleteCron"},
+	// continue_as_new and continue_as_new_versioned joined in cleat#4159, with the stop_requested guards in host_calls.rs. The simple layout
+	// reads a stop as error code 0, a success, so the continuation went on and the defer segment's cleanup was consumed.
+	{"continue_as_new", "ContinueAsNew"},
+	{"continue_as_new_versioned", "ContinueAsNewWithVersion"},
+	// create_promise and set_scope joined in the cleat#4079 audit, with the
+	// stop_requested guards in host_calls.rs. Both layouts read a refusal as
+	// error code 0, a success.
+	{"create_promise", "CreatePromise"},
+	{"set_scope", "SetScope"}, // goes through step; see the Java list
+	// resolve_promise and reject_promise joined in cleat#4079: a defer segment's body must not settle a promise another run may
+	// be waiting on. The simple layout reads a stop as error code 0, which is a successful settlement.
+	{"resolve_promise", "ResolvePromise"},
+	{"reject_promise", "RejectPromise"},
+	// The heartbeat call goes through step, so its refusal is the dispatcher's and the host method is the site (cleat#4152, G3).
 	{"cleat_call_heartbeat", "DurableCallWithHeartbeat"},
 	{"child_workflow", "childWorkflowWithVersion"},
 	{"child_workflow_with_options", "childWorkflowWithVersion"},
+	// plugin_call goes through step, so its refusal is the dispatcher's and the host method is the site (cleat#4152, G3).
 	{"plugin_call", "PluginCall"},
 	{"plugin_call_streaming", "PluginCallStreaming"},
 	{"await_signals_ms", "DurableAwaitSignals"},

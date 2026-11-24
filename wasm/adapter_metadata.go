@@ -156,14 +156,17 @@ var adapterDefs = map[string]adapterDef{
 			{"objectType", "string"},
 			{"instanceKey", "string"},
 		},
-		ResultStmts: []string{
+		// withSuspendCheck since the cleat#4079 audit: the host refuses a scope taken
+		// by a defer segment's body, and the errCode mask below does not cover bit 31,
+		// so without the check the refusal decodes as a successful set_scope.
+		ResultStmts: withSuspendCheck(
 			"prevLen := uint32(uint64(result) >> 32)",
 			"errCode := uint32(result & 0xFFFF)",
 			"if errCode != 0 {",
 			`	return "", fmt.Errorf("cleat_set_scope: %s", hostErrMessage(prevScopeBuf[:], prevLen))`,
 			"}",
 			"return unsafe.String(&prevScopeBuf[0], int(prevLen)), nil",
-		},
+		),
 	},
 	"GetScope": {
 		FieldName:  "GetScope",
@@ -181,14 +184,14 @@ var adapterDefs = map[string]adapterDef{
 		Params: []adapterParam{
 			{"description", "string"},
 		},
-		ResultStmts: []string{
+		ResultStmts: withSuspendCheck(
 			"deferIDLen := uint32(uint64(result) >> 32)",
 			"errCode := uint32(result)",
 			"if errCode != 0 {",
 			`	return "", fmt.Errorf("cleat_defer: %s", hostErrMessage(deferIDBuf[:], deferIDLen))`,
 			"}",
 			"return unsafe.String(&deferIDBuf[0], int(deferIDLen)), nil",
-		},
+		),
 	},
 	// DurableDeferFunc registers a closure, so unlike DurableDefer it has a
 	// body the guest can actually run. The ID the host mints is the key: it is
@@ -215,7 +218,7 @@ var adapterDefs = map[string]adapterDef{
 			`description := "deferred function"`,
 			"descriptionPtr, descriptionLen := stringPtr(description)",
 		},
-		ResultStmts: []string{
+		ResultStmts: withSuspendCheck(
 			"deferIDLen := uint32(uint64(result) >> 32)",
 			"errCode := uint32(result)",
 			"if errCode != 0 {",
@@ -226,7 +229,7 @@ var adapterDefs = map[string]adapterDef{
 			"deferID := string(unsafe.String(&deferIDBuf[0], int(deferIDLen)))",
 			"_cleatRegisterDefer(deferID, fn)",
 			"return deferID, nil",
-		},
+		),
 	},
 	"DurableLog": {
 		FieldName: "DurableLog",
@@ -334,13 +337,15 @@ var adapterDefs = map[string]adapterDef{
 			{"id", "string"},
 			{"value", "string"},
 		},
-		ResultStmts: []string{
+		// Refused in a defer segment (cleat#4079), so the stop is tested before the error code: bit 31 read as a code is
+		// 0x80000000, an ordinary error, and the guest would carry on instead of unwinding.
+		ResultStmts: withSuspendCheck(
 			"errCode := uint32(result)",
 			"if errCode != 0 {",
 			`	return fmt.Errorf("cleat_resolve_promise: error %d", errCode)`,
 			"}",
 			"return nil",
-		},
+		),
 	},
 	// RejectPromise: two strings in, nothing out. The mirror of ResolvePromise.
 	// IMPROVEMENT-PLAN 3.226.
@@ -351,13 +356,15 @@ var adapterDefs = map[string]adapterDef{
 			{"id", "string"},
 			{"errMsg", "string"},
 		},
-		ResultStmts: []string{
+		// Refused in a defer segment (cleat#4079), so the stop is tested before the error code: bit 31 read as a code is
+		// 0x80000000, an ordinary error, and the guest would carry on instead of unwinding.
+		ResultStmts: withSuspendCheck(
 			"errCode := uint32(result)",
 			"if errCode != 0 {",
 			`	return fmt.Errorf("cleat_reject_promise: error %d", errCode)`,
 			"}",
 			"return nil",
-		},
+		),
 	},
 	// ScheduleInvoke: three strings and a delay in, nothing out.
 	// IMPROVEMENT-PLAN 3.224. Same shape as SignalWorkflow below: no response
@@ -418,13 +425,16 @@ var adapterDefs = map[string]adapterDef{
 			`	return _cleatErrInDeferPhase("ContinueAsNew")`,
 			"}",
 		},
-		ResultStmts: []string{
+		// withSuspendCheck since cleat#4159: the host refuses a continuation in a defer segment. Without the check a stop
+		// reads as error 2147483648 and the guest goes on into its own defer drain, where the cleanup's call is refused
+		// and the whole table consumed.
+		ResultStmts: withSuspendCheck(
 			"errCode := uint32(result)",
 			"if errCode != 0 {",
 			`	return fmt.Errorf("cleat_continue_as_new: error %d", errCode)`,
 			"}",
 			"return nil",
-		},
+		),
 	},
 	"ContinueAsNewWithVersion": {
 		FieldName:  "ContinueAsNewWithVersion",
@@ -443,13 +453,16 @@ var adapterDefs = map[string]adapterDef{
 			`	return _cleatErrInDeferPhase("ContinueAsNewWithVersion")`,
 			"}",
 		},
-		ResultStmts: []string{
+		// withSuspendCheck since cleat#4159: the host refuses a continuation in a defer segment. Without the check a stop
+		// reads as error 2147483648 and the guest goes on into its own defer drain, where the cleanup's call is refused
+		// and the whole table consumed.
+		ResultStmts: withSuspendCheck(
 			"errCode := uint32(result)",
 			"if errCode != 0 {",
 			`	return fmt.Errorf("cleat_continue_as_new_versioned: error %d", errCode)`,
 			"}",
 			"return nil",
-		},
+		),
 	},
 	"ChildWorkflow": {
 		FieldName:  "ChildWorkflow",
@@ -729,14 +742,17 @@ var adapterDefs = map[string]adapterDef{
 		Params: []adapterParam{
 			{"name", "string"},
 		},
-		ResultStmts: []string{
+		// withSuspendCheck since the cleat#4079 audit: the host refuses a promise created
+		// by a defer segment's body. Without the check a Go guest reads the sentinel as an
+		// ordinary error code and runs on.
+		ResultStmts: withSuspendCheck(
 			"promiseIDLen := uint32(uint64(result) >> 32)",
 			"errCode := uint32(result)",
 			"if errCode != 0 {",
 			"return \"\", fmt.Errorf(\"cleat_create_promise: %s\", hostErrMessage(promiseIDOutBuf[:], promiseIDLen))",
 			"}",
 			"return unsafe.String(&promiseIDOutBuf[0], int(promiseIDLen)), nil",
-		},
+		),
 	},
 	"AwaitPromise": {
 		FieldName:  "AwaitPromise",
@@ -841,6 +857,25 @@ var adapterDefs = map[string]adapterDef{
 			"return unsafe.String(&cachedResultBuf[0], int(cachedResultLen)), nil",
 		),
 	},
+	// cleat#4113. The lookup HostCallsImpl.SideEffect makes before it runs the user's function. status is the low byte: 0 a recorded value in
+	// the buffer, 2 nothing recorded, anything else an error carrying its message. The stop sentinel comes first, as for every call the host
+	// can refuse: a fresh lookup in a stopped workflow is refused so the function never runs.
+	"SideEffectRecorded": {
+		FieldName:  "SideEffectRecorded",
+		ReturnType: "(string, bool, error)",
+		Params:     nil,
+		ResultStmts: withSuspendCheck(
+			"cachedResultLen := uint32(uint64(result) >> 32)",
+			"status := uint32(result & 0xFF)",
+			"if status == 2 {",
+			`    return "", false, nil`,
+			"}",
+			"if status != 0 {",
+			`    return "", false, fmt.Errorf("cleat_side_effect_recorded: %s", hostErrMessage(cachedResultBuf[:], cachedResultLen))`,
+			"}",
+			"return unsafe.String(&cachedResultBuf[0], int(cachedResultLen)), true, nil",
+		),
+	},
 	"ScheduleCron": {
 		FieldName:  "ScheduleCron",
 		ReturnType: "(string, error)",
@@ -869,7 +904,10 @@ var adapterDefs = map[string]adapterDef{
 		Params: []adapterParam{
 			{"scheduleID", "string"},
 		},
-		ResultStmts: []string{
+		// withSuspendCheck since cleat#4083: the host refuses a delete made by a
+		// defer segment's body, and without the check a Go guest would read the
+		// sentinel as an ordinary error code and run on.
+		ResultStmts: withSuspendCheck(
 			"errCode := uint32(result)",
 			"if errCode != 0 {",
 			// No out buffer in this call's ABI, so there is no message to
@@ -878,7 +916,7 @@ var adapterDefs = map[string]adapterDef{
 			`	return fmt.Errorf("cleat_delete_cron failed (code %d)", errCode)`,
 			"}",
 			"return nil",
-		},
+		),
 	},
 	"ListCrons": {
 		FieldName:  "ListCrons",

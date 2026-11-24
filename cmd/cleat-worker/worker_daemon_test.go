@@ -13,7 +13,6 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
-	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -660,6 +659,11 @@ func (m *mockStore) FinalizeWorkflowSegment(ctx context.Context, runID, workerID
 	if m.finalizeWorkflowSegmentFn != nil {
 		return m.finalizeWorkflowSegmentFn(ctx, runID, workerID, generation, newEvents, finalStatus, result, errorCode, errorOp, queryState, nextWakeAt)
 	}
+	return nil
+}
+
+// PublishQueryState: the test double writes nothing and reports no fence loss (cleat#4162); a test that needs otherwise overrides it on its own type.
+func (m *mockStore) PublishQueryState(ctx context.Context, runID, workerID string, generation int64, queryState map[string]string) error {
 	return nil
 }
 
@@ -3309,40 +3313,6 @@ func TestCanAcceptAPIWorkflows_Default(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// readMemTotal tests
-// ---------------------------------------------------------------------------
-
-// readMemTotal reads /proc/meminfo, so it only works on Linux. Its caller
-// treats a false return as "memory monitoring unavailable" and disables the
-// feature rather than failing, so on other platforms the correct behaviour is
-// a clean false — which is worth asserting rather than skipping past.
-func TestReadMemTotal(t *testing.T) {
-	total, ok := readMemTotal()
-
-	if runtime.GOOS != "linux" {
-		if ok {
-			t.Errorf("readMemTotal() = (%d, true) on %s; /proc/meminfo should not exist there",
-				total, runtime.GOOS)
-		}
-		return
-	}
-
-	if !ok {
-		t.Fatal("readMemTotal() returned false on Linux — /proc/meminfo should be readable")
-	}
-	if total == 0 {
-		t.Error("readMemTotal() returned 0 bytes, expected > 0")
-	}
-	// Reasonable minimum: 16 MB
-	if total < 16*1024*1024 {
-		t.Errorf("readMemTotal() = %d bytes, seems unreasonably small", total)
-	}
-	// Sanity check: less than 64 TB
-	if total > 64*1024*1024*1024*1024 {
-		t.Errorf("readMemTotal() = %d bytes, seems unreasonably large", total)
-	}
-}
 func (m *mockStore) HeartbeatBatchFenced(ctx context.Context, workerID string, runs []engine.GenerationKey) ([]string, error) {
 	if m.heartbeatBatchFencedFn != nil {
 		return m.heartbeatBatchFencedFn(ctx, workerID, runs)

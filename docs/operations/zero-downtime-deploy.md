@@ -462,6 +462,58 @@ spec:
                 sleep 60
 ```
 
+### Keeping workers on separate nodes, and node drains
+
+The Helm chart (`topologySpread` and `podDisruptionBudget` in `values.yaml`) and the raw manifests
+(`k8s/deployment.yaml`, `k8s/pdb.yaml`) both ask the scheduler to keep worker pods on different nodes,
+and carry a PodDisruptionBudget that lets a node drain evict one worker at a time (cleat#4439).
+
+**Separate hardware needs at least two schedulable nodes, and nothing here can create the second one.** On a cluster with one node both workers run on it, with the default and with strict mode alike, so a requirement that the workers be on different machines is met only when the cluster has two or more nodes that can take a worker. Strict mode (below) is what refuses to start a worker rather than put it beside another one, and it does that only when a second node exists that cannot take the pod.
+
+**The default spreads, but does not refuse.** It is a `topologySpreadConstraint` on
+`kubernetes.io/hostname` with `maxSkew: 1` and `whenUnsatisfiable: ScheduleAnyway`, so a one-node
+cluster, or one whose other nodes are full or cordoned, still starts every worker, together. Set
+`topologySpread.whenUnsatisfiable=DoNotSchedule` (or edit the manifest) if you would rather have a
+Pending pod than two workers on one node. It is a spread constraint rather than pod anti-affinity so the
+autoscaler can still scale past the node count: with `maxSkew: 1`, three workers on two nodes is allowed,
+where required anti-affinity would leave the third Pending. `topologySpread.zoneKey` adds a second
+constraint on a zone label, a preference by default as well.
+
+What it did, measured on a kind cluster (v0.25.0, one control-plane node plus two schedulable nodes,
+two workers, 2026-11-23; the worker was a stand-in server answering `/readyz`, because placement and
+eviction are the scheduler's and API server's and do not depend on what the container does):
+
+| situation | constraint off | default (`ScheduleAnyway`) | strict (`DoNotSchedule`) |
+|---|---|---|---|
+| two healthy nodes | on two nodes, 15 of 15 installs | on two nodes, 15 of 15 | on two nodes, 1 of 1 |
+| one of the two nodes cordoned | both on the one node | both on the one node, running | **second worker Pending** |
+| a real one-node cluster | both run | both run | both run |
+
+Read the first row for what it is: on a healthy cluster the scheduler's own default spreading already
+separates two workers, and it did with the constraint off in 15 of 15 installs (10 of them with a filler pod
+making one node look fuller, up to 96% of its memory requested), and with it on in 15 of 15. The constraint does not change that outcome. The likely reason, read from the scheduler's documentation and not
+measured here, is that kube-scheduler applies its own default spread constraints (hostname with `maxSkew: 3`, zone
+with `maxSkew: 5`, both soft) to the pods of a ReplicaSet that carry none of their own, so the soft default here
+largely repeats what is already in force; the new behaviour is strict mode and the budget. It makes the requirement
+explicit, it keeps working as the autoscaler adds pods, and strict mode is what turns "usually" into
+"never". The last row is also the case people expect to go the other way: a single node is a single
+topology domain, so strict mode has nothing to be uneven against and starts both workers. Strict mode
+refuses only when another node exists and cannot take the pod; the scheduler's message then reads
+`1 node(s) didn't match pod topology spread constraints`.
+
+**The budget.** `maxUnavailable: 1` means a drain evicts one worker and waits for its replacement to be
+Ready before it evicts the next. Measured with the Eviction API, two workers both Ready, evicting both
+back to back: with the budget the second eviction was refused (`TooManyRequests: Cannot evict pod as it
+would violate the pod's disruption budget`), without it both were accepted. A budget limits voluntary
+disruptions only (a drain, a node-pool upgrade); a node that fails takes its pods regardless. With a
+single replica, `maxUnavailable: 1` does not block the drain. The budget and the spread constraint select
+the workers and leave out the migrate Job's pod (`app.kubernetes.io/component=migrate`), which carries the same
+selector labels: measured with a Job pod labelled that way running next to two workers, a budget that did not
+exclude it went to zero allowed disruptions and refused to evict a worker (a pod that had finished did the same),
+and one that does exclude it allowed the eviction. A migration that fails leaves its Job and pod in place until the
+next upgrade attempt (`hook-delete-policy: before-hook-creation,hook-succeeded`), so without the exclusion a failed
+migration would refuse every voluntary eviction of a worker until then.
+
 ### Service routing
 
 If you route traffic to workers via a Service (e.g., for the web UI or API),

@@ -106,7 +106,7 @@
 #
 # That used to have one exception. The rest shards set up a JDK 17 and Rust with
 # wasm32-unknown-unknown because tests/crash's agent-loop acceptance built its
-# /java, /rust and /assemblyscript clients in tier 1 (cleat#3499, cleat#2978).
+# /java and /rust clients in tier 1 (cleat#3499, cleat#2978; /assemblyscript was a third until cleat#4023).
 # Those clients are now a top-level test of their own, excluded in tiers.yaml and
 # run by ci.yml's test-go "crash" leg, and both steps are gone (cleat#3692). Every
 # tier-2 toolchain test in a tier-1 package is excluded the same way, and
@@ -288,6 +288,189 @@ env:
   WASM_TOOLS_SHA256: "a62237f4731c45f665f1115cad39acaeec02963cbc848c9473ab033eed837072"
 
 jobs:
+  # ---------------------------------------------------------------------------
+  # A title/body edit re-runs every required context on a head this workflow
+  # has already tested. cleat#3958's inventory found exactly one job in the
+  # repository that reads `pull_request.body` (closing-reference-check.yml) and
+  # none that reads `.title` for anything but a display name, so a body-edit run
+  # here measures a tree that has not changed.
+  #
+  # `edit-gate` decides whether skipping is SAFE, which is not the same question
+  # as whether it is cheap. A skipped job reports as Success and does not block
+  # a required check (GitHub docs, "Using conditions to control job execution"),
+  # so skipping unconditionally would launder a RED head into a green one: edit
+  # the body of a failing PR and its red check-runs become green skips. The gate
+  # therefore says `skip=true` only when every job's latest NON-skipped
+  # conclusion on this head is `success` -- see scripts/pr-edit-already-green.py,
+  # whose --self-test covers the failure-then-skip sequence by name.
+  #
+  # It runs ONLY for an `edited` whose base did not change. Every other event
+  # leaves it skipped, and `needs.edit-gate.outputs.skip` is then the empty
+  # string, which is not 'true', so every job below runs exactly as before.
+  # That is why their conditions carry `!cancelled()` or `always()`: a job whose
+  # `needs` dependency was skipped is itself skipped unless its `if` uses a
+  # status function. Measured on cleat#3959 -- the plain `needs.*` form stayed
+  # skipped, the `!cancelled()` form ran.
+  # ---------------------------------------------------------------------------
+  edit-gate:
+    name: PR edit gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    if: github.event_name == 'pull_request' && github.event.action == 'edited' && !github.event.changes.base
+    outputs:
+      skip: ${{ steps.gate.outputs.skip }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          sparse-checkout: scripts
+      - name: Has this head already passed this workflow?
+        id: gate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          # Passed through the environment, never interpolated into the script:
+          # a branch name is attacker-controlled and can carry `$(...)`, which
+          # the runner would execute. actionlint's `expression` rule flags the
+          # inline form, correctly.
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+        run: |
+          set -uo pipefail
+          # `-e` is on: GitHub runs this as `bash -e {0}` and `set -u` below does not
+          # clear it, so a bare `out=$(...)` exits the step the moment the script
+          # exits 2 -- before `rc=$?` -- leaving the job RED with an empty output.
+          # The output still fails open (nothing publishes skip=true), but a red
+          # gate check holds the PR un-CLEAN until the next push (cleat-review).
+          rc=0
+          out=$(python3 scripts/pr-edit-already-green.py \
+                  --repo "$GITHUB_REPOSITORY" \
+                  --workflow tier1-gate.yml \
+                  --sha "${{ github.event.pull_request.head.sha }}" \
+                  --branch "$HEAD_REF" \
+                  --exclude-run "${{ github.run_id }}") || rc=$?
+          echo "$out"
+          if [ "$rc" -ne 0 ]; then
+            # UNMEASURED: a gate that could not look must not skip.
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          case "$out" in
+            skip=true*) echo "skip=true" >> "$GITHUB_OUTPUT" ;;
+            *)          echo "skip=false" >> "$GITHUB_OUTPUT" ;;
+          esac
+  # cleat#3958: THE CUT'S OWN GUARD.
+  #
+  # The develop push no longer runs the jobs the merge group already ran on
+  # this exact commit -- the queue's merge commit IS the develop commit -- so
+  # that coverage now depends on a merge_group run existing on this sha AND
+  # having passed. Nothing enforced that before this job, and its absence
+  # would be SILENT: a push run whose heavy jobs are skipped concludes
+  # `success`, because they are absent rather than failing.
+  #
+  # A direct admin push, or a queue regroup that cancels a group run, is
+  # exactly what this catches. It fails the Tier 1 run rather than re-running
+  # the suites: the commit is already on develop, and the operator needs to
+  # know it was never gated, not to wait 40 minutes for a run that should not
+  # have been necessary. The failure reaches a person through
+  # tier1-push-failure-notifier, which already watches this workflow's develop
+  # push runs and opens or refreshes a tracking issue.
+  #
+  # Deliberately NOT a `needs:` dependency of the shards below. A skipped
+  # dependency skips its dependents unless they carry `always()`, and giving
+  # them `always()` would also make them run after this job FAILED -- the
+  # opposite of fail-fast. Running the shards anyway is the right fallback:
+  # this commit was never gated, so the develop push is the only place it can
+  # be tested.
+  develop-push-was-queued:
+    name: Develop push was queued
+    if: github.event_name == 'push' && github.ref == 'refs/heads/develop'
+    runs-on: ubuntu-latest
+    # The bound in the polling step is 1500s; this is the outer cap that
+    # backstops a hung `gh` call, not the decision the job normally makes.
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - name: Checkout the guard only
+        uses: actions/checkout@v7
+        with:
+          sparse-checkout: scripts/check-develop-push-was-queued.py
+          sparse-checkout-cone-mode: false
+
+      # POLLS, because a run that exists but has not finished is not a finding
+      # (cleat-review on #3961). The queue merges once the 35 REQUIRED contexts
+      # pass, and the crash shards are not required, so ci.yml's merge_group run
+      # is routinely still going when the develop push fires -- on 343c1cca it
+      # completed at 13:19:45Z against a push created at 13:17:05Z. Judging that
+      # as "ungated" would have paged on a normal merge.
+      - name: Wait for this commit's merge_group runs, then judge
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ github.sha }}
+          # Longest observed lag 828s (cleat-review, 40 pushes); this census
+          # measured 516s over 25. 1500s is headroom for a slow runner queue,
+          # and it is a BOUND, not a deadline the normal path approaches: only
+          # 6 of the 25 pushes in the census needed any wait at all.
+          BOUND: "1500"
+          INTERVAL: "30"
+        run: |
+          set -euo pipefail
+          # Every exit from this loop must leave a verdict behind, or the
+          # notifier quotes a stale one -- or none, and falls back to the job
+          # name that cannot tell UNKNOWN from ungated (cleat#3962).
+          write_unmeasured() {
+            { echo "canary: UNMEASURED"
+              echo "attempt: ${GITHUB_RUN_ATTEMPT}"
+              echo "$1"; } > canary-verdict.txt
+          }
+          deadline=$(( SECONDS + BOUND ))
+          while :; do
+            # An empty result is a legitimate ANSWER -- the commit did not go
+            # through the queue -- and reaches the script as a finding. Only a
+            # failed REQUEST is UNMEASURED.
+            # A STALE VERDICT IS WORSE THAN NONE: the loop re-runs the script,
+            # so a verdict left from an earlier poll would be quoted by the
+            # notifier if this poll dies before writing a new one.
+            rm -f canary-verdict.txt
+            if ! gh api --paginate \
+              "repos/${{ github.repository }}/actions/runs?head_sha=${SHA}&event=merge_group&per_page=100" \
+              --jq '.workflow_runs[]' | jq -s '.' > merge-group-runs.json; then
+              write_unmeasured "could not list the merge_group runs for ${SHA}; whether this commit was gated is unknown"
+              exit 2
+            fi
+            rc=0
+            python3 scripts/check-develop-push-was-queued.py \
+              --runs merge-group-runs.json --sha "$SHA" \
+              --attempt "${GITHUB_RUN_ATTEMPT}" \
+              --verdict-file canary-verdict.txt || rc=$?
+            case "$rc" in
+              0) exit 0 ;;
+              1) exit 1 ;;   # a finding waiting cannot fix: absent, or failed
+              2) exit 2 ;;   # the check itself could not measure
+              3) ;;          # still running: ask again
+              *) echo "::error::the guard exited $rc, which is not one of its statuses (0/1/2/3). UNMEASURED." >&2; exit 2 ;;
+            esac
+            if [ "$SECONDS" -ge "$deadline" ]; then
+              write_unmeasured "still running after ${BOUND}s, so whether this commit was gated is unknown"
+              echo "::error::UNMEASURED: the merge_group runs for ${SHA} were still running after ${BOUND}s, so whether this commit was gated is UNKNOWN -- this is a failure of the check, not a finding about the commit. The longest lag observed was 828s, so something is stuck: look at this sha's merge_group runs before concluding anything about the push." >&2
+              exit 2
+            fi
+            sleep "$INTERVAL"
+          done
+
+      # cleat#3962. The tracking issue used to quote only the failing JOB's name,
+      # so "still running at the bound" (UNKNOWN) and "no merge_group run exists"
+      # (ungated) looked identical in the issue body unless someone opened the
+      # log. The canary writes its own reason to this file; the notifier quotes
+      # it. `if: failure()` because there is nothing to deliver on a pass.
+      - name: Upload the canary's verdict
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: tier-gate-canary-${{ github.sha }}-${{ github.run_attempt }}
+          path: canary-verdict.txt
+          if-no-files-found: warn
+          retention-days: 30
+
   # No DB, no Python, no wasm-tools: `go test -list` compiles the package and
   # enumerates Test funcs, it never runs one. Gates the three expensive jobs
   # below so a broken partition (a bucket that lost a test, or double-counted
@@ -295,12 +478,13 @@ jobs:
   # a shard split that was wrong from the start.
   tier1-coverage:
     name: Tier 1 Shard Coverage
+    needs: [edit-gate]
     # On merge_group this shard's own steps already reduce to one report-only
     # echo (below) -- this makes it skip ENTIRELY instead, so merge_group
     # costs one runner assignment across all three shards rather than three.
     # See tier1's own "Aggregate shard results" step for why a job SKIPPED
     # here does not fail the gate on merge_group.
-    if: github.event_name != 'merge_group'
+    if: ${{ !cancelled() && github.event_name != 'merge_group' && needs.edit-gate.outputs.skip != 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     env:
@@ -318,13 +502,13 @@ jobs:
 
   tier1-engine:
     name: Tier 1 Engine Shard ${{ matrix.shard }}/4
-    needs: [tier1-coverage]
+    needs: [tier1-coverage, edit-gate]
     # On merge_group every step below already reduces to one report-only
     # echo (see the per-step `if:` guards further down) -- this skips the
     # job ENTIRELY instead, so the matrix's two runner assignments are not
     # spent just to run that echo. See tier1's "Aggregate shard results"
     # step for why a SKIPPED job here does not fail the gate on merge_group.
-    if: github.event_name != 'merge_group'
+    if: ${{ !cancelled() && needs.tier1-coverage.result == 'success' && github.event_name != 'merge_group' && needs.edit-gate.outputs.skip != 'true' }}
     strategy:
       fail-fast: false
       matrix:
@@ -384,6 +568,10 @@ jobs:
           --health-timeout 5s
           --health-retries 5
 
+      # `--health-start-period` is load-bearing: mysql:8.4 starts a server twice
+      # (initialize, then run) and a loaded runner can take over 50s to boot, which
+      # is the whole budget without it (cleat#3936). Guarded by
+      # scripts/check-workflow-guards.py.
       mysql:
         image: mirror.gcr.io/library/mysql:8.4.11@sha256:b3b90af2a6552ae30c266fdb7d5dd55f3afb72404bb78d37fe8a23eb857fd3fb
         env:
@@ -395,7 +583,8 @@ jobs:
           --health-cmd "mysqladmin ping -h 127.0.0.1 -u root -pcleat"
           --health-interval 10s
           --health-timeout 5s
-          --health-retries 5
+          --health-retries 15
+          --health-start-period 60s
 
       mssql:
         # Pinned by digest on 2026-08-07. THE RATIONALE FOR ALL SEVEN ORIGINAL
@@ -517,7 +706,7 @@ jobs:
         if: github.event_name != 'merge_group'
         run: |
           pip install --upgrade pip
-          pip install componentize-py
+          bash scripts/install-componentize-py.sh
           pip install -e python-sdk
           # scripts/tier-gate.sh reads tiers.yaml with a YAML parser (cleat#2085).
           # That makes this a gate PRECONDITION, not a convenience: without it the
@@ -621,6 +810,10 @@ jobs:
           # writing "tier-gate.log" collided there, so only one shard's
           # failures ever reached the notifier (cleat#2877).
           TIER_GATE_LOG: tier-gate-engine-${{ matrix.shard }}.log
+          # cleat#3949: the machine-readable report, named per shard for the same
+          # reason the log is -- the artifact names already differ, but a
+          # merge-multiple download merges by the file name INSIDE the artifact.
+          TIER_GATE_REPORT: tier-gate-engine-${{ matrix.shard }}.json
         run: scripts/tier-gate.sh --shard ${{ matrix.shard }}/4 --engine-buckets 2
 
       # The log on failure, because the gate deliberately keeps it rather than
@@ -651,13 +844,27 @@ jobs:
           path: tier-gate-engine-${{ matrix.shard }}.log
           retention-days: 30
 
+      # cleat#3949 step 1. The `go test -json` report the skip budget will read, once
+      # this job has a ledger key of its own -- see the inventory step in `tier1` for
+      # why the existing key cannot be reused. Same if:/continue-on-error reasoning as
+      # the log above: it is evidence, not a result, and losing it to an upload hiccup
+      # must not fail the authoritative push check.
+      - name: Upload the go test -json report
+        if: always() && github.event_name != 'merge_group'
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: tier-gate-json-engine-${{ matrix.shard }}-${{ github.sha }}-${{ github.run_attempt }}
+          path: tier-gate-engine-${{ matrix.shard }}.json
+          retention-days: 30
+
   tier1-rest:
     name: Tier 1 Gate -- rest shard ${{ matrix.shard }}/4
-    needs: [tier1-coverage]
+    needs: [tier1-coverage, edit-gate]
     # Same reasoning as tier1-engine's job-level `if:` above: on merge_group
     # every step below already reduces to one report-only echo, so skip the
     # job entirely rather than spend a runner assignment on it.
-    if: github.event_name != 'merge_group'
+    if: ${{ !cancelled() && needs.tier1-coverage.result == 'success' && github.event_name != 'merge_group' && needs.edit-gate.outputs.skip != 'true' }}
     # cleat#3301: matrix of 2, same shape as tier1-engine's. The matrix
     # value IS the overall --shard numerator (3 and 4 here, not a separate
     # 0-based bucket index) -- tier-gate.sh itself derives the rest-bucket
@@ -750,6 +957,10 @@ jobs:
           --health-timeout 5s
           --health-retries 5
 
+      # `--health-start-period` is load-bearing: mysql:8.4 starts a server twice
+      # (initialize, then run) and a loaded runner can take over 50s to boot, which
+      # is the whole budget without it (cleat#3936). Guarded by
+      # scripts/check-workflow-guards.py.
       mysql:
         image: mirror.gcr.io/library/mysql:8.4.11@sha256:b3b90af2a6552ae30c266fdb7d5dd55f3afb72404bb78d37fe8a23eb857fd3fb
         env:
@@ -761,7 +972,8 @@ jobs:
           --health-cmd "mysqladmin ping -h 127.0.0.1 -u root -pcleat"
           --health-interval 10s
           --health-timeout 5s
-          --health-retries 5
+          --health-retries 15
+          --health-start-period 60s
 
       mssql:
         # See tier1-engine's mssql service for the full pin rationale.
@@ -834,7 +1046,7 @@ jobs:
         if: github.event_name != 'merge_group'
         run: |
           pip install --upgrade pip
-          pip install componentize-py
+          bash scripts/install-componentize-py.sh
           pip install -e python-sdk
           # scripts/tier-gate.sh reads tiers.yaml with a YAML parser (cleat#2085).
           # That makes this a gate PRECONDITION, not a convenience: without it the
@@ -923,11 +1135,17 @@ jobs:
   # states which dependency, if any, was not a success.
   tier1:
     name: Tier 1 Gate
-    needs: [tier1-coverage, tier1-engine, tier1-rest]
-    if: always()
+    needs: [tier1-coverage, tier1-engine, tier1-rest, edit-gate]
+    if: ${{ always() }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
+      # A required context must still report SUCCESS on a body edit: a
+      # `skipped` one beside its `success` twin leaves the PR un-mergeable
+      # (cleat#3958, measured on #3960). So the job runs and does nothing.
+      - name: Nothing to do -- this head already passed
+        if: ${{ needs.edit-gate.outputs.skip == 'true' }}
+        run: echo "the PR head already passed this workflow; nothing to re-run"
       # The three shards now carry `if: github.event_name != 'merge_group'`
       # at the JOB level (not just on their steps), so on merge_group they
       # are skipped entirely rather than started-and-report-only -- one
@@ -938,7 +1156,111 @@ jobs:
       # real failure (a job that did not run cannot have passed its tests),
       # so the acceptance is conditioned on the event, not granted
       # unconditionally to the string "skipped".
+      # cleat#3949 step 1: the step below needs two things this job did not have --
+      # scripts/skip-inventory.py, and a git repository for `gh`. The sparse checkout
+      # pulls only scripts/, which is all it needs; `--repo` in the step is belt and
+      # braces so the command does not depend on the checkout's remotes at all.
+      - name: Checkout scripts/ for the skip inventory
+        if: ${{ github.event_name == 'pull_request' && always() && needs.edit-gate.outputs.skip != 'true' }}
+        uses: actions/checkout@v7
+        with:
+          sparse-checkout: scripts
+
+      # cleat#3949 step 1: REPORT ONLY. This supplies the numbers a skip budget needs,
+      # from the job that will be gated, because check-skip-budget.sh has no derive mode
+      # and its own header says a local run can confirm a line does not error but cannot
+      # vouch for the file.
+      #
+      # IT CANNOT FAIL THE JOB, and that is deliberate rather than convenient: it is a
+      # diagnostic, and the owner's direction (cleat#3958) is to spend no runner
+      # assignment on one. So there is no `continue-on-error` here -- the guard in
+      # scripts/check-workflow-guards.py refuses that in a required job, and it is right
+      # that a step which cannot fail cannot be part of the check -- and no separate job
+      # either, which would cost a runner assignment on every PR to print a notice.
+      # Instead every failure path below reports UNMEASURED and exits 0: a missing
+      # artifact, a failed download, a crash in the inventory script. The step still
+      # carries a real exit status for anything UNEXPECTED, so it is not a swallowed
+      # step; when step 2 turns this into a gate it becomes a check with 0/1/2.
+      #
+      # pull_request only: on merge_group the shards are skipped at the job level, so
+      # there are no reports to download.
+      #
+      # `gh run download`, not actions/download-artifact: the action fails the step when
+      # nothing matches, which is exactly the case this must survive.
+      - name: Skip inventory across the engine shards (report only)
+        if: ${{ github.event_name == 'pull_request' && always() && needs.edit-gate.outputs.skip != 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -uo pipefail
+          rm -rf tier-gate-json
+          mkdir -p tier-gate-json
+          if ! gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" -p 'tier-gate-json-engine-*' -D tier-gate-json; then
+            echo "::warning title=Skip inventory UNMEASURED::could not download the engine shard reports on this run -- a failure of the inventory, not a finding about the suite"
+            exit 0
+          fi
+          # -mindepth 2: `gh run download -p` extracts EACH matching artifact into its
+          # own directory, even when there is exactly one match -- measured on develop's
+          # run 43874297221, where all the files sat one level deeper than -maxdepth 1
+          # looks. The first version of this step found nothing and reported UNMEASURED on
+          # every run (cleat-review, #3964).
+          reports=$(find tier-gate-json -mindepth 2 -maxdepth 2 -name '*.json' 2>/dev/null | sort | tr '\n' ' ')
+          if [ -z "$reports" ]; then
+            echo "::warning title=Skip inventory UNMEASURED::no tier-gate-json report on this run -- a failure of the inventory, not a finding about the suite"
+            exit 0
+          fi
+          # shellcheck disable=SC2086
+          if ! python3 scripts/skip-inventory.py $reports > skip-inventory.txt; then
+            echo "::warning title=Skip inventory UNMEASURED::the inventory script exited non-zero; its output follows"
+            cat skip-inventory.txt || true
+            exit 0
+          fi
+          cat skip-inventory.txt
+          echo "::notice title=Skip inventory (report only)::$(head -1 skip-inventory.txt)"
+
+      # cleat#3949 step 2, and the reason step 1 exists. The engine shards run
+      # ./engine/... with all three DSNs set, and measured ZERO skips in all 15 runs
+      # sampled before this step existed -- 13 develop pushes and 2 PR runs, 2026-11-16.
+      # So the budget is 0, not a derived set:
+      # any engine test that starts skipping on a PR is red here.
+      #
+      # rc 2 for UNMEASURED, deliberately distinct from rc 1 (a skip finding): 1 says go
+      # and look at the tree, 2 says the check is broken and the tree may be fine. It
+      # cannot be checked into a corner where a missing artifact reads as a pass.
+      - name: Skip budget across the engine shards
+        if: ${{ github.event_name == 'pull_request' && always() && needs.edit-gate.outputs.skip != 'true' }}
+        run: |
+          set -uo pipefail
+          list=$(find tier-gate-json -mindepth 2 -maxdepth 2 -name '*.json' 2>/dev/null | sort | tr '\n' ' ')
+          if [ -z "$list" ]; then
+            echo "::error title=Skip budget UNMEASURED::no engine report to check a budget against -- this is a failure of the check, not a finding about the tree"
+            exit 2
+          fi
+          # shellcheck disable=SC2086
+          awk 1 $list > tier-gate-union.json
+          if [ ! -s tier-gate-union.json ]; then
+            echo "::error title=Skip budget UNMEASURED::the union report is empty -- this is a failure of the check, not a finding about the tree"
+            exit 2
+          fi
+          scripts/check-skip-budget.sh test-go/engine-tier1 tier-gate-union.json
+
+
+      # `always()` is load-bearing, and its absence was a defect (cleat#3969): with no
+      # `if:` a step defaults to `success()`, so any earlier failure -- notably the skip
+      # budget immediately above, which exits non-zero when the engine shards skipped
+      # anything -- SKIPPED this step entirely. The job then reported only the budget's
+      # own error and never printed `tier1-engine: <result>`, so the reader could not tell
+      # which shard failed, or whether any had. Measured on run 43903650094 (budget step
+      # present): no per-shard lines. On run 43902888453 (no budget step yet): the
+      # per-shard verdict printed. Both were cancelled by a later push, so the
+      # cancellation is not the difference -- the budget step is.
+      #
+      # This is the same reasoning the step's own body gives -- "this job always runs and
+      # always states which dependency, if any, was not a success" -- which was false in
+      # exactly the case that matters until this line existed. The gate clause is kept so
+      # a gated body edit still reports `success` without running this.
       - name: Aggregate shard results
+        if: ${{ always() && needs.edit-gate.outputs.skip != 'true' }}
         env:
           EVENT: ${{ github.event_name }}
           COVERAGE: ${{ needs.tier1-coverage.result }}

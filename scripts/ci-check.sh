@@ -93,7 +93,7 @@ run_step() {
 # ---------------------------------------------------------------------------
 REQUIRED_PATHS=(
     "engine" "internal" "plugins" "cmd" "wasm"
-    "cleat" "python-sdk" "packages/cleat-as"
+    "cleat" "python-sdk"
     "crates/cleat-macro" "crates/cleat-sdk"
 )
 missing=()
@@ -223,9 +223,6 @@ run_step "go test (commands) ./cmd/..." \
 run_step "python tests" \
     bash -c "cd '$REPO_ROOT/python-sdk' && python -m pytest -v"
 
-run_step "assemblyscript tests" \
-    bash -c "cd '$REPO_ROOT/packages/cleat-as' && npm test"
-
 # Java tests are optional locally — skip if no Java/Gradle
 if command -v gradle &>/dev/null || [ -x "$REPO_ROOT/crates/cleat-java/gradlew" ]; then
     run_step "java tests" \
@@ -248,13 +245,6 @@ run_step "cargo build (cleat-macro)" \
 
 run_step "cargo build (cleat-sdk)" \
     bash -c "cd '$REPO_ROOT/crates/cleat-sdk' && cargo build"
-
-# NOT `npm ci`. packages/cleat-as/node_modules is COMMITTED (139 tracked files
-# as of 2026-08-09, `git ls-files packages/cleat-as/node_modules | wc -l`), and
-# npm ci wipes node_modules before installing -- so the old step deleted tracked
-# files out of the developer's checkout as a side effect of a pre-push check.
-run_step "assemblyscript build" \
-    bash -c "cd '$REPO_ROOT/packages/cleat-as' && npm run build"
 
 run_step "python install" \
     bash -c "cd '$REPO_ROOT/python-sdk' && pip install --upgrade pip && pip install ."

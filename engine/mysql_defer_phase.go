@@ -58,6 +58,16 @@ func (s *MySQLStore) FinalizeDeferPhase(ctx context.Context, runID, workerID str
 	`, runID, workerID, generation, s.tenantID); err != nil {
 		return fmt.Errorf("finalize defer phase: %w", err)
 	}
+	// See the PostgreSQL FinalizeDeferPhase for why a non-done outcome is copied to the run's idempotency key here.
+	if appliedStatus != statusDone {
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE idempotency_keys
+			SET error_msg = (SELECT error_msg FROM workflow_instances WHERE id = ? AND tenant_id = ?)
+			WHERE workflow_id = ? AND tenant_id = ?
+		`, runID, s.tenantID, runID, s.tenantID); err != nil {
+			s.log().WarnContext(ctx, "idempotency update failed", "error", err)
+		}
+	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("finalize defer phase commit: %w", err)
 	}

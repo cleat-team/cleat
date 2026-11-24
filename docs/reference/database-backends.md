@@ -708,12 +708,14 @@ So the contract is:
   |---|---|
   | `blob_index.tags` | queried with `JSON_CONTAINS`, so it cannot be text without rewriting the read — degraded, like `workflow_instances.query_state` |
   | `webhook_config.events`, `webhook_events.headers` | `[]string` and `map[string]string`; they cannot carry a number |
-  | `audit_events.metadata` | only ever `{}`: the chained insert writes it explicitly so the hash covers the stored value |
+  | `audit_events.metadata` | **Not only `{}`:** this row said so until cleat#3873, but `record_event` (a workflow's `details`) and `auth.NoteAuditMetadata` both fill it. It is still `JSON` on MySQL, so a number outside MySQL's exact range in a workflow's details is rewritten; the chain still verifies, because it hashes the stored value (cleat#3884) |
 
-  One column is beyond a migration's reach: `ingested_events.event_data`
-  arrives through `map[string]any`, and Go's decoder turns a JSON number into a
-  `float64` before any column type has a say. Converting it would measure clean
-  and change nothing. That is cleat#1641.
+  One column was beyond a migration's reach until cleat#1641: `ingested_events.event_data`
+  arrived through `map[string]any`, and Go's decoder turns a JSON number into a
+  `float64` before any column type has a say, so converting it would have measured
+  clean and changed nothing. cleat#1641 removed that decode; the eventtriggers
+  plugin's step 13 (cleat#3873) then converted the column on MySQL, with the same
+  `JSON_VALID` check as the others.
 
 **No backend is "the strict one", which is the whole reason this is written
 down.** A NUL escape passes on MySQL and SQL Server and fails on PostgreSQL;

@@ -7,6 +7,20 @@ import (
 	"fmt"
 )
 
+// redactedBody is how a divergence message names a body it must not print (cleat#4321): its size and the start of its sha256, and never its text.
+//
+// A divergence message reaches the guest, and from the guest a stored run error, a log line and an API response, and by replay time a store has
+// already handed back the DECRYPTED payload (replay acts on it). Truncating a body, which is what the messages did before, is not redaction: a body
+// under 4096 bytes was printed whole. Egress redaction reads a JSON document and leaves other text alone, so a body embedded in a sentence is out of its
+// reach, and the message has to be built without it.
+//
+// It is the same for the same body, so a message that prints the call's body and the recorded one still shows whether they are equal, which is the
+// question a divergence about a request asks. The hash is a comparison aid and not a secret: a body with little entropy can be guessed from it.
+func redactedBody(s string) string {
+	h := sha256.Sum256([]byte(s))
+	return fmt.Sprintf("[redacted: %d bytes, sha256=%x]", len(s), h[:8])
+}
+
 // truncateWithHash truncates s to maxLen bytes, appending "... [sha256=<hash>]"
 // if truncation occurred. Returns s unchanged if len(s) <= maxLen.
 func truncateWithHash(s string, maxLen int) string {

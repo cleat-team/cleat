@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -1070,7 +1071,7 @@ func TestAwaitAllChildren_AllCompleted(t *testing.T) {
 // This test previously asserted the opposite -- errCode 0 with
 // Error: "child not completed" for run-b -- which is the behaviour
 // IMPROVEMENT-PLAN 3.309 identified as a durable wrong answer. The outcomes are
-// marshalled into the recorded EventRecord and replayAwaitAllChildren serves
+// marshalled into the recorded EventRecord and awaitAllChildrenStep's replay serves
 // rec.Response verbatim forever, so "had not finished when I looked" became
 // run-b's permanent result even after run-b completed.
 //
@@ -1178,7 +1179,7 @@ func TestReplayAwaitAllChildren_Match(t *testing.T) {
 		Response:  `[{"run_id":"run-a","result":"a"},{"run_id":"run-b","result":"b"}]`,
 	}}
 
-	result := s.replayAwaitAllChildren(context.Background(), nil, `["run-a","run-b"]`, 0, 0)
+	result := s.AwaitAllChildren(context.Background(), nil, `["run-a","run-b"]`, 0, 0)
 
 	errCode := uint32(result & 0xFFFFFFFF)
 	if errCode != 0 {
@@ -1197,7 +1198,7 @@ func TestReplayAwaitAllChildren_MismatchType(t *testing.T) {
 		EventType: EventTypeCall, // wrong type
 	}}
 
-	result := s.replayAwaitAllChildren(context.Background(), nil, `["run-a"]`, 0, 0)
+	result := s.AwaitAllChildren(context.Background(), nil, `["run-a"]`, 0, 0)
 
 	errCode := uint32(result & 0xFFFFFFFF)
 	if errCode != 1 {
@@ -1216,7 +1217,7 @@ func TestReplayAwaitAllChildren_IDsMismatch(t *testing.T) {
 	}}
 
 	// Pass different run IDs than in history.
-	result := s.replayAwaitAllChildren(context.Background(), nil, `["run-y"]`, 0, 0)
+	result := s.AwaitAllChildren(context.Background(), nil, `["run-y"]`, 0, 0)
 
 	errCode := uint32(result & 0xFFFFFFFF)
 	if errCode != 1 {
@@ -1231,7 +1232,7 @@ func TestReplayAwaitAllChildren_PastEnd(t *testing.T) {
 	s.isReplay = true
 	s.history = nil
 
-	result := s.replayAwaitAllChildren(context.Background(), nil, `["run-a"]`, 0, 0)
+	result := s.AwaitAllChildren(context.Background(), nil, `["run-a"]`, 0, 0)
 
 	if s.isReplay {
 		t.Error("expected isReplay=false after exitReplay")
@@ -1245,7 +1246,7 @@ func TestReplayAwaitAllChildren_PastEnd(t *testing.T) {
 func TestFreshAwaitAllChildren_InvalidJSON(t *testing.T) {
 	s := newTestExecSession()
 
-	result := s.freshAwaitAllChildren(context.Background(), nil, `not-json`, 0, 0)
+	result := s.AwaitAllChildren(context.Background(), nil, `not-json`, 0, 0)
 
 	errCode := uint32(result & 0xFFFFFFFF)
 	if errCode != 1 {
@@ -1267,7 +1268,7 @@ func TestFreshAwaitAllChildren_NoStore(t *testing.T) {
 
 	buf := make([]byte, 512)
 	ctx := contextWithRawMemBuf(context.Background(), buf)
-	result := s.freshAwaitAllChildren(ctx, nil, `["run-a"]`, 0, uint32(len(buf)))
+	result := s.AwaitAllChildren(ctx, nil, `["run-a"]`, 0, uint32(len(buf)))
 
 	if result != packAwaitChildResultSuspend() {
 		t.Errorf("with no child store configured AwaitAllChildren must suspend, as AwaitChild does: "+
@@ -1388,14 +1389,6 @@ func TestRunDetached_FreshWithoutStore(t *testing.T) {
 	}
 	if s.history[0].DetachedRunID == "" {
 		t.Error("expected synthetic DetachedRunID")
-	}
-}
-
-func TestChildWorkflowWithOptions_ExplicitVersion(t *testing.T) {
-	// Test that ChildWorkflowOptions{Version: 10} resolves to version 10
-	opts := ChildWorkflowOptions{Version: 10}
-	if opts.Version != 10 {
-		t.Errorf("expected Version 10, got %d", opts.Version)
 	}
 }
 
@@ -1589,5 +1582,142 @@ func TestChildWorkflow_ReplayPastEndStillExitsReplay(t *testing.T) {
 	if s.isReplay {
 		t.Error("past the end of history, replay must be EXITED, not reported as divergence -- " +
 			"exhausting the history is how every resumed workflow reaches new work")
+	}
+}
+
+// cleat#4114: a start the child-workflow store REFUSED used to drop the error, record a made-up id (detached-<name>-<step>) and return success.
+// The guest is now told, the refusal is recorded without a run id, and a replay refuses again with the same text.
+func refusingChildStore(msg string) *mockChildStore {
+	return &mockChildStore{
+		startChildFn: func(context.Context, string, string, string, int, string, int) (string, error) {
+			return "", errors.New(msg)
+		},
+	}
+}
+
+func TestRunDetached_ARefusedStartIsAFailureNotASuccessWithAMadeUpID(t *testing.T) {
+	s := newTestExecSession()
+	s.engine.childWfStore = refusingChildStore("the child store is down")
+	s.workflowID = "parent-wf"
+	buf := make([]byte, 512)
+
+	got := s.StartDetached(ctxWithMem(context.Background(), buf), nil, "detached-wf", `{}`, 0, 512)
+
+	if byte(got) != detachedStartRefused {
+		t.Fatalf("errCode = %d, want %d: a refused start was reported to the guest as a success", byte(got), detachedStartRefused)
+	}
+	if msg := extractStringFromSimplePacked(got, buf); !strings.Contains(msg, "the child store is down") || !strings.Contains(msg, "detached-wf") {
+		t.Errorf("message = %q, want the store's text and the run's name", msg)
+	}
+	if len(s.history) != 1 {
+		t.Fatalf("history has %d events, want the one recording the refusal", len(s.history))
+	}
+	rec := s.history[0]
+	if rec.EventType != EventTypeRunDetached || rec.Err == "" || rec.DetachedRunID != "" {
+		t.Errorf("recorded %+v, want a run_detached event carrying the refusal and NO run id", rec)
+	}
+	if strings.HasPrefix(rec.DetachedRunID, "detached-") {
+		t.Errorf("a made-up run id %q was recorded", rec.DetachedRunID)
+	}
+}
+
+// RunDetached has no buffer, so its guest sees the code alone.
+func TestRunDetached_ARefusedStartReachesTheNoBufferForm(t *testing.T) {
+	s := newTestExecSession()
+	s.engine.childWfStore = refusingChildStore("the child store is down")
+	if got := s.RunDetached(context.Background(), nil, "detached-wf", `{}`); byte(got) != detachedStartRefused {
+		t.Errorf("RunDetached = %d, want errCode %d", got, detachedStartRefused)
+	}
+}
+
+func TestRunDetached_AReplayOfARefusedStartRefusesAgainWithTheRecordedText(t *testing.T) {
+	fresh := newTestExecSession()
+	fresh.engine.childWfStore = refusingChildStore("the child store is down")
+	fresh.RunDetached(context.Background(), nil, "detached-wf", `{}`)
+
+	// The replay's store would ACCEPT: the recorded refusal must win, as a recorded success does.
+	replay := newTestExecSession()
+	replay.isReplay = true
+	replay.history = fresh.history
+	replay.engine.childWfStore = &mockChildStore{startChildFn: func(context.Context, string, string, string, int, string, int) (string, error) {
+		t.Error("the store was asked again on replay")
+		return "run-x", nil
+	}}
+	buf := make([]byte, 512)
+
+	got := replay.StartDetached(ctxWithMem(context.Background(), buf), nil, "detached-wf", `{}`, 0, 512)
+
+	if byte(got) != detachedStartRefused {
+		t.Fatalf("replay errCode = %d, want %d", byte(got), detachedStartRefused)
+	}
+	if msg := extractStringFromSimplePacked(got, buf); !strings.Contains(msg, "the child store is down") {
+		t.Errorf("replayed message = %q, want the recorded text", msg)
+	}
+	if replay.stepCount != 1 {
+		t.Errorf("stepCount = %d, want the refusal consumed so the next call reads the next event", replay.stepCount)
+	}
+}
+
+// The control: an accepting store still records the id the store issued.
+func TestRunDetached_AnAcceptedStartRecordsTheStoresID(t *testing.T) {
+	s := newTestExecSession()
+	s.engine.childWfStore = &mockChildStore{startChildFn: func(context.Context, string, string, string, int, string, int) (string, error) {
+		return "run-from-the-store", nil
+	}}
+	buf := make([]byte, 512)
+
+	got := s.StartDetached(ctxWithMem(context.Background(), buf), nil, "detached-wf", `{}`, 0, 512)
+
+	if byte(got) != 0 || extractStringFromSimplePacked(got, buf) != "run-from-the-store" {
+		t.Errorf("got %#x %q, want success with the store's id", got, extractStringFromSimplePacked(got, buf))
+	}
+	if s.history[0].DetachedRunID != "run-from-the-store" || s.history[0].Err != "" {
+		t.Errorf("recorded %+v", s.history[0])
+	}
+}
+
+// A refused detached start must survive the two places an event leaves memory: the database payload and a compaction. Without them the
+// refusal would replay as a start that was never refused (the field is empty), which is the defect in the other direction (cleat#4114).
+func TestRunDetached_ARefusalSurvivesThePayloadAndCompaction(t *testing.T) {
+	rec := EventRecord{Step: 0, EventType: EventTypeRunDetached, DetachedName: "wf", DetachedInput: `{"a":1}`, Err: `detached run "wf": start failed: down`}
+
+	payload, err := eventRecordToPayload(rec)
+	if err != nil {
+		t.Fatalf("eventRecordToPayload: %v", err)
+	}
+	got := EventRecord{EventType: EventTypeRunDetached}
+	populateFromPayload(&got, payload)
+	if got.Err != rec.Err || got.DetachedRunID != "" {
+		t.Errorf("payload round trip: Err=%q DetachedRunID=%q, want the refusal and no run id (payload %s)", got.Err, got.DetachedRunID, payload)
+	}
+
+	cs, err := extractCompactionState([]EventRecord{rec})
+	if err != nil {
+		t.Fatalf("extractCompactionState: %v", err)
+	}
+	back := buildFullHistoryFromCompaction(nil, cs)
+	if len(back) != 1 || back[0].Err != rec.Err || back[0].DetachedRunID != "" {
+		t.Errorf("compaction round trip: %+v, want the refusal and no run id", back)
+	}
+}
+
+// The recorded refusal is what a replay RETURNS, so it must be inside the integrity checksum: computeEventChecksum hashes eventRecordToPayload
+// for the event type, and an Err that the payload omitted would leave the message editable in the row with VerifyWorkflowEvents still passing.
+func TestRunDetached_TheRecordedRefusalIsInsideTheChecksum(t *testing.T) {
+	base := EventRecord{Step: 3, EventType: EventTypeRunDetached, DetachedName: "wf", DetachedInput: `{}`}
+	refused := base
+	refused.Err = `detached run "wf": start failed: down`
+	edited := base
+	edited.Err = `detached run "wf": start failed: up`
+
+	cBase, cRefused, cEdited := computeEventChecksum(base, "prev"), computeEventChecksum(refused, "prev"), computeEventChecksum(edited, "prev")
+	if cRefused == cBase {
+		t.Errorf("a refusal and no refusal have the same checksum %s: the refusal is outside the integrity chain", cBase)
+	}
+	if cRefused == cEdited {
+		t.Errorf("two different refusal messages have the same checksum %s: the message is editable without detection", cRefused)
+	}
+	if again := computeEventChecksum(refused, "prev"); again != cRefused {
+		t.Errorf("the checksum is not stable: %s then %s", cRefused, again)
 	}
 }

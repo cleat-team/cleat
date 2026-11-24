@@ -860,6 +860,25 @@ func (s *PostgresStore) ContinueAsNew(ctx context.Context, currentRunID, workerI
 		return "", fmt.Errorf("continue as new: %w", err)
 	}
 
+	// Signals stored on the old run and not yet consumed belong to the WORKFLOW, and the workflow goes on as the new run: carry them (cleat#4340). This runs AFTER the old run's lease row was
+	// updated above, and that update waits for any delivery that holds the row (a delivery locks it before it decides: signal_forward.go), so every such delivery has committed and its row is
+	// visible to this statement; one that arrives later finds the run done with a successor and is forwarded instead. `id` order is kept,
+	// so the successor reads them in the order they were sent.
+	if _, err := tx.ExecContext(ctx, `UPDATE workflow_signals SET workflow_id = $1 WHERE workflow_id = $2 AND tenant_id = $3`, newRunID, currentRunID, s.tenantID); err != nil {
+		return "", fmt.Errorf("continue as new: carry the pending signals: %w", err)
+	}
+	// A cooperative cancel requested on the old run and not yet seen belongs to the WORKFLOW too (cleat#4340): a successor created without it is a cancel that was lost. It is
+	// read here, after the old run's completion update holds its lease row, so a RequestCancellation (which locks that row first) cannot change it before this commits. The reason
+	// is copied as it is stored: same tenant, same key.
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE workflow_leases n
+		SET cancellation_requested = true, cancellation_reason = o.cancellation_reason
+		FROM workflow_leases o
+		WHERE n.id = $1 AND o.id = $2 AND n.tenant_id = $3 AND o.tenant_id = $3 AND o.cancellation_requested
+	`, newRunID, currentRunID, s.tenantID); err != nil {
+		return "", fmt.Errorf("continue as new: carry the cancellation request: %w", err)
+	}
+
 	if err := tx.Commit(); err != nil {
 		return "", err
 	}
@@ -1644,6 +1663,9 @@ func (s *PostgresStore) StartNewRunWithConcurrencyKey(ctx context.Context, runID
 // INSERT that creates the run. See StartOptions for why the two suffixed
 // methods collapsed into one.
 func (s *PostgresStore) StartNewRunWithOptions(ctx context.Context, runID, defName string, defVersion int, input json.RawMessage, idempotencyKey string, tenantID string, priority int, opts StartOptions) (string, bool, error) {
+	if err := opts.Validate(); err != nil {
+		return "", false, err
+	}
 	return s.startNewRun(ctx, runID, defName, defVersion, input, idempotencyKey, tenantID, priority, opts)
 }
 

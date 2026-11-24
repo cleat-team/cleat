@@ -9,7 +9,7 @@ import json
 import pytest
 
 try:
-    from cleat_sdk.host_calls import HostCalls, RetryPolicy, SuspendSentinel
+    from cleat_sdk.host_calls import INFINITE_TIMEOUT_MS, HostCalls, RetryPolicy, SuspendSentinel
     from cleat_sdk.test_harness import CleatTestHarness
 except ImportError as e:
     pytest.skip(
@@ -307,17 +307,25 @@ class TestSignals:
         assert result.name == ""
         assert result.payload == ""
 
-    def test_await_signals_indefinite_timeout_raises_suspend(self):
-        """timeout_ms=0 means wait indefinitely, which raises SuspendSentinel
+    def test_await_signals_zero_or_negative_times_out_at_once(self):
+        """cleat#4144: a timeout of 0 or less is do not wait, in the harness as on the host."""
+        h = CleatTestHarness()
+        for timeout_ms in (0, -1):
+            result = h.await_signals_ms(["anything"], timeout_ms)
+            assert result.timed_out, f"timeout_ms={timeout_ms} did not time out"
+            assert result.name == ""
+
+    def test_await_signals_none_or_infinite_raises_suspend(self):
+        """Waiting without a limit is explicit: None or INFINITE_TIMEOUT_MS, which raises SuspendSentinel
         in the test harness when no signal is available."""
         h = CleatTestHarness()
         with pytest.raises(SuspendSentinel):
-            h.await_signals_ms(["anything"], 0)
+            h.await_signals_ms(["anything"], None)
         with pytest.raises(SuspendSentinel):
-            h.await_signals_ms(["anything"], -1)
+            h.await_signals_ms(["anything"], INFINITE_TIMEOUT_MS)
 
-    def test_await_signals_indefinite_with_signal(self):
-        """With a signal available, indefinite wait returns immediately."""
+    def test_await_signals_zero_still_returns_a_waiting_signal(self):
+        """A 0 ms wait degrades to a poll, not to nothing."""
         h = CleatTestHarness()
         h.stub_signal("greeting", "hello")
         result = h.await_signals_ms(["greeting"], 0)

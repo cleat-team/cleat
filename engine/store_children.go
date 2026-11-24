@@ -210,13 +210,13 @@ func (s *PostgresStore) GetChildResult(ctx context.Context, runID string) (Child
 	//
 	// Nothing distinguishes "done because it continued" from "done because it
 	// finished" on the row itself. The successor lookup does: a run with no
-	// successor is the terminal one. Only WHICH row is read changes here;
-	// everything below -- the status test, the result compaction -- is
-	// untouched.
-	runID, err := terminalRunID(ctx, runID, s.successorOfRun)
-	if err != nil {
-		return ChildOutcome{}, err
-	}
+	// successor is the terminal one. And it is asked AGAIN after the row is
+	// read (cleat#4069): the chain moves between the walk and the read.
+	return readChildOutcomeFollowingTheChain(ctx, runID, s.successorOfRun, s.readChildOutcome)
+}
+
+// readChildOutcome reads ONE run's row and says what it settled as. It does not follow the chain; GetChildResult does, around it.
+func (s *PostgresStore) readChildOutcome(ctx context.Context, runID string) (ChildOutcome, error) {
 	tx, err := s.beginTxWithRLS(ctx)
 	if err != nil {
 		return ChildOutcome{}, fmt.Errorf("get child result: begin: %w", err)

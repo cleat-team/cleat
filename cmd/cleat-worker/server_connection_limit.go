@@ -116,8 +116,9 @@ func assessConnectionFit(fixed int, limit serverConnectionLimit) (severity, mess
 			fixed, usable, limit.Detail)
 	case 2*fixed > usable:
 		return "warn", fmt.Sprintf(
-			"this worker's pools may open %d of the %d connections the server allows (%s), "+
-				"so a SECOND worker will not fit. Raise the server's limit, or put a "+
+			"this worker's pools may open %d of the %d connections the server allows (%s). "+
+				"This worker fits; a SECOND worker will not fit. Nothing is wrong with a single "+
+				"worker. Raise the server's limit, or put a "+
 				"transaction-mode pooler in front -- see docs/operations/postgresql-sizing.md. "+
 				"Note a pooler consolidates these fixed pools but NOT per-tenant pools under "+
 				"--tenant-isolation=role, which connect as distinct roles",

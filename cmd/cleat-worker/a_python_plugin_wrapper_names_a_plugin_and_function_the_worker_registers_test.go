@@ -10,8 +10,8 @@ import (
 	"github.com/cleat-team/cleat/plugin"
 )
 
-// cleat#3789: the typed plugin wrappers in the Python, Java and AssemblyScript
-// SDKs (`Plugins.await_webhook` and its siblings) name a plugin and a function
+// cleat#3789: the typed plugin wrappers in the Python, Java and (then)
+// AssemblyScript SDKs (`Plugins.await_webhook` and its siblings) name a plugin and a function
 // by string, and nothing checked those strings against the worker.
 //
 // `Plugins.await_webhook` called "webhookingest"; the worker registers
@@ -65,9 +65,10 @@ func registeredPluginFunctions(t *testing.T) map[string]map[string]bool {
 	return out
 }
 
-// pluginWrapperSources are the three SDK files that wrap plugin calls in typed
-// methods. The Java and AssemblyScript wrappers were written beside the Python
-// one and carry the same names, so the same defect: all three are read.
+// pluginWrapperSources are the two SDK files that wrap plugin calls in typed
+// methods. The Java wrapper was written beside the Python one and carries the
+// same names, so the same defect: both are read. (A third, the AssemblyScript
+// one, was read until cleat#4023 removed that SDK.)
 var pluginWrapperSources = []struct {
 	file     string
 	call     *regexp.Regexp
@@ -77,8 +78,6 @@ var pluginWrapperSources = []struct {
 		regexp.MustCompile(`self\._call\(\s*self\._h,\s*"([^"]+)",\s*"([^"]+)"`), 13},
 	{filepath.Join("crates", "cleat-java", "src", "main", "java", "cleat", "Plugins.java"),
 		regexp.MustCompile(`host\.pluginCall\("([^"]+)", "([^"]+)"`), 12},
-	{filepath.Join("packages", "cleat-as", "assembly", "plugins.ts"),
-		regexp.MustCompile(`this\.host\.pluginCall\("([^"]+)", "([^"]+)"`), 13},
 }
 
 func TestEveryPluginWrapperNamesAPluginAndFunctionTheWorkerRegisters(t *testing.T) {

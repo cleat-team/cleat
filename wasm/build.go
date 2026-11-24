@@ -657,6 +657,23 @@ func BuildPythonWasmWithRuntime(entry, output, targetRuntime string, verbose boo
 	return cmd.Run()
 }
 
+// PythonBuildExitUnmeasuredComponentizePy is the exit status build_wasm.py gives a build it REFUSED because the installed componentize-py is not the
+// version the SDK was measured on (cleat#4383), as opposed to 1, a build that ran and failed. It must equal EXIT_UNMEASURED_COMPONENTIZE_PY in
+// python-sdk/scripts/build_wasm.py; TestPythonBuildExitStatusMatchesTheScript holds the two together.
+const PythonBuildExitUnmeasuredComponentizePy = 3
+
+// AllowUnmeasuredComponentizePyEnv is the variable that lets such a build go on. `cleat build --allow-unmeasured-componentize-py` sets it for the script it
+// runs, and the script reads the same name, so a CI job or a container can set it without a flag.
+const AllowUnmeasuredComponentizePyEnv = "CLEAT_ALLOW_UNMEASURED_COMPONENTIZE_PY"
+
+// IsPythonComponentizeVersionRefused reports whether err is the build script refusing an unmeasured componentize-py. The script has already said so on
+// stderr, with the fix and the override; the CLI's own advice ("check that the file has a @cleat_entry function") is about a compile that failed, and
+// printed after this it would send the reader to their source for a problem in their environment.
+func IsPythonComponentizeVersionRefused(err error) bool {
+	var ee *exec.ExitError
+	return errors.As(err, &ee) && ee.ExitCode() == PythonBuildExitUnmeasuredComponentizePy
+}
+
 // pythonBuildScriptError is returned when no build_wasm.py can be found, as
 // opposed to one that was found and failed. The two need different messages:
 // the CLI's "check that the file has a @cleat_entry function" advice is about a
@@ -714,7 +731,7 @@ func locatePythonBuildScript(
 			"package is not installed for the python3 on PATH (%v).\n"+
 			"Install it in the environment you build from, for example:\n"+
 			"    python3 -m venv .venv && . .venv/bin/activate\n"+
-			"    pip install cleat-sdk 'componentize-py>=0.12.0'", checkoutNote, ierr)}
+			"    pip install cleat-sdk componentize-py==0.25.1", checkoutNote, ierr)}
 	}
 	candidate := filepath.Join(pkg, pythonBuildScriptRel)
 	if _, serr := os.Stat(candidate); serr != nil {

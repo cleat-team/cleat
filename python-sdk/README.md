@@ -22,11 +22,12 @@ there needs `sudo apt install python3-venv` first.
 ```bash
 python3 -m venv .venv
 . .venv/bin/activate
-pip install cleat-sdk 'componentize-py>=0.12.0'
+pip install cleat-sdk componentize-py==0.25.1
 ```
 
-Quote the requirement. Unquoted, `>=0.12.0` is a shell redirect: it creates a file
-named `=0.12.0` and installs `componentize-py` with no constraint.
+Pin `componentize-py` exactly. Which standard-library modules a component contains is decided by
+`componentize-py` when it builds ([the compatibility tables](#python-standard-library-compatibility)
+were measured on 0.25.1 and on no other version), and it is the version CI tests.
 
 Or from source:
 
@@ -71,7 +72,7 @@ The decorator generates a WASM export wrapper conforming to the Cleat ABI (`(arg
 
 ## HostCalls overview
 
-The `HostCalls` class binds 48 WASM host function imports, grouped by category below.
+The `HostCalls` class binds 49 WASM host function imports, grouped by category below.
 The number is derived, not counted by hand -- see "Deriving the surface" at the end
 of this file, because it was 36 here for long enough to be copied into three more
 places.
@@ -81,7 +82,7 @@ places.
 - `current_run_id() -> str` -- the current run's unique ID
 
 ### Time & Random
-- `now() -> int` -- wall-clock time in ms since epoch
+- `now() -> int` -- wall-clock time in ms since epoch. **This is the replayable clock**: the same value on replay. Python's own monotonic clock is not (see below)
 - `random() -> int` -- deterministic random value (same on replay)
 - `version() -> int` -- workflow definition version
 - `min_version() -> int` -- minimum supported version
@@ -98,7 +99,7 @@ places.
 - `schedule_invoke(service, operation, request, delay_ms) -> None` -- delayed one-shot invocation
 
 ### Signals & Events
-- `await_signals(signal_names, timeout_seconds) -> SignalResult` -- wait for external signals; `0` waits indefinitely, and `await_signals_ms` is the milliseconds form
+- `await_signals(signal_names, timeout_seconds) -> SignalResult` -- wait for external signals; `0` or less does not wait (a signal already waiting is returned, otherwise `timed_out` at once), `None` waits without a limit, and `await_signals_ms` is the milliseconds form (`None` or `INFINITE_TIMEOUT_MS` for no limit)
 - `poll_signal(name) -> (payload, found)` -- non-blocking signal check
 - `poll_cancellation() -> (cancelled, reason)` -- check for cancellation
 
@@ -253,33 +254,63 @@ All Cleat workflows are synchronous. The host handles suspension and resumption 
 
 ## Python Standard Library Compatibility
 
-When compiled to WASM via `componentize-py`, **only a subset of the Python standard library is available**. The following tables document the compatibility status of commonly used modules.
+**The rule: import every standard-library module you use at the top level of the workflow module.**
 
-### Fully available
+What decides whether a standard-library module is there is not which module it is but **when it is first imported**. `componentize-py` keeps only the standard-library modules that were imported while your component was being built; a module first imported inside a function, at run time, is not in the component and raises `ModuleNotFoundError` **in production, not at build time**. This is a documented limit of componentize-py ("the application can only import dependencies during build time, which means any imports used at runtime must be resolved at the top level of the application module"), and Cleat's build adds no trimming of its own.
 
-These modules work without restrictions in WASM:
+```python
+# Fails when the workflow runs: ModuleNotFoundError: No module named 'csv'
+def my_workflow(h, request):
+    import csv
+    ...
 
-| Module | Notes |
-|--------|-------|
-| `json` | JSON encoding/decoding (heavily used by the SDK) |
-| `math` | Mathematical functions |
-| `datetime` | Date and time types (basic usage) |
-| `collections` / `collections.abc` | Container data types |
-| `typing` / `typing_extensions` | Type annotations |
-| `dataclasses` | Data class definitions (preferred for input/output types) |
-| `hashlib` | Cryptographic hash functions |
-| `functools` | Decorators and higher-order functions |
-| `itertools` | Iterator tools |
-| `enum` | Enumerations |
-| `decimal` | Decimal arithmetic |
-| `uuid` | UUID generation |
-| `copy` | Shallow/deep copy |
-| `heapq` | Heap queue algorithm |
-| `bisect` | Array bisection algorithm |
-| `base64` | Base64 encoding/decoding |
-| `struct` | Pack/unpack binary data (limited to basic types) |
-| `abc` | Abstract base classes |
-| `contextlib` | Context manager utilities |
+# Works: csv was imported when the component was built
+import csv
+
+def my_workflow(h, request):
+    ...
+```
+
+Measured 2026-11-22 (cleat#4266) with componentize-py 0.25.1, whose guest is CPython 3.14.0 for wasi, in a minimal workflow that imports only `json`, `dataclasses` and `cleat_sdk`. Of the 297 names in the guest's `sys.stdlib_module_names`, **130 import at run time without being imported first, 167 do not, 119 of those 167 work once imported at the top level, and 42 are not in the component at all.** (Six names were not tried at build time: `antigravity`, `idlelib`, `this`, `tkinter`, `turtle`, `turtledemo`.) Versions of componentize-py other than 0.25.1 were not measured.
+
+### Present without a top-level import
+
+**Since cleat#4266 the SDK preloads a few modules, so the counts above are one step out of date:** `heapq` and `_strptime` were in the "need a top-level import" group when this was measured and are now present in every component (and so are the five codec modules under `encodings`, see the call table below). The totals were **not re-measured** after that change; by arithmetic they would read 132 present, 165 not, 118 recoverable, 42 unavailable, which is a derivation and not a measurement.
+
+
+These import at run time even when your workflow never imported them: 130 names, of which the 72 public ones are below (the other 58 are underscore-prefixed implementation modules such as `_io` and `_collections`). A module can be here and still lazily import another module when you call it: see the call table below.
+
+`abc`, `annotationlib`, `array`, `ast`, `atexit`, `base64`, `binascii`, `bisect`, `builtins`, `cmath`, `codecs`, `collections`, `compression`, `contextlib`, `copy`, `copyreg`, `dataclasses`, `datetime`, `dis`, `email`, `encodings`, `enum`, `errno`, `faulthandler`, `fnmatch`, `functools`, `gc`, `genericpath`, `hashlib`, `http`, `importlib`, `inspect`, `io`, `ipaddress`, `itertools`, `json`, `keyword`, `linecache`, `marshal`, `math`, `ntpath`, `opcode`, `operator`, `os`, `posix`, `posixpath`, `pyexpat`, `quopri`, `random`, `re`, `reprlib`, `select`, `shutil`, `site`, `socket`, `stat`, `string`, `struct`, `sys`, `tempfile`, `time`, `token`, `tokenize`, `types`, `typing`, `unicodedata`, `urllib`, `uuid`, `warnings`, `weakref`, `zipimport`, `zlib`.
+
+This is whatever the SDK and the interpreter themselves import, so it can change between SDK versions: re-derive it (below), and import what you use at the top level whether or not it is listed.
+
+### Available once imported at the top level
+
+The other 119 standard-library modules: everything that is in neither the list above nor the "Not in the component at all" list below, leaving out the six names that were not tried (`antigravity`, `idlelib`, `this`, `tkinter`, `turtle`, `turtledemo`). Among the ones people reach for, **`decimal`, `fractions`, `statistics`, `csv`, `difflib`, `textwrap`, `pprint`, `argparse`, `pathlib`, `logging`, `traceback`, `queue`, `glob`, `secrets`, `hmac`, `shlex`, `html`, `calendar`, `tomllib`, `gzip`, `zipfile`, `numbers`, `pickle` and `sqlite3`** all fail with `ModuleNotFoundError` if first imported inside a function, and import if imported at the top level. For `decimal`, `fractions`, `statistics`, `csv`, `difflib`, `textwrap`, `pprint`, `logging`, `traceback`, `queue`, `calendar`, `shlex`, `html`, `secrets`, `tomllib`, `gzip` and `hmac`, a basic call was also run and worked. "Imports" is all that was measured for the rest.
+
+### A call that imports a helper the first time it runs
+
+Some calls import another module the first time they run. For these, **the SDK does it for you** (cleat#4266): `cleat_sdk` imports the modules below when it is imported, and every workflow imports it, so they are in every component and you need no import of your own.
+
+| call | the module the SDK carries |
+|---|---|
+| `datetime.strptime()`, `time.strptime()` | `_strptime` |
+| `Counter.most_common()` | `heapq` |
+| `.encode()` / `.decode()` with `"cp1252"` | `encodings.cp1252` |
+| `… "shift_jis"` | `encodings.shift_jis` |
+| `… "iso-8859-15"` | `encodings.iso8859_15` |
+| `… "utf-8-sig"` | `encodings.utf_8_sig` |
+| `… "idna"` | `encodings.idna` and `encodings.punycode` |
+
+This is a short list of calls that were measured to fail and to be fixed by exactly that import, not a preload of the standard library. It costs about **0.4 to 0.5 MiB** of component size (2.5 to 3 percent; measured, warm builds). `utf-8`, `ascii`, `latin-1`, `utf-16` and `utf-32` need nothing. **Other codecs and other calls that import a helper on first use were not measured and are probably the same:** for those, import the helper at the top level of your workflow module, which is the rule above. The source of the list is `cleat_sdk/_stdlib_preload.py`.
+
+### Not in the component at all
+
+These fail with `ModuleNotFoundError` even when imported at the top level (42 names; they are native or operating-system-only modules that the interpreter build does not contain):
+
+`_bz2`, `_ctypes`, `_curses`, `_curses_panel`, `_dbm`, `_gdbm`, `_hashlib`, `_interpchannels`, `_interpqueues`, `_interpreters`, `_lzma`, `_multiprocessing`, `_overlapped`, `_posixshmem`, `_posixsubprocess`, `_remote_debugging`, `_scproxy`, `_ssl`, `_tkinter`, `_uuid`, `_winapi`, `_wmi`, `_zstd`, `bz2`, `ctypes`, `curses`, `fcntl`, `grp`, `lzma`, `mmap`, `msvcrt`, `nt`, `pty`, `pwd`, `readline`, `resource`, `ssl`, `syslog`, `termios`, `tty`, `winreg`, `winsound`.
+
+Two more things are missing from modules that otherwise import: **`hashlib.pbkdf2_hmac` and `hashlib.scrypt`** do not exist (`_hashlib`, the OpenSSL binding, is in the list above; `md5`, `sha1`, `sha2`, `sha3` and `blake2` work), and **`zoneinfo` has no time-zone database**: with every standard-library module imported, `ZoneInfo("UTC")` and `ZoneInfo("Europe/Paris")` both raise `ZoneInfoNotFoundError`.
 
 ### Limited availability
 
@@ -290,33 +321,27 @@ These modules are partially available with documented restrictions:
 | `os` | ⚠️ Limited | `os.environ.get()`, `os.name` work. No file I/O (`os.open`, `os.listdir`), no `os.fork`, no `os.pipe` |
 | `sys` | ⚠️ Limited | `sys.version`, `sys.platform`, `sys.getsizeof()` work. No `sys.stdin`, `sys.stdout`, `sys.stderr` access |
 | `re` | ⚠️ Limited | Basic matching works. Backreferences and lookahead/lookbehind may fail in some builds |
-| `pathlib` | ⚠️ Limited | Path manipulation works. No real filesystem I/O (`read_text`, `write_text`, etc.) |
+| `pathlib` | ⚠️ Limited | Path manipulation works **once `pathlib` is imported at the top level** (it is not in the component otherwise, see the rule above). No real filesystem I/O (`read_text`, `write_text`, etc.) |
 | `random` | ⚠️ Limited | Basic PRNG works. Use `h.random()` for deterministic workflow randomness instead |
 | `json` | ✅ Fully available, see above | |
-| `time` | ⚠️ Limited | `time.time()` works. `time.sleep()` is not available (use `h.sleep()`) |
+| `time` | ⚠️ Limited | `time.time()` works. `time.sleep()` runs and really sleeps (measured: a 0.5 s sleep took 524 ms), blocks its execution for its whole duration and is **not interrupted by the instance timeout** (cleat#4403); `cleat vet` refuses it, use `h.sleep()`. **`time.monotonic()`, `monotonic_ns()`, `perf_counter()` and `perf_counter_ns()` read the host's real clock, which replay does not reproduce, and `time.process_time()` and `process_time_ns()` differ between runs too (measured: -2.0412 and -2.0397 s, negative on both)** (measured: two runs of one workflow id read 0.5029 and 0.5021 s for the same `time.sleep(0.5)`); `cleat vet` warns (PY016); use `h.now()` and subtract two readings |
 
-### Not available
+### Imports, but `cleat vet` refuses it in workflow code
 
-These modules will **fail at import time or runtime** in WASM:
+These **do import** (measured); it is `cleat vet` that rejects them, because they make a workflow non-deterministic or produce effects that cannot be replayed:
 
-| Module | Reason |
-|--------|--------|
-| `asyncio` | Async/await not supported in WASM CPython |
-| `threading` | No thread support in WASM |
-| `multiprocessing` | No process support |
-| `socket` | No raw socket access |
-| `subprocess` | No process spawning |
-| `signal` | No OS signal handling |
-| `select` / `selectors` | No I/O multiplexing |
-| `mmap` | No memory mapping |
-| `ctypes` / `cffi` | No native code interop |
-| `ssl` | No TLS/SSL (use host's `call` instead) |
-| `http.client` / `urllib` | No outbound HTTP (use host calls instead) |
-| `requests` | Third-party HTTP library (use `h.fetch()` instead) |
-| `xml` / `xmlrpc` | XML parsing may be unavailable; avoid |
-| `tkinter` | No GUI support in WASM |
-| `concurrent.futures` | Depends on threading |
-| `asyncio`-based libs | Any library depending on `asyncio` (e.g., `aiohttp`) |
+| Module | Refused as | Reason (from `cleat vet`) |
+|---|---|---|
+| `threading`, `asyncio`, `multiprocessing` | PY008 | Cleat workflows are single-threaded; use child workflows for parallelism |
+| `socket` | PY009 | raw sockets produce non-replayable network side effects |
+| `urllib`, `http.client`, `requests` | PY003 | direct HTTP calls produce non-replayable network effects; use host calls (below) |
+| `subprocess`, most of `os` | PY007 | subprocesses and OS operations cannot be replayed |
+
+`select`, `selectors`, `signal`, `xml`, `xmlrpc` and `concurrent.futures` also **import** (at the top level) and `cleat vet` does not refuse them; whether they do anything useful inside a component was not tested. This section used to say they "fail at import time". A submodule needs its own top-level import: with only `import xml` present, `xml.etree.ElementTree` raised `ModuleNotFoundError`, and `import xml.etree.ElementTree` fixed it.
+
+### Re-deriving all of this
+
+The numbers above are one build's. To re-measure, build a workflow that imports each name in `sys.stdlib_module_names` inside its entry function, record the exception for each, then build it again with the same imports at module level (`importlib.import_module` over the list is enough) and compare. The probe used for the figures here is on cleat#4266.
 
 ### Making HTTP requests
 
@@ -416,7 +441,7 @@ def counter_entity(h: HostCalls, instance_key: str) -> str:
     # Process signals in a loop (long-lived entity)
     while True:
         # Wait for the next signal
-        result = h.await_signals(["increment", "reset", "get", "stop"], 0)
+        result = h.await_signals(["increment", "reset", "get", "stop"], None)  # None: wait without a limit
 
         if result.timed_out:
             continue
@@ -473,7 +498,7 @@ h.signal_workflow(target_run_id, "approve_request",
 reply = h.await_signals(["approve_reply"], 30)   # seconds; reply.timed_out if none came
 
 # Receiver workflow:
-request = h.await_signals(["approve_request"], 0)  # 0 waits indefinitely
+request = h.await_signals(["approve_request"], None)  # None waits without a limit; 0 would time out at once
 # ... decode request.payload, read its "reply_to" run id, decide ...
 h.signal_workflow(reply_to_run_id, "approve_reply", '{"approved": true}')
 ```
@@ -629,8 +654,8 @@ Python 3.10 or newer, in a virtual environment, with both packages installed
 ([Installation](#installation)):
 
 ```bash
-pip install cleat-sdk 'componentize-py>=0.12.0'
-componentize-py --version
+pip install cleat-sdk componentize-py==0.25.1
+componentize-py --version   # componentize-py 0.25.1
 ```
 
 If `componentize-py` is `command not found`, the environment is not active, or
@@ -673,7 +698,7 @@ When your workflow is compiled to WASM, `componentize-py` bundles a minimal CPyt
 
 - **Pure-Python imports** -- Pure Python modules on the Python path work normally
 - **C extension modules** -- Native code (`.so`/`.pyd`) does **not** work in WASM
-- **stdlib modules** -- Only pure-Python stdlib modules are available (see [compatibility section](#python-standard-library-compatibility))
+- **stdlib modules** -- Only the standard-library modules imported at the top level of your workflow module (or already present in every component, including the few the SDK preloads) are there at run time: import what you use at the top level (see [compatibility section](#python-standard-library-compatibility))
 - **Third-party packages** -- Pure-Python packages (e.g., `langchain-core`) can work if they are on the Python path and do not depend on C extensions
 - **Relative imports** -- Use absolute imports within your workflow file; relative imports may not resolve correctly in the WASM context
 
@@ -702,7 +727,8 @@ See the [Makefile](./Makefile) for details.
 
 | Error | Likely Cause | Solution |
 |-------|-------------|----------|
-| `componentize-py: command not found` | Not installed in the active environment | `pip install 'componentize-py>=0.12.0'` in the environment you build from |
+| `componentize-py: command not found` | Not installed in the active environment | `pip install componentize-py==0.25.1` in the environment you build from |
+| `componentize-py 0.x.y is installed, but this SDK was tested and measured with componentize-py 0.25.1` / `Refusing to build` | The installed `componentize-py` is not the measured version, and `cleat build` stops before it compiles anything | `pip install componentize-py==0.25.1` in the environment you build from; to build with the version you have anyway, see below |
 | `finding repo root: go.mod not found` | `cleat-sdk` 0.5.0, which ships no build script | Upgrade `cleat-sdk`, or build from a checkout |
 | `has no build script` | An older `cleat-sdk` is active | `pip install --upgrade cleat-sdk` |
 | `Error: unexpected argument '--wit-path' found` | A hand-written `componentize-py` command in the pre-0.13 form | Use `cleat build`, or the `-d … -w … componentize <module>` form above |
@@ -714,10 +740,16 @@ See the [Makefile](./Makefile) for details.
 | WASM binary > 50 MB | Large or unnecessary imports | Check that imported modules are genuinely needed at runtime |
 | `ImportError: ...` at WASM runtime | Module not bundled | Only pure-Python modules are available; C extensions will not work |
 
+To build with a `componentize-py` that is not the measured version anyway, say so explicitly. A standard-library module that is missing from such a build raises `ModuleNotFoundError` only when the workflow runs, so test it:
+
+```bash
+cleat build --target python --allow-unmeasured-componentize-py --entry my_workflow.py:my_entry
+```
+
 ## Requirements
 
 - **Python 3.10+** -- the SDK uses `typing.get_type_hints` and `inspect.signature` for parameter introspection
-- **componentize-py >= 0.12.0** -- required for WASM compilation (installed via `pip install componentize-py`)
+- **componentize-py ==0.25.1** -- required for WASM compilation, pinned to the version CI tests and the standard-library tables were measured on (`pip install componentize-py==0.25.1`); other versions are not measured, and may contain different standard-library modules. `cleat build --target python` therefore **refuses** to build when the installed one differs (or its version cannot be read), naming both versions and the `pip install` that fixes it; `--allow-unmeasured-componentize-py` (or `CLEAT_ALLOW_UNMEASURED_COMPONENTIZE_PY=1`) builds anyway, with a warning
 - **Cleat CLI** (`cleat build`) -- the supported way to build a workflow
 - **WIT files** -- shipped inside the package (`cleat_sdk/wit/`); nothing to copy
 
@@ -751,7 +783,7 @@ Decorator similar to `@cleat_entry` but for entity workflows (virtual objects). 
 
 ### `HostCalls`
 
-Core class binding the 48 WASM host function imports (derived -- see "Deriving the
+Core class binding the 49 WASM host function imports (derived -- see "Deriving the
 surface"). Each method handles the pointer+length string protocol and bit-packed `i64` result decoding per the Cleat ABI. The host runtime guarantees deterministic replay — all side effects are recorded in the event history.
 
 ### Result types
@@ -872,6 +904,6 @@ names inside comments stating the import does **not** exist:
 
 A text search cannot tell a binding from a sentence denying one.
 
-The WIT world in `wit/cleat.wit` declares **49** functions across 17 imported
-interfaces. The SDK binds 48 of them; the unbound one is
+The WIT world in `wit/cleat.wit` declares **50** functions across 17 imported
+interfaces. The SDK binds 49 of them; the unbound one is
 `durable-register-query-handler`, matching the removal note above.

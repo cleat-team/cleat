@@ -168,23 +168,45 @@ func TestAStreamFailureRecordedBeforeThisChangeStillReplaysAsUnknown(t *testing.
 	}
 }
 
-// The failure the one-function-for-both design exists to prevent: a site that
-// records one code and returns another. Asserted on what streamFailure
-// actually did, rather than on the shape of the code.
+// The failure the one-function-for-both design exists to prevent: a site that records one code and returns another. Asserted on what the call actually did, through
+// PluginCallStreaming, for each way it can fail that has a different code: no registry (callErrorUnknown) and an unregistered function, a function that fails to
+// start and a rejected caller (callFailureCode). (This used to call a streamFailure method directly with each of three codes; the failure helper is a closure inside the
+// call's Fresh now, so that every record it writes goes through the dispatcher's handle, and the code is read where a guest reads it.)
 func TestStreamFailureRecordsTheCodeItReturns(t *testing.T) {
-	for _, code := range []byte{callErrorUnknown, callFailureCode, callErrorInvalidRequest} {
+	start := func(ctx context.Context, in string) (<-chan plugin.StreamEvent, error) {
+		return nil, fmt.Errorf("cannot start")
+	}
+	for _, tc := range []struct {
+		name  string
+		setUp func(s *execSession)
+		want  byte
+	}{
+		{"no registry", func(s *execSession) { s.engine.pluginStreamRegistry = nil }, callErrorUnknown},
+		{"unregistered", func(s *execSession) { s.engine.pluginStreamRegistry = NewPluginStreamRegistry() }, callFailureCode},
+		{"fails to start", func(s *execSession) {
+			s.engine.pluginStreamRegistry = NewPluginStreamRegistry()
+			_ = s.engine.pluginStreamRegistry.Register("test-plugin", "Echo", start)
+		}, callFailureCode},
+		{"caller rejected", func(s *execSession) {
+			s.engine.pluginStreamRegistry = NewPluginStreamRegistry()
+			_ = s.engine.pluginStreamRegistry.Register("test-plugin", "Echo", start)
+			s.callerPluginName = "caller-plugin"
+			guard := NewPluginCallGuard()
+			guard.Allow("caller-plugin", nil)
+			s.engine.pluginCallGuard = guard
+		}, callFailureCode},
+	} {
 		s := newTestExecSession()
-		returned := callCodeOf(t, s.streamFailure(context.Background(), nil,
-			"test-plugin", "Echo", `{}`, "boom", code, 0, 0))
+		tc.setUp(s)
+		returned := callCodeOf(t, s.PluginCallStreaming(context.Background(), nil, "test-plugin", "Echo", `{}`, 0, 0))
 		if len(s.history) != 1 {
-			t.Fatalf("code %d: recorded %d events, want 1", code, len(s.history))
+			t.Fatalf("%s: recorded %d events, want 1", tc.name, len(s.history))
 		}
-		if recorded := byte(s.history[0].StreamErrCode); recorded != code {
-			t.Errorf("code %d: recorded %d but returned %d; a fresh run and the replay of it "+
-				"would classify the same step differently", code, recorded, returned)
+		if recorded := byte(s.history[0].StreamErrCode); recorded != tc.want {
+			t.Errorf("%s: recorded %d but want %d (returned %d); a fresh run and the replay of it would classify the same step differently", tc.name, recorded, tc.want, returned)
 		}
-		if returned != uint32(code) {
-			t.Errorf("code %d: returned %d", code, returned)
+		if returned != uint32(tc.want) {
+			t.Errorf("%s: returned %d, want %d", tc.name, returned, tc.want)
 		}
 	}
 }

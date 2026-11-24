@@ -30,6 +30,15 @@ coverage.*
 *.coverprofile
 profile.cov
 
+# Binaries `go build ./cmd/cleat-ts-*` writes into the REPO ROOT when run without -o. Anchored with a leading slash:
+# an unanchored `cleat-ts-run` would also match nothing else here today, but `coverage.*` -- unanchored, three lines up --
+# is what silently untracked `.github/workflows/coverage.yml`, so the anchor is the point rather than decoration.
+# Checked with `git check-ignore -v cleat-ts-run` (matches this line) and against `cmd/cleat-ts-run/main.go` (must not
+# match).
+/cleat-ts-run
+/cleat-ts-check
+/cleat-ts-meta
+
 # Build output directories
 /tmp/out/
 /out/
@@ -80,28 +89,11 @@ packages/*/node_modules/
 ports-round2/*/package-lock.json
 ports-round2/*/dist/
 
-# Build output in examples. `npm run build` regenerates all of dist/, so
-# tracking any of it makes the tree dirty after a build -- and the AS end-to-end
-# test in engine/as_workflow_e2e_test.go RUNS that build, so `go test ./engine/`
-# was enough to do it.
-#
-# This rule used to be `examples/*/dist/*.wasm`, which covered the artifact the
-# READMEs actually name (`cleat deploy as-workflow dist/workflow.stamped.wasm`)
-# and left AssemblyScript's generated glue tracked. Four files, workflow.js and
-# workflow.d.ts in two examples, none of them read by anything:
-#
-#   grep -rn "as-workflow/dist" --include="*.go" --include="*.md" .   # no hits
-#
-# They were also STALE -- the committed workflow.js disagreed with what the
-# pinned toolchain produces, and the build is deterministic (two runs
-# byte-identical), so the difference was age, not nondeterminism. A committed
-# artifact that nothing reads and that does not match its own lockfile's output
-# is worse than an absent one: a reader takes it for the real thing.
-#
-# The same lesson is recorded 100 lines below for the asworkflow test fixture,
-# where only dist/workflow.wasm is a fixture and the stamped copy is ignored
-# "because left untracked it makes the tree dirty after any asworkflow build".
-# This is that case again, one directory over.
+# Build output in examples. A build regenerates all of dist/, so tracking any
+# of it makes the tree dirty after a build. (This rule used to be
+# `examples/*/dist/*.wasm`, which left AssemblyScript's generated glue tracked;
+# that SDK and its examples were removed in cleat#4023, and the rule stays as
+# it was because the next example with a dist/ would otherwise repeat it.)
 examples/*/dist/
 
 # Cloned source repos (not our work product)
@@ -164,6 +156,9 @@ testdata/agentclientjava/build/
 # root by the workflow steps that check skip budgets.
 *-report.json
 tier-gate.log
+# The go test -json report scripts/tier-gate.sh writes by default (cleat#3949), for the
+# same reason: every shard would otherwise leave it untracked at the repo root.
+tier-gate.json
 
 # scripts/tier2-gate.sh output
 tier2-gate.log
@@ -230,40 +225,6 @@ cmd/cleat-worker/cleat-worker
 /ast_transform_demo.go
 /ast_transform_demo_v2.go
 
-# The whole of the AS test fixture's dist/ is build output now, and none of it
-# is tracked. This rule used to name only dist/workflow.stamped.wasm, on the
-# reasoning that "only dist/workflow.wasm is a fixture" -- true about which file
-# has readers, wrong about which files the build writes. `cleat build --target
-# assemblyscript` regenerates dist/workflow.wasm itself, so
-# TestPluginCalls_Wasm_AS rewrote the tracked fixture on every run and left the
-# tree dirty. Measured 2026-09-04: 13369 bytes committed, 13672 after one run,
-# and byte-identical across two runs -- so the difference was age, not
-# nondeterminism, the same distinction drawn 100 lines above for examples/.
-#
-# The fixture the two tests read now lives in ../prebuilt/, out of the build's
-# reach, exactly as javaworkflow/prebuilt/ already did for the same reason.
-# workflow.js and workflow.d.ts are AssemblyScript's generated glue with no
-# reader (`grep -rn 'dist/workflow\.\(js\|d\.ts\)' --include='*.go'
-# --include='*.md' --exclude-dir=node_modules .` finds none) and are untracked
-# rather than moved.
-tests/plugin-harness/testdata/asworkflow/dist/
-
-# hostcallsas/dist/ for the same reason, and one more that is stronger: the
-# required step "Tests did not rewrite their own fixtures" git-diffs THIS tree,
-# so committing the bytes a build wrote here would defeat the very check that
-# exists to notice a fixture being rewritten. Note that `cleat build --target
-# assemblyscript` writes into the fixture's own dist/ regardless of -o, so this
-# directory is produced by ordinary local work rather than only by an explicit
-# build step. Added 2026-10-04, after exactly that: four files from a local
-# `asc` run landed in a commit and review caught them.
-tests/plugin-harness/testdata/hostcallsas/dist/
-
-# Same for cleat#2978's AssemblyScript agent client: `cleat build --target
-# assemblyscript` writes into the fixture's own dist/ regardless of -o, and
-# TestCrashMidAgentLoopInATierTwoLanguageResumesWithoutReaskingTheModel/assemblyscript rebuilds
-# it on every run.
-testdata/agentclientas/dist/
-
 # goreleaser output. Produced by `goreleaser build --snapshot`, which the
 # Release Dry Run CI job runs and which is the documented way to reproduce a
 # release build locally (docs/project/release-process.md).
@@ -284,8 +245,7 @@ testdata/agentclientas/dist/
 # Anchoring is the repair, not deleting the rule: goreleaser writes to the repo
 # root, which is the only path this is for. cmd/cleat-worker/web/dist/ is
 # covered by nothing else and must stay committable; the sibling rules above
-# (`tests/plugin-harness/testdata/asworkflow/dist/`, and the `examples/*/dist/`
-# one further up) each still match their own trees. Verified: anchoring changes
+# (the `examples/*/dist/` one further up) still matches its own tree. Verified: anchoring changes
 # the ignored set on nothing else.
 #
 # TestNoEmbeddedFileIsHiddenFromGit fails if any path the compiler embeds is
@@ -299,3 +259,11 @@ testdata/agentclientas/dist/
 # directly. cleat#1996.
 /states/
 specs/states/
+
+# The TypeScript guest's build chain (cleat#3825). Its two crates are BINARIES built with `cargo build --locked`, so
+# their lockfiles are the pin and must be tracked; **/Cargo.lock above ignores every other crate's. What bootstrap.sh
+# downloads and build.sh writes is not source.
+!crates/cleat-js-plugin/Cargo.lock
+!crates/cleat-js-link/Cargo.lock
+packages/cleat-ts/.tools/
+packages/cleat-ts/.work/

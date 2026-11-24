@@ -62,7 +62,9 @@ def signal_echo(h: HostCalls, signal_name: str) -> str:
     finalize the run (``unsupported Unicode escape sequence (22P05)``), so the run FAILED instead of finishing with
     a wrong answer; both outcomes are the same bug.
     """
-    got = h.await_signals_ms([signal_name], 0)
+    got = h.await_signals_ms(
+        [signal_name], None
+    )  # None: wait without a limit (a 0 would time out at once)
     return json.dumps({"name": got.name, "payload": got.payload, "timed_out": got.timed_out})
 
 
@@ -73,4 +75,4 @@ def signal_payload_result(h: HostCalls, signal_name: str) -> str:
     Before the fix the result was a run of NUL bytes, which PostgreSQL refuses to store; this entry exists so that case
     is measured through a worker rather than inferred from the byte test.
     """
-    return h.await_signals_ms([signal_name], 0).payload
+    return h.await_signals_ms([signal_name], None).payload

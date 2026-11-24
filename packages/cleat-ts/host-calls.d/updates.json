@@ -1,0 +1,11 @@
+{
+  "doc": [
+    "The 'updates' group of host calls (cleat#3827). Each call is listed here as unbound ('pending: ...') until its binding lands; the PR that binds a call moves its entry from 'unbound' to 'bound' in THIS file and touches no other inventory file. See packages/cleat-ts/groups/README.md."
+  ],
+  "bound": {
+    "__cleat_register_update_handler": "cleat_register_update_handler",
+    "__cleat_poll_update": "cleat_poll_update",
+    "__cleat_complete_update": "cleat_complete_update"
+  },
+  "unbound": {}
+}

@@ -220,7 +220,7 @@ every check had settled:
 | #500 | docs + `engine/` | 46 |
 | #503 | `engine/` + `cmd/` | **50** |
 
-The four `{AssemblyScript,Java,Python,Rust} SDK Integration` jobs are the whole of the gap; they
+The four `{AssemblyScript,Java,Python,Rust} SDK Integration` jobs (three once AssemblyScript is removed, cleat#4023) are the whole of the gap; they
 trigger only on some paths. `Benchmarks` and `Coverage` report `skipping` on a normal PR, so a
 green run shows two fewer passing than the total. Re-derive with
 `gh pr checks <pr> | grep -c .`, and diff two PRs with `comm -23` over the sorted name column to
@@ -539,7 +539,7 @@ finding — which is why it was not questioned."
 
 **The fifth instance is the sharpest, and it is one line of source.** A scan for binding names
 scored the AssemblyScript SDK as *having* `cleat_register_query_handler` — by matching this, at
-`packages/cleat-as/assembly/host-calls.ts:391`:
+`packages/cleat-as/assembly/host-calls.ts:391` (deleted with the AssemblyScript SDK, cleat#4023):
 
     // There is no import_cleat_register_query_handler here (removed 2026-08-09).
 
@@ -549,7 +549,7 @@ survives a rename. The two agreeing would have proved nothing; their *disagreein
 reason anybody looked, and it is why #757 publishes no binding counts until they reconcile. This
 is the "grep a retraction satisfies" trap under *Build*, one level up, and worse: that line is the
 **only** occurrence of `register_query_handler` in the file
-(`grep -c register_query_handler packages/cleat-as/assembly/host-calls.ts` → 1). The sole evidence
+(`grep -c register_query_handler packages/cleat-as/assembly/host-calls.ts` → 1; that path was deleted with the AssemblyScript SDK, cleat#4023, so it can no longer be re-run, and read 1 when this was written). The sole evidence
 the scan had was a sentence denying the thing it recorded.
 
 So when a check and the thing it checks agree, ask what a differently-wrong reading would say
@@ -970,13 +970,30 @@ cancelled** —
 
     gh run list --branch <branch> --json databaseId,createdAt,status,conclusion,name
 
-What survives is **cost, not breakage**: a body edit still starts a full run of every required
-context, because skipping them would need each one to keep reporting while skipped, and cleat's
-contexts have no aggregating gate in front of them to do that (`ci.yml`'s own comment, "WHY THE
-JOBS STILL RUN"). That residual cost is cleat#2767's subject, not a cancellation. The **practical
-rule below is now cheap, not necessary** — timing an edit around checks no longer prevents a
-destroyed run, because there is no longer a run it would destroy; it only avoids one extra no-op
-run appearing alongside the real ones in a `gh pr checks` watcher.
+What survived was **cost, not breakage**: a body edit still started a full run of every required
+context, because skipping them was thought to need each one to keep reporting while skipped, and
+cleat's contexts have no aggregating gate in front of them to do that (`ci.yml`'s own comment,
+"WHY THE JOBS STILL RUN"). That residual cost was cleat#2767's subject, not a cancellation. The
+**practical rule below is now cheap, not necessary** — timing an edit around checks no longer
+prevents a destroyed run, because there is no longer a run it would destroy; it only avoided one
+extra no-op run appearing alongside the real ones in a `gh pr checks` watcher.
+
+**SUPERSEDED 2026-11-16 (cleat#3958): a body edit no longer re-runs the heavy work at all.** The
+six workflows that carry it grew an `edit-gate` job that runs only for an `edited` whose base did
+not change, and answers one question of the head's own run history: has every job's latest
+non-skipped conclusion been `success`? Only then does the run collapse — and what collapses depends
+on one property, whether the job's name is a required context. The non-required jobs skip at job
+level. The required ones still run, with every step guarded, and report `success`. That is not the
+"aggregating gate" the paragraph above imagined — it is the other half of the same fact, that a
+skipped job reports as **Success**, which is exactly why an unconditional skip would let a body edit
+launder a red head into a green one: a required context may report `success` on a body edit, but it
+may not report `skipped`, because a skipped twin beside its success leaves the PR un-mergeable.
+Measured on `d1eec185`, an edited run registered **20 of 35** required contexts as `skipped` and
+`mergeStateStatus` went `CLEAN` → `BLOCKED` while the rollup still read SUCCESS. Measured at
+6,973 runner-minutes a day over 154 runs (18.2% of the pool) in the census on that issue. After it,
+a body edit on an already-green head costs about **8.5 runner-minutes across 41 runner assignments**
+with **0 of 35** required contexts reading `skipped`, and the practical rule below is about the
+watcher, not the wall.
 
 The measurement below is kept, dated, as the reason the fix exists — not as current behavior.
 
@@ -1721,6 +1738,15 @@ Only the reflog is unforgeable by typing; only the trailer names a person. See `
 **One PR, one thing.** Every PR that bundled a second concern was harder to review than the two
 would have been apart.
 
+**A change that ships adds a `changelog.d/<issue>-<slug>.md` fragment and does not edit
+`CHANGELOG.md`.** Two PRs editing one file conflicted three times in one day (2026-11-19).
+`changelog.d/README.md` is the format; `scripts/check-changelog-fragments.py` (Lint) refuses a
+direct edit and shipped code with no fragment. A change with nothing to tell users puts
+`no-changelog: <reason>` on a line of its own in the PR body; correcting an existing entry puts
+`changelog-edit: <reason>` there. `scripts/fold-changelog.py` folds fragments into `CHANGELOG.md`
+at release prep. Only that PR, a `release/*` or `hotfix/*` branch, or a `changelog-edit:` correction
+edits `CHANGELOG.md` directly.
+
 **Never merge on red, and never re-run a failing job hoping it passes.** Read the log. If it is
 genuinely infrastructure, say so out loud and re-run *that*.
 
@@ -1755,7 +1781,7 @@ faster than reading the remaining sites.
 - `web/` — Svelte 5 admin dashboard
 - `crates/` — Rust SDK + Java SDK
 - `python-sdk/` — Python SDK
-- `packages/` — AssemblyScript SDK
+- `packages/` — TypeScript SDK (`cleat-ts`)
 - `examples/` — Example workflows
 - `tests/` — Integration test suites (cluster, cross-language, integrity, plugin-harness,
   scale, soak, upgrade)

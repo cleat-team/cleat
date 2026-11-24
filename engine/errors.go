@@ -5,6 +5,12 @@ import (
 	"fmt"
 )
 
+// ErrWorkflowDefNotFound is returned by the stores' workflow-definition reads (LoadDAGSpec, the history-limit
+// lookup) when no definition exists for the name and version in the caller's tenant. Its text is unchanged:
+// "workflow def not found: <name> v<version>" still reads the same, and is now matchable with errors.Is, so
+// an HTTP handler can answer 404 for it instead of a 500 carrying the sentence (cleat#3883).
+var ErrWorkflowDefNotFound = errors.New("workflow def not found")
+
 // ErrFenceLost is returned by the generation-fenced workflow lifecycle
 // methods (CompleteWorkflow, FailWorkflow, MoveToDeadLetterQueue,
 // ContinueAsNew, FinalizeWorkflowSegment) when the fencing UPDATE affected
@@ -17,6 +23,11 @@ import (
 // should treat it as "someone else now owns this workflow" and return
 // cleanly rather than retrying or surfacing it as a failure.
 var ErrFenceLost = errors.New("fence lost: workflow reassigned to another worker (generation mismatch)")
+
+// ErrEventQuotaExceeded is what a write of a recorded event returns when the run's stored event count has reached
+// --max-quota-events. It is a refusal every later attempt would repeat, so it is not retried (errFlushRetryPointless), and the
+// session answers it with the event cap's continue-as-new rather than a suspend that would be refused again (cleat#4160).
+var ErrEventQuotaExceeded = errors.New("event quota exceeded")
 
 // ErrSearchUnavailableUnderEncryption is returned by ListWorkflows when a
 // caller asks for InputContains or ErrorContains while

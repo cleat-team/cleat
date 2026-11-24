@@ -116,8 +116,22 @@ func TestEveryHostCallIsExercisedByTheCompileFixture(t *testing.T) {
 	}
 	text := string(src)
 
+	// A field no workflow names, because the SDK method that needs it calls it on the workflow's behalf: the fixture exercises it by
+	// calling that method, AND the usage scan of the fixture must have wired its import. Naming the method alone would pass a fixture
+	// whose scan no longer reaches the field, which is the failure the compositeRequires table exists to prevent.
+	viaMethod := map[string]struct{ method, importName string }{
+		"SideEffectRecorded": {"SideEffect", "cleat_side_effect_recorded"}, // cleat#4113
+	}
+	_, _, _, _, fixtureUsage, _ := analyze(filepath.Join(testdataDir(t), "allhostcalls"))
+
 	missing := []string{}
 	for _, name := range wasm.AdapterFieldNames() {
+		if via, ok := viaMethod[name]; ok {
+			if !strings.Contains(text, "h."+via.method+"(") || fixtureUsage == nil || !fixtureUsage.Used[via.importName] {
+				missing = append(missing, name+" (reached through h."+via.method+", import "+via.importName+")")
+			}
+			continue
+		}
 		if !strings.Contains(text, "h."+name+"(") {
 			missing = append(missing, name)
 		}

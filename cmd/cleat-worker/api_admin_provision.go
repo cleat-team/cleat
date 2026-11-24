@@ -172,7 +172,7 @@ func (s *apiServer) handleProvisionTenant(w http.ResponseWriter, r *http.Request
 	if s.tenantCreationGuard != nil {
 		refusal, err := s.tenantCreationGuard(r.Context())
 		if err != nil {
-			s.writeError(w, http.StatusInternalServerError, "could not check whether this connection is subject to row-level security: "+err.Error())
+			s.writeStoreErrorDuring(w, r, "checking whether this connection is subject to row-level security", err)
 			return
 		}
 		if refusal != nil {

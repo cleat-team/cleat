@@ -191,6 +191,8 @@ The stream carries **every** answer the run produces, and stays open until the r
 terminal status. A client segments the transcript itself: `stream_start` opens an answer,
 `finish` closes it.
 
+A streaming call whose stream produces **no chunk** opens no answer here: the engine records a marker row for it in `event_history` (so a replay can tell the call from one that is not there), and the stream endpoint does not serve that row. A client that reads `event_history` or the events API directly sees it: a `plugin_call_stream_chunk` with an empty `output`, `stream_data` true and a non-zero `stream_err_code`.
+
 There is no per-answer filter, and that is a measurement rather than an omission. A step
 identifies one **chunk** — `recordEvent` increments the step counter for every event — so a filter
 on it would select a single token, not a call. What separates answers is the index restarting,

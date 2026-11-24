@@ -1,0 +1,36 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- The example the C# quick start (docs/tutorials/csharp-quick-start.md) walks through. CI builds it and runs it on the engine
+       (tests/csharp, TestCSharpQuickStartExample*), so the page cannot drift from a workflow that works. The properties follow the conformance
+       project, which the C# build of `cleat build` is proven against. The SDK is imported from this checkout by path: it is a SOURCE package and
+       not a NuGet package (see packages/cleat-csharp/README.md). -->
+  <PropertyGroup>
+    <OutputType>Library</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <AssemblyName>orders</AssemblyName>
+    <RootNamespace>Cleat.Example</RootNamespace>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <RuntimeIdentifier>wasi-wasm</RuntimeIdentifier>
+    <UseAppHost>false</UseAppHost>
+    <PublishTrimmed>true</PublishTrimmed>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <SelfContained>true</SelfContained>
+    <DebugType>none</DebugType>
+    <!-- Deliberately NOT UseSystemResourceKeys: under it an exception's Message is a resource key, and Message is what
+         run-outcome::failed carries (cleat#4077). -->
+  </PropertyGroup>
+
+  <Import Project="../../packages/cleat-csharp/build/Cleat.Sdk.props" />
+
+  <ItemGroup>
+    <PackageReference Include="BytecodeAlliance.Componentize.DotNet.Wasm.SDK" Version="0.8.0-preview00011" />
+    <!-- The host pack follows the build platform (linux-x64 or linux-arm64 in the container), not a hard-coded one. -->
+    <PackageReference Include="runtime.$(NETCoreSdkPortableRuntimeIdentifier).microsoft.dotnet.ilcompiler.llvm" Version="10.0.0-rc.1.26306.1" />
+    <ProjectReference Include="../../packages/cleat-csharp/generator/Cleat.Generator.csproj" OutputItemType="Analyzer" ReferenceOutputAssembly="false" />
+  </ItemGroup>
+
+  <Import Project="../../packages/cleat-csharp/build/Cleat.Sdk.targets" />
+
+</Project>

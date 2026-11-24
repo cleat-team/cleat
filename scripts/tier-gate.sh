@@ -119,7 +119,12 @@ fi
 # duplicate name, not a partition bug; dedupe once here rather than at every
 # caller.
 engine_all_tests() {
-  (cd "$REPO_ROOT" && go test ./engine/... -list '.*' 2>/dev/null) | grep -E '^Test' | LC_ALL=C sort -u
+  # `^(Test|Fuzz)`, not `^Test`: FuzzCompactionEquivalence is a fuzz target that
+  # runs its seed corpus as an ordinary test and costs 0.55s, and Test MySQL was
+  # the only per-PR job running it (cleat#3940 review). With that job sharded the
+  # listing has to carry it here too, or the engine shards would be the place it
+  # disappears to.
+  (cd "$REPO_ROOT" && go test ./engine/... -list '.*' 2>/dev/null) | grep -E '^(Test|Fuzz)' | LC_ALL=C sort -u
 }
 
 # REST_PACKAGES (cleat#3301): tiers.yaml's tier1.packages minus ./engine/..., today.
@@ -153,6 +158,468 @@ REST_PACKAGES=(
 # same bucket regardless (same reasoning as engine_all_tests' own sort -u).
 rest_all_tests() {
   (cd "$REPO_ROOT" && go test "${REST_PACKAGES[@]}" -list '.*' 2>/dev/null) | grep -E '^Test' | LC_ALL=C sort -u
+}
+
+# --- rest shard pins (cleat#3940) ----------------------------------------------
+#
+# The two rest shards were split by `sha1(test name) % 2`. That is uniform by
+# NAME, and the rest pool is not uniform in TIME: measured on develop 3466755e's
+# own tier-gate-log-rest-{3,4} artifacts, the two shards came out 1674.6s and
+# 1238.8s. The test that carries the most of that has the same chance of landing
+# in bucket 0 as a 0.00s one.
+#
+# A FULL static list -- the technique #3934 used for tests/crash -- does not
+# scale here: the pool is ~3,760 top-level tests, and a table listing every one
+# would fail Tier 1 on any PR that adds a test until the table is regenerated.
+# That is a worse developer experience than the imbalance.
+#
+# So the rule is: pin every test that takes at least half a second, by name, and
+# let the sha1 split place the rest. That is the 334 names below, carrying
+# 2,820.2s of the 2,913.4s total. Measured with them pinned, the split moves from
+# 1674.6/1238.8 to 1469.7/1443.7 -- 26s apart, against an ideal half of 1456.7s.
+# The tail that remains hashed is 2,718 tests carrying 93.1s between them (most
+# are 0.00s), so its residual imbalance is bounded by tens of seconds rather
+# than hundreds.
+#
+# WHY NOT A TABLE OF ALL 3,052 NAMES, which partitions exactly (1456.7/1456.7)?
+# 13 more seconds for a three-thousand-line table in a shell script, and any PR
+# that adds a test would either have to regenerate it or carry an entry naming
+# nothing. Half a second is where the curve flattens: below it a test is noise
+# against the run-to-run variance of the ones above it -- the SAME two shards
+# measured 1795/1004 on one run and 1676/1241 on another, a larger swing than
+# everything the tail can contribute.
+#
+# STILL NOT A BOUND. A new heavy test hashes in wherever it lands, and a pinned
+# test can get slower on one side. If the imbalance returns, re-derive the pair
+# from a run's artifacts rather than re-tuning a constant:
+#
+#   gh run download <run> -p 'tier-gate-log-rest-*'
+#   # per top-level test: '^--- PASS: (Test\w+) \(([0-9.]+)s\)' summed over both logs
+#   # then assign the heaviest, one at a time, to the currently lighter bucket
+#
+# Every pinned name must exist in rest_all_tests; rest_pins_present checks that
+# on every real run and in --verify-shard-coverage, so a renamed or deleted test
+# fails loudly instead of silently unbalancing the split.
+REST_PIN_0=(
+  TestChecksumChainSurvivesAwaitChild
+  TestFullstackTemplateRunStartsAWorkflow
+  TestCrashWithIdempotencyKeysDoesNotDuplicate
+  TestMainRefusesToStartWithoutAKeyOnceEncryptionHasEverBeenEnabled
+  TestEnablingEncryptionMidRunDoesNotStrandTheRun
+  TestCrashMidDurableCallReplaysOnlyTheUnrecordedStep
+  TestCrashWithWriteAheadIntentDoesNotRepeatTheCall
+  TestSIGTERM_b_ReleasesARunThatOutlastsTheGraceInsteadOfFailingIt
+  TestSIGTERM_g_ARunWithADeferDoesNotRunItsCleanupOnTheWorkerThatIsLeaving
+  TestWorkerRefusesToBootWithAnUndeclaredAmbiguityLookupOp
+  TestAShardedWorkerBootsWithAPerShardHeartbeatPool
+  TestAPythonSignalReachesTheGuestThroughTheWorker
+  TestReaperRecoveryGateHoldsAcrossTheParameterSpace
+  TestReaperRecoveryGateHoldsAcrossTheParameterSpaceMultiAttempt
+  TestREADMEQuickStartReachesADoneWorkflow
+  TestACompactedRunFinishesWithTheRightResultOnARealWorker
+  TestJavaBuildRefusesNondeterminism
+  TestAWorkerOnAConnectionThatBypassesRLSRefusesToServeMoreThanOneTenant
+  TestSIGTERM_d_AFinalizeInFlightWhenTheGraceEndsIsReleasedNotFailed
+  TestRequireHostMatchBootsAsTheAppRoleAndServesOnEveryDialect
+  TestSIGTERM_j_ADrainThenSIGTERMStillLetsTheRunFinish
+  TestTutorialGoSnippetsCompile
+  TestREADMEsTryItSnippetCompletes
+  TestSIGTERM_c_ACompensatingRunIsNotToldItsCallFailed
+  TestMigrateOnlyMigratesEveryShard
+  TestAWorkerBootsAndServesAsTheAppLoginOnEveryDialect
+  TestReplayWithInjectedCrashPoints
+  TestACrashedTenantsRunIsReclaimedUnderRLS
+  TestSignalsTutorialExpenseIsApprovedAndRejected
+  TestReplayDivergenceDetection
+  TestReplayStressRandomCrashPoints
+  TestTheBuiltCleatctlPublishesToEveryShardAndAReRunCompletesOne
+  TestSIGHUPReloadsWithNoKeysConfiguredAndKeepsServing
+  TestABootedWorkerSweepsAnAbandonedLogin
+  TestWorkerMigratesFromOutsideTheRepo
+  TestADBBuildKeepsAHandAddedLockEntry
+  TestExecuteWorkflowInstallsTheFetcherOnlyWhenTheFlagIsSet
+  TestARealPythonFixtureWorkflowValidatesStartInput
+  TestIdempotencyKeyReplayEndToEnd_ResolvesACrashedCall
+  TestWorkerMigratesTheDatabaseItServes
+  TestACrashedTenantsRunIsReclaimedUnderRLSOnSQLServer
+  TestTheDocumentListsAGoAndAPythonFixtureWorkflow
+  TestAForceReplacedDefinitionIsWhatAWarmWorkerRuns
+  TestABootedWorkerDisablesAnExpiredOAuthMintedKey
+  TestAnonymousOAuthLoginIsNotAborted401UnderRequireAuth
+  TestABootedWorkerBindsLoginToTheHost
+  TestTutorialQuickStartReachesADoneWorkflow
+  TestATenantsBeatDoesNotQueueBehindTheExecutionPoolUnderRLS
+  TestGeneratedAdapterCompilesForEveryHostCall
+  TestTheHTTPAPILogsThePortItActuallyBound
+  TestAForeignMigrationChainIsRefusedBeforeAnyChange
+  TestShutdownDuringABackoffNeverReachesAGuestThatCompensates
+  TestRunBuild_PythonTarget_WasmRoundtrip
+  TestConcurrentMintsCannotPassTheLiveKeyCap
+  TestATenantIsDroppedOnSQLServer
+  TestSignalPluginWorkflow_MSSQLScopesToTheTargetsTenant
+  TestStartPluginWorkflow_MSSQLScopesTheWriteUnderTheDestinationTenantsSessionContext
+  TestTenantIsolationOverHTTP_MSSQL
+  TestTheWorkersGapIsNeverShorterThanTheWritersGap
+  TestRunEmbedded_NoArgs
+  TestRunPlugin_NoArgs
+  TestInvalidTargetError
+  TestEncryptionKeyFilePreviousWithoutCurrentIsRefusedByARealWorker
+  TestRunBuild_PythonTarget_NoPyFile
+  TestTheRefusalIsReachedFromMain
+  TestRunBuild_JavaTarget_RelativePathWithGradlew
+  TestRunBuild_RustTarget_NoCargoToml
+  TestRunDag_ValidateBadFile
+  TestRunBuild_JavaTarget_NoBuildFile
+  TestFullstackTemplateProxyPassesItsOwnVetAndTests
+  TestTheWorkerRunsADeferPhaseRatherThanReschedulingIt
+  TestDebugWatch_LoadPaginatedError
+  TestDurableFetchReturnsTheStatusTheWorkerSends
+  TestTenRunsTheWorkerCannotOpenDoNotStarveAFreshRun
+  TestVetAndBuildAgreeOnAnAutoThreadedPackage
+  TestWasmOutputName_IsDeterministic
+  TestScaffoldAgent
+  TestEverySDKFunctionThatReachesAHostCallHasAFixture
+  TestRevokingTheLastTwoKeysConcurrentlyLeavesOne
+  TestADropWaitsForAResumeAndForASecondDropOnPostgres
+  TestAStaleConcurrencyKeyOfAnotherTenantIsReapedUnderRLSOnSQLServer
+  TestVetStillRejectsAGenuineThreadingError
+  TestAnotherTenantsHistoryIsSweptUnderRLSOnSQLServer
+  TestATenantsDeferPhaseDeadlineIsSweptByAnotherTenantsWorkerUnderRLSOnSQLServer
+  TestNoPluginScansIntoUUIDDirectly
+  TestLoadPluginClientSpec
+  TestAnotherTenantsLongHistoryIsCompactedUnderRLSOnSQLServer
+  TestResultSchemaIsAlwaysStringForAValueReturningEntryPoint
+  TestVetGo_E005_NetHttp
+  TestTheDetectionFollowsAHelper
+  TestASQLServerStoreSeesOnlyItsOwnTenantsVersions
+  TestHeartbeatBatchFencedIsolatedFromASaturatedExecutionPool
+  TestLoadPluginClientSpecRefusesNonLiteralOptsName
+  TestGenerateGo_Streaming
+  TestTwoDependenciesDeclaringTheSameMethodAreNotConflated
+  TestGenerateGo_UnreferencedType
+  TestTheTransitionsAreLoggedOnceEachWithTheOutageLength
+  TestLoadPluginClientSpecRefusesUnexportedType
+  TestAnIdleWorkerDoesNotReclaimABusyWorkersLiveRunAcrossAStall
+  TestGenerateGo_InputRawOutputTyped
+  TestVetExitCode
+  TestGenerateGo_InputTypedOutputRaw
+  TestAStaleConcurrencyKeyOfAnotherTenantIsReapedUnderRLS
+  TestTemplateSourceCompilesAgainstTheTree
+  TestARelativeOutputDirectoryIsNotMisplaced
+  TestGenerateGo_StreamingUntyped
+  TestGenerateGo_Empty
+  TestLoadPluginClientSpecRefusesNoCallSites
+  TestEveryTenantScopedStatementNamesItsContext
+  TestTheLoaderRetainsImportedPackages
+  TestARecoveryMintRacesAreDecidedUnderTheTenantsRowLock
+  TestAuditVerifyExitStatusesAreDistinct
+  TestEntryPointSchemaAgreesWithTheBindingTableOnGo
+  TestVetGo_E007_MathRand
+  TestBuildRefusesTheOldMapShapedManifest
+  TestAnotherTenantsHistoryIsSweptUnderRLS
+  TestRunBuild_GoTarget
+  TestTheAdminRetentionSweepReachesTheWorkersOwnTenantOnly
+  TestMethodUsingGlobalHIsRejected
+  TestAnalyzeUsageErrorsDetectsMultiple
+  TestAnotherTenantsOldVersionsAreCollectedUnderRLS
+  TestGenerateImportsBasic
+  TestTransformGenericsOutputSyntaxValid
+  TestVetGo_EntryPointMustReturnString
+  TestVetSummaryFields
+  TestAnalyze_ValidPackage
+  TestBuildEntryPointSchemasMatchesTheJSONSchemaPackage
+  TestHasHostCallsParam
+  TestStartPluginWorkflow_MySQLIsSingleTenantOnly
+  TestVetGo_SingleStringEntryPointWarns
+  TestAnotherTenantsLongHistoryIsCompactedUnderRLS
+  TestFindGlobalHostCallsReturnsNilForErrors
+  TestIsHostCallsTypeReturnsTrueForInterface
+  TestAGenericFunctionIsNotAnEntryPoint
+  TestDevWatch_SkipsTheFileItGenerates
+  TestGenericsFunctionsFound
+  TestResolveCallFQNameEdgeCases
+  TestATenantsDeferPhaseDeadlineIsSweptByAnotherTenantsWorkerUnderRLS
+  TestBuildDurableLeavesSetsFuncDeclFlags
+  TestGenerateExportsResultOnlyReturn
+  TestWasmOutputName_CrossFileEntryPointsNameTheRightFile
+  TestFindCallChainEdgeCases
+  TestGenerateExportsEmitsTheDeferRunner
+  TestGenericsPipelineRunsCleanly
+  TestResultTagsConsistency
+  TestTransformAutothreadOutputSyntaxValid
+  TestComputeErrorsDetectsGoroutine
+  TestFindEnclosingFuncNameReturnsEmptyForMissingNode
+  TestTheBuildRefusesAWorkflowThatReachesCodeItCannotRead
+  TestTransformEmptyClosure
+  TestCanRemoveGlobalH_TrueAllUsersHandled
+  TestComputeErrorsDetectsFuncValueCall
+  TestComputeErrorsDetectsInterfaceDispatchThroughFieldOrCallResult
+  TestGenerateExportsPlaceOrderUnmarshalsArgs
+  TestTheUnderlyingMapOrderActuallyVaries
+  TestBuildGenericsAllFunctions
+  TestFindGlobalHAutothread
+  TestTheEscapingHelperIsStillTaggedPure
+  TestFindGlobalHostCallsFindsVarHInAutothread
+  TestVetGo_E001_Goroutine
+  TestAReaderThatAlreadySawEverythingWaitsForTheNextAnswer
+  TestVetChecksForbiddenFmtPrintln
+  TestASingleFailedHeartbeatRetryCanOutlastTheOldReclaimInvariantButNotTheNewOne
+  TestDispatchLoop_ProgressiveBackoff
+  TestVetGo_E015_FmtPrintln
+)
+REST_PIN_1=(
+  TestCrashMidAgentLoopResumesWithoutReaskingTheModel
+  TestReplayStressBasic
+  TestAWorkerThatCannotDecryptAReplayReleasesTheRun
+  TestShutdownScenariosOnMySQLAndMSSQL
+  TestPayloadEncryptionKeyRotationWiresIntoARealWorker
+  TestUninstallDownChainIsClassifiedOnEveryDialect
+  TestPayloadEncryptionShardedWorkerDoesNotWritePlaintext
+  TestSIGTERMKeepsHeartbeatingSoTheRunIsNotReclaimedWhileItDrains
+  TestSIGTERM_b2_ACatchingGuestIsReleasedNotCompleted
+  TestReplayHashConsistency
+  TestMainRefusesToStartOnAStaleRouteSignature
+  TestWorkerRefusesToBootWithAMisconfiguredIdempotencyKeyOp
+  TestEveryGoFixtureMatchesItsExpectedVerification
+  TestAWorkerWithNoWasmtimeRefusesBeforeAnyDatabaseWork
+  TestTheGeneratedFileDefinesWhatItCalls
+  TestVetAndBuildGiveOneAnswerOnTheRefusalsOnlyBuildUsedToTake
+  TestAReclaimedRunIsNotClobberedByItsStaleHolderUnderRLS
+  TestMigrationIsADeployStepOnEveryDialect
+  TestAModernMCPClientListsCallsAndCancelsARealWorkflow
+  TestReplayReadsWhatTheGuestWasGiven
+  TestSIGTERM_e_AContinueAsNewInFlightWhenTheGraceEndsMakesExactlyOneNewRun
+  TestWorkerShutdownAbortsAFireAndForgetSchedule
+  TestSIGTERM_m_ADeferPhaseCutOffByShutdownIsReleasedNotTerminatedWithoutItsCleanup
+  TestAmbiguityLookupEndToEnd_ResolvesACrashedCall
+  TestAmbiguityDetectionOnTruncatedHistory
+  TestTheShippedAppRoleScriptsProvisionAWorkingLogin
+  TestADropWaitsForAResumeAndForASecondDropOnSQLServer
+  TestEventsArePersistedDuringExecution
+  TestPendingIntentDetection
+  TestTheAppLoginCannotWriteDeploymentSecrets
+  TestMigrateOnlySucceedsWithADatabaseScopedLoginOnMySQLAndMSSQL
+  TestPayloadEncryptionWiringKnownPositive
+  TestSIGTERM_a_LetsAnInFlightRunFinishInsideTheGrace
+  TestEveryGoTemplateScaffoldsIntoAProjectThatBuilds
+  TestSIGTERM_h_AGenuineFailureDuringTheDrainIsStillRecorded
+  TestCleanRunCallsEachOperationOnce
+  TestEveryAdapterDefCompiles
+  TestPythonBuildRefusesNondeterminism
+  TestABuildDoesNotEmbedTheOutputPath
+  TestAPythonFixtureWorkflowDeploysWithASchema
+  TestAnSDKFunctionsHostCallsAreWiredIntoTheWorkflowThatCallsIt
+  TestDeployAndRunDocumentedPositionalsAreTheKindTheSubcommandExpects
+  TestEachRewiredMethodWiresItsImport
+  TestACompiledModuleImportsTheHostCallsOfTheSDKFunctionsItCalls
+  TestThePprofAndInternalHoldsListenersLogTheAddressTheyBound
+  TestATenantsRunOutlivesItsHeartbeatsUnderRLS
+  TestASessionShapedBearerOnAnExemptRouteIsNotRefusedByTheOAuthPlugin
+  TestABootedWorkerSuspendsAnExpiredTrial
+  TestATenantsBeatDoesNotQueueBehindTheExecutionPoolUnderRLSOnSQLServer
+  TestTheBuiltCleatctlPublishesWithOnlyThePublisherRole
+  TestAnalyze_InvalidPackagePath
+  TestAGlobalFlagBeforeASubcommandIsNotItsPackage
+  TestABootedWorkerMintsAnOAuthAPIKeyOnARealLogin
+  TestUninstallPluginRefusesAnUnprovenPluginOnEveryDialect
+  TestARotatingClaimServesEveryTenantOnSQLServer
+  TestAnAgentPythonRequirementsTxtResolves
+  TestTheDropPlanSeesUnsettledRunsOnSQLServer
+  TestRunBuild_EntryPointWithNoArguments
+  TestAnotherTenantsMemorySamplesAreTrimmedUnderRLSOnSQLServer
+  TestAPluginStartIsRefusedForASuspendedTenantOnSQLServer
+  TestATenantsRunExecutesItsOwnDefinitionEvenThroughARoleThatBypassesRLS
+  TestATenantsRunOutlivesItsHeartbeatsUnderRLSOnSQLServer
+  TestRunInit_NoArgs
+  TestAFencedExecutionMakesNoFurtherCallsAndASecondWorkerFinishesTheWorkflow
+  TestRunEmbedded_NoWasmFlag
+  TestEveryTemplateDocumentedCommandActuallyRuns
+  TestRunPlugin_UnknownSubcommand
+  TestAnalyze_InvalidPackageNoEntryPoints
+  TestRunDag_UnknownSubcommand
+  TestRunInit_InvalidTemplate
+  TestRunDag_EmptyArgs
+  TestWorkerShutdownAbortsADurableCallsHostBackoffWait
+  TestDebugWatch_PollNewEvents
+  TestEveryDocumentedCleatInvocationClearsFlagParsing
+  TestFrozenBuildRefusesAChildItCannotPin
+  TestATypedPromiseIsCreatedAndAwaitedOnARealWorker
+  TestASlowHeartbeatCycleDoesNotOpenAGapWiderThanReclaimAfterAllows
+  TestDispatchLoop_StickyErrorContinuesLoop
+  TestInitBasicNamesTheModuleForTheDirectory
+  TestDurableReachableIsStrictlyLargerThanTheDurableClosure
+  TestPurgedAwaiterUnregistersAcrossDialects
+  TestDebugWatchOfARunOfAnotherTenantCountsThatTenantsEvents
+  TestWaitForDB_RetriesOnError
+  TestACreateCannotReuseAnIdThatWasDroppedAfterItsFirstCheckOnSQLServer
+  TestNoSDKFunctionHandsTheRuntimeToCodeTheBuildCannotRead
+  TestABuildInsideAGitCheckoutDoesNotEmbedTheCommit
+  TestAnotherTenantsOldVersionsAreCollectedUnderRLSOnSQLServer
+  TestInitBasicRefusesANameThatIsNoModulePath
+  TestTheSidecarCleatBuildWritesIsTheOneDeployReads
+  TestGenerateGo_Simple
+  TestASQLServerStoreReadsOnlyItsOwnTenantsDefinition
+  TestGenerateGo_WithTypes
+  TestGeneratePluginClientCodeCompiles
+  TestTenantIsolationOverHTTP_MySQL
+  TestRollingWorkerRestart
+  TestVetChecksForbiddenNetHTTP
+  TestBuildIgnoresAnAbsentEntryPointsManifest
+  TestCleatLockKeepsAHandAddedEntryThroughTheBinary
+  TestAShardedDeployChecksTheFirstShardsRegistryAndWritesEveryShardOrNone
+  TestAScopedOperatorKeyReachesOnlyTheRoutesItsScopeNames
+  TestDispatchLoop_StoreError
+  TestARequiredHostCallIsReadFromAnImportedPackage
+  TestBuildRefusesACleatYAMLThatFailsToParseAsYAMLAtAll
+  TestRustBuildRefusesNondeterminism
+  TestARealGoFixtureWorkflowValidatesStartInput
+  TestBuildRefusesAnEntryPointsManifestMismatch
+  TestBuildWritesNothingToStdoutOnSuccess
+  TestBuildStillAcceptsTheDocumentedOrder
+  TestEveryMultiBackendTestIsSelectedByTheMultiDialectJob
+  TestAReconnectBeforeTheRetryBreaksTheZeroSlackInvariantButNotWithReclaimSlack
+  TestARotatingClaimServesEveryTenantOnPostgres
+  TestScaffoldedGoFilesHaveNoBuildConstraint
+  TestMethodWithHostCallsFieldStillBuilds
+  TestRunBuild_AllScalarParamsCompile
+  TestBuildAutoThreadedPackage
+  TestRunDownMigrationsRefusesATableAnotherPluginAlsoDeclares
+  TestARecoveryKeyIsMintedOnlyForATenantWithNoLiveKey
+  TestContainsNodeReturnsFalseForMissingNode
+  TestAWorkflowAgentWiresItsImportsFromAnImportedPackage
+  TestVetChecksChannelOps
+  TestConcurrentCreatesOfOneTenantLeaveOneProvisionalKey
+  TestRunBuild_WithOutputDir
+  TestVetChecksForbiddenNow
+  TestVetGo_NoErrors
+  TestABuiltFixtureDeclaresItsExposureFromSource
+  TestADeployNamingAnUnregisteredPluginIsRefusedAndWritesNothing
+  TestBuildBasicHasEdges
+  TestGeneratedExportsEmitsSingleQuotedErrorResult
+  TestRollingRestartNoDuplicateExecution
+  TestVetGo_E021_MapIteration
+  TestWasmOutputName_FromRealAnalysis
+  TestGenerateDevMain
+  TestTheRunnableCountIsAskedOnlyAtFullBackoff
+  TestContainsNodeFindsTarget
+  TestEveryHostCallGeneratesACompilableAdapterAlone
+  TestGenerateExportBasic
+  TestGenerateImportsNoUnused
+  TestShortEntryPoints_FromRealAnalysis
+  TestFindGlobalHostCallsReturnsNilForBasic
+  TestVetChecksForbiddenPackageRef
+  TestBuildDurableLeavesBasic
+  TestComputeGenericsNoErrors
+  TestFindEnclosingFuncNameFindsEnclosingFunction
+  TestGenerateExportsErrorsOnlyReturn
+  TestHasHostCallsParamAutothreadLeaf
+  TestTheShippedAppRoleScriptsRefuseToReportSuccessWhenTheyFailed
+  TestVerifyThreadingPassesForBasic
+  TestResolveCalleeReturnsEmptyForNilInfo
+  TestTransformBasicNoChanges
+  TestAPureEntryPointIsChecked
+  TestCanRemoveGlobalH_AlreadyHasHParam
+  TestComputeErrorsDetectsFloatInCondition
+  TestComputeErrorsDetectsInterfaceDispatch
+  TestComputeGenericsTagsConsistent
+  TestHasHostCallsCallWithNilInfo
+  TestAnotherTenantsEventRowsMoveThePublishedCountUnderRLS
+  TestCanRemoveGlobalH_FalseDueToNonDurableUser
+  TestIsHostCallsTypeReturnsFalseForNonHostCallsType
+  TestWASMVersionUpgrade
+  TestVetGo_E003_TimeNow
+  TestTheSameRoutesAreNotUnavailableWhenTheDefinitionCanBeRead
+  TestAConstNamedChildIsPinnedAndAComputedOneIsReported
+  TestARelativePythonEntryResolvesWhereTheUserStands
+  TestBuildCalledByConsistency
+  TestVetGo_E013_SyncMutex
+  TestVetJSONOutputSchema
+)
+
+# REST_PIN_ARGS is the two lists above flattened to "BUCKET:NAME", which is what
+# the python below wants. Built once rather than per call.
+REST_PIN_ARGS=()
+for _t in "${REST_PIN_0[@]}"; do REST_PIN_ARGS+=("0:$_t"); done
+for _t in "${REST_PIN_1[@]}"; do REST_PIN_ARGS+=("1:$_t"); done
+unset _t
+
+# rest_shard_names BUCKET NBUCKETS: reads test names on stdin and prints this
+# bucket's. With two rest buckets (today's shape) a pinned name goes to its
+# pinned bucket and every other name keeps the sha1 split. With any other bucket
+# count the pins do NOT apply and the whole list is hashed: the pair above is
+# balanced as a PAIR, and halving a pair is not a partition into three.
+rest_shard_names() {
+  python3 -c '
+import sys, hashlib
+bucket, n = int(sys.argv[1]), int(sys.argv[2])
+pins = {}
+for a in sys.argv[3:]:
+    b, name = a.split(":", 1)
+    pins[name] = int(b)
+for name in sorted(l.strip() for l in sys.stdin if l.strip()):
+    if n == 2 and name in pins:
+        if pins[name] == bucket:
+            print(name)
+        continue
+    if int(hashlib.sha1(name.encode()).hexdigest(), 16) % n == bucket:
+        print(name)
+' "$1" "$2" "${REST_PIN_ARGS[@]}"
+}
+
+# rest_pins_present: reads the full rest name list on stdin and fails, naming
+# each, if any pinned name is missing from it. A pinned test that was renamed or
+# deleted otherwise just stops being pinned -- the split silently reverts toward
+# the imbalance the pins exist to remove, and nothing says so.
+rest_pins_present() {
+  local all missing=() t n0 n1 nuniq
+  all=$(cat)
+  # (cleat#3940 review) The two lists must be DISJOINT. The python below builds
+  # a dict from them, so a name in both is last-wins -- it silently lands in
+  # bucket 1 and is absent from bucket 0. The split is still a partition, so
+  # every other check passes; it is simply not the balanced one any more, and
+  # nothing said so. Checked here because this function runs on every path that
+  # depends on the pins.
+  n0=${#REST_PIN_0[@]}
+  n1=${#REST_PIN_1[@]}
+  # TWO duplicate shapes, and they are not the same finding. A name twice in ONE
+  # list is harmless to the split (same bucket) but means the pair was edited by
+  # hand; a name in BOTH lists is the dangerous one, because the python's dict is
+  # last-wins. Counting `sort -u` over the concatenation cannot tell them apart,
+  # and the first version reported the cross-list message for both -- naming
+  # nothing, because `comm -12` has nothing to print for an intra-list duplicate.
+  n0u=$(printf '%s\n' "${REST_PIN_0[@]}" | LC_ALL=C sort -u | grep -c . || true)
+  n1u=$(printf '%s\n' "${REST_PIN_1[@]}" | LC_ALL=C sort -u | grep -c . || true)
+  if [ "$n0u" != "$n0" ] || [ "$n1u" != "$n1" ]; then
+    echo "tier-gate: a pin is listed TWICE IN THE SAME list (REST_PIN_0: $n0 entries, $n0u distinct; REST_PIN_1: $n1 entries, $n1u distinct). The split is unaffected -- both copies are the same bucket -- but the pair was edited by hand and should be re-derived:" >&2
+    printf '%s\n' "${REST_PIN_0[@]}" | LC_ALL=C sort | uniq -d | sed 's/^/  REST_PIN_0: /' >&2
+    printf '%s\n' "${REST_PIN_1[@]}" | LC_ALL=C sort | uniq -d | sed 's/^/  REST_PIN_1: /' >&2
+    return 1
+  fi
+  nuniq=$(printf '%s\n' "${REST_PIN_0[@]}" "${REST_PIN_1[@]}" | LC_ALL=C sort -u | grep -c . || true)
+  if [ "$nuniq" != "$((n0 + n1))" ]; then
+    echo "tier-gate: REST_PIN_0 and REST_PIN_1 share a name ($nuniq distinct across both lists, want $((n0 + n1))). The name would silently land in bucket 1 only:" >&2
+    comm -12 <(printf '%s\n' "${REST_PIN_0[@]}" | LC_ALL=C sort -u) <(printf '%s\n' "${REST_PIN_1[@]}" | LC_ALL=C sort -u) | sed 's/^/  /' >&2
+    return 1
+  fi
+  # Pure-shell matching, NOT `printf ... | grep -qxF "$t"`. Under `pipefail`,
+  # `grep -q` exits as soon as it matches, printf takes SIGPIPE, and the
+  # PIPELINE is non-zero exactly when the grep SUCCEEDED -- so the check
+  # reported every pin it found as missing. Measured here on 21 of 60 pins
+  # before this line changed. (Same failure recorded in the memory store as
+  # "grep -q on a pipe under pipefail lies in both directions".)
+  for t in "${REST_PIN_0[@]}" "${REST_PIN_1[@]}"; do
+    case $'\n'"$all"$'\n' in
+      *$'\n'"$t"$'\n'*) ;;
+      *) missing+=("$t") ;;
+    esac
+  done
+  if [ "${#missing[@]}" -gt 0 ]; then
+    echo "tier-gate: REST_PIN_0/REST_PIN_1 name tests that are not in the rest pool (renamed or deleted?), so the rest split is no longer the balanced one it was measured to be:" >&2
+    printf '  %s\n' "${missing[@]}" >&2
+    echo "  Re-derive the pair from a run's tier-gate-log-rest-* artifacts; the comment above REST_PIN_0 says how." >&2
+    return 1
+  fi
+  return 0
 }
 
 # engine_shard_names BUCKET NBUCKETS: reads test names on stdin (one per line),
@@ -196,7 +663,7 @@ names_to_run_pattern() {
 # duplicated a second time with its own chance to drift from the first.
 # Returns 0 OK, 1 a real coverage finding, 2 could not measure (empty list).
 verify_bucket_coverage() {
-  local label="$1" nbuckets="$2"
+  local label="$1" nbuckets="$2" sharder="${3:-engine_shard_names}"
   local all nall union total b part n uniq_count missing extra
   all=$(cat)
   nall=$(printf '%s\n' "$all" | grep -c . || true)
@@ -210,7 +677,7 @@ verify_bucket_coverage() {
   total=0
   b=0
   while [ "$b" -lt "$nbuckets" ]; do
-    part=$(printf '%s\n' "$all" | engine_shard_names "$b" "$nbuckets")
+    part=$(printf '%s\n' "$all" | "$sharder" "$b" "$nbuckets")
     n=$(printf '%s\n' "$part" | grep -c . || true)
     note "  $label bucket $b/$nbuckets: $n tests"
     total=$((total + n))
@@ -298,6 +765,39 @@ $part"
   elif ! grep -q 'distinct-in-union' /tmp/vbc-out.$$; then
     st_fail "verify_bucket_coverage failed the duplicate case for the wrong reason -- expected a distinct-in-union mismatch in its own output"
   fi
+
+  # cleat#3940: rest_shard_names honours the pins AND still partitions. Two real
+  # pinned names, one from each list, plus unpinned names that must hash in.
+  RS_P0="${REST_PIN_0[0]}"
+  RS_P1="${REST_PIN_1[0]}"
+  RSYN=$(printf '%s\n%s\nTestUnpinnedAlpha\nTestUnpinnedBeta\nTestUnpinnedGamma\n' "$RS_P0" "$RS_P1")
+  RS0=$(printf '%s\n' "$RSYN" | rest_shard_names 0 2)
+  RS1=$(printf '%s\n' "$RSYN" | rest_shard_names 1 2)
+  printf '%s\n' "$RS0" | grep -qxF "$RS_P0" || st_fail "rest_shard_names 0 2 dropped $RS_P0, which is pinned to bucket 0"
+  if printf '%s\n' "$RS0" | grep -qxF "$RS_P1"; then st_fail "rest_shard_names 0 2 put $RS_P1 in bucket 0; it is pinned to bucket 1"; fi
+  printf '%s\n' "$RS1" | grep -qxF "$RS_P1" || st_fail "rest_shard_names 1 2 dropped $RS_P1, which is pinned to bucket 1"
+  RS_SUM=$(printf '%s\n%s\n' "$RS0" "$RS1" | grep . | grep -c . || true)
+  RS_ALL=$(printf '%s\n' "$RSYN" | grep -c . || true)
+  RS_UNIQ=$(printf '%s\n%s\n' "$RS0" "$RS1" | grep . | sort -u | grep -c . || true)
+  [ "$RS_SUM" = "$RS_ALL" ] || st_fail "rest_shard_names buckets summed to $RS_SUM of $RS_ALL names"
+  [ "$RS_UNIQ" = "$RS_ALL" ] || st_fail "rest_shard_names buckets held $RS_UNIQ distinct names of $RS_ALL -- not disjoint"
+
+  # cleat#3940: a pin that names nothing must FAIL, or a renamed test silently
+  # reverts the split to the imbalance the pins were measured to remove. Both
+  # directions, because a check that always fails is as useless as one that never does.
+  if printf 'TestSomethingElse\n' | rest_pins_present >/tmp/rpp-out.$$ 2>&1; then
+    st_fail "rest_pins_present passed a list containing none of the pins"
+  elif ! grep -q 'not in the rest pool' /tmp/rpp-out.$$; then
+    st_fail "rest_pins_present failed for the wrong reason -- expected its own message naming the pins"
+  fi
+  printf '%s\n' "${REST_PIN_0[@]}" "${REST_PIN_1[@]}" | rest_pins_present || st_fail "rest_pins_present rejected a list made of the pins themselves"
+
+  # cleat#3940 review: the two SHIPPED lists must be disjoint. rest_pins_present
+  # enforces it at runtime; this catches a duplicate that ships, before a run.
+  RS_N0=${#REST_PIN_0[@]}
+  RS_N1=${#REST_PIN_1[@]}
+  RS_NU=$(printf '%s\n' "${REST_PIN_0[@]}" "${REST_PIN_1[@]}" | LC_ALL=C sort -u | grep -c . || true)
+  [ "$RS_NU" = "$((RS_N0 + RS_N1))" ] || st_fail "the pin lists hold $((RS_N0 + RS_N1 - RS_NU)) duplicate entr(y/ies) -- a name twice in one list or in both; rest_pins_present names which"
   rm -f /tmp/vbc-out.$$
 
   # Known positive, same names, deduplicated: must pass, proving the failure
@@ -329,8 +829,26 @@ if [ -n "$VERIFY_N" ]; then
   note "verifying shard coverage: $EBUCKETS engine bucket(s), $RBUCKETS rest bucket(s) (N=$VERIFY_N, cleat#3301)"
   RC=0
   engine_all_tests | verify_bucket_coverage "./engine/..." "$EBUCKETS" || RC=$?
+  # cleat#3940: the rest side shards through rest_shard_names (pins + sha1),
+  # not engine_shard_names, so the coverage check has to ask the same function
+  # the real run asks. A check that partitions differently from the run it
+  # vouches for is the "two readings nobody compares" failure this file's own
+  # header records.
+  # (cleat#3940 review) A `go test -list` that FAILED returns a partial list. Sharding
+  # on it would look like "some pins were renamed" (the next check's message) when the
+  # real news is that the pool could not be listed at all -- the UNMEASURED case, which
+  # gets its own exit status and its own words.
+  REST_ALL=$(rest_all_tests) || {
+    echo "tier-gate --verify-shard-coverage: could not list the rest pool -- go test -list failed (a pinned package that does not build?). This is a failure of the check, not a finding about the split." >&2
+    exit 2
+  }
   r=0
-  rest_all_tests | verify_bucket_coverage "rest (${#REST_PACKAGES[@]} non-engine tier1 packages)" "$RBUCKETS" || r=$?
+  printf '%s\n' "$REST_ALL" | verify_bucket_coverage "rest (${#REST_PACKAGES[@]} non-engine tier1 packages)" "$RBUCKETS" rest_shard_names || r=$?
+  # A pin that names nothing is not a coverage hole -- it is a split that is no
+  # longer the balanced one -- so it gets its own check and its own message.
+  if [ "$RBUCKETS" = "2" ]; then
+    printf '%s\n' "$REST_ALL" | rest_pins_present || r=1
+  fi
   [ "$r" -gt "$RC" ] && RC=$r
   exit "$RC"
 fi
@@ -372,7 +890,16 @@ if [ -n "$LIST_SHARD_SPEC" ]; then
     # engine, over the union of REST_PACKAGES instead of ./engine/....
     REST_BUCKET=$((SHARD_I_NUM - EBUCKETS - 1))
     echo "REST shard $SHARD_I_NUM/$SHARD_N_NUM (bucket $REST_BUCKET/$RBUCKETS): every tier1 package except ./engine/..., plus the cleat module"
-    rest_all_tests | engine_shard_names "$REST_BUCKET" "$RBUCKETS" | names_to_run_pattern
+    # cleat#3940: rest_shard_names, not engine_shard_names -- the heavy head is
+    # pinned by name and only the tail is hashed. The pins are checked here too:
+    # a listing is what a reader uses to answer "does this shard run X", and a
+    # stale pin makes that answer quietly wrong rather than obviously broken.
+    REST_ALL=$(rest_all_tests) || {
+      echo "tier-gate: could not list the rest pool -- go test -list failed (a pinned package that does not build?). Refusing to list a shard from a partial pool." >&2
+      exit 2
+    }
+    printf '%s\n' "$REST_ALL" | rest_pins_present || exit 2
+    printf '%s\n' "$REST_ALL" | rest_shard_names "$REST_BUCKET" "$RBUCKETS" | names_to_run_pattern
   else
     # Today's default shape (RBUCKETS=1): the single, unsharded rest shard --
     # unchanged, byte for byte, from before cleat#3301.
@@ -713,7 +1240,14 @@ case "$RUN_MODE" in
     fi
     if [ "$RBUCKETS" -gt 1 ]; then
       REST_BUCKET=$((SHARD_I_NUM - EBUCKETS - 1))
-      SHARD_PATTERN=$(rest_all_tests | engine_shard_names "$REST_BUCKET" "$RBUCKETS" | names_to_run_pattern)
+      # cleat#3940: the same sharder --list-shard prints, so what a shard is
+      # listed as and what it runs cannot drift apart.
+      REST_ALL=$(rest_all_tests) || {
+        echo "tier-gate: could not list the rest pool -- go test -list failed (a pinned package that does not build?). Refusing to shard on a partial pool." >&2
+        exit 2
+      }
+      printf '%s\n' "$REST_ALL" | rest_pins_present || exit 2
+      SHARD_PATTERN=$(printf '%s\n' "$REST_ALL" | rest_shard_names "$REST_BUCKET" "$RBUCKETS" | names_to_run_pattern)
       note "  rest shard $SHARD_I_NUM/$SHARD_N_NUM (bucket $REST_BUCKET/$RBUCKETS): $(echo "$ACTIVE_PKGS" | tr '\n' ' ')"
       note "  rest shard $SHARD_I_NUM/$SHARD_N_NUM: -run '$SHARD_PATTERN'"
     else
@@ -799,6 +1333,71 @@ fi
 LOG="${TIER_GATE_LOG:-$REPO_ROOT/tier-gate.log}"
 : > "$LOG"
 
+# The REPORT is `go test -json`, and it exists for scripts/check-skip-budget.sh, whose
+# usage is `<job-key> <test-report.json>` (cleat#3949). Before this, Tier 1's shards
+# produced only the text log below and no budget could read them, which is why the
+# Postgres arm of ./engine/... lost its per-PR skip budget when cleat#3935 removed the
+# cluster job's copy of the run.
+#
+# The suite still runs ONCE. `-json` already carries every line the test binary printed,
+# in an `Output` field, so scripts/test2json-text.py renders that stream back into $LOG
+# and every judge below -- the four greps, the named-skip check against
+# tier1.exclude_tests, the dialect-skip listing -- reads the same log it always has.
+REPORT="${TIER_GATE_REPORT:-$REPO_ROOT/tier-gate.json}"
+: > "$REPORT"
+command -v python3 >/dev/null || { fail "python3 is required to render the go test -json report into $LOG (cleat#3949)"; exit 1; }
+
+# run_json DIR ARGS...: run the suite in DIR, append the JSON stream to $REPORT, and
+# render THIS invocation's events into $LOG.
+#
+# Per invocation, not once at the end: the root module and each tier-1 module run
+# sequentially into the same two files, and rendering later would put every module's
+# text after every root-module line. The temp file also keeps the report append atomic
+# with respect to the render.
+#
+# `awk 1`, not `cat`, for the append: the next invocation's first record would otherwise
+# weld onto a file whose last line arrived without a newline, and a JSONL reader would
+# see one malformed line and one lost record. Same reason check-skip-budget.sh:95 gives
+# for its own reader.
+run_json() {
+  local dir="$1"; shift
+  local part rc rcs
+  part="$(mktemp "${TMPDIR:-/tmp}/tiergatejson.XXXXXX")" || { fail "could not create a temp file for the go test -json report"; return 2; }
+  # STREAMED, not rendered afterwards. The log used to be written live by `go test -v >>
+  # $LOG`, and a job-level timeout killed the step with a partial log still on disk. If
+  # the render moved after the run, that same timeout would leave an EMPTY log -- losing
+  # exactly the evidence (which test was hanging) the log exists for. tee keeps the
+  # report complete and the renderer reads the same stream as it arrives.
+  ( cd "$dir" && go test -json "$@" ) 2>> "$LOG"     | tee -a "$part"     | python3 -u "$REPO_ROOT/scripts/test2json-text.py" - >> "$LOG"
+  # One array assignment, because ANY other command resets PIPESTATUS -- reading it twice
+  # in two commands would return the first element and then that command's own status.
+  #
+  # All three stages are checked, not just go test's (cleat#3969). The streaming rewrite
+  # kept `PIPESTATUS[0]` -- correctly, that is the suite's verdict -- and silently dropped
+  # the other two, so a crash in the renderer left $LOG short and nothing said so. That
+  # direction is the dangerous one: every judge below greps $LOG for `^=== RUN` and
+  # `--- PASS/FAIL/SKIP`, so a partial render UNDERCOUNTS instead of failing, and an
+  # undercount flatters the run. The pre-streaming version carried an explicit
+  # `|| fail "rendering ... failed"`; this restores it.
+  #
+  # tee is checked for the same reason one step further out: it feeds $REPORT, which
+  # check-skip-budget.sh reads. A truncated report loses skip events, and a budget that
+  # cannot see a skip reports it inside the budget.
+  rcs=("${PIPESTATUS[@]}")
+  rc=${rcs[0]}
+  awk 1 "$part" >> "$REPORT"
+  rm -f "$part"
+  if [ "${rcs[2]:-0}" -ne 0 ]; then
+    fail "rendering the go test -json stream into $LOG failed (renderer rc=${rcs[2]}) -- the log is short, so the judges that grep it undercount rather than fail"
+  elif [ "${rcs[1]:-0}" -ne 0 ]; then
+    fail "appending the go test -json stream to $REPORT failed (tee rc=${rcs[1]}) -- the report is short, so the skip budget would not see those events"
+  fi
+  # Quoted: SC2086 fires on an unquoted expansion even where word splitting is harmless,
+  # and Lint runs shellcheck at its DEFAULT severity, so `-S warning` locally does not
+  # see it. cleat-review caught this one at line 1378 (cleat#3964).
+  return "$rc"
+}
+
 # -p 1 is required: engine/testutil's CleanupPostgresTestData is an unqualified
 # DELETE FROM across eleven tables, so packages run concurrently against one database
 # delete each other's fixtures mid-test.
@@ -829,7 +1428,7 @@ SKIP_ARGS=""
 RUN_ARGS=""
 [ -n "$SHARD_PATTERN" ] && RUN_ARGS="-run $SHARD_PATTERN"
 # shellcheck disable=SC2086
-(cd "$REPO_ROOT" && go test -count=1 -p 1 -timeout "$GO_TEST_TIMEOUT" -v $RUN_ARGS $SKIP_ARGS $ACTIVE_PKGS) >> "$LOG" 2>&1
+run_json "$REPO_ROOT" -count=1 -p 1 -timeout "$GO_TEST_TIMEOUT" $RUN_ARGS $SKIP_ARGS $ACTIVE_PKGS
 TEST_RC=$?
 
 # Separate Go modules must be tested from inside their own directory; `go test
@@ -841,7 +1440,7 @@ if [ "$RUN_MOD_DIRS" = "1" ]; then
     [ -f "$REPO_ROOT/$md/go.mod" ] || { fail "tiers.yaml names module '$md' but $md/go.mod does not exist"; continue; }
     note "running module: $md"
     # shellcheck disable=SC2086
-    (cd "$REPO_ROOT/$md" && go test -count=1 -p 1 -timeout "$GO_TEST_TIMEOUT" -v $SKIP_ARGS ./...) >> "$LOG" 2>&1
+    run_json "$REPO_ROOT/$md" -count=1 -p 1 -timeout "$GO_TEST_TIMEOUT" $SKIP_ARGS ./...
     rc=$?
     [ "$rc" = "0" ] || TEST_RC=$rc
   done

@@ -32,10 +32,13 @@ package engine
 //     wasmtime_component_val_t *args, size_t nargs,
 //     wasmtime_component_val_t *results, size_t nresults);
 //
-// // See cbid_as_env in component_callbacks.go. A separate copy because cgo
-// // compiles each file's preamble into its own translation unit, so a static
-// // function in one is not visible from another.
-// static void *cbid_as_env_test(uintptr_t id) { return (void *)id; }
+// // Calls goComponentCallback the way wasmtime does, with a callback-registry id as its host data. The id crosses into C as the integer it is and
+// // is cast to the `void *` here: returning it to Go as a pointer is the hazard of cleat#4417, see add_func_with_id in component_callbacks.go. A
+// // separate copy because cgo compiles each file's preamble into its own translation unit, so a static function in one is not visible from another.
+// static wasmtime_error_t *cgotest_call_component_callback(
+//     uintptr_t id, wasmtime_component_val_t *args, size_t nargs, wasmtime_component_val_t *results, size_t nresults) {
+//     return goComponentCallback((void *)id, NULL, NULL, args, nargs, results, nresults);
+// }
 //
 // static wasmtime_component_val_t cgotest_make_u64(uint64_t v) {
 //     wasmtime_component_val_t val;
@@ -152,6 +155,35 @@ package engine
 //     *msg = payload->of.string.data;
 //     *msglen = payload->of.string.size;
 //     return kind;
+// }
+//
+// // Reads a result<side-effect-lookup, call-failure> (cleat#4113): 0 = recorded(msg),
+// // 2 = not-recorded, 11 = err(suspended), 12 = err(failed), -1 = anything else.
+// static int cgotest_val_get_side_effect_lookup(const wasmtime_component_val_t *v,
+//                                               const char **msg, size_t *msglen,
+//                                               uint32_t *code) {
+//     *msg = NULL;
+//     *msglen = 0;
+//     *code = 0;
+//     if (v->kind != WASMTIME_COMPONENT_RESULT) { return -1; }
+//     const wasmtime_component_val_t *inner = v->of.result.val;
+//     if (inner == NULL) { return -1; }
+//     if (!v->of.result.is_ok) {
+//         int r = cgotest_val_get_call_outcome(v, msg, msglen, code);
+//         return r == 1 ? 11 : (r == 2 ? 12 : -1);
+//     }
+//     if (inner->kind != WASMTIME_COMPONENT_VARIANT) { return -1; }
+//     const char *d = inner->of.variant.discriminant.data;
+//     size_t dlen = inner->of.variant.discriminant.size;
+//     const wasmtime_component_val_t *payload = inner->of.variant.val;
+//     if (dlen == 12 && memcmp(d, "not-recorded", 12) == 0) { return payload == NULL ? 2 : -1; }
+//     if (dlen == 8 && memcmp(d, "recorded", 8) == 0) {
+//         if (payload == NULL || payload->kind != WASMTIME_COMPONENT_STRING) { return -1; }
+//         *msg = payload->of.string.data;
+//         *msglen = payload->of.string.size;
+//         return 0;
+//     }
+//     return -1;
 // }
 //
 // // Reads two string fields out of a `record{string, string}` (the shape of
@@ -340,6 +372,25 @@ func cgotestReadAwaitOutcome(r unsafe.Pointer) (kind, payload string, code uint3
 	return "", "", 0
 }
 
+// cgotestReadSideEffectLookup decodes a result<side-effect-lookup, call-failure>: kind is "recorded", "not-recorded", "suspended" or
+// "failed", and "" for a value that is none of them (a dispatcher writing a bare string or a packed u64).
+func cgotestReadSideEffectLookup(r unsafe.Pointer) (kind, payload string, code uint32) {
+	var msg *C.char
+	var msgLen C.size_t
+	var cCode C.uint32_t
+	switch C.cgotest_val_get_side_effect_lookup((*C.wasmtime_component_val_t)(r), &msg, &msgLen, &cCode) {
+	case 0:
+		return "recorded", cgotestGoStr(msg, msgLen), 0
+	case 2:
+		return "not-recorded", "", 0
+	case 11:
+		return "suspended", "", 0
+	case 12:
+		return "failed", cgotestGoStr(msg, msgLen), uint32(cCode)
+	}
+	return "", "", 0
+}
+
 // cgotestReadSignalOutcome reads a `result<signal-outcome, call-failure>` out of
 // a result slot: kind is "received", "timed-out", "suspended" or "failed", and ""
 // for a value that is none of them (a dispatcher still writing its packed u64).
@@ -404,6 +455,7 @@ func (b *wasmtimeBackend) cgotestDispatchStr(method int, argsPtr unsafe.Pointer,
 		23: b.dispatchPollSignal,
 		28: b.dispatchAwaitSignals,
 		29: b.dispatchGetScope,
+		30: b.dispatchSideEffectRecorded,
 	}[method]
 	// A missing key yields a nil func value, and calling it segfaults rather
 	// than failing a test. The map has had gaps since the durable-state family
@@ -473,11 +525,86 @@ func (b *wasmtimeBackend) cgotestDispatchU64(method int, argsPtr unsafe.Pointer,
 // cgotestGoComponentCallback invokes the callback exactly as wasmtime does,
 // taking the registry id rather than a pointer.
 //
-// It takes a uintptr and casts in C for the same reason
-// component_callbacks.go's cbid_as_env does: the id is a token, and spelling
-// it as a Go unsafe.Pointer is both a vet finding and an invalid Go pointer in
-// a pointer-typed slot. Callers used to write unsafe.Pointer(id) at each call
-// site, which put four copies of that in the test file.
+// It takes a uintptr and casts in C for the same reason add_func_with_id does
+// in component_callbacks.go: the id is a token, and spelling it as a Go
+// unsafe.Pointer, or receiving it from C as one, is both a vet finding and an
+// invalid Go pointer in a pointer-typed slot (cleat#4417). Callers used to
+// write unsafe.Pointer(id) at each call site, which put four copies of that in
+// the test file.
 func cgotestGoComponentCallback(cbID uintptr, argsPtr unsafe.Pointer, nargs int, resultsPtr unsafe.Pointer) *C.wasmtime_error_t {
-	return C.goComponentCallback(C.cbid_as_env_test(C.uintptr_t(cbID)), nil, nil, (*C.wasmtime_component_val_t)(argsPtr), C.size_t(nargs), (*C.wasmtime_component_val_t)(resultsPtr), 1)
+	return C.cgotest_call_component_callback(C.uintptr_t(cbID), (*C.wasmtime_component_val_t)(argsPtr), C.size_t(nargs), (*C.wasmtime_component_val_t)(resultsPtr), 1)
 }
+
+// payloadDispatchOutcome is what cgotestDispatchPayload saw: the trap text if the dispatcher trapped, else the result read as the kind the
+// dispatcher answers in.
+type payloadDispatchOutcome struct {
+	Trap     string // non-empty when the dispatcher returned a wasmtime error (a refusal of an import with no result to carry it)
+	CallKind string // "ok" | "suspended" | "failed" for a result<string, call-failure>
+	Payload  string // the call-failure message, the ok payload, or a bare string result
+	Code     uint32 // the call-failure classification
+	U64      uint64 // the word a u64-returning dispatcher answered
+}
+
+// cgotestDispatchPayload runs one component dispatcher BY NAME with mixed arguments and reads its result as `answers`: "call" for
+// result<string, call-failure>, "u64", or "string". It exists for cleat#4130's per-site bound, where the 28 dispatchers differ in argument layout
+// and answer kind and the string-only harness above reaches fewer than half of them.
+func (b *wasmtimeBackend) cgotestDispatchPayload(name, answers string, args ...any) (payloadDispatchOutcome, error) {
+	table := map[string]func(*C.wasmtime_component_val_t, C.size_t, *C.wasmtime_component_val_t, C.size_t) *C.wasmtime_error_t{
+		"dispatchDurableCallString":        b.dispatchDurableCallString,
+		"dispatchDurableCallRetry":         b.dispatchDurableCallRetry,
+		"dispatchDurableCallHeartbeat":     b.dispatchDurableCallHeartbeat,
+		"dispatchDurableLog":               b.dispatchDurableLog,
+		"dispatchDurableDefer":             b.dispatchDurableDefer,
+		"dispatchContinueAsNew":            b.dispatchContinueAsNew,
+		"dispatchAwaitSignals":             b.dispatchAwaitSignals,
+		"dispatchSignalWorkflow":           b.dispatchSignalWorkflow,
+		"dispatchChildWorkflow":            b.dispatchChildWorkflow,
+		"dispatchAwaitAnyChild":            b.dispatchAwaitAnyChild,
+		"dispatchAwaitAllChildren":         b.dispatchAwaitAllChildren,
+		"dispatchChildWorkflowWithOptions": b.dispatchChildWorkflowWithOptions,
+		"dispatchResolvePromise":           b.dispatchResolvePromise,
+		"dispatchRejectPromise":            b.dispatchRejectPromise,
+		"dispatchSetQueryState":            b.dispatchSetQueryState,
+		"dispatchCompleteUpdate":           b.dispatchCompleteUpdate,
+		"dispatchDurableSend":              b.dispatchDurableSend,
+		"dispatchScheduleInvoke":           b.dispatchScheduleInvoke,
+		"dispatchPluginCall":               b.dispatchPluginCall,
+		"dispatchPluginCallStreaming":      b.dispatchPluginCallStreaming,
+		"dispatchUUID":                     b.dispatchUUID,
+		"dispatchRunDetached":              b.dispatchRunDetached,
+		"dispatchContinueAsNewVersioned":   b.dispatchContinueAsNewVersioned,
+		"dispatchSideEffect":               b.dispatchSideEffect,
+		"dispatchFetch":                    b.dispatchFetch,
+		"dispatchScheduleCron":             b.dispatchScheduleCron,
+	}
+	dispatch := table[name]
+	if dispatch == nil {
+		return payloadDispatchOutcome{}, fmt.Errorf("cgotestDispatchPayload: no dispatcher %q", name)
+	}
+	argsPtr, nargs, free := cgotestMakeMixedArgs(args...)
+	defer free()
+	resultPtr := cgotestAllocResult()
+	var out payloadDispatchOutcome
+	if err := dispatch((*C.wasmtime_component_val_t)(argsPtr), C.size_t(nargs), (*C.wasmtime_component_val_t)(resultPtr), 1); err != nil {
+		var msg C.wasm_byte_vec_t
+		C.wasmtime_error_message(err, &msg)
+		out.Trap = C.GoStringN(msg.data, C.int(msg.size))
+		C.wasm_byte_vec_delete(&msg)
+		C.wasmtime_error_delete(err)
+		return out, nil
+	}
+	switch answers {
+	case "call":
+		out.CallKind, out.Payload, out.Code = cgotestReadCallOutcome(resultPtr)
+	case "u64":
+		out.U64 = cgotestReadResultU64(resultPtr)
+	case "string":
+		out.Payload, _ = cgotestReadResultString(resultPtr)
+	default:
+		return out, fmt.Errorf("cgotestDispatchPayload: unknown answer kind %q", answers)
+	}
+	return out, nil
+}
+
+// cgotestReleaseComponent deletes the reference a test took with acquireComponent.
+func cgotestReleaseComponent(c *C.wasmtime_component_t) { C.wasmtime_component_delete(c) }

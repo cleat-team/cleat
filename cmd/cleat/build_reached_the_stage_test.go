@@ -32,20 +32,6 @@ const (
 	// rustVetMarker is the Rust checker's OPENING line (vet_rust.go:852), for the
 	// same in-process reason as Java's.
 	rustVetMarker = "Vetting Rust crate"
-
-	// asBuildMarker is the AssemblyScript build's COMPLETION line
-	// (build_as.go:183, `fmt.Printf("  Wrote %s (%s)")`).
-	//
-	// A completion line rather than an opening one, because the AS checker is a
-	// SUBPROCESS: `Compiling AssemblyScript to WASM...` (build_as.go:75) is printed
-	// before `npx asc` runs, and asc can then fail on its own -- so the opening line
-	// does not carry the guarantee the other two do. `  Wrote ` is printed only when
-	// the whole build, checker included, completed.
-	//
-	// This is the file's own signal used the other way round: ARM 1 of
-	// as_build_refuses_nondeterminism_test.go asserts `!Contains(out, "Wrote ")` for
-	// the refused case, which is only meaningful if a non-refused build prints it.
-	asBuildMarker = "  Wrote "
 )
 
 // The two failure texts are built here rather than written inline at each call site,
@@ -97,11 +83,11 @@ func requireBuildStarted(t *testing.T, err error) {
 // arm depends on, so that "no finding was reported" means the check looked and found
 // nothing rather than that nothing looked.
 //
-// marker is a parameter rather than a default because the three callers pass
-// different KINDS of line, and that is a fact about each checker rather than a style
-// choice: Java's and Rust's run in-process, so their opening line suffices;
-// AssemblyScript's runs as a subprocess, so only its completion line does. Copying
-// one language's marker to another is the mistake this measures against.
+// marker is a parameter rather than a default because callers can pass different
+// KINDS of line, and that is a fact about each checker rather than a style choice:
+// Java's and Rust's run in-process, so their opening line suffices, where a
+// checker that runs as a subprocess needs its completion line. Copying one
+// language's marker to another is the mistake this measures against.
 //
 // This check is SEPARABLE from requireBuildStarted, and deliberately so rather than
 // incidentally. A build that never starts is caught there; a build that starts and

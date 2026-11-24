@@ -11,11 +11,12 @@ package engine
 // MySQL and SQL Server returned an empty payload for it. This pins that all three agree and that the list is
 // still readable beside an ordinary request.
 //
-// Deliberately NOT asserted: what a string payload reads back as. Unsealed it is unquoted on every dialect
-// (`"yes"` reads back `yes`, `hello` reads back `hello`), by the contract that a payload which was not JSON is
-// stored wrapped and handed back as passed (decodeJSONPayload), shared with signals. Sealed on PostgreSQL it comes
-// back as the JSON text it was sealed from (`"yes"`, `"hello"`), so encryption changes what an update handler is
-// handed. That is a separate question from this one and is left to cleat#3822.
+// Deliberately NOT asserted here: what a string payload reads back as, beyond the null case below. Unsealed it
+// is unquoted on every dialect (`"yes"` reads back `yes`, `hello` reads back `hello`), by the contract that a
+// payload which was not JSON is stored wrapped and handed back as passed (decodeJSONPayload), shared with signals.
+// When this test was written the sealed PostgreSQL arm broke that contract instead, coming back as the JSON text
+// the value was sealed from; cleat#3852 made that read go through decodeJSONPayload too, so both arms now agree
+// and TestASealedUpdatePayloadIsHandedBackAsAnUnsealedOne holds the whole payload set to it.
 
 import (
 	"context"
@@ -48,9 +49,15 @@ func TestAJSONNullUpdatePayloadDoesNotBreakThePendingList(t *testing.T) {
 					case *PostgresStore:
 						store = s.WithEncryption(enc, true)
 					case *MySQLStore:
-						store = s.WithEncryption(enc, true)
+						// This arm asks for a sealed read on a dialect that cannot
+						// seal. Since cleat#3906 that is refused at construction
+						// rather than half-applied, so the arm asserts the refusal
+						// and stops; the plain arm above covers the read itself.
+						assertEnablingPayloadEncryptionIsRefused(t, "MySQL", func() { s.WithEncryption(enc, true) })
+						return
 					case *MSSQLStore:
-						store = s.WithEncryption(enc, true)
+						assertEnablingPayloadEncryptionIsRefused(t, "SQL Server", func() { s.WithEncryption(enc, true) })
+						return
 					default:
 						t.Fatalf("%T has no WithEncryption; seal it deliberately rather than reporting a pass on a store this test did not exercise", base)
 					}
@@ -82,22 +89,13 @@ func TestAJSONNullUpdatePayloadDoesNotBreakThePendingList(t *testing.T) {
 				if got["first"] != `{"n":1}` {
 					t.Errorf("the object payload read back as %q, want %q", got["first"], `{"n":1}`)
 				}
-				// MySQL and SQL Server read a null payload as an empty string. PostgreSQL does too unless the payload
-				// was sealed: a sealed value comes back as the JSON text it was sealed from, `null`, as it does for
-				// every other value that is not an object or number (a string comes back quoted; see below).
-				//
-				// THE SEALED PostgreSQL EXPECTATION IS CURRENT BEHAVIOUR, NOT A CONTRACT, and it is meant to change:
-				// the decision (cleat#3852) is that encryption must be transparent, so when that lands this arm's
-				// answer becomes "" and this branch goes. The mysql and mssql "sealed" arms are the plain arms again:
-				// `--encrypt-sensitive-payloads` is PostgreSQL-only and those stores' CreateUpdateRequest only runs
-				// encodeJSONPayload, so WithEncryption seals nothing there. They are kept so the table is complete,
-				// not because they exercise a sealed path.
-				want := ""
-				if backend.Name() == "postgres" && sealed {
-					want = "null"
-				}
-				if got["second"] != want {
-					t.Errorf("the null payload read back as %q, want %q", got["second"], want)
+				// MySQL and SQL Server read a null payload as an empty string, and PostgreSQL does too sealed or
+				// unsealed: cleat#3852 routed the sealed read through decodeJSONPayload, whose json.Unmarshal of
+				// a bare `null` into a string is a no-op that returns "", the same answer COALESCE gives the
+				// unsealed read. This arm pinned the OLD sealed answer (`null`) until then; the update is the fix,
+				// and the sealed arm is kept so the table stays complete rather than silently losing a column.
+				if got["second"] != "" {
+					t.Errorf("the null payload read back as %q, want %q", got["second"], "")
 				}
 			})
 		}

@@ -15,6 +15,9 @@ Quick start:
         return resp
 """
 
+# Puts the modules that a call imports on first use into every component (cleat#4266). It must stay imported from here: componentize-py builds by
+# importing the workflow's module, and every workflow imports this package.
+from . import _stdlib_preload  # noqa: F401
 from .agent import AGENT_WORKFLOW_NAME, AgentConfig, Tool, run_agent
 from .client import CleatClient
 from .entry import cleat_entry, virtual_object

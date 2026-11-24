@@ -376,6 +376,11 @@ public class HostCalls {
         int resultPtr, int resultLen,
         int outPtr, int outMaxLen);
 
+    // cleat#4113, ABI 2.43a: is the value of this side effect already recorded? Asked BEFORE the function runs.
+    @Import(module = "env", name = "cleat_side_effect_recorded")
+    private static native long cleatSideEffectRecordedRaw(
+        int outPtr, int outMaxLen);
+
     @Import(module = "env", name = "cleat_set_scope")
     private static native long cleatSetScopeRaw(
         int objTypePtr, int objTypeLen,
@@ -843,6 +848,9 @@ public class HostCalls {
 
         long result = cleatContinueAsNewRaw(p[0], p[1]);
 
+        // cleat#4159: the host refuses a continuation in a defer segment; read as an error code a stop is a success.
+        Memory.throwIfStopped(result);
+
         int errCode = Memory.decodeSimpleErrCode(result);
         if (errCode != 0) {
             return CleatResult.err("continueAsNew(...) failed: host returned error code " + errCode + ". Check that the input JSON is valid and continue-as-new is available.");
@@ -872,6 +880,9 @@ public class HostCalls {
 
         long result = cleatContinueAsNewVersionedRaw(p[0], p[1], newVersion);
 
+        // cleat#4159: the host refuses a continuation in a defer segment; read as an error code a stop is a success.
+        Memory.throwIfStopped(result);
+
         int errCode = Memory.decodeSimpleErrCode(result);
         if (errCode != 0) {
             return CleatResult.err("continueAsNewVersioned(...) failed: host returned error code " + errCode + ". Check that the input JSON is valid and version is valid.");
@@ -896,6 +907,11 @@ public class HostCalls {
         long result = cleatCreatePromiseRaw(
             p[0], p[1],
             Memory.OUTPUT_OFFSET, Memory.OUT_BUF_SIZE);
+
+        // The host refuses a promise created by a defer segment's workflow body
+        // (cleat#4079 audit). The refusal reads as errCode 0 with an empty id in
+        // this layout, a SUCCESSFUL create_promise, so ask before decoding.
+        Memory.throwIfStopped(result);
 
         int errCode = Memory.decodeSimpleErrCode(result);
         int idLen = Memory.decodeSimpleExtra(result);
@@ -993,7 +1009,9 @@ public class HostCalls {
      * Wait for a child workflow to complete and retrieve its result.
      * <p>
      * If the child has not yet completed, this call triggers a workflow
-     * suspension.  The host resumes the workflow when the child finishes.
+     * suspension: it throws {@link SuspendSignal}, which the generated entry
+     * wrapper turns into the suspend sentinel, so the code after the call does
+     * not run.  The host resumes the workflow when the child finishes.
      *
      * @param runID the child workflow run ID (from
      *              {@link #childWorkflow(String, String)})
@@ -1010,7 +1028,10 @@ public class HostCalls {
 
         // Check for suspension sentinel before decoding the result.
         if (result == Memory.SUSPEND_SENTINEL) {
-            return CleatResult.err("child workflow not yet complete; workflow must suspend");
+            // Throw, as sleep does: the host has recorded the suspension and answered the suspend word, and a guest that is handed an
+            // ordinary value for it can handle that value and carry on, making calls the host records AFTER the pending await and runs
+            // again on the resume (cleat#4285). The word is 1<<62, packAwaitChildResultSuspend, not the stop bit throwIfStopped reads.
+            throw new SuspendSignal();
         }
 
         int errCode = Memory.decodeSimpleErrCode(result);
@@ -1064,8 +1085,9 @@ public class HostCalls {
      * this millisecond variant.
      *
      * @param promiseId the promise ID to wait for
-     * @param timeoutMs maximum wait time in milliseconds (use
-     *                  {@link Long#MAX_VALUE} for no timeout)
+     * @param timeoutMs maximum wait time in milliseconds. Zero or negative does NOT
+     *                  wait (the result is a timeout at once; cleat#4144); use
+     *                  {@link Long#MAX_VALUE} for no timeout
      * @return a result containing an {@link AwaitPromiseResult} with the
      *         resolved value and timeout indicator
      */
@@ -1103,14 +1125,29 @@ public class HostCalls {
      * {@link #awaitPromiseMs(String, long)}.
      *
      * @param promiseId      the promise ID to wait for
-     * @param timeoutSeconds maximum wait time in seconds (use
-     *                       {@link Long#MAX_VALUE} for no timeout)
+     * @param timeoutSeconds maximum wait time in seconds. Zero or negative does NOT
+     *                       wait (the result is a timeout at once; cleat#4144); use
+     *                       {@link Long#MAX_VALUE} for no timeout
      * @return a result containing an {@link AwaitPromiseResult} with the
      *         resolved value and timeout indicator
      * @see #awaitPromiseMs(String, long)
      */
     public CleatResult<AwaitPromiseResult> awaitPromise(String promiseId, long timeoutSeconds) {
-        return awaitPromiseMs(promiseId, timeoutSeconds * 1000);
+        return awaitPromiseMs(promiseId, secondsToMs(timeoutSeconds));
+    }
+
+    /**
+     * A whole-second wait as the milliseconds the host is given, saturating at {@link Long#MAX_VALUE} (cleat#4144).
+     * <p>
+     * {@code timeoutSeconds * 1000} wrapped: the documented "use {@link Long#MAX_VALUE} for no timeout" computed
+     * {@code -1000}, a NEGATIVE the host reads as "do not wait". Saturating keeps the idiom meaning what the Javadoc says; the
+     * host clamps the value it receives (cleat#4105). Zero and negative values are returned as they are.
+     */
+    static long secondsToMs(long timeoutSeconds) {
+        if (timeoutSeconds > Long.MAX_VALUE / 1000) {
+            return Long.MAX_VALUE;
+        }
+        return timeoutSeconds * 1000;
     }
 
     /**
@@ -1128,8 +1165,9 @@ public class HostCalls {
      * over this millisecond variant.
      *
      * @param signalNames the signal names to wait for
-     * @param timeoutMs   maximum wait time in milliseconds (use
-     *                    {@link Long#MAX_VALUE} for no timeout)
+     * @param timeoutMs   maximum wait time in milliseconds. Zero or negative does NOT
+     *                    wait (the result is a timeout at once; cleat#4144); use
+     *                    {@link Long#MAX_VALUE} for no timeout
      * @return a result containing an {@link AwaitSignalsResult} with the
      *         received signal name, payload, and timeout indicator
      */
@@ -1210,14 +1248,15 @@ public class HostCalls {
      * {@link #awaitSignalsMs(String[], long)}.
      *
      * @param signalNames   the signal names to wait for
-     * @param timeoutSeconds maximum wait time in seconds (use
-     *                       {@link Long#MAX_VALUE} for no timeout)
+     * @param timeoutSeconds maximum wait time in seconds. Zero or negative does NOT
+     *                       wait (the result is a timeout at once; cleat#4144); use
+     *                       {@link Long#MAX_VALUE} for no timeout
      * @return a result containing an {@link AwaitSignalsResult} with the
      *         received signal name, payload, and timeout indicator
      * @see #awaitSignalsMs(String[], long)
      */
     public CleatResult<AwaitSignalsResult> awaitSignals(String[] signalNames, long timeoutSeconds) {
-        return awaitSignalsMs(signalNames, timeoutSeconds * 1000);
+        return awaitSignalsMs(signalNames, secondsToMs(timeoutSeconds));
     }
 
     /**
@@ -1723,6 +1762,11 @@ public class HostCalls {
             instKeyOff, instKeyLen,
             Memory.OUTPUT_OFFSET, Memory.OUT_BUF_SIZE);
 
+        // The host refuses a scope taken by a defer segment's workflow body
+        // (cleat#4079 audit); the refusal reads as a successful set_scope with an
+        // empty previous scope, so ask before anything below runs on.
+        Memory.throwIfStopped(result);
+
         // Still update _scopePrefix for backward compat with state operations.
         this._scopePrefix = (objectType != null && !objectType.isEmpty()
             && instanceKey != null && !instanceKey.isEmpty())
@@ -2142,6 +2186,11 @@ public class HostCalls {
 
         long result = cleatResolvePromiseRaw(idOff, idLen, valOff, valLen);
 
+        // The host refuses this call in a defer segment (cleat#4079): settling a promise is an effect another run may be waiting
+        // on. The refusal is bit 31, and decodeSimpleErrCode reads the low byte, where a stop is 0 -- an ordinary success, so
+        // the guest would report the promise settled. Ask BEFORE decoding.
+        Memory.throwIfStopped(result);
+
         int errCode = Memory.decodeSimpleErrCode(result);
         if (errCode != 0) {
             return CleatResult.err("resolvePromise(id=\"" + id + "\") failed: host returned error code " + errCode + ". Check that the promise ID is valid.");
@@ -2163,6 +2212,11 @@ public class HostCalls {
         int idLen = p[2], errLen = p[3];
 
         long result = cleatRejectPromiseRaw(idOff, idLen, errOff, errLen);
+
+        // The host refuses this call in a defer segment (cleat#4079): settling a promise is an effect another run may be waiting
+        // on. The refusal is bit 31, and decodeSimpleErrCode reads the low byte, where a stop is 0 -- an ordinary success, so
+        // the guest would report the promise settled. Ask BEFORE decoding.
+        Memory.throwIfStopped(result);
 
         int errCode = Memory.decodeSimpleErrCode(result);
         if (errCode != 0) {
@@ -2378,6 +2432,11 @@ public class HostCalls {
      * in the workflow event history.  On replay, the recorded result is
      * returned instead of re-executing the side effect.
      *
+     * <p>
+     * The value was computed BEFORE the host could be asked, so this cannot stop the computation running again on replay; the
+     * host returns the recorded value rather than failing the replay when the two differ (cleat#4113). To freeze a value, use
+     * {@link #sideEffectOnce(java.util.function.Supplier)}.
+     *
      * @param computedResult the result of the side effect computation
      * @return a result containing the side effect output on success, or an
      *         error description on failure
@@ -2403,6 +2462,35 @@ public class HostCalls {
 
         String output = readOutput(outLen);
         return CleatResult.ok(output);
+    }
+
+    /**
+     * Freeze a value (cleat#4113): call {@code compute} once, on first execution, and record its result; on every replay
+     * return the recorded value WITHOUT calling {@code compute}.
+     * <p>
+     * {@link #sideEffect(String)} takes a value that was computed before the host could be asked, so it cannot stop the
+     * computation running again on replay (the host now returns the recorded value instead of failing the replay). This
+     * method asks first. {@code compute} must not make host calls: each consumes a step of the history.
+     *
+     * @param compute computes the value, on first execution only
+     * @return the recorded value, or an error description (a refused lookup unwinds instead, see {@link Memory#throwIfStopped})
+     */
+    public CleatResult<String> sideEffectOnce(java.util.function.Supplier<String> compute) {
+        long result = cleatSideEffectRecordedRaw(Memory.OUTPUT_OFFSET, Memory.OUT_BUF_SIZE);
+
+        // Bit 31 before any field: a fresh lookup in a stopped workflow is refused so the function never runs.
+        Memory.throwIfStopped(result);
+
+        int status = Memory.decodeSimpleErrCode(result);
+        int outLen = Memory.decodeSimpleExtra(result);
+        if (status == 0) {
+            return CleatResult.ok(readOutput(outLen));
+        }
+        if (status != 2) {
+            return CleatResult.err(hostMessageOr(outLen, "sideEffect(...) lookup failed: host status " + status + "."));
+        }
+        // 2: nothing is recorded, nothing changed. Compute, then record.
+        return sideEffect(compute.get());
     }
 
 
@@ -2449,7 +2537,8 @@ public class HostCalls {
         // workflow was handed an Ok carrying 64 KiB of buffer instead of being
         // told to suspend (cleat#3430). Same check as awaitAnyChild.
         if (result == Memory.SUSPEND_SENTINEL) {
-            return CleatResult.err("not all child workflows complete yet; workflow must suspend");
+            // Throw, as sleep does (cleat#4285; see awaitChild).
+            throw new SuspendSignal();
         }
 
         int errCode = Memory.decodeSimpleErrCode(result);
@@ -2498,7 +2587,8 @@ public class HostCalls {
 
         // Check for suspension sentinel before decoding the result.
         if (result == Memory.SUSPEND_SENTINEL) {
-            return CleatResult.err("no child workflow yet complete; workflow must suspend");
+            // Throw, as sleep does (cleat#4285; see awaitChild).
+            throw new SuspendSignal();
         }
 
         int errCode = Memory.decodeSimpleErrCode(result);
@@ -2578,11 +2668,13 @@ public class HostCalls {
     /**
      * Remove a previously registered cron schedule by its ID.
      * <p>
-     * There is no stop-bit check here, and that is deliberate rather than an
-     * omission: {@code DeleteCron} does not call {@code stopBeforeNewWork}
-     * host-side, because removing a schedule is not new work. Verified against
-     * {@code engine/schedules.go} on 2026-09-07; {@code ScheduleCron} is the
-     * only one of the three that can be refused.
+     * The host refuses this in a defer segment's workflow body, past the end of
+     * its recorded history, and marks the refusal with bit 31 (cleat#4083). It
+     * was unguarded until then, and a terminated workflow's segment deleted a
+     * schedule the workflow had not reached. The refusal reads as errCode 0 in
+     * this layout, which is a SUCCESSFUL delete, so the stop is tested before
+     * the result is decoded and unwinds the guest. A defer body's own call is
+     * not refused.
      *
      * @param scheduleID the schedule ID returned by scheduleCron
      * @return a result indicating success, or an error description
@@ -2590,6 +2682,8 @@ public class HostCalls {
     public CleatResult<Void> deleteCron(String scheduleID) {
         int[] p = packStrings(scheduleID);
         long result = cleatDeleteCronRaw(p[0], p[1]);
+
+        Memory.throwIfStopped(result);
 
         int errCode = Memory.decodeSimpleErrCode(result);
         if (errCode != 0) {
@@ -2603,8 +2697,9 @@ public class HostCalls {
     /**
      * List all registered cron schedules, as a JSON array.
      * <p>
-     * See {@link #deleteCron(String)} for why there is no stop-bit check here
-     * either.
+     * There is no stop-bit check here, deliberately: this is a read that changes
+     * no schedule, so the host never refuses it (cleat#4083 left it unguarded on
+     * purpose). Unlike {@link #deleteCron(String)}, a refusal is not possible.
      *
      * @return a result containing the JSON array of schedules, or an error
      */
@@ -2912,15 +3007,45 @@ public class HostCalls {
 
         Memory.throwIfStopped(result);
 
-        int errCode = Memory.decodeCallErrCode(result);
-        int responseLen = Memory.decodeCallResponseLen(result);
+        return fetchResult(result, HostCalls::readOutput);
+    }
 
-        if (errCode != 0) {
-            String errMsg = readOutput(responseLen);
-            return CleatResult.err(errMsg);
+    /**
+     * Decode the {@code long} the host returns from {@code cleat_fetch}.
+     *
+     * <p>The host packs it with {@code packSimpleResult} (engine/memory.go): the
+     * length is bits 32-63 and the error code bits 0-7. It is NOT the
+     * {@code cleat_call} layout, whose length is bits 40-63, and this method
+     * used to decode it as that one -- so the length read as {@code written >> 8},
+     * which is 0 for any answer under 256 bytes and a truncation above, and every
+     * fetch failed with an empty-JSON parse error (cleat#4039).
+     *
+     * <p>Package-private and static, taking the output reader as a parameter, so
+     * a test can hand it the value the engine really packs and observe which
+     * length it asks for. The native import underneath cannot be called from a
+     * unit test.
+     */
+    static CleatResult<FetchResult> fetchResult(long result, java.util.function.IntFunction<String> read) {
+        CleatResult<String> text = simpleTextResult(result, read);
+        if (text.isErr()) {
+            return CleatResult.err(text.getError());
         }
+        return parseFetchResponse(text.getValue());
+    }
 
-        return parseFetchResponse(readOutput(responseLen));
+    /**
+     * Decode a host call that returns text through {@code packSimpleResult}:
+     * error code in bits 0-7, output length in bits 32-63. Used by
+     * {@code cleat_fetch}, {@code cleat_json_parse} and
+     * {@code cleat_json_stringify}. The durable-call family ({@code cleat_call},
+     * {@code cleat_call_retry}, the plugin calls, ...) uses a different layout
+     * and its own decoders in {@link Memory}.
+     */
+    static CleatResult<String> simpleTextResult(long result, java.util.function.IntFunction<String> read) {
+        int errCode = Memory.decodeSimpleErrCode(result);
+        int len = Memory.decodeSimpleExtra(result);
+        String text = read.apply(len);
+        return errCode != 0 ? CleatResult.err(text) : CleatResult.ok(text);
     }
 
     /**
@@ -3115,16 +3240,8 @@ public class HostCalls {
             p[0], p[1],
             Memory.OUTPUT_OFFSET, Memory.OUT_BUF_SIZE);
 
-        int errCode = Memory.decodeCallErrCode(result);
-        int outLen = Memory.decodeCallResponseLen(result);
-
-        if (errCode != 0) {
-            String errMsg = readOutput(outLen);
-            return CleatResult.err(errMsg);
-        }
-
-        String normalized = readOutput(outLen);
-        return CleatResult.ok(normalized);
+        // packSimpleResult, NOT the cleat_call layout (cleat#4039).
+        return simpleTextResult(result, HostCalls::readOutput);
     }
 
     /**
@@ -3145,16 +3262,8 @@ public class HostCalls {
             p[0], p[1],
             Memory.OUTPUT_OFFSET, Memory.OUT_BUF_SIZE);
 
-        int errCode = Memory.decodeCallErrCode(result);
-        int outLen = Memory.decodeCallResponseLen(result);
-
-        if (errCode != 0) {
-            String errMsg = readOutput(outLen);
-            return CleatResult.err(errMsg);
-        }
-
-        String canonical = readOutput(outLen);
-        return CleatResult.ok(canonical);
+        // packSimpleResult, NOT the cleat_call layout (cleat#4039).
+        return simpleTextResult(result, HostCalls::readOutput);
     }
 
     // ========================================================================

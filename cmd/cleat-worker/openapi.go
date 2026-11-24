@@ -47,7 +47,7 @@ func (s *apiServer) handleOpenAPIDocument(w http.ResponseWriter, r *http.Request
 
 	defs, err := st.ListWorkflowDefs(r.Context(), "")
 	if err != nil {
-		s.writeError(w, http.StatusInternalServerError, err.Error())
+		s.writeStoreError(w, r, err)
 		return
 	}
 

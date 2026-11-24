@@ -65,7 +65,7 @@ and syscall boundary but not the CPU/wall-clock one.
   (default 30s, `DefaultWasmtimeExecutionTimeout` in
   `engine/wasmtime_options.go`, configurable via `--wasm-instance-timeout`),
   an optional instruction/fuel budget (`--wasm-instruction-limit`), and a
-  linear-memory ceiling (default 32 MiB per module,
+  linear-memory ceiling (default 256 MiB per module,
   `DefaultWasmtimeMemoryLimitBytes`, configurable via `--wasm-memory-max-mb`).
   These bound even a WASM module stuck in a tight loop that never calls back
   into the host — see CLAUDE.md's note that this differs between wasmtime's two
