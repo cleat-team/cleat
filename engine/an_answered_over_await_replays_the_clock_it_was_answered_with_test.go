@@ -466,3 +466,57 @@ func TestTheEventChecksumDoesNotCoverTheTimestampAnAnswerOverRewrites(t *testing
 		t.Errorf("control: the checksum does not cover the response, so the comparison above measured nothing")
 	}
 }
+
+// The guard that lets a writer set created_at is the same one that freezes the row once it is answered: only a PENDING await is written over. A stray write
+// of the same step that arrives LATER (a batch flushed twice, a retried flush) must change neither the answer nor its time. The existing immutability tests
+// re-flush with the same TimestampMs, which cannot tell a frozen created_at from a rewritten one, so this one gives the stray write a much later time.
+//
+// Without the guard, the MySQL assignment `created_at = VALUES(created_at)` would store the stray's time beside a response that stayed frozen, and a replay
+// would read a clock from the future of the answer.
+func TestAStrayReflushOverAnAnsweredAwaitKeepsTheAnswersTimestamp(t *testing.T) {
+	eachDialectDB(t, func(t *testing.T, d testutil.Dialect, db *sql.DB, store WorkflowStore) {
+		for _, tc := range []struct {
+			name  string
+			stray func(t0 int64) EventRecord
+		}{
+			{"the_pending_record_written_again_later", func(t0 int64) EventRecord {
+				return EventRecord{Step: 0, EventType: EventTypeAwaitChild, RunID: "r1", TimestampMs: t0 + 5000}
+			}},
+			{"the_answer_written_again_later", func(t0 int64) EventRecord {
+				return EventRecord{Step: 0, EventType: EventTypeAwaitChild, RunID: "r1", Response: `{"ok":true}`, TimestampMs: t0 + 5000}
+			}},
+		} {
+			tc := tc
+			t.Run(tc.name, func(t *testing.T) {
+				ctx := context.Background()
+				wfID := uniqueRunID("answer-over-stray-" + string(d))
+				seedWorkflowInstance(t, db, d, wfID)
+				t0 := time.Now().UnixMilli() - 10000
+				write := func(rec EventRecord) {
+					t.Helper()
+					if err := store.AppendEventHistoryBatch(ctx, wfID, []EventRecord{rec}); err != nil {
+						t.Fatalf("append %+v: %v", rec, err)
+					}
+				}
+				write(EventRecord{Step: 0, EventType: EventTypeAwaitChild, RunID: "r1", TimestampMs: t0})
+				answer := EventRecord{Step: 0, EventType: EventTypeAwaitChild, RunID: "r1", Response: `{"ok":true}`, TimestampMs: t0 + 100}
+				write(answer)
+				read := func() EventRecord {
+					t.Helper()
+					h, err := store.LoadEventHistory(ctx, wfID)
+					if err != nil || len(h) != 1 {
+						t.Fatalf("load history: %v, %d records", err, len(h))
+					}
+					return h[0]
+				}
+				if got := read(); got.Response != answer.Response || got.TimestampMs != answer.TimestampMs {
+					t.Fatalf("precondition: the answer was not stored with its own time: response %q at %d, want %q at %d", got.Response, got.TimestampMs, answer.Response, answer.TimestampMs)
+				}
+				write(tc.stray(t0))
+				if got := read(); got.Response != answer.Response || got.TimestampMs != answer.TimestampMs {
+					t.Errorf("a stray write of an answered await changed it: response %q at %d (%+dms), want %q at %d", got.Response, got.TimestampMs, got.TimestampMs-answer.TimestampMs, answer.Response, answer.TimestampMs)
+				}
+			})
+		}
+	})
+}
