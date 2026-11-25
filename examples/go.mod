@@ -23,12 +23,12 @@ require (
 	github.com/cleat-team/cleat v0.5.0 // indirect
 	github.com/go-logr/logr v1.4.4 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect
-	github.com/go-sql-driver/mysql v1.10.1 // indirect
+	github.com/go-sql-driver/mysql v1.10.2 // indirect
 	github.com/golang-sql/civil v0.0.0-20220223132316-b832511892a9 // indirect
 	github.com/golang-sql/sqlexp v0.1.0 // indirect
 	github.com/grpc-ecosystem/grpc-gateway/v2 v2.30.0 // indirect
 	github.com/lib/pq v1.12.3 // indirect
-	github.com/microsoft/go-mssqldb v1.11.2 // indirect
+	github.com/microsoft/go-mssqldb v1.12.0 // indirect
 	github.com/shopspring/decimal v1.4.0 // indirect
 	github.com/tetratelabs/wazero v1.12.0 // indirect
 	go.opentelemetry.io/auto/sdk v1.2.1 // indirect
@@ -43,11 +43,11 @@ require (
 	go.opentelemetry.io/proto/otlp v1.11.0 // indirect
 	golang.org/x/crypto v0.59.0 // indirect
 	golang.org/x/mod v0.43.0 // indirect
-	golang.org/x/net v0.62.0 // indirect
+	golang.org/x/net v0.63.0 // indirect
 	golang.org/x/sync v0.25.0 // indirect
 	golang.org/x/sys v0.50.0 // indirect
 	golang.org/x/text v0.44.0 // indirect
-	golang.org/x/tools v0.52.0 // indirect
+	golang.org/x/tools v0.53.0 // indirect
 	google.golang.org/genproto/googleapis/api v0.0.0-20260928230214-8a89bd6388cc // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260928230214-8a89bd6388cc // indirect
 	google.golang.org/grpc v1.83.2 // indirect
