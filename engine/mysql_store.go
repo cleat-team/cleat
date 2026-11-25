@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/go-sql-driver/mysql"
@@ -106,6 +107,12 @@ type MySQLStore struct {
 	// contain the same decryption guard as the Postgres variant.
 	encryption               *PayloadEncryption
 	encryptSensitivePayloads bool
+
+	// lockConflictRetries, when a TEST sets it, counts the whole-transaction retries retryingLockConflict makes on this store: each time InnoDB refused a transaction as
+	// a deadlock victim (1213) or a lock wait timeout (1205) and it was run again. It is nil in production and then costs one nil check. A pointer and not an
+	// atomic.Int64 value because this struct is copied by value (per-tenant clones). It exists because the only server-side evidence of a deadlock, INNODB_METRICS
+	// lock_deadlocks, is server-wide and moves for any session, so a test that engineers a deadlock could not tell its own from another test's (cleat#4444).
+	lockConflictRetries *atomic.Int64
 
 	// perTenantDatabase records that this store was built by
 	// MySQLStoreFactory, whose topology gives each tenant its own physical

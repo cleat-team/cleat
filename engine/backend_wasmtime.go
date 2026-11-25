@@ -125,6 +125,15 @@ type wasmtimeBackend struct {
 	components   *componentCache // compiled components, in moduleCache's LRU (cleat#3748); PerExecution must copy it
 	compileLocks *sync.Map       // per-key *sync.Mutex to serialize compilation
 
+	// componentCompileSem lets ONE component compile run at a time in this worker's container, whichever way it is compiled (in this process, in a precompile child, or in this process
+	// after the child failed). compileLocks stops two runs compiling the SAME component and nothing stops two DIFFERENT ones, so a cold start that claims runs of six distinct Python
+	// components compiled six at once: measured 2026-11-23 in a 2Gi container, 40 MiB to the limit in 17 seconds and OOM-killed. A nil channel (a backend built without one) is no limit. Shared
+	// by every PerExecution copy, like compileLocks.
+	componentCompileSem chan struct{}
+
+	// compileHeadroom, when non-nil, refuses an in-process component compile the container has no memory left for (WithWasmtimeCompileHeadroom). Shared by every PerExecution copy.
+	compileHeadroom *compileHeadroom
+
 	// precompiler, when non-nil, compiles components in a child process (WithWasmtimeComponentPrecompile). Shared by every PerExecution copy; the root backend owns its directory.
 	precompiler *componentPrecompiler
 	metaCache   *sync.Map // per-key *wasmMeta (envNeeded, hasWasi, language)
@@ -217,21 +226,24 @@ func NewWasmtimeBackend(ctx context.Context, opts ...WasmtimeOption) (*wasmtimeB
 
 	moduleCache := newModuleLRU(bcfg.moduleCacheMaxEntries, bcfg.moduleCacheMaxBytes)
 	b := &wasmtimeBackend{
-		engine:       eng,
-		moduleCache:  moduleCache,
-		components:   newComponentCache(moduleCache),
-		compileLocks: new(sync.Map),
-		metaCache:    new(sync.Map),
-		limits:       lim,
-		logger:       bcfg.logger,
-		epochStop:    make(chan struct{}),
-		epochDone:    make(chan struct{}),
+		engine:              eng,
+		moduleCache:         moduleCache,
+		components:          newComponentCache(moduleCache),
+		compileLocks:        new(sync.Map),
+		componentCompileSem: make(chan struct{}, 1),
+		compileHeadroom:     bcfg.compileHeadroom,
+		metaCache:           new(sync.Map),
+		limits:              lim,
+		logger:              bcfg.logger,
+		epochStop:           make(chan struct{}),
+		epochDone:           make(chan struct{}),
 	}
 	if bcfg.componentPrecompile != nil {
 		// Off unless configured. A failure to set it up leaves the in-process compile, which is what the worker always did.
 		if pc, err := newComponentPrecompiler(*bcfg.componentPrecompile, lim.instructionLimit, bcfg.logger); err != nil {
 			b.log().Warn("component precompile disabled", "error", err)
 		} else {
+			pc.onFallback = bcfg.componentFallbackHook
 			b.precompiler = pc
 		}
 	}
@@ -327,13 +339,15 @@ func (b *wasmtimeBackend) PerExecution(tenantInstanceTimeout time.Duration) Wasm
 	lim.executionTimeout = ClampToCeiling(tenantInstanceTimeout, b.limits.executionTimeout)
 
 	return &wasmtimeBackend{
-		engine:       b.engine,
-		moduleCache:  b.moduleCache,
-		components:   b.components,
-		compileLocks: b.compileLocks,
-		precompiler:  b.precompiler,
-		metaCache:    b.metaCache,
-		limits:       lim,
+		engine:              b.engine,
+		moduleCache:         b.moduleCache,
+		components:          b.components,
+		compileLocks:        b.compileLocks,
+		componentCompileSem: b.componentCompileSem,
+		compileHeadroom:     b.compileHeadroom,
+		precompiler:         b.precompiler,
+		metaCache:           b.metaCache,
+		limits:              lim,
 		// Copied, like limits. A PerExecution copy that dropped the logger
 		// would send every record from the path that actually executes
 		// workflows to slog.Default(), which is the bug this field exists to

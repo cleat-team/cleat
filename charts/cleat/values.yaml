@@ -188,7 +188,7 @@ auth:
 #     Python workflow could not run at all.
 #   - each HELD run (residency, on by default) adds on top: Go about 1.5 MiB, Python 1.3 MiB once
 #     cleat#4382 is in (12 MiB before), C# 17 MiB once cleat#4378 is in (49 before), plus whatever
-#     the guest itself allocates. The compiled-component cache holds about 100 MiB per distinct
+#     the guest itself allocates. The compiled-module cache holds about 100 MiB per distinct
 #     Python component and about 10 to 17 MiB per C# one.
 # RESIDENCY'S BUDGET IS A SHARE OF THE LIMIT: unless --resident-memory-budget-mb is set it is
 # 8 held runs x the dearest per-run charge (66 MiB for C#), 528 MiB, which was MORE than the old
@@ -227,7 +227,7 @@ autoscaling:
   targetCPU: 70
   # -- Memory utilization target (percent of resources.requests.memory). UNSET BY DEFAULT, and the
   # HPA renders no memory metric unless you set it. A worker's memory is dominated by things that
-  # grow by design and do not follow load: the compiled-component cache, the held runs, the
+  # grow by design and do not follow load: the compiled-module cache, the held runs, the
   # allocator's retention. The metric is also a percentage of the REQUEST, and per-pod usage does
   # not fall when replicas are added, so a target below what one warmed worker uses pins the HPA at
   # maxReplicas: with the old 128Mi request the 80% target was 102 MiB, and a warmed Go worker

@@ -80,7 +80,7 @@ func TestARunWhoseComponentCouldNotBeCompiledForMemoryIsReleasedForItsRetryAfter
 			line = l
 		}
 	}
-	for _, want := range []string{`memory_limit_mib="512"`, `parallel_compilation="true"`} {
+	for _, want := range []string{`memory_limit_mib="512"`, `parallel_compilation="true"`, `reason="child_killed"`} {
 		if !strings.Contains(line, want) {
 			t.Errorf("cleat_workflow_releases_total{check=\"component_compile_refused\"} = %q, want it to carry %s", line, want)
 		}

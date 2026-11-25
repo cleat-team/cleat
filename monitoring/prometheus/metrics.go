@@ -65,40 +65,41 @@ type Metrics struct {
 	internalDefs map[string]struct{}
 
 	// --- Counters (Int64Counter) ---
-	workflowsStarted        metric.Int64Counter
-	workflowsCompleted      metric.Int64Counter
-	workflowsFailed         metric.Int64Counter
-	freshSteps              metric.Int64Counter
-	replaySteps             metric.Int64Counter
-	calls                   metric.Int64Counter
-	callRetries             metric.Int64Counter
-	replayFailures          metric.Int64Counter
-	residentParks           metric.Int64Counter
-	residentRefusals        metric.Int64Counter
-	residentEvictions       metric.Int64Counter
-	residentRechecks        metric.Int64Counter
-	replayShortHistories    metric.Int64Counter
-	replayChecksumFailures  metric.Int64Counter
-	ambiguousCalls          metric.Int64Counter
-	compactionEventsDeleted metric.Int64Counter
-	encryptionErrors        metric.Int64Counter
-	decryptionErrors        metric.Int64Counter
-	continueAsNew           metric.Int64Counter
-	eventWriteFailures      metric.Int64Counter
-	wasmFuelExhausted       metric.Int64Counter
-	workflowsDeadLettered   metric.Int64Counter
-	workflowsClaimed        metric.Int64Counter
-	executionsFencedOut     metric.Int64Counter
-	workflowReleases        metric.Int64Counter
-	wasmCacheHits           metric.Int64Counter
-	wasmCacheMisses         metric.Int64Counter
-	eventsDeleted           metric.Int64Counter
-	compactionStateCleared  metric.Int64Counter
-	workflowsPurged         metric.Int64Counter
-	backgroundLoops         metric.Int64Counter
-	backgroundLoopRestarts  metric.Int64Counter
-	pluginEventsLost        metric.Int64Counter
-	secretKeyReloads        metric.Int64Counter
+	workflowsStarted             metric.Int64Counter
+	workflowsCompleted           metric.Int64Counter
+	workflowsFailed              metric.Int64Counter
+	freshSteps                   metric.Int64Counter
+	replaySteps                  metric.Int64Counter
+	calls                        metric.Int64Counter
+	callRetries                  metric.Int64Counter
+	replayFailures               metric.Int64Counter
+	residentParks                metric.Int64Counter
+	residentRefusals             metric.Int64Counter
+	residentEvictions            metric.Int64Counter
+	residentRechecks             metric.Int64Counter
+	replayShortHistories         metric.Int64Counter
+	replayChecksumFailures       metric.Int64Counter
+	ambiguousCalls               metric.Int64Counter
+	compactionEventsDeleted      metric.Int64Counter
+	encryptionErrors             metric.Int64Counter
+	decryptionErrors             metric.Int64Counter
+	continueAsNew                metric.Int64Counter
+	eventWriteFailures           metric.Int64Counter
+	wasmFuelExhausted            metric.Int64Counter
+	componentPrecompileFallbacks metric.Int64Counter
+	workflowsDeadLettered        metric.Int64Counter
+	workflowsClaimed             metric.Int64Counter
+	executionsFencedOut          metric.Int64Counter
+	workflowReleases             metric.Int64Counter
+	wasmCacheHits                metric.Int64Counter
+	wasmCacheMisses              metric.Int64Counter
+	eventsDeleted                metric.Int64Counter
+	compactionStateCleared       metric.Int64Counter
+	workflowsPurged              metric.Int64Counter
+	backgroundLoops              metric.Int64Counter
+	backgroundLoopRestarts       metric.Int64Counter
+	pluginEventsLost             metric.Int64Counter
+	secretKeyReloads             metric.Int64Counter
 
 	// Database reachability (cleat#2007), fed by the worker's deadline-bounded probes.
 	dbReachable            metric.Int64Gauge
@@ -386,6 +387,14 @@ func New(cfg Config) (*Metrics, error) {
 	)
 	if err != nil {
 		return nil, fmt.Errorf("cleat_wasm_fuel_exhausted_total: %w", err)
+	}
+
+	m.componentPrecompileFallbacks, err = meter.Int64Counter(
+		"cleat_component_precompile_fallbacks_total",
+		metric.WithDescription("Components a failed precompile child sent back to this worker to compile in-process, by the stage that failed (timeout, child_exit, record, artifact, deserialize, workdir, other). A rate here means --component-precompile is not protecting the worker's memory"),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("cleat_component_precompile_fallbacks_total: %w", err)
 	}
 
 	m.workflowsDeadLettered, err = meter.Int64Counter(
@@ -1207,6 +1216,12 @@ func (m *Metrics) RecordEventWriteFailure(ctx context.Context, reason string, ex
 func (m *Metrics) RecordWasmFuelExhausted(ctx context.Context, extraAttrs ...attribute.KeyValue) {
 	attrs := m.mergeAttrs(extraAttrs...)
 	m.wasmFuelExhausted.Add(ctx, 1, metric.WithAttributes(attrs...))
+}
+
+// RecordComponentPrecompileFallback counts one component a failed precompile child sent back to this worker to compile in-process.
+func (m *Metrics) RecordComponentPrecompileFallback(ctx context.Context, reason string) {
+	attrs := m.mergeAttrs(attribute.String("reason", reason))
+	m.componentPrecompileFallbacks.Add(ctx, 1, metric.WithAttributes(attrs...))
 }
 
 // RecordPluginCallDuration records a plugin call duration by plugin and function.

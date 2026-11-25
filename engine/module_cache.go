@@ -261,17 +261,18 @@ func (c *moduleLRU) loadHeld(key string, acquire func(held any) any) (any, bool)
 
 // storeHeld inserts an artifact the cache owns one reference to. release drops
 // that reference, and runs when the entry is evicted, replaced or drained,
-// never under the lock. wasmLen is the length of the wasm it was compiled from,
-// which sets its share of the byte bound exactly as for a module.
+// never under the lock. est is its cost against the byte bound, which for a
+// compiled component is CompiledComponentSizeEstimate over its serialized
+// artifact and not an estimate over its wasm's length: a component's wasm is
+// mostly a memory snapshot, so its length does not predict the cost (cleat#4389).
 //
 // The artifacts share the modules' budget on purpose: one entry bound and one
 // byte bound a deployment can size against, not two that add up to twice what it
 // was told.
-func (c *moduleLRU) storeHeld(key string, held any, release func(), wasmLen int) {
+func (c *moduleLRU) storeHeld(key string, held any, release func(), est int64) {
 	var releases []func()
 	var evicted []string
 	c.mu.Lock()
-	est := CompiledSizeEstimate(wasmLen)
 	if elem, ok := c.index[key]; ok {
 		entry := elem.Value.(*moduleEntry)
 		if entry.release != nil {

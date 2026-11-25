@@ -8910,7 +8910,7 @@ func (w *Worker) releaseForLimitsUnavailable(wf *engine.WorkflowInstance, cause 
 // memory limit (engine.ErrComponentCompileRefused). The guest never ran, so there is no outcome to record; the run is released, not failed, and it may be served by a worker with more
 // memory. It is released for the refusal's retry-after, which is also how long THIS worker refuses to start another child for that component.
 //
-// ERROR, rate-limited per run, and counted on cleat_workflow_releases_total{check="component_compile_refused"} with the memory limit and the compile mode as labels: a deployment
+// ERROR, rate-limited per run, and counted on cleat_workflow_releases_total{check="component_compile_refused"} with the memory limit, the compile mode and the reason (child_killed, or low_headroom for an in-process compile the container had no memory left for) as labels: a deployment
 // whose limit is too small for its component stops running that workflow here, and has to be able to see it.
 func (w *Worker) releaseForComponentCompileRefused(wf *engine.WorkflowInstance, cause error) {
 	ctx := context.Background()
@@ -8922,7 +8922,8 @@ func (w *Worker) releaseForComponentCompileRefused(wf *engine.WorkflowInstance, 
 		retryAfter = ref.RetryAfter
 		// STRINGS: the text exposition renders a label value with AsString, which is empty for an int or bool attribute.
 		attrs = append(attrs, attribute.String("memory_limit_mib", strconv.FormatUint(ref.MemoryLimitBytes>>20, 10)),
-			attribute.String("parallel_compilation", strconv.FormatBool(ref.ParallelCompilation)))
+			attribute.String("parallel_compilation", strconv.FormatBool(ref.ParallelCompilation)),
+			attribute.String("reason", ref.ReasonLabel()))
 	}
 	if w.Metrics != nil {
 		w.Metrics.RecordWorkflowRelease(ctx, op, attrs...)

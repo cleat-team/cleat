@@ -126,12 +126,36 @@ def report(problems):
     return "\n".join(lines)
 
 
+def read_input(name):
+    """The value of <name>: the file <name>_FILE names if that is set, else the environment variable <name>.
+
+    A FILE, because Linux caps one environment string at 131,072 bytes (MAX_ARG_STRLEN) and a re-cut PR's commit
+    messages are several times that (cleat#4456: 358,419 bytes, `python3` could not even be started). The
+    environment form stays for a caller that supplies small values directly. Returns None when neither is set,
+    and raises Unmeasured when a file is named but cannot be read as UTF-8: a path that was supplied and not
+    read must never be treated as an empty value, which is the "unset becomes empty and passes" collapse this
+    script's UNMEASURED guard exists for. Trailing newlines are dropped, as `$(...)` dropped them.
+    """
+    path = os.environ.get(name + "_FILE")
+    if path is None:
+        return os.environ.get(name)
+    try:
+        with open(path, encoding="utf-8") as f:
+            return f.read().rstrip("\n")
+    except (OSError, UnicodeDecodeError) as e:
+        raise Unmeasured(f"{name}_FILE={path!r} was supplied but could not be read: {e}")
+
+
 def main():
-    pr_body = os.environ.get("PR_BODY")
-    commit_messages = os.environ.get("COMMIT_MESSAGES")
-    closing_issues_json = os.environ.get("CLOSING_ISSUES")
+    try:
+        pr_body = read_input("PR_BODY")
+        commit_messages = read_input("COMMIT_MESSAGES")
+        closing_issues_json = read_input("CLOSING_ISSUES")
+    except Unmeasured as e:
+        print(f"UNMEASURED: {e}")
+        return 2
     if pr_body is None or commit_messages is None or closing_issues_json is None:
-        print("UNMEASURED: PR_BODY, COMMIT_MESSAGES and CLOSING_ISSUES must all be set.")
+        print("UNMEASURED: PR_BODY, COMMIT_MESSAGES and CLOSING_ISSUES (or their _FILE forms) must all be set.")
         return 2
 
     try:
@@ -266,6 +290,41 @@ def self_test():
         "{not valid json",
         2,
     )
+
+    # The _FILE form (cleat#4456): the same text through a file must give the same answer as through the
+    # environment, trailing newline dropped; and a file that was NAMED and cannot be read is UNMEASURED, never empty.
+    import tempfile
+    with tempfile.TemporaryDirectory() as d:
+        good = os.path.join(d, "v")
+        with open(good, "w", encoding="utf-8") as f:
+            f.write("This does not close #1980.\n")
+        saved = {k: os.environ.get(k) for k in ("PR_BODY", "PR_BODY_FILE")}
+        try:
+            os.environ["PR_BODY"] = "WRONG: the environment must lose to the file"
+            os.environ["PR_BODY_FILE"] = good
+            if read_input("PR_BODY") != "This does not close #1980.":
+                failures.append("read_input: a file's contents, trailing newline dropped, must win over the environment")
+            os.environ["PR_BODY_FILE"] = os.path.join(d, "missing")
+            try:
+                read_input("PR_BODY")
+                failures.append("read_input: a named file that does not exist must raise Unmeasured, not read as empty")
+            except Unmeasured as e:
+                if "PR_BODY_FILE" not in str(e):
+                    failures.append(f"read_input: the message does not name the variable: {e}")
+            with open(good, "wb") as f:
+                f.write(b"\xff\xfe not utf-8")
+            os.environ["PR_BODY_FILE"] = good
+            try:
+                read_input("PR_BODY")
+                failures.append("read_input: a file that is not UTF-8 must raise Unmeasured")
+            except Unmeasured:
+                pass
+        finally:
+            for k, v in saved.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
 
     if failures:
         print(f"{len(failures)} self-test failure(s):")

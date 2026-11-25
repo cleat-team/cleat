@@ -377,6 +377,35 @@ Example: `--max-workflow-duration 5m`
 
 ---
 
+## Sizing a worker by language
+
+What one worker costs depends on the guest language far more than on anything else, and the figures differ by more than an order of magnitude between languages. Every number below is **measured**, says where it comes from, and holds only for the conditions in the last paragraph. The held figures are what `--resident-memory-percent` and `--resident-memory-budget-mb` charge against; the compile figures are what a worker's memory has to cover beside them.
+
+| | Go | Python | C# |
+|---|---:|---:|---:|
+| **Held run, idle instance** (private memory, Pss, per held instance) | 1.5 MiB | 1.3 MiB | 16.8 MiB |
+| **Held run after the guest has handled large objects** (allocated and dropped 256 MiB in 4 MiB chunks) | 19.6 MiB | 9.5 MiB | **57.4 MiB** |
+| **What a held run is charged** (0.6.0) | 24 MiB | 11 MiB | **59 MiB** |
+| **Held runs in the default budget of a 2Gi worker** (20% = 409 MiB, whole runs) | 17 | 37 | **6** |
+| First distinct component compiled **in the worker** (peak above the level before it) | not measured | +486 to +512 MiB (RSS) | +60 to +118 MiB, of which +60 to +70 is kept (the larger includes the engine's own start-up) |
+| Each further distinct component compiled in the worker | not measured | +185 to +268 MiB kept (RSS); up to about 300 MiB (198 to 308 for each of the first four further components, then 44 to 76) in a 2 GiB container | peak +11 to +42 MiB, +9 to +41 MiB kept |
+| Same, with **`--component-precompile`** (the worker keeps the artifact, the compile runs in a child) | not measured | +27 MiB | +2.4 MiB |
+| Charge of one entry in the compiled-module cache (3.5 times its serialized artifact, cleat#4391) | not applicable (a core module) | 111 to 153 MiB, from serialized artifacts of 31.9 to 43.7 MiB (about 6 to 9 entries per 1 GiB bound) | about 11 to 30 MiB, from artifacts of 3.1 and 8.5 MiB |
+
+**Where each number comes from.** Held, idle: a fit of Pss against the number of held instances, over 1 to 64, three repetitions, R squared 1.0000, 2026-11-22, on the builds with cleat#4386 (C#: 8 MiB GC segments, 48.7 MiB before) and cleat#4387 (Python: dense data segments, 12.1 MiB before). Held, after large objects: the stage-0 probe's pattern, re-run on the fixed builds on 2026-11-23, a fit over 4 to 16 held instances, held count read from the held set and equal to N in every row (raw rows: `testdata/heldmem/raw/churn/` on `feature/resident-memory-percent-design`); an independent re-run by a second reviewer gave C# 57.55 MiB (65.1 on the default GC segments), and Python 5.9 MiB with a different guest. Go's 19.6 MiB is the original design measurement of the same pattern, and its idle figure is a fit over held instances of a minimal guest. Compile: the Python figures are the component-memory measurements of 2026-11-23 (one worker process, RSS above the baseline, arm64 Linux) and a 2 GiB container; the C# figures are the container's own `memory.current` for a worker compiling one component at a time in a 2 GiB container, two components of 1.0 and 2.8 MiB with six variants each (one set of code stamped with different metadata, so each is a different cache key with the same compile cost; a fleet of different libraries costs more). Cache charge: `engine/compiled_size_estimate.go`, the measured serialized artifacts of five distinct components (three Python, 31.9 to 43.7 MiB; two C#, 3.1 MiB for a minimal workflow and 8.5 MiB for the conformance one), at the 3.5 times that cleat#4391 charges; before it, the cache charged 4 times the wasm length.
+
+**C# needs much more memory per held run than Python, and 0.6.0 charges for it.** An idle C# instance is 17 MiB, but one that has handled large objects stays near **57 MiB** (65 on a component built without the 8 MiB GC segments), because the runtime's large-object heap grows with it and wasm memory never shrinks, and a run is charged **59 MiB**. In the default budget of a 2Gi worker that is **6 held C# runs against 37 held Python runs**. Reducing it is planned for 0.7.0 (cleat#4440). Until then, for a worker that serves C# workflows:
+
+- **raise the container's memory limit** (`limits.memory` in the chart): the budget is a share of the limit, so a 4Gi worker holds about 13 C# runs;
+- **or lower `--resident-memory-percent`** if the worker cannot afford the held runs beside everything else, which makes residency hold fewer runs and suspend more (a suspended run costs a replay when it wakes, not correctness);
+- **or run C# on its own workers**, with their own memory limit, task queue and budget, so its cost does not displace a Python or Go worker's.
+
+**What a worker needs for compiling, at the same limit.** Measured on a real worker in a container limited to 2Gi, with nine distinct Python components, **one run of each configuration** on one machine. **With `--component-precompile`, which is on by default since 0.6.0**, the compile runs in a short-lived child that returns its memory, and the nine components, 60 held-eligible runs and one more first-time compile all completed with a **peak of 1107 to 1159 MiB** and no kill; six distinct components arriving at once completed in 41 seconds at a peak of 1425 MiB, because **a worker compiles one component at a time**.
+
+**Compiled in the worker instead** (`--component-precompile=false`, or the fallback when a child fails for an ordinary reason), each further distinct Python component **kept 198 to 308 MiB for each of the first four further components and 44 to 76 for each of the next three (mean 175), for good**: the worker reached 1.76 GiB after eight and, before 0.6.0, the container was **killed by the out-of-memory killer** on the ninth (peak 2013 of 2048 MiB), and six distinct components arriving at once reached the limit within 17 seconds and were killed. Since 0.6.0 the worker compiles one component at a time and, **before a compile in its own process, checks the memory the container has left**: it needs between 256 MiB (a small C# workflow) and 800 MiB (a Python-sized component) scaled by the component's size, and below that **the run is released, not failed**, and components already compiled keep running (`--component-compile-min-headroom-mb`, below). With that check, the same cold start of twenty runs on six distinct Python components and a seventh compile, precompile off, completed with no kill at a peak of 1473 MiB (12 runs done, 8 released); with every child forced to fail (a 1 second child timeout) it completed with no kill at 1608 MiB (10 done, 10 released). **That is a degraded mode, not a full-speed one**, and the memory a compile in the worker keeps does not come back, so a refusal usually lasts until the worker is restarted or its limit raised: keep `--component-precompile` on. A child killed by the out-of-memory killer is refused and not compiled in the worker. The forced failure used `--component-precompile-timeout`; a timeout is treated as an ordinary failure, not a kill, so a child that is merely slow, on a heavily loaded node or with `--component-precompile-parallel false`, can reach the fallback without being forced. Fallbacks are counted on `cleat_component_precompile_fallbacks_total{reason}`: a rate there means the flag is not protecting the worker.
+
+**These figures are for the conditions they were measured under, and are floors for a workflow that does real work.** One machine (an arm64 Linux virtual machine; **x86-64 is not measured**); minimal and synthetic guests, not your workflow; **live data is not in any of them**, and a guest that once held 100 MiB keeps it, one for one, since wasm memory never shrinks; a component built before cleat#4386 (C#, 48.7 MiB idle per held run before) or cleat#4387 (Python, 12.1 MiB idle before) costs more per held run than the table says and is charged short, so rebuild your components. `--memory-soft-limit`, which reads the container's real use, is the backstop for all of it.
+
 ## Memory Management
 
 ### --memory-soft-limit
@@ -1095,7 +1124,7 @@ lease.
 
 | Type | Default | Description |
 |------|---------|-------------|
-| int | `512` | Max **estimated** size of the compiled-module cache, in MB (LRU eviction) |
+| int | `1024` | Max **estimated** size of the compiled-module cache, in MB (LRU eviction) |
 
 **Two different caches, and this is the larger one.** `--wasm-cache-max-mb`
 above bounds the WASM *byte* cache — the artifacts as uploaded.
@@ -1140,6 +1169,47 @@ Both outliers fail safely: tiny modules (that row was one) run high but cost ten
 of kilobytes, and debug builds run low so the estimate over-counts them
 further. Over-counting shrinks the cache; it cannot overrun the bound.
 
+**Components are costed differently, from 2026-11-23 (cleat#4389).** A Python or C# component
+is costed at **3.5× its serialized compiled artifact**, not 4× its wasm. A component's wasm is
+mostly a memory snapshot (and, for Python since cleat#4382, zero-filled gaps), none of which
+compiles to anything, so its length does not predict what the cache holds. Measured on
+2026-11-23 (arm64 Linux, wasmtime 48; entries 2 to 5 of five distinct components compiled into
+one engine, RssAnon after `malloc_trim`, two repetitions):
+
+| component | wasm | old charge (4× wasm) | serialized | live per entry | live ÷ serialized | new charge |
+|---|---|---|---|---|---|---|
+| Python (componentize-py) | 17.6 MiB | 70.5 MiB | 31.9 MiB | 95 MiB | 3.0× | 111.5 MiB |
+| Python (plugin-harness fixture) | 18.4 MiB | 73.6 MiB | 43.7 MiB | 111 MiB | 2.5× | 152.9 MiB |
+| Python (densified, cleat#4382) | 28.7 MiB | 114.6 MiB | 42.5 MiB | 103 MiB | 2.4× | 148.8 MiB |
+| C# (defer_order) | 1.0 MiB | 4.0 MiB | 3.1 MiB | 8.9 MiB | 2.9× | 10.7 MiB |
+| C# (conformance) | 2.8 MiB | 11.3 MiB | 8.5 MiB | 16.7 MiB | 2.0× | 29.6 MiB |
+
+The old charge under-counted every component that was not densified (Python by 1.35 to 1.5×,
+C# by 1.5 to 2.2×), which is the direction this bound cannot tolerate. The live figures are
+noisy (a single entry read from 34 to 147 MiB for one Python component), so the ratio is over
+means, not a per-entry guarantee. **The first component an engine compiles costs far more
+than any later one** (about 200 MiB live and about 480 MiB at its high-water mark for Python:
+the engine and the compile scratch), and no per-entry bound covers that.
+
+**What this means for a deployment:** the default is **1024 MB** (it was 512 MB until cleat#4389;
+the owner raised it with the new charge), so a worker holds about **six to seven** distinct
+Python components (nine of the smaller ones), where 512 MB at the new charge would have held
+three; one more evicts the least recently used and recompiles it (about 1.5 s and a transient
+of several hundred MB). That is what holding them costs, now stated. The live cost is about
+100 MiB per Python entry, so a full cache is near 650 MiB. **What that costs a 2 GiB worker, measured**
+(2026-11-23: a real worker in a container limited to 2 GiB, the chart's limit since cleat#4394, nine distinct Python
+components that differ in code and data but share the CPython runtime, the stock flags, one run of each configuration on
+one arm64 machine, x86-64 not measured). With `--component-precompile` (the default in 0.6.0) the cache filled, 60
+held-eligible runs and a ninth compile all completed at a container peak of **1107 to 1159 MiB** (anonymous memory at
+most 776) and no out-of-memory kill. Compiled in the worker instead (`--component-precompile=false`), each further
+distinct component **kept 198 to 308 MiB for each of the first four further components and 44 to 76 for each of the next three (mean 175), for good** (anonymous memory after each of eight compiles: 533, 836, 1034, 1277,
+1585, 1661, 1716 and 1760 MiB) and the container was **killed on the ninth** (peak 2013 of 2048 MiB). That retained memory
+is not what the bound limits: the bound limits what the cache *charges*, so at 2Gi compiling in a child matters more than
+this setting does. The bound is not to be raised casually either way. A deployment that runs more than
+six or seven distinct Python workflows should raise
+`--wasm-module-cache-max-mb`, and should size the container for the live figure above, about
+100 MiB per entry plus the first compile's high-water mark.
+
 Observe it with `cleat_wasm_compiled_module_cache_bytes`, beside the entries
 gauge.
 
@@ -1153,7 +1223,11 @@ on every call.
 
 | Type | Default | Description |
 |------|---------|-------------|
-| bool | `false` | **EXPERIMENTAL (0.6.0).** Compile a Component Model component (a Python or C# workflow) in a short-lived child process of this binary, and load the serialized result |
+| bool | `true` | **ON by default since 0.6.0; `--component-precompile=false` turns it off.** Compile a Component Model component (a Python or C# workflow) in a short-lived child process of this binary, and load the serialized result, one component at a time per worker |
+
+**Why it is the default.** Measured 2026-11-23 on a real worker in a container limited to 2 GiB, the stock flags, nine distinct Python components (one run of each configuration, one arm64 machine, x86-64 not measured; the components differ in code and data but share the CPython runtime, so each is a different cache key with a near-identical compile cost). **Compiling in the worker** retained 198 to 308 MiB for each of the first four further distinct components and 44 to 76 for each of the next three (mean 175) (anonymous memory after each of eight fills: 533, 836, 1034, 1277, 1585, 1661, 1716 and 1760 MiB) and the container was **killed by the out-of-memory killer** when it then compiled a ninth (peak 2013 of 2048 MiB); the same limit with a fresh worker and six distinct components arriving at once was killed within 17 seconds, because six first compiles ran at once. **With this flag** the same nine components, 60 held-eligible runs and a ninth compile all completed, with a container peak of **1159 MiB** and no kill, and the six-at-once start completed in 41 seconds at a peak of 1425 MiB.
+
+**A worker compiles one component at a time**, in the child or in the worker (a fallback below), so a burst of runs of distinct components queues instead of compiling together. Before 0.6.0 only runs of the *same* component waited for each other.
 
 **What it is for.** The first compile of a Python workflow raises the worker's
 resident memory by about 490 MiB, and most of it stays resident for the life of
@@ -1205,7 +1279,14 @@ memory limit, the compile mode and the fix, and counts it on
 `cleat_workflow_releases_total{check="component_compile_refused",memory_limit_mib,parallel_compilation}`:
 a rate on that check is the alert. Every *other* child failure (cannot start,
 times out, exits non-zero, writes an artifact the worker will not accept) is
-logged and falls back to the in-process compile.
+logged as a WARN and falls back to the in-process compile, **one at a time like any other compile**, and is counted on
+`cleat_component_precompile_fallbacks_total{reason}` (`timeout`, `child_exit`, `record`, `artifact`, `deserialize`, `workdir` or `other`).
+**A rate on that counter means the flag is not protecting the worker's memory**: each fallback retains what an in-process compile retains (about
+up to about 300 MiB (198 to 308 for each of the first four further components, then 44 to 76) per distinct Python component), so a child that fails systematically makes this the same as `--component-precompile=false`. The WARN
+carries the error and says where to look: a timeout means `--component-precompile-timeout` (default 5 minutes) or a loaded node, and an exit or an
+artifact error means the child could not run or write, so check that the system temp directory is writable and not full, and that the binary has not been replaced
+under the running worker (the child is the worker's own binary). A timeout is treated as an ordinary failure and not as a kill, so a merely slow child
+reaches this fallback unforced.
 
 **"The worker stays up" is measured on Docker, where `memory.oom.group` is 0**
 (an out-of-memory kill takes one process). Where it is 1, the kill takes every
@@ -1227,6 +1308,30 @@ Kubernetes `emptyDir` with `medium: Memory`, for instance) the 46 MB artifact is
 in the same cgroup as the compile and counts against the limit while it exists.
 
 The child is this binary, found with `os.Executable` and resolved once at start-up.
+
+### --component-compile-min-headroom-mb
+
+| Type | Default | Description |
+|------|---------|-------------|
+| int (MB) | `800` | The most memory a container must have left for this worker to compile a Component Model component **in its own process**: the need of a Python-sized component. A smaller component needs proportionally less, down to 256 MB. Below the need the run is released, not failed. `0` turns the check off |
+
+**What it is for.** A compile in the worker costs about 500 MiB of scratch while it runs and the worker keeps up to about 300 MiB of it for good (198 to 308 for each of the first four further components, then 44 to 76), for each distinct Python component. Serialising compiles (a worker compiles one component at a time) removes the simultaneous peak and **not that retention**, so a worker that compiles in its own process runs out of memory after about six distinct Python components at a 2 GiB limit, and gets killed with every run it holds. Measured 2026-11-23 in a 2 GiB container: with the check absent, a seventh distinct component compiled in the worker sat at the limit in one run (anonymous memory 1863 of 2048 MiB) and killed the container in another.
+
+**What it does.** Before a compile in the worker (the fallback after a `--component-precompile` child failed for an ordinary reason, and every compile when `--component-precompile=false`) the worker reads the memory the container has left, from the same cgroup v2 reading as `--memory-soft-limit`: the level with the least headroom on the worker's own cgroup path. If that is below this figure it **does not compile**: the run is **released** (it stays `ready`, retried after `--component-precompile-refusal-window`, possibly on another worker), the worker logs an ERROR with the memory left and the memory needed, and counts `cleat_workflow_releases_total{check="component_compile_refused",reason="low_headroom"}` (a killed child is `reason="child_killed"`). **Components already compiled keep running**, so the worker degrades instead of being killed. **This is a degraded mode, not a full-speed one:** a worker under memory pressure that meets a new component refuses it until memory comes back or another worker takes it.
+
+**A refusal usually lasts until a restart or a larger limit.** Memory a worker compiled with in its own process stays with that process (the allocator keeps it, and wasm memory never shrinks), so the memory does not come back by waiting. A refused run is retried after the window and refused again for as long as the container is short; what ends it is restarting the worker, raising its memory limit, or another worker taking the run. Keep `--component-precompile` on, so compiles run in a child that returns its memory, and the question does not arise for the components it compiles.
+
+**What a compile is judged to need depends on the component.** Measured 2026-11-23 on a real worker (arm64 Linux), in a 2 GiB container, with `--component-precompile=false` and one compile at a time. The figures are the container's own `memory.current`: the peak is the highest value above the level before the compile, and what is retained is what was still there 4 seconds after it.
+
+| component | wasm | first compile in the process | each further distinct compile |
+|---|---|---|---|
+| C# (a small workflow, 6 variants) | 1.0 MiB | peak +118, retained +70 (includes the engine's own start-up) | peak +11 to +23, retained +9 to +23 |
+| C# (the conformance guest, 6 variants) | 2.8 MiB | peak +60, retained +60 | peak +33 to +42 (once +3), retained +33 to +41 |
+| Python | 17.6 to 19.5 MiB | peak +486 to +512 (RSS) | retained +185 to +268 (RSS); 198 to 308 for each of the first four further components and 44 to 76 after, in the 2 GiB container |
+
+So the need is the component's wasm length times 42 bytes, at least 256 MiB and at most the flag (800 by default): about 800 MiB for a 19.5 MiB Python component, 256 MiB for a small C# one (twice the largest C# peak measured, which is the first compile of a process). It is a fit through two measured languages. The C# variants are one set of code stamped with different metadata, so each is a different cache key with the same compile cost; a fleet of different C# libraries would cost more. The Python figures are the component-memory measurements and the 2 GiB run (anonymous memory after each of eight distinct compiles: 533, 836, 1034, 1277, 1585, 1661, 1716 and 1760 MiB). x86-64 is not measured.
+
+**With no cgroup v2 limit** the reading is the host's available memory (`/proc/meminfo`), which a container limited another way can exceed; the worker warns at start-up and the check then means less. If the memory cannot be read at all the check is off and the worker warns.
 
 ### --component-precompile-parallel
 

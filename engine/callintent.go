@@ -484,10 +484,11 @@ func (s *execSession) replayUnderOriginalKey(ctx context.Context, rec EventRecor
 	ctx = s.tenantScopedContext(ctx)
 
 	// Retention bound (cleat#1984 item 3). rec.CreatedAt is the row's
-	// INSERT time -- set once, at WriteCallIntent, and never touched by
-	// CompleteCallIntent -- so for a still-pending row it is exactly the
-	// original dispatch time, with no new column needed: applyCreatedAt
-	// (store_events.go) already loads it for every dialect.
+	// INSERT time -- set at WriteCallIntent, and moved only by
+	// CompleteCallIntent, which stamps the time of the answer (cleat#4465)
+	// -- so for a still-pending row, the only kind this reads, it is
+	// exactly the original dispatch time, with no new column needed:
+	// applyCreatedAt (store_events.go) already loads it for every dialect.
 	//
 	// Compared against the STORE's own clock, not this process's
 	// (cleat#2911 G2) -- see callIntentClock's doc comment (store_intent.go)
