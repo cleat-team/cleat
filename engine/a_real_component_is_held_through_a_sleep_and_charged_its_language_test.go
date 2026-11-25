@@ -64,7 +64,7 @@ type heldRun struct {
 }
 
 // residentRefusals reads the refusal counter back through the same /metrics handler an operator scrapes, so it is the production counter and not a second record kept for the
-// test. It returns "kind=sleep reason=memory x1" for each recorded (kind, reason), sorted, or "none recorded".
+// test. It returns "kind=sleep reason=memory x1" for each (kind, reason) that has been recorded at least once, sorted, or "none recorded". A series at 0 is skipped: the set starts them there.
 func residentRefusals(t *testing.T, m *prometheus.Metrics) string {
 	t.Helper()
 	rec := httptest.NewRecorder()
@@ -79,6 +79,9 @@ func residentRefusals(t *testing.T, m *prometheus.Metrics) string {
 		}
 		labels := line[strings.Index(line, "{")+1 : strings.LastIndex(line, "}")]
 		count := strings.TrimSpace(line[strings.LastIndex(line, "}")+1:])
+		if count == "0" {
+			continue // a series started at zero (cleat#4474) is not a refusal: this reports what was RECORDED, and a zero is the absence of one
+		}
 		var kind, reason string
 		for _, kv := range strings.Split(labels, ",") {
 			switch {

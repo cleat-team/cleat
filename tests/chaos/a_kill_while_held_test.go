@@ -45,8 +45,8 @@ func freeLoopbackAddr(t *testing.T) string {
 // residentRuns reads cleat_resident_runs from a worker's /metrics. ok is false when the page cannot be read or is not a real metrics page, which is NOT zero: an
 // unreadable gauge says nothing about whether a run is held, and the caller reports UNMEASURED for it.
 //
-// A worker that has never held a run exports NO cleat_resident_runs series at all (the counter is created on its first increment), so "the page is real and the series is
-// absent" is zero. "Real" is checked, and not assumed from a 200: the page must carry some other cleat_ series, so an empty body or another service's page on that port
+// A worker with residency on exports cleat_resident_runs at 0 from start-up (cleat#4474); before that, one that had never held a run exported NO series at all (the instrument is
+// written out on its first measurement), and a worker with residency off still does not. So "the page is real and the series is absent" is zero, and a series reading 0 is zero. "Real" is checked, and not assumed from a 200: the page must carry some other cleat_ series, so an empty body or another service's page on that port
 // cannot read as "holds nothing". The first version of this treated absence as unreadable and so could not tell its own control apart from a broken scrape.
 func residentRuns(addr string) (n float64, ok bool) {
 	c := &http.Client{Timeout: 2 * time.Second}
