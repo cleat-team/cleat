@@ -2689,7 +2689,7 @@ type Worker struct {
 	// instead of sleeping a whole --poll: a plain sleep cannot be woken by
 	// anything, so a worker at its concurrency limit looked for work again only
 	// at the next tick, however early the NOTIFY or the slot arrived
-	// (cleat#4311: 340 to 403 ms against 69 to 99 ms at --poll 500ms). nil in
+	// (cleat#4311: a resume took 355 to 412 ms at --concurrency 1 and 92 to 110 ms with the fix, --poll 500ms; the 69 to 99 ms of the diagnosis was a worker with a free slot). nil in
 	// a Worker built without it, which makes the send below a no-op and the
 	// wait a plain timer.
 	slotFreedCh chan struct{}
@@ -3403,9 +3403,8 @@ func (w *Worker) dispatchLoop() {
 
 		free := w.memoryController.DynamicConcurrency() - count
 		if free <= 0 {
-			if !w.waitForSlot() {
-				return
-			}
+			// A cancelled context falls to the top of the loop, whose drain branch has always been what handles it; the result is not needed here.
+			w.waitForSlot()
 			continue
 		}
 
@@ -3574,6 +3573,10 @@ func (w *Worker) dispatchLoop() {
 		}
 	}
 }
+
+// newSlotFreedChannel is the channel a Worker carries as slotFreedCh: ONE token. Unbuffered, a slot freed between the loop's count and its wait
+// would be lost (the send is non-blocking), and a larger buffer would queue wakes into passes the first one already made.
+func newSlotFreedChannel() chan struct{} { return make(chan struct{}, 1) }
 
 // waitForSlot is what the dispatch loop does when it has no free slot: wait for
 // one to be freed, for the worker to stop, or for one --poll to pass, whichever

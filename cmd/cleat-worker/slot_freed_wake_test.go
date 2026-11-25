@@ -20,7 +20,7 @@ func newSlotWaitWorker(t *testing.T, poll time.Duration) (*Worker, context.Cance
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
-	return &Worker{ctx: ctx, pollInterval: poll, slotFreedCh: make(chan struct{}, 1)}, cancel
+	return &Worker{ctx: ctx, pollInterval: poll, slotFreedCh: newSlotFreedChannel()}, cancel
 }
 
 func TestAFreedSlotEndsTheAtCapacityWaitBeforeThePollTick(t *testing.T) {
