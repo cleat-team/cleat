@@ -132,7 +132,40 @@ jobs:
           # grows into"). 45m is headroom, not a permanent fix: re-measure
           # (`gh run list --workflow engine-race.yml --json createdAt,conclusion`)
           # if this starts tripping again.
-          go test -race -count=1 -timeout 45m -p 1 -json ./engine/... 2>&1 | tee test-report.json
+          #
+          # It tripped again, and the ceiling was NOT raised a second time
+          # (cleat#4418). Ten of the 33 scheduled runs from 2026-11-20 to
+          # 2026-11-25 ended in `panic: test timed out after 45m0s` with no test
+          # failure and no data race. A timed-out run never reaches the tests
+          # after the clock runs out, so it is not only red: it is a run that
+          # did not look for races in them, and this job is the only place
+          # `-race` runs on ./engine/... at all.
+          #
+          # Two tests are skipped HERE and nowhere else. They are the two
+          # largest single costs in the job, 11-14 minutes each under -race in
+          # green runs, and they read source files and run regexes over them:
+          # one goroutine, no database, nothing for a race detector to find.
+          # Each is still run, without -race, by a required job that gates
+          # every PR: TestMSSQLTenantScopedTablesAreQueriedWithATenantPredicate
+          # in `Tier 1 Engine Shard 1/4` and
+          # TestMySQLTenantScopedTablesAreQueriedWithATenantPredicate in
+          # `Tier 1 Engine Shard 2/4` (both under the required `Tier 1 Gate`),
+          # and both again in the Multi-DB engine shards (`Layer 3 — Multi-DB`,
+          # also required).
+          # Re-derive the shard of a name with
+          # `scripts/tier-gate.sh --list-shard I/4 --engine-buckets 2`.
+          #
+          # `-skip` prints no `--- SKIP` line, so these two are invisible here
+          # rather than merely unrun. That is deliberate and it is why this
+          # comment names where they do run. The skip budget is unaffected: they
+          # never skip, and no scripts/skip-ledger.d/ line names either.
+          #
+          # If either test ever starts a goroutine or opens a connection, it
+          # stops being a source scan and belongs back under -race: delete the
+          # -skip.
+          go test -race -count=1 -timeout 45m -p 1 \
+            -skip '^(TestMySQLTenantScopedTablesAreQueriedWithATenantPredicate|TestMSSQLTenantScopedTablesAreQueriedWithATenantPredicate)$' \
+            -json ./engine/... 2>&1 | tee test-report.json
 
       # Same job-key ('test-go/engine') the removed ci.yml matrix entry used,
       # deliberately: scripts/skip-ledger.d/'s existing test-go/engine lines
