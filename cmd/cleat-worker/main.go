@@ -2653,7 +2653,6 @@ func main() {
 	// a hold never outlives its code's cache entry (engine.ResidentSet.EvictCode). Backends made per execution share the cache, so the root backend is enough.
 	resident.AttachToCodeCache(wt)
 	metricsInstance.RecordDesiredConcurrency(context.Background(), int64(*concurrency))
-	startInFlightSeriesAtZero(metricsInstance)
 	globalWorker = w
 
 	// Set metrics on the store factory so stores created during workflow
