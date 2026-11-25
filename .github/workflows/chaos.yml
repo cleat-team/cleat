@@ -337,6 +337,17 @@ jobs:
           # `go test -run` that selects nothing exits 0, so a renamed row would leave this step green having run nothing. Require its pass event.
           grep -E '"Action":"pass","Package":"[^"]*","Test":"TestAHeldSignalWaitResumesNoLaterThanASuspendedOneOnPostgres"' chaos-held-vs-off.log > /dev/null \
             || { echo "::error::the held-vs-off timing row reported no pass: the -run pattern selected nothing, it failed, or it never finished"; exit 1; }
+      # cleat#4311: a worker at its --concurrency limit must wake when a slot is freed, not at its next --poll tick. One --concurrency 1 worker, residency off, a signal 150 ms after the run
+      # parks; the median of 8 must be under 250 ms (a worker that waits for its tick measures ~385 ms, one that wakes ~90 ms). Same tags and the same reason as the row above: a loaded runner ends it
+      # UNMEASURED or over the bar, and that is a red here, never a gate on a pull request. Its samples are in chaos-at-limit.log.
+      - name: At-capacity wake timing (tags chaos timing)
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          go test -json -tags 'chaos timing' -count=1 -timeout 30m ./tests/chaos \
+            -run 'TestAWorkerAtItsConcurrencyLimitResumesASignalWaitWithoutWaitingForItsPollTickOnPostgres' 2>&1 | tee chaos-at-limit.log
+          grep -E '"Action":"pass","Package":"[^"]*","Test":"TestAWorkerAtItsConcurrencyLimitResumesASignalWaitWithoutWaitingForItsPollTickOnPostgres"' chaos-at-limit.log > /dev/null \
+            || { echo "::error::the at-capacity wake timing row reported no pass: the -run pattern selected nothing, it failed, or it never finished"; exit 1; }
       - uses: actions/upload-artifact@v7
         if: always()
         with:
