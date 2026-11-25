@@ -107,6 +107,14 @@ func runChecksumChainCase(t *testing.T, encrypt, sigkill, forceAdaptive bool) {
 		// suspend AND its completing re-flush both go through
 		// AdaptiveFlusher.flushAndNotify rather than flushEvent.
 		encFlags = append(encFlags, "--batch-flush-enter-rate", "1", "--batch-flush-exit-rate", "1")
+		// A second rate sample, whatever the dispatch timing (cleat#4311). updateRate (adaptive_flush.go) takes a sample only if 100 ms have passed
+		// since the last one, and the first falls at the parent's first event, long after the flusher was built, so its rate is far under 1 and
+		// seeds a near-zero average: batch mode needs a SECOND sample taken at least 100 ms later, while steps are still arriving. This case used to
+		// get it from the poll-tick gaps between the parent's suspend, the child's claim and the parent's re-claim (90 to 160 ms). A worker that
+		// wakes its dispatch loop when a slot is freed closes those gaps to about 15 ms, the second sample was not taken, and the precondition
+		// below failed one run in eleven (cleat-review2 on #4470). The child's only call is held for 250 ms by the SERVICE instead, so the parent's
+		// completing re-flush is at least 250 ms after its first event whatever the worker does.
+		svc.delayOperation("Reserve", 250*time.Millisecond)
 	}
 
 	first := startWorkerOn(t, dbName, bin, taskQueue, svc.srv.URL,

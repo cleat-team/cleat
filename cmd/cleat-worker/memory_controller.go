@@ -54,6 +54,14 @@ type MemoryController struct {
 	queueDepth         int64
 	scalingPressure    float64
 
+	// queueDepthEvery is the shortest time between two COUNT(*)s over the ready leases that Tick makes for the queue depth; a Tick inside it
+	// reuses the last reading. Zero asks every Tick, which is what a controller built without it does. It is the bound on what a dispatch pass
+	// costs the database: a pass per freed slot (cleat#4311) would otherwise be a COUNT(*) per completion, and the count grows with the very
+	// queue that keeps a worker saturated. The reading feeds a gauge, not a decision, so a --poll old one loses nothing. NewMemoryController sets the
+	// stock --poll; main.go replaces it with the operator's, so a controller built without that line is bounded anyway. Zero turns the bound off.
+	queueDepthEvery time.Duration
+	queueDepthAt    time.Time
+
 	scalingThreshold  int64 // queue depth that saturates scaling_pressure
 	recoveryAllowedAt time.Time
 	recoveryInterval  time.Duration
@@ -69,6 +77,9 @@ func (c *MemoryController) log() *slog.Logger {
 	}
 	return slog.Default()
 }
+
+// defaultQueueDepthEvery is the stock --poll (config.go), the longest a queue-depth reading is reused unless the worker says otherwise (cleat#4311).
+const defaultQueueDepthEvery = 500 * time.Millisecond
 
 // NewMemoryController creates a MemoryController that reads memory via the
 // given monitor, queries the store for queue depth and estimates, and
@@ -90,6 +101,7 @@ func NewMemoryController(
 		dynamicConcurrency:    configuredConcurrency,
 		scalingThreshold:      defaultScalingThreshold,
 		recoveryInterval:      defaultRecoveryInterval,
+		queueDepthEvery:       defaultQueueDepthEvery,
 		defEstimates:          make(map[memoryEstimateKey]float64),
 	}
 }
@@ -154,10 +166,20 @@ func (c *MemoryController) Tick(ctx context.Context) {
 	info := c.monitor.Read()
 	p := PressureLevel(info, c.softLimit, c.hardLimit)
 
-	qd, err := c.store.QueueDepth(ctx)
-	if err != nil {
-		c.log().WarnContext(context.Background(), "queue depth query failed", "worker_id", c.workerID, "error", err)
-		qd = 0
+	c.mu.Lock()
+	qd, fresh := c.queueDepth, c.queueDepthEvery > 0 && !c.queueDepthAt.IsZero() && time.Since(c.queueDepthAt) < c.queueDepthEvery
+	if !fresh {
+		// Stamped before the query, so a slow or failing count is not asked again until the interval has passed either.
+		c.queueDepthAt = time.Now()
+	}
+	c.mu.Unlock()
+	if !fresh {
+		var err error
+		qd, err = c.store.QueueDepth(ctx)
+		if err != nil {
+			c.log().WarnContext(context.Background(), "queue depth query failed", "worker_id", c.workerID, "error", err)
+			qd = 0
+		}
 	}
 
 	qdFrac := min(float64(qd)/float64(c.scalingThreshold), 1.0)

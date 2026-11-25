@@ -356,6 +356,21 @@ type chargeService struct {
 	holdStatus int
 	// failFirst maps an operation to how many of its first invocations answer 503 (retryable), then succeed.
 	failFirst map[string]int
+	// delayOp maps an operation to how long every invocation of it waits before answering. The wait is the service's, not the worker's, so it holds
+	// whatever the worker's dispatch timing is.
+	delayOp map[string]time.Duration
+}
+
+// delayOperation makes every invocation of op wait d before it answers, so a test that needs two events a known time apart gets them from the
+// service instead of from the worker's poll-tick gaps (cleat#4311: those gaps shrank from 90 to 160 ms to about 15 ms when a freed slot began
+// waking the dispatch loop).
+func (c *chargeService) delayOperation(op string, d time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.delayOp == nil {
+		c.delayOp = map[string]time.Duration{}
+	}
+	c.delayOp[op] = d
 }
 
 // failFirstN makes the first n invocations of op answer 503, a retryable failure, so a call under a retry
@@ -427,6 +442,7 @@ func (c *chargeService) handle(w http.ResponseWriter, r *http.Request) {
 	hold := c.hold
 	failing := n <= c.failFirst[op]
 	holdStatus := c.holdStatus
+	delay := c.delayOp[op]
 	c.mu.Unlock()
 
 	if failing {
@@ -441,6 +457,10 @@ func (c *chargeService) handle(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, `{"error":"rejected"}`, holdStatus)
 			return
 		}
+	}
+
+	if delay > 0 {
+		time.Sleep(delay)
 	}
 
 	body := fmt.Sprintf(`{"charge_id":"chg-%s-%d","status":"ok"}`, op, n)

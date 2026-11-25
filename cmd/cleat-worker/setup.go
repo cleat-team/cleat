@@ -2684,6 +2684,16 @@ type Worker struct {
 	// idle sleep, waking immediately to claim the newly-ready parent.
 	parentWakeCh chan struct{}
 
+	// slotFreedCh is signaled (non-blocking, one token) when an execution
+	// leaves w.inflight. A dispatch loop that found no free slot waits on it
+	// instead of sleeping a whole --poll: a plain sleep cannot be woken by
+	// anything, so a worker at its concurrency limit looked for work again only
+	// at the next tick, however early the NOTIFY or the slot arrived
+	// (cleat#4311: a resume took 355 to 412 ms at --concurrency 1 and 92 to 110 ms with the fix, --poll 500ms; the 69 to 99 ms of the diagnosis was a worker with a free slot). nil in
+	// a Worker built without it, which makes the send below a no-op and the
+	// wait a plain timer.
+	slotFreedCh chan struct{}
+
 	// notifyCh receives PostgreSQL NOTIFY events for dispatch wake-up.
 	// nil when not using Postgres or when --notify-channel is empty —
 	// a nil channel blocks forever in select, so the case is a no-op.
@@ -3393,7 +3403,8 @@ func (w *Worker) dispatchLoop() {
 
 		free := w.memoryController.DynamicConcurrency() - count
 		if free <= 0 {
-			time.Sleep(w.pollInterval)
+			// A cancelled context falls to the top of the loop, whose drain branch has always been what handles it; the result is not needed here.
+			w.waitForSlot()
 			continue
 		}
 
@@ -3563,6 +3574,33 @@ func (w *Worker) dispatchLoop() {
 	}
 }
 
+// newSlotFreedChannel is the channel a Worker carries as slotFreedCh: ONE token. Unbuffered, a slot freed between the loop's count and its wait
+// would be lost (the send is non-blocking), and a larger buffer would queue wakes into passes the first one already made.
+func newSlotFreedChannel() chan struct{} { return make(chan struct{}, 1) }
+
+// waitForSlot is what the dispatch loop does when it has no free slot: wait for
+// one to be freed, for the worker to stop, or for one --poll to pass, whichever
+// is first. It returns false when the worker's context is done.
+//
+// It was time.Sleep(w.pollInterval), which nothing can interrupt, so at its
+// concurrency limit a worker did not look for work again until the tick even
+// when the slot was freed (or the NOTIFY for a signal that would resume a run
+// arrived) a moment after the sleep began. The timer is kept as the ceiling, so
+// a missed signal costs what it always did. A NOTIFY is deliberately NOT a wake
+// here: with no free slot it would find nothing to claim, and it would turn a
+// busy channel into a spin.
+func (w *Worker) waitForSlot() bool {
+	t := time.NewTimer(w.pollInterval)
+	defer t.Stop()
+	select {
+	case <-w.ctx.Done():
+		return false
+	case <-w.slotFreedCh:
+	case <-t.C:
+	}
+	return true
+}
+
 // execRegistration is what execCancel maps a workflow id to: the cancel func
 // for the execution registered under that id, tagged with the generation it
 // belongs to.
@@ -3595,6 +3633,14 @@ type execRegistration struct {
 // generation (cleat#2942).
 func (w *Worker) deregisterExecution(wf *engine.WorkflowInstance, reg *execRegistration) {
 	w.inflight.CompareAndDelete(wf.ID, wf)
+	// Tell a dispatch loop that is waiting for capacity that there is some now.
+	// After the delete, so the loop's recount sees the slot; one buffered token,
+	// so a signal sent while the loop is between its count and its wait is kept
+	// rather than lost.
+	select {
+	case w.slotFreedCh <- struct{}{}:
+	default:
+	}
 	w.claimedAfter.Delete(engine.GenerationKey{WorkflowID: wf.ID, Generation: wf.Generation})
 	w.fencedRuns.CompareAndDelete(wf.ID, wf.Generation)
 	w.execCancel.CompareAndDelete(wf.ID, reg)

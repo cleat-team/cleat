@@ -2606,6 +2606,7 @@ func main() {
 		encryptSensitivePayloads:         *encryptSensitivePayloads,
 		drainCh:                          make(chan struct{}),
 		parentWakeCh:                     make(chan struct{}, 1),
+		slotFreedCh:                      newSlotFreedChannel(),
 		notifyCh:                         notifyCh,
 		flusherRegistry:                  flusherRegistry,
 		db:                               db,
@@ -2633,6 +2634,8 @@ func main() {
 	}
 	mc := NewMemoryController(monitor, store, workerID, *concurrency, *memorySoftLimit, *memoryHardLimit)
 	mc.logger = logger
+	// At most one COUNT(*) over the ready leases per --poll, however often the dispatch loop passes (cleat#4311).
+	mc.queueDepthEvery = *pollInterval
 	if err := mc.LoadEstimates(ctx, defaultTenantID); err != nil {
 		logger.WarnContext(context.Background(), "failed to load memory estimates", "worker_id", workerID, "error", err)
 	}
