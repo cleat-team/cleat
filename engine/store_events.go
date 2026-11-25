@@ -24,6 +24,11 @@ import (
 // or absent one makes a resumed workflow see a Now() the run that recorded it
 // never returned.
 //
+// A row that was answered over (an await recorded empty and answered later at
+// the same step, a write-ahead-intent call completed over its intent row)
+// carries the time of the answer in this column since cleat#4465, so that the
+// value read here is the one the live run read.
+//
 // Deriving both in Go from the one column is what makes the nine agree by
 // construction rather than by nine people remembering. The SQL-side
 // timestamp_ms expressions are gone; there is nothing left for a new read path

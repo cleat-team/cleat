@@ -603,7 +603,7 @@ func (s *MSSQLStore) appendEventsInTxOpts(ctx context.Context, tx *sql.Tx, workf
 			     AND target.response IS NULL AND target.error IS NULL
 			     AND target.promise_result IS NULL AND target.promise_error IS NULL THEN UPDATE SET
 				response = @p7, error = @p8, promise_result = @p27, promise_error = @p28,
-				checksum = @p31, payload = @p29, payload_encoding = @p33, event_type = @p3;
+				checksum = @p31, payload = @p29, payload_encoding = @p33, event_type = @p3, created_at = @p30;
 		`, workflowID, rec.Step, rec.EventType,
 			nullStr(rec.Service), nullStr(rec.Op), nullStr(base64.StdEncoding.EncodeToString([]byte(rec.Request))), nullStr(base64.StdEncoding.EncodeToString([]byte(rec.Response))), nullStr(rec.Err),
 			nullInt64(rec.DurationMs), nullStr(rec.SignalNames), nullInt64(rec.TimeoutMs),
