@@ -247,6 +247,12 @@ func (s *execSession) writeOut(ctx context.Context, m api.Module, ptr uint32, va
 // wrapped a clock read. store_children.go already bound the event's own
 // timestamp here; this brings the two write paths into agreement.
 //
+// The DO UPDATE below writes created_at too, and that is the same rule applied to the other way a row gets its timestamp (cleat#4465). An await
+// recorded EMPTY and answered later at the same step is an upsert OVER its pending row, and until then the update left created_at alone, so the row
+// kept the time the await STARTED while the live run had read the time of the ANSWER: a replay's Now() came out earlier than the run's, and a call
+// whose request carried it diverged on replay. Every writer that answers over a pending row names created_at; so does CompleteCallIntent, for the
+// same reason. The checksum does not cover the timestamp, so rewriting it changes no chain.
+//
 // # The completion guard covers promise_result/promise_error too, not just response/error
 //
 // AwaitPromise (engine/promises.go) is the same suspend-then-complete
@@ -405,7 +411,7 @@ const insertEventSQL = `
 	ON CONFLICT (tenant_id, workflow_id, step) DO UPDATE SET response = EXCLUDED.response, error = EXCLUDED.error,
 		promise_result = EXCLUDED.promise_result, promise_error = EXCLUDED.promise_error,
 		checksum = EXCLUDED.checksum, payload = EXCLUDED.payload, payload_encoding = EXCLUDED.payload_encoding,
-		event_type = EXCLUDED.event_type
+		event_type = EXCLUDED.event_type, created_at = EXCLUDED.created_at
 		WHERE event_history.event_type IN ('await_child', 'await_promise', 'await_all_children')
 		  AND event_history.response IS NULL AND event_history.error IS NULL
 		  AND event_history.promise_result IS NULL AND event_history.promise_error IS NULL`

@@ -482,7 +482,7 @@ func (af *AdaptiveFlusher) flushAndNotify(ctx context.Context, batch []batchEntr
 			SET response = EXCLUDED.response, error = EXCLUDED.error,
 				promise_result = EXCLUDED.promise_result, promise_error = EXCLUDED.promise_error,
 				checksum = EXCLUDED.checksum, payload = EXCLUDED.payload, payload_encoding = EXCLUDED.payload_encoding,
-				event_type = EXCLUDED.event_type
+				event_type = EXCLUDED.event_type, created_at = EXCLUDED.created_at
 			WHERE event_history.event_type IN ('await_child', 'await_promise', 'await_all_children')
 			  AND event_history.response IS NULL AND event_history.error IS NULL
 			  AND event_history.promise_result IS NULL AND event_history.promise_error IS NULL
@@ -731,7 +731,7 @@ func retryBatchFlush(ctx context.Context, af *AdaptiveFlusher, eventsJSON []byte
 				SET response = EXCLUDED.response, error = EXCLUDED.error,
 					promise_result = EXCLUDED.promise_result, promise_error = EXCLUDED.promise_error,
 					checksum = EXCLUDED.checksum, payload = EXCLUDED.payload, payload_encoding = EXCLUDED.payload_encoding,
-					event_type = EXCLUDED.event_type
+					event_type = EXCLUDED.event_type, created_at = EXCLUDED.created_at
 				WHERE event_history.event_type IN ('await_child', 'await_promise', 'await_all_children')
 				  AND event_history.response IS NULL AND event_history.error IS NULL
 				  AND event_history.promise_result IS NULL AND event_history.promise_error IS NULL

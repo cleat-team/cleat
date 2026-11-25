@@ -1107,6 +1107,15 @@ func WithWorkflowStartTime(ms int64) EngineOption {
 //
 // Zero leaves the old behaviour for embedders with no such timestamp, and the
 // history branch still beats the wall clock there.
+//
+// That history branch reads a row's created_at, and an await answered over its
+// pending row, or a write-ahead-intent call completed over its intent row, now
+// carries the time of the ANSWER there (cleat#4465), where it used to keep the
+// time of the start. So an embedder with no start time, whose first step is one
+// of those, replays a Now() read BEFORE that step later than the live run read
+// it, by about how long the step was pending (measured at +131 to +148 ms with
+// two 60 ms waits, against +0 to +2 ms before). The worker passes
+// WithWorkflowStartTime and is not affected.
 func (e *Engine) seedNowMs(replayHistory []EventRecord) int64 {
 	if e.workflowStartMs > 0 {
 		return e.workflowStartMs
