@@ -2606,6 +2606,7 @@ func main() {
 		encryptSensitivePayloads:         *encryptSensitivePayloads,
 		drainCh:                          make(chan struct{}),
 		parentWakeCh:                     make(chan struct{}, 1),
+		slotFreedCh:                      make(chan struct{}, 1),
 		notifyCh:                         notifyCh,
 		flusherRegistry:                  flusherRegistry,
 		db:                               db,

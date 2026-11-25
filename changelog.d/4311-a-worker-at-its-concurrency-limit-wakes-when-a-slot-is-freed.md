@@ -1,0 +1,4 @@
+---
+section: fixed
+---
+- **A worker at its concurrency limit looked for work again only at the next `--poll` tick, even when a slot was freed or a signal's NOTIFY arrived a moment after it began waiting (cleat#4311).** The dispatch loop slept a whole `--poll` when it had no free slot, and a plain sleep cannot be woken. It now waits for a freed slot, the worker's shutdown, or the tick, whichever comes first. Measured 2026-11-25 on PostgreSQL with real workers, `--poll 500ms`, residency off, one signal delivered 150 ms after the run suspended: 340 to 403 ms at `--concurrency 1` before the change (12 trials), against 66 to 114 ms with a free slot (20 trials); the after-the-change figure at `--concurrency 1` is in the PR. A NOTIFY while the worker has no free slot is still not acted on until a slot frees, by design: it would find nothing to claim.
