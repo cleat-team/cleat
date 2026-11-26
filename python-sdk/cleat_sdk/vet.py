@@ -52,8 +52,8 @@ WARN_FUNCTION_IMPORT = "PY014"  # stdlib module imported inside a function
 WARN_LAZY_IMPORT_CALL = "PY015"  # call that imports a module the first time it runs
 
 #: A real-time clock read or sleep in workflow code (cleat#4396). A WARNING, never an error: it must not newly refuse a build that runs today.
-#: ``time.sleep`` written plainly is the PY004 error and is not reported twice; this covers the same call through an alias, and the clock reads
-#: that PY004 and PY005 never named.
+#: ``time.sleep`` written plainly is the PY004 error and is not reported twice; the same call through an alias is reported as PY004 too (an error), and
+#: this covers the clock reads that PY004 and PY005 never named.
 WARN_REAL_TIME_CLOCK = "PY016"
 
 #: A wait that blocks the worker in code the workflow executes (cleat#4403): ``select.select`` and a ``queue.Queue.get`` that can block. A WARNING, never an
@@ -837,13 +837,15 @@ class RealTimeClockChecker(ast.NodeVisitor):
     One warning code, PY016, over the same scope as the forbidden-API checker (the functions the entry points reach). A reference counts as well as
     a call, because ``clock = time.perf_counter`` reads the clock later. Names are resolved through the file's own imports (``import time as t``,
     ``from time import monotonic as m``); a bare ``time`` is taken to be the module as the existing rules do. A ``time.sleep`` written plainly is the
-    PY004 error and is skipped here; the same call through an alias is reported, as a warning, so it cannot newly refuse a build.
+    PY004 error and is skipped here; the same call through an alias is reported as the same PY004 ERROR (cleat#4403): it blocks the same way, and an
+    alias must not be the way round the rule.
     """
 
     def __init__(self, filepath: str, tree: ast.AST, target_funcs: set[str]) -> None:
         self.filepath = filepath
         self.target_funcs = target_funcs
         self.warnings: list[dict[str, Any]] = []
+        self.errors: list[dict[str, Any]] = []  # a sleep through an alias is the PY004 error, as the plain spelling is
         self._depth = 0  # >0 while inside a function whose code the workflow executes
         # Names that mean the ``time`` module, and local names bound to one of its functions (``from time import x as y``).
         self._modules: set[str] = {"time"}
@@ -874,11 +876,22 @@ class RealTimeClockChecker(ast.NodeVisitor):
 
     def _warn(self, node: ast.AST, function: str) -> None:
         if function == "sleep":
-            message = (
-                "time.sleep() really sleeps: it blocks its execution for its whole duration, the instance timeout does not interrupt it (cleat#4403), "
-                "and it is not durable. PY004 refuses `time.sleep` written plainly; this is the same call through an alias."
+            # The same call as the plain spelling, so the same code and the same severity: an alias must not be the way round PY004.
+            self.errors.append(
+                {
+                    "code": ERROR_TIME_SLEEP,
+                    "file": self.filepath,
+                    "line": getattr(node, "lineno", 0),
+                    "column": getattr(node, "col_offset", 0),
+                    "message": (
+                        "time.sleep() is not allowed in durable functions, written through an alias as well: real-time sleep advances differently on "
+                        "each replay, breaking determinism. It also blocks its execution for its whole duration, holds a --concurrency slot and one OS "
+                        "thread, and the instance timeout does not interrupt it (cleat#4403)."
+                    ),
+                    "suggestion": "Use h.sleep() instead",
+                }
             )
-            suggestion = "Use h.sleep(seconds) for a durable sleep"
+            return
         elif function in PROCESS_TIME_CALLS:
             message = (
                 f"time.{function}() reads the host's process-time clock, which replay does not reproduce: its value differs between a run and its replay "
@@ -1502,6 +1515,8 @@ def analyze_file(filepath: str) -> AnalysisResult:
     # Same scope as the forbidden-API checker: what the workflow executes.
     real_time = RealTimeClockChecker(filepath, tree, to_check)
     real_time.visit(tree)
+    for error in real_time.errors:
+        result.add_error(error["code"], error["line"], error["message"], error["suggestion"], error["column"])
     for warning in real_time.warnings:
         result.add_warning(
             warning["code"],

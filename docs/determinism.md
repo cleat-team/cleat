@@ -144,7 +144,7 @@ monotonic deadline.
 
 | language | refused or flagged |
 |---|---|
-| Python | `time.sleep` (PY004, error); `time.time` (PY005, error); **`time.monotonic`, `monotonic_ns`, `perf_counter`, `perf_counter_ns`, `process_time`, `process_time_ns` and `time.sleep` through an alias (PY016, warning)**; **`select.select` and a blocking `queue.Queue.get` (PY017, warning)** |
+| Python | `time.sleep` (PY004, error, through an alias too); `time.time` (PY005, error); **`time.monotonic`, `monotonic_ns`, `perf_counter`, `perf_counter_ns`, `process_time`, `process_time_ns` (PY016, warning)**; **`select.select` and a blocking `queue.Queue.get` (PY017, warning)** |
 | C# | `Stopwatch` (CV006), `Environment.TickCount` and `TickCount64` (CV007), `Thread.Sleep` (CV005) |
 | Go | `time.Now` (E003), `time.Sleep` (E004), `time.After`, `NewTicker`, `NewTimer` (E014) |
 | Rust | `std::time::Instant::now` (R005) |
