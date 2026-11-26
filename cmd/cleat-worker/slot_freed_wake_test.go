@@ -2,9 +2,7 @@ package main
 
 import (
 	"context"
-	"go/ast"
-	"go/parser"
-	"go/token"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -108,55 +106,66 @@ func TestDeregisterExecutionDoesNotBlockOrPanicWithoutASlotChannel(t *testing.T)
 	}
 }
 
-// cleat#4476. The tests above hold waitForSlot and the send that ends it; nothing at PR time held that the dispatch loop's at-capacity branch CALLS
-// waitForSlot, so a change putting a plain time.Sleep back there (the cleat#4311 defect) kept every one of them green, and was caught only by the
-// timing row in the scheduled chaos sweep. The loop is too large to drive without a database and a clock, so this reads it: the `free <= 0` branch
-// of dispatchLoop must call w.waitForSlot and must not sleep on its own.
-func TestTheDispatchLoopsAtCapacityBranchWaitsForASlotAndDoesNotSleep(t *testing.T) {
-	fset := token.NewFileSet()
-	file, err := parser.ParseFile(fset, "setup.go", nil, 0)
-	if err != nil {
-		t.Fatal(err)
+// cleat#4476. The tests above hold waitForSlot and the send that ends it; nothing held that the dispatch loop's at-capacity branch USES them, so putting a plain time.Sleep back there
+// (the cleat#4311 defect) kept every one of them green, and was caught only by the timing row in the scheduled chaos sweep. This drives dispatchLoop itself, on the same mock store
+// TestDispatchLoop_AtCapacity uses: concurrency 1, one in-flight entry, and a --poll of an HOUR. The slot is freed through deregisterExecution, and a claim must follow within 10 s.
+// A loop that waits for the tick, by whatever means, claims nothing for an hour; one that wakes on the freed slot claims in milliseconds. The margin (360x) runs one way: a slow runner
+// cannot make a working loop miss it.
+//
+// WHAT IT NEEDS BEFORE THE SLOT IS FREED: the loop must already have counted the in-flight entry and be at the wait. A slot freed before that is not lost (the token is kept) but the
+// loop would simply claim on its first pass, and a loop that ignores the freed slot would pass. The first QueueDepth call is the evidence the loop has gone round (Tick makes it, once
+// per bound interval, at the top of every pass); the settle after it covers the few instructions between that call and the wait. Reading the loop's own state would be better; none
+// of it is observable from here.
+func TestTheDispatchLoopClaimsAgainWhenASlotIsFreedWithAnHourlyPoll(t *testing.T) {
+	ms := &mockStore{}
+	var claims, depthReads atomic.Int32
+	ms.claimStickyWorkflowsFn = func(context.Context, string, int) ([]*engine.WorkflowInstance, error) {
+		claims.Add(1)
+		return nil, nil
 	}
-	var branch *ast.BlockStmt
-	for _, d := range file.Decls {
-		fn, ok := d.(*ast.FuncDecl)
-		if !ok || fn.Name.Name != "dispatchLoop" || fn.Body == nil {
-			continue
-		}
-		ast.Inspect(fn.Body, func(n ast.Node) bool {
-			if is, ok := n.(*ast.IfStmt); ok {
-				if b, ok := is.Cond.(*ast.BinaryExpr); ok && b.Op == token.LEQ {
-					if x, ok := b.X.(*ast.Ident); ok && x.Name == "free" {
-						if y, ok := b.Y.(*ast.BasicLit); ok && y.Value == "0" {
-							branch = is.Body
-						}
-					}
-				}
-			}
-			return true
-		})
+	ms.claimWorkflowsFn = func(context.Context, string, int) ([]*engine.WorkflowInstance, error) { return nil, nil }
+	ms.queueDepthFn = func(context.Context) (int64, error) {
+		depthReads.Add(1)
+		return 0, nil
 	}
-	if branch == nil {
-		t.Fatal("found no `if free <= 0` in dispatchLoop: the test's anchor is gone, so it cannot say what the at-capacity branch does (UNMEASURED, not a pass)")
-	}
-	var waits, sleeps int
-	ast.Inspect(branch, func(n ast.Node) bool {
-		call, ok := n.(*ast.CallExpr)
-		if !ok {
-			return true
+	w := newTestWorkerWithConcurrency(ms, 1)
+	w.pollInterval = time.Hour
+	w.slotFreedCh = newSlotFreedChannel()
+	busy := &engine.WorkflowInstance{ID: "wf-busy-1", DefName: "test", DefVersion: 1}
+	w.inflight.Store(busy.ID, busy)
+
+	done := make(chan struct{})
+	w.wg.Add(1)
+	go func() {
+		w.dispatchLoop()
+		close(done)
+	}()
+	t.Cleanup(func() {
+		w.cancel()
+		w.inflight.Delete(busy.ID) // the shutdown drain waits for in-flight to reach zero
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Error("dispatchLoop did not stop within 5s of cancellation")
 		}
-		if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
-			switch {
-			case sel.Sel.Name == "waitForSlot":
-				waits++
-			case sel.Sel.Name == "Sleep":
-				sleeps++
-			}
-		}
-		return true
 	})
-	if waits != 1 || sleeps != 0 {
-		t.Fatalf("the at-capacity branch of dispatchLoop calls waitForSlot %d times and time.Sleep %d times, want 1 and 0: a worker at its limit must wake when a slot is freed (cleat#4311)", waits, sleeps)
+
+	for deadline := time.Now().Add(10 * time.Second); depthReads.Load() == 0; time.Sleep(time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatal("UNMEASURED: the dispatch loop never made its first pass (no QueueDepth read in 10s), so it cannot be said to have been at capacity")
+		}
+	}
+	time.Sleep(100 * time.Millisecond)
+	if n := claims.Load(); n != 0 {
+		t.Fatalf("the loop claimed %d times while at capacity", n)
+	}
+
+	w.deregisterExecution(busy, nil)
+	deadline := time.Now().Add(10 * time.Second)
+	for claims.Load() == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("no claim 10s after the slot was freed, with a 1h --poll: the at-capacity branch is not woken by a freed slot, so it is waiting for the poll tick (cleat#4311)")
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
 }
