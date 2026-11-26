@@ -566,6 +566,12 @@ Measured at 0.44 to 0.67 s per claim for a minimal guest.
 
 **Unmeasured, so 0**: until it is measured the window does not grow with a run's history, and every run's window is the floor.
 
+### Reading the residency metrics
+
+A worker with residency on (`--resident-max-runs` above 0) reports every residency series from the moment it starts, at 0: the gauges `cleat_resident_runs` and `cleat_resident_memory_charged_bytes`, and each series of `cleat_resident_parks_total`, `cleat_resident_refusals_total`, `cleat_resident_rechecks_total` and `cleat_resident_evictions_total` that the engine can record (a `kind` that cannot end a given way has no series for that outcome: only a sleep and a signal wait are held, and only a signal wait is rechecked). A worker that has held nothing therefore reads 0, and a missing `cleat_resident_*` series means the worker has residency off or is not the version that starts them (before 0.7.0 they appeared on their first measurement). A worker with residency off exports none of them.
+
+`cleat_workflows_active` is the exception, because it is labelled by workflow name and a worker cannot know the names before it runs them. Its series for a workflow appears when a run of that workflow first starts, so **a missing series means 0**. Write a query that must return a number as `sum(cleat_workflows_active) or vector(0)`, and per workflow as `sum by (workflow_name) (cleat_workflows_active)`, which returns nothing for a workflow that has not run on that worker.
+
 ---
 
 ## Authentication

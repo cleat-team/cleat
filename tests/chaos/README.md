@@ -144,8 +144,8 @@ measure nothing about residency. So the worker is killed only once it says it is
 `--api-addr` on a free loopback port) reads at least 1 AND the store does not have the run parked (`parkedNow`). The **control** is the same scenario with residency off, and has to
 read the opposite on the same detector: `cleat_resident_runs` 0 and the run parked. A case whose run was never in the state it needs reports `UNMEASURED`, which fails.
 
-**Two facts about the detector.** The counter exports no series at all until its first increment, so a worker that has never held a run has no `cleat_resident_runs` line: "the page
-is real (it carries other `cleat_` series) and the series is absent" is zero, and an unreadable page is unknown, not zero (the first version treated absence as unreadable and could
+**Two facts about the detector.** A worker with residency on exports `cleat_resident_runs` at 0 from start-up (cleat#4474); one with residency off, the control, exports no series at all (an instrument is written out only after its first measurement, and that worker records none), so "the page
+is real (it carries other `cleat_` series) and the series is absent" is zero, and a series reading 0 is zero too, and an unreadable page is unknown, not zero (the first version treated absence as unreadable and could
 not tell its own control from a broken scrape, and waited out the whole budget). And **the 8 s sleep is not there for the cold-start compile**: in this scenario the compile happens before call A, not during the sleep (WS-cleat1's review of #4273), and the sleep's
 deadline is anchored at A's recorded event, not at the claim (`DurableSleep` takes `max(s.nowMs, s.Now(ctx))`, and `Now` is the last history event's timestamp; cleat-review3's reading of the
 code at `3c662e32`, consistent with one measurement and **not measured directly**). So 8 s only has to outlast the detection (a 100 ms poll plus a metrics scrape) and the kill.

@@ -1154,6 +1154,33 @@ func (m *Metrics) AddResidentMemoryCharged(ctx context.Context, delta int64) {
 	m.residentMemoryCharged.Add(ctx, delta, metric.WithAttributes(m.defaultAttrs...))
 }
 
+// ResidentSeries is the label values of the residency counters that a worker with residency on starts at zero: a (kind, outcome) pair per parks series, a (kind, reason) pair per
+// refusals series, a (kind, result) pair per rechecks series, and a reason per evictions series (cleat#4474).
+type ResidentSeries struct {
+	Parks, Refusals, Rechecks [][2]string
+	Evictions                 []string
+}
+
+// StartResidentSeriesAtZero records a 0 for each residency instrument and for each series in s. The exporter writes an instrument out only after its first measurement, so without
+// this a worker that has held nothing has no cleat_resident_runs, no evictions counter and no series for any outcome it has not yet seen, and an operator cannot tell "nothing held"
+// from "the exporter is broken". A 0 is an Add of 0: it creates the series the first real event then increments, and changes no total.
+func (m *Metrics) StartResidentSeriesAtZero(ctx context.Context, s ResidentSeries) {
+	m.AddResidentRuns(ctx, 0)
+	m.AddResidentMemoryCharged(ctx, 0)
+	for _, p := range s.Parks {
+		m.residentParks.Add(ctx, 0, metric.WithAttributes(m.mergeAttrs(attribute.String("kind", p[0]), attribute.String("outcome", p[1]))...))
+	}
+	for _, r := range s.Refusals {
+		m.residentRefusals.Add(ctx, 0, metric.WithAttributes(m.mergeAttrs(attribute.String("kind", r[0]), attribute.String("reason", r[1]))...))
+	}
+	for _, r := range s.Rechecks {
+		m.residentRechecks.Add(ctx, 0, metric.WithAttributes(m.mergeAttrs(attribute.String("kind", r[0]), attribute.String("result", r[1]))...))
+	}
+	for _, reason := range s.Evictions {
+		m.residentEvictions.Add(ctx, 0, metric.WithAttributes(m.mergeAttrs(attribute.String("reason", reason))...))
+	}
+}
+
 // RecordReplayShortHistory increments the replay-short-histories counter.
 //
 // NOT RecordReplayFailure, and the distinction is the whole point: a short

@@ -252,8 +252,35 @@ func NewResidentSet(cfg ResidencyConfig) (*ResidentSet, error) {
 	// The budget is a fixed fact of the set, so it is recorded once here and the charged figure moves with each hold (cleat#4377).
 	if m := cfg.Metrics; m != nil && cfg.MaxRuns > 0 && cfg.MemoryBudgetBytes > 0 {
 		m.AddResidentMemoryBudget(context.Background(), int64(cfg.MemoryBudgetBytes))
+		// And every series it can emit at 0, so a worker that has held nothing says so instead of leaving the series out (cleat#4474).
+		m.StartResidentSeriesAtZero(context.Background(), residentStartUpSeries())
 	}
 	return &ResidentSet{cfg: cfg, parked: map[*residentSlot]struct{}{}, nudge: make(chan struct{})}, nil
+}
+
+// residentStartUpSeries is every series the residency counters can emit, by the label values resident.go records. It is what a set with residency on starts at zero. The pairs are the
+// ones a wait can actually produce, not a cross product: only a timer and a signal wait can be held, so only they have outcomes; only a signal wait is rechecked, so only it can end
+// "woke" or "recheck_failed"; and a kind with no wake source is refused for its kind and for nothing else. A pair left out would reappear as the gap this exists to close, so
+// TestEveryResidencyLabelValueTheEngineRecordsHasAStartUpZero reads the constants above and fails on a value that is in none of these lists.
+func residentStartUpSeries() prometheus.ResidentSeries {
+	var s prometheus.ResidentSeries
+	timer, signal := wakeTimer.String(), wakeSignal.String()
+	for _, outcome := range []string{residentEndedDeadline, residentEndedCancelled, residentEndedEvicted} {
+		s.Parks = append(s.Parks, [2]string{timer, outcome}, [2]string{signal, outcome})
+	}
+	s.Parks = append(s.Parks, [2]string{signal, residentEndedWoke}, [2]string{signal, residentEndedRecheckErr})
+	for _, reason := range []string{residentRefusedLanguage, residentRefusedWindow, residentRefusedCount, residentRefusedMemory, residentRefusedPressure, residentRefusedDraining, residentRefusedCode, residentRefusedDeadline} {
+		s.Refusals = append(s.Refusals, [2]string{timer, reason}, [2]string{signal, reason})
+	}
+	s.Refusals = append(s.Refusals, [2]string{signal, residentRefusedKind})
+	for _, kind := range []wakeKind{wakePromise, wakeChild, wakeUpdate} {
+		s.Refusals = append(s.Refusals, [2]string{kind.String(), residentRefusedKind})
+	}
+	for _, result := range []string{residentRecheckFound, residentRecheckNone, residentRecheckError} {
+		s.Rechecks = append(s.Rechecks, [2]string{signal, result})
+	}
+	s.Evictions = []string{ResidentEvictedShutdown, ResidentEvictedPressure, ResidentEvictedCode}
+	return s
 }
 
 // DearestResidentInstanceBytes is the largest per-language charge in the default table. The worker uses it for the one case with no better number: a host whose memory
