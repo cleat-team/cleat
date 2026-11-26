@@ -84,12 +84,14 @@ import (
 //
 // MySQL and SQL Server have one copy each, covered by the same families.
 //
-// A stray write that reaches the WHERE from another worker meets a lease fence
-// first: insertEventSQL's folded fence and partitionFencedBatch on the flush
-// paths, and the claim fence of the finalize writes that call appendEventsInTx
-// (FinalizeWorkflow's fenceHeld check). That is read from the code, not
-// measured end to end, and it is why a crash test cannot isolate the WHERE
-// without injecting a database fault.
+// A stray write from another worker does not commit. On the flush paths it
+// meets a lease fence before the WHERE (insertEventSQL's folded fence;
+// partitionFencedBatch ahead of flushAndNotify and retryBatchFlush). On the
+// finalize paths that call appendEventsInTx (finalizeWorkflowSegmentInner,
+// FinalizeDeferPhase) the write runs first, and the claim fence checked after
+// it in the same transaction rolls it back (ErrFenceLost). That is read from
+// the code, not measured end to end, and it is why a crash test cannot
+// isolate the WHERE without injecting a database fault.
 func TestChecksumChainSurvivesAwaitChild(t *testing.T) {
 	for _, tc := range []struct {
 		name          string
