@@ -47,16 +47,34 @@ func refLine(localRef, localSHA, remoteRef, remoteSHA string) string {
 	return localRef + " " + localSHA + " " + remoteRef + " " + remoteSHA + "\n"
 }
 
+// wantRefused is how every refusal in this file is read, and it asks for two things a bare `code != 0` does not (cleat#4479). The status must be
+// exactly 1, which is the hook's own "refused": a hook that died some other way (a crashed `grep`, a bad invocation) also exits non-zero, and a test
+// that accepts any non-zero status certifies it. And the message must name the branch, because a refusal that says nothing is not one an author can
+// act on, and because it is the only evidence the refusal path (not an earlier exit) produced the status. It reports through t.Errorf and returns
+// whether the refusal was as wanted, so a caller can skip its own further checks.
+func wantRefused(t *testing.T, label string, code int, stderr, branch string) bool {
+	t.Helper()
+	ok := true
+	if code != 1 {
+		t.Errorf("%s: exit status %d, want 1 (the hook's refusal; 0 is an allow and anything else is the hook failing some other way): %q", label, code, stderr)
+		ok = false
+	}
+	if !strings.Contains(stderr, branch) {
+		t.Errorf("%s: the refusal does not name the branch %q: %q", label, branch, stderr)
+		ok = false
+	}
+	return ok
+}
+
 func TestThePrePushHookRefusesABranchOutsideTheSix(t *testing.T) {
-	for _, tc := range []struct{ name, stdin string }{
-		{"an arbitrary prefix", refLine("refs/heads/test/y", realSHA, "refs/heads/test/y", zeroSHA)},
-		{"chore, the #2314 mistake", refLine("refs/heads/chore/x", realSHA, "refs/heads/chore/x", zeroSHA)},
-		{"feat, which is not feature", refLine("refs/heads/feat/x", realSHA, "refs/heads/feat/x", zeroSHA)},
-		{"the bare word, with no slash", refLine("refs/heads/feature", realSHA, "refs/heads/feature", zeroSHA)},
+	for _, tc := range []struct{ name, branch string }{
+		{"an arbitrary prefix", "test/y"},
+		{"chore, the #2314 mistake", "chore/x"},
+		{"feat, which is not feature", "feat/x"},
+		{"the bare word, with no slash", "feature"},
 	} {
-		code, stderr := runPrePush(t, tc.stdin)
-		if code == 0 {
-			t.Errorf("%s: allowed; want refused", tc.name)
+		code, stderr := runPrePush(t, refLine("refs/heads/"+tc.branch, realSHA, "refs/heads/"+tc.branch, zeroSHA))
+		if !wantRefused(t, tc.name, code, stderr, tc.branch) {
 			continue
 		}
 		// The refusal has to name the six, or the message sends the author to
@@ -107,9 +125,7 @@ func TestThePrePushHookReadsTheREMOTERef(t *testing.T) {
 	if code == 0 {
 		t.Fatal("a bad REMOTE ref was allowed because the LOCAL ref was well named: the hook is reading the wrong object")
 	}
-	if !strings.Contains(stderr, "test/y") {
-		t.Errorf("the refusal does not name the offending ref: %q", stderr)
-	}
+	wantRefused(t, "a bad remote ref from a well-named local branch", code, stderr, "test/y")
 }
 
 // TestThePrePushHookReadsTheRuleFromTheCheck is the tie this hook shipped
@@ -202,9 +218,7 @@ func TestThePrePushHookRefusesOnlyTheOffendingRef(t *testing.T) {
 	if code == 0 {
 		t.Fatal("a push carrying a bad ref was allowed")
 	}
-	if !strings.Contains(stderr, "test/z") {
-		t.Errorf("the refusal does not name the bad ref: %q", stderr)
-	}
+	wantRefused(t, "a push carrying one good ref and one bad", code, stderr, "test/z")
 	if strings.Contains(stderr, "feature/x") {
 		t.Errorf("the refusal blames the GOOD ref: %q", stderr)
 	}
@@ -244,13 +258,7 @@ func TestThePrePushHookExemptsOnlyAPrefixAndNothingElse(t *testing.T) {
 		"Dependabot/npm_and_yarn", // the exemption is case-exact, as the check's is
 	} {
 		code, stderr := runPrePush(t, refLine("refs/heads/"+name, realSHA, "refs/heads/"+name, zeroSHA))
-		if code == 0 {
-			t.Errorf("%s: allowed; want refused", name)
-			continue
-		}
-		if !strings.Contains(stderr, name) {
-			t.Errorf("%s: the refusal does not name it: %q", name, stderr)
-		}
+		wantRefused(t, name, code, stderr, name)
 	}
 }
 
@@ -306,7 +314,10 @@ func TestThePrePushHookStopsExemptingABotWhenTheCheckDoes(t *testing.T) {
 	if code, stderr := run(check); code != 0 {
 		t.Fatalf("the real check, copied into a scratch repository, did not exempt a dependabot branch (exit %d): %s", code, stderr)
 	}
-	if code, _ := run(without); code == 0 {
-		t.Error("the check no longer exempts dependabot and the hook still does: it is carrying its own copy of the exemption")
+	// The refusal is read as every other one in this file is: exit 1 and the branch named (cleat#4479). Status alone passed a hook that exited 2.
+	code, stderr := run(without)
+	if code == 0 {
+		t.Fatal("the check no longer exempts dependabot and the hook still does: it is carrying its own copy of the exemption")
 	}
+	wantRefused(t, "a dependabot branch once the check stops exempting bots", code, stderr, "dependabot/npm_and_yarn/web/x")
 }
