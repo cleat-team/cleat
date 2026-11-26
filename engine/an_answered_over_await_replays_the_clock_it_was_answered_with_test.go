@@ -475,16 +475,25 @@ func TestTheEventChecksumDoesNotCoverTheTimestampAnAnswerOverRewrites(t *testing
 // would read a clock from the future of the answer.
 func TestAStrayReflushOverAnAnsweredAwaitKeepsTheAnswersTimestamp(t *testing.T) {
 	eachDialectDB(t, func(t *testing.T, d testutil.Dialect, db *sql.DB, store WorkflowStore) {
+		// batch is how many records the stray travels with. One goes through appendOneEvent (a direct Exec); two or more go through
+		// appendEventsInTx's prepared statement, which is a SEPARATE copy of the guard on PostgreSQL and the one a terminal write (a finalize, a
+		// defer-phase finalize, a continue-as-new) uses for its whole batch of new events. A guard removed from that copy alone left every
+		// test here green (cleat#4475, measured 2026-11-26), because every stray below used to travel alone.
+		pendingAgain := func(t0 int64) EventRecord {
+			return EventRecord{Step: 0, EventType: EventTypeAwaitChild, RunID: "r1", TimestampMs: t0 + 5000}
+		}
+		answerAgain := func(t0 int64) EventRecord {
+			return EventRecord{Step: 0, EventType: EventTypeAwaitChild, RunID: "r1", Response: `{"ok":true}`, TimestampMs: t0 + 5000}
+		}
 		for _, tc := range []struct {
 			name  string
 			stray func(t0 int64) EventRecord
+			batch int
 		}{
-			{"the_pending_record_written_again_later", func(t0 int64) EventRecord {
-				return EventRecord{Step: 0, EventType: EventTypeAwaitChild, RunID: "r1", TimestampMs: t0 + 5000}
-			}},
-			{"the_answer_written_again_later", func(t0 int64) EventRecord {
-				return EventRecord{Step: 0, EventType: EventTypeAwaitChild, RunID: "r1", Response: `{"ok":true}`, TimestampMs: t0 + 5000}
-			}},
+			{"the_pending_record_written_again_later", pendingAgain, 1},
+			{"the_answer_written_again_later", answerAgain, 1},
+			{"the_pending_record_written_again_later_in_a_batch_of_two", pendingAgain, 2},
+			{"the_answer_written_again_later_in_a_batch_of_two", answerAgain, 2},
 		} {
 			tc := tc
 			t.Run(tc.name, func(t *testing.T) {
@@ -504,15 +513,28 @@ func TestAStrayReflushOverAnAnsweredAwaitKeepsTheAnswersTimestamp(t *testing.T) 
 				read := func() EventRecord {
 					t.Helper()
 					h, err := store.LoadEventHistory(ctx, wfID)
-					if err != nil || len(h) != 1 {
+					if err != nil || len(h) < 1 {
 						t.Fatalf("load history: %v, %d records", err, len(h))
 					}
-					return h[0]
+					for _, r := range h {
+						if r.Step == 0 {
+							return r
+						}
+					}
+					t.Fatalf("no step 0 in the history: %+v", h)
+					return EventRecord{}
 				}
 				if got := read(); got.Response != answer.Response || got.TimestampMs != answer.TimestampMs {
 					t.Fatalf("precondition: the answer was not stored with its own time: response %q at %d, want %q at %d", got.Response, got.TimestampMs, answer.Response, answer.TimestampMs)
 				}
-				write(tc.stray(t0))
+				batch := []EventRecord{tc.stray(t0)}
+				for i := 1; i < tc.batch; i++ {
+					// Companions at steps nothing else has written, so the only conflict in the batch is the stray itself.
+					batch = append(batch, EventRecord{Step: i, EventType: EventTypeCall, Service: "svc", Op: "op", Response: `{}`, TimestampMs: t0 + 5000 + int64(i)})
+				}
+				if err := store.AppendEventHistoryBatch(ctx, wfID, batch); err != nil {
+					t.Fatalf("append a batch of %d: %v", len(batch), err)
+				}
 				if got := read(); got.Response != answer.Response || got.TimestampMs != answer.TimestampMs {
 					t.Errorf("a stray write of an answered await changed it: response %q at %d (%+dms), want %q at %d", got.Response, got.TimestampMs, got.TimestampMs-answer.TimestampMs, answer.Response, answer.TimestampMs)
 				}
