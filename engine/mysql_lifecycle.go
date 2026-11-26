@@ -1247,12 +1247,13 @@ func (s *MySQLStore) ReapStaleInstances(ctx context.Context, timeout time.Durati
 		        SELECT id FROM workflow_instances
 		        WHERE status = 'running'
 		          AND heartbeat_at < NOW(6) - INTERVAL ? MICROSECOND
+		          AND (heartbeat_at < NOW(6) - INTERVAL ? MICROSECOND OR held_generation = generation)
 		          AND tenant_id = ?
 		        ORDER BY heartbeat_at
 		        LIMIT ?
 		    ) t
 		)
-	`, timeout.Microseconds(), s.tenantID, reapLimitArg(limit))
+	`, heldStaleness(ctx, timeout).Microseconds(), timeout.Microseconds(), s.tenantID, reapLimitArg(limit))
 	if err != nil {
 		return 0, fmt.Errorf("reap stale instances: %w", err)
 	}
@@ -1275,10 +1276,11 @@ func (s *MySQLStore) ListStaleHolders(ctx context.Context, timeout time.Duration
 		SELECT id, generation, assigned_to FROM workflow_instances
 		WHERE status = 'running'
 		  AND heartbeat_at < NOW(6) - INTERVAL ? MICROSECOND
+		  AND (heartbeat_at < NOW(6) - INTERVAL ? MICROSECOND OR held_generation = generation)
 		  AND tenant_id = ?
 		ORDER BY heartbeat_at
 		LIMIT ?
-	`, timeout.Microseconds(), s.tenantID, reapLimitArg(limit))
+	`, heldStaleness(ctx, timeout).Microseconds(), timeout.Microseconds(), s.tenantID, reapLimitArg(limit))
 	if err != nil {
 		return nil, fmt.Errorf("list stale holders: %w", err)
 	}
@@ -1316,7 +1318,7 @@ func (s *MySQLStore) ReapStaleInstancesExcept(ctx context.Context, timeout time.
 	defer tx.Rollback()
 
 	excludeClause := ""
-	args := []any{timeout.Microseconds(), s.tenantID}
+	args := []any{heldStaleness(ctx, timeout).Microseconds(), timeout.Microseconds(), s.tenantID}
 	if len(exclude) > 0 {
 		pairs := make([]string, len(exclude))
 		for i, k := range exclude {
@@ -1338,6 +1340,7 @@ func (s *MySQLStore) ReapStaleInstancesExcept(ctx context.Context, timeout time.
 		        SELECT id FROM workflow_instances
 		        WHERE status = 'running'
 		          AND heartbeat_at < NOW(6) - INTERVAL ? MICROSECOND
+		          AND (heartbeat_at < NOW(6) - INTERVAL ? MICROSECOND OR held_generation = generation)
 		          AND tenant_id = ?
 		          `+excludeClause+`
 		        ORDER BY heartbeat_at

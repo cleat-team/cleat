@@ -133,7 +133,12 @@ type Engine struct {
 	claimCheck func(ctx context.Context) error
 	// publishState writes the run's query state to the store before the run is HELD, from parkOrSuspend (park.go publishForHold): a held run does not return to the worker, and the
 	// worker writes query state only when an execution returns. nil means this handle cannot publish, so a run WITH query state is refused, not held. WithResidency sets it.
-	publishState         func(ctx context.Context, state map[string]string) error
+	publishState func(ctx context.Context, state map[string]string) error
+	// markHeld and clearHeld record in the store that this run is held (cleat#4275), so that its holder's death is noticed at the held window and not the ordinary one. They are set
+	// together or not at all: a mark with no clear would leave a run that has gone back to its guest looking held. markHeld runs at hold admission, clearHeld when a hold ends and
+	// BEFORE claimCheck, both from parkOrSuspend and nowhere else.
+	markHeld             func(ctx context.Context) error
+	clearHeld            func(ctx context.Context) error
 	stopAtLastStoppable  bool         // a defer segment over a killed run; see WithStopAtLastStoppable
 	killedWithDefersOwed atomic.Bool  // a component guest was stopped before its wrapper ran its defers; see KilledWithDefersOwed
 	nowFn                func() int64 // wall clock for sleep-deadline decisions; see WithClock
@@ -465,6 +470,9 @@ func WithResidency(r *ResidentRun) EngineOption {
 			e.wakeSource = r
 			e.claimCheck = r.info.ClaimCheck
 			e.publishState = r.info.PublishState
+			if r.info.MarkHeld != nil && r.info.ClearHeld != nil {
+				e.markHeld, e.clearHeld = r.info.MarkHeld, r.info.ClearHeld
+			}
 		}
 	}
 }

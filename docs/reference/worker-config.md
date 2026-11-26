@@ -311,6 +311,42 @@ still follows `--heartbeat`.
 
 ---
 
+### --held-reclaim-after
+
+| Type | Default | Description |
+|------|---------|-------------|
+| duration | `0` | How long a run **held in memory** through a wait (`--resident-max-runs`) may go without a heartbeat before another worker may claim it (`0` = derive, negative = off) |
+
+cleat#4275. A worker that dies while holding a run leaves it `running` and assigned
+to the dead worker, so, unlike a suspended run, it is not claimable until the
+reaper reclaims it. At `--reclaim-timeout` (about 47s at the default heartbeat) that
+is how long it waits, and the wait does not add to the sleep's own time: measured on PostgreSQL at the defaults
+with a real `SIGKILL`, a held run's next step ran about 49 to 50s after the first
+(three runs on develop, three on the 0.6.0 release tip).
+
+`0` derives the held window as the reclaim window **without its database-stall
+allowance**, about 17s at the default heartbeat. That allowance is what keeps a
+database stall from reclaiming a running run whose heartbeat the stall delayed,
+where a false reclaim repeats an effect. A held run is not executing, and a hold
+ends only through a claim check that is a fenced write, so a held run reclaimed by
+mistake costs one replay and not a repeated effect.
+
+How it works: the holder marks the run held at the generation it holds (fenced on
+its claim) when a hold starts, and clears the marker, again fenced, **before** the
+hold's claim check returns and the guest resumes. A marker is read only while it
+names the run's current generation, so one that outlives a reclaim does nothing to
+the next owner. Only a marked run is reclaimed at this window; every other run is
+reclaimed at `--reclaim-timeout` as before.
+
+The reaper still waits a full `--reclaim-timeout` after any database trouble of its
+own before it reclaims anything, so a database-wide stall does not reclaim every
+held run at once, and `--max-reclaim-per-tick` still bounds a sweep.
+
+Refused below the derived floor. Ignored (no fast path) when it is not shorter than
+the reclaim window. A negative value turns the fast path off.
+
+---
+
 ### --heartbeat-max-connections
 
 | Type | Default | Description |

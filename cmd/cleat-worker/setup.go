@@ -2227,6 +2227,7 @@ type Worker struct {
 	maxQueued            int
 	heartbeatInterval    time.Duration
 	reclaimTimeout       time.Duration // 0 = derive from heartbeatInterval; see reclaimAfter
+	heldReclaimFlag      time.Duration // --held-reclaim-after; see heldReclaim
 	flushRetryWindow     time.Duration // 0 = engine.DefaultFlushRetryWindow; see --flush-retry-window
 	pollInterval         time.Duration
 	pluginRegistry       *engine.PluginRegistry
@@ -4314,6 +4315,10 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 			PublishState: func(ctx context.Context, state map[string]string) error {
 				return execStore.PublishQueryState(ctx, wf.ID, w.id, wf.Generation, state)
 			},
+			// cleat#4275: say in the store that the run is held, so another worker's reaper reclaims it at --held-reclaim-after if this one dies, and clear it when the hold ends,
+			// before the claim check. Both or neither: a store that cannot mark, or a worker with the fast path off, holds the run unmarked (reclaimed at the ordinary window).
+			MarkHeld:  heldMarkerFor(w, execStore, wf, true),
+			ClearHeld: heldMarkerFor(w, execStore, wf, false),
 		})))
 	}
 	eng := engine.NewEngine(nil, caller, engineOpts...)
@@ -5055,6 +5060,20 @@ func heartbeatGroupOrder(byTenant map[string][]engine.GenerationKey) []string {
 // exist, for shard distribution -- and still follows --heartbeat.
 func (w *Worker) reclaimAfter() time.Duration {
 	return reclaimWindow(w.reclaimTimeout, w.heartbeatInterval)
+}
+
+// heldReclaim is the staleness at which this worker's reaper reclaims a run another worker HOLDS (cleat#4275), or 0 when there is no fast path. See heldReclaimWindow.
+func (w *Worker) heldReclaim() time.Duration {
+	return heldReclaimWindow(w.heldReclaimFlag, w.reclaimTimeout, w.heartbeatInterval)
+}
+
+// withHeldReclaim arms the held arm of the reclaim statements for a call made with the returned context. reapingIsSafe has already been consulted by reapOnce, so this is only
+// ever reached on a tick that waited out the full reclaim window after any database trouble of its own.
+func (w *Worker) withHeldReclaim(ctx context.Context) context.Context {
+	if d := w.heldReclaim(); d > 0 {
+		return engine.WithHeldReclaimAfter(ctx, d)
+	}
+	return ctx
 }
 
 // heartbeatPresumedLost reports whether this worker's own heartbeats have
@@ -5948,6 +5967,29 @@ func reclaimWindow(reclaimTimeout, heartbeat time.Duration) time.Duration {
 	return max(minimumReclaimAfter(heartbeat), 10*time.Second)
 }
 
+// minimumHeldReclaimAfter is the floor for --held-reclaim-after, and its default: minimumReclaimAfter without the maxTolerableStall term (cleat#4275). That term is what keeps a
+// database stall of up to maxTolerableStall from reclaiming a RUNNING run whose heartbeat the stall delayed, where a false reclaim repeats an effect. A held run is not executing,
+// and what ends its hold is a fenced claim check, so it does not need to be paid for; every other term (the heartbeat, a failed-and-retried heartbeat, the reconnect slack) is.
+func minimumHeldReclaimAfter(heartbeat time.Duration) time.Duration {
+	return minimumReclaimAfter(heartbeat) - maxTolerableStall
+}
+
+// heldReclaimWindow is the staleness at which a held run is reclaimed, or 0 for "no fast path": the flag is negative, or the result would not be shorter than the ordinary window
+// (a --reclaim-timeout set at or below it, where there is nothing to gain and the held arm would only add a predicate).
+func heldReclaimWindow(configured, reclaimTimeout, heartbeat time.Duration) time.Duration {
+	if configured < 0 {
+		return 0
+	}
+	d := configured
+	if d == 0 {
+		d = minimumHeldReclaimAfter(heartbeat)
+	}
+	if d >= reclaimWindow(reclaimTimeout, heartbeat) {
+		return 0
+	}
+	return d
+}
+
 // reapSkipWarnThreshold is how many reaper ticks in a row reapOnce will fail
 // to reclaim -- via its grace-period gate, OR via the probe/reclaim call
 // itself erroring out -- before escalating to a distinct, harder-to-miss
@@ -6297,7 +6339,7 @@ func (w *Worker) reapUnitOnce(unit reapUnit, staleTimeout time.Duration) (int, e
 		var n int
 		err := w.probeBoundedCall(func(reapCtx context.Context) error {
 			var err error
-			n, err = unit.store.ReapStaleInstances(reapCtx, staleTimeout, w.maxReclaimPerTick)
+			n, err = unit.store.ReapStaleInstances(w.withHeldReclaim(reapCtx), staleTimeout, w.maxReclaimPerTick)
 			return err
 		})
 		return n, err
@@ -6307,7 +6349,7 @@ func (w *Worker) reapUnitOnce(unit reapUnit, staleTimeout time.Duration) (int, e
 	var addresses map[string]string
 	err := w.probeBoundedCall(func(reapCtx context.Context) error {
 		var e error
-		rows, e = w.staleRowsToAsk(reapCtx, reaper, staleTimeout)
+		rows, e = w.staleRowsToAsk(w.withHeldReclaim(reapCtx), reaper, staleTimeout)
 		if e != nil || len(rows) == 0 {
 			// Nothing to ask about -- the ordinary tick, and the one the
 			// registry read below would otherwise charge for.
@@ -6332,7 +6374,7 @@ func (w *Worker) reapUnitOnce(unit reapUnit, staleTimeout time.Duration) (int, e
 	var n int
 	err = w.probeBoundedCall(func(reapCtx context.Context) error {
 		var err error
-		n, err = reaper.ReapStaleInstancesExcept(reapCtx, staleTimeout, w.maxReclaimPerTick, exclude)
+		n, err = reaper.ReapStaleInstancesExcept(w.withHeldReclaim(reapCtx), staleTimeout, w.maxReclaimPerTick, exclude)
 		return err
 	})
 	return n, err
@@ -9897,4 +9939,20 @@ func continuationVersion(ctx context.Context, st interface {
 		return 0, fmt.Sprintf("continue_as_new: version %d of %q was requested for the next run but is not deployed (or is deprecated); the run is failed rather than continued on version %d", requested, wf.DefName, wf.DefVersion), nil
 	}
 	return requested, "", nil
+}
+
+// heldMarkerFor returns the MarkHeld (mark true) or ClearHeld (mark false) function of a resident handle, or nil when this worker does not use the fast path or the run's store cannot
+// mark a run held. It is called for both halves at once, so they are nil together.
+func heldMarkerFor(w *Worker, store engine.WorkflowStore, wf *engine.WorkflowInstance, mark bool) func(ctx context.Context) error {
+	if w.heldReclaim() <= 0 {
+		return nil
+	}
+	m, ok := store.(engine.HeldRunMarker)
+	if !ok {
+		return nil
+	}
+	if mark {
+		return func(ctx context.Context) error { return m.MarkRunHeld(ctx, wf.ID, w.id, wf.Generation) }
+	}
+	return func(ctx context.Context) error { return m.ClearRunHeld(ctx, wf.ID, w.id, wf.Generation) }
 }

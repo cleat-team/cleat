@@ -1,0 +1,11 @@
+-- cleat#4275: a run held in memory through a wait records the generation it is held at, so that its holder's death is noticed sooner than a running run's.
+--
+-- held_generation is written by the holder (fenced on assigned_to and generation) when a hold starts and cleared by the holder when it ends. The reclaim statements treat a row
+-- as held only while held_generation = generation, so a marker its holder could no longer clear (the run was reclaimed, which bumps generation) is inert from the next claim on.
+-- NULL is the ordinary state and costs nothing: an unmarked row is reclaimed exactly as before.
+--
+-- No index: the held arm of the reclaim keeps the ordinary `heartbeat_at < now() - <interval>` range predicate (at the SHORTER interval), which idx_leases_stale
+-- (status, heartbeat_at) WHERE status = 'running' already serves, and filters held_generation on the rows that range returns.
+--
+-- Idempotent.
+ALTER TABLE workflow_leases ADD COLUMN IF NOT EXISTS held_generation bigint;

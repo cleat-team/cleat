@@ -460,6 +460,10 @@ func main() {
 		os.Exit(1)
 	}
 
+	if err := validateHeldReclaimAfter(*heldReclaimAfter, *heartbeatInterval); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
 	if err := validateReclaimTimeout(*reclaimTimeout, *heartbeatInterval); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
@@ -2532,6 +2536,7 @@ func main() {
 		heartbeatInterval:                *heartbeatInterval,
 		membershipLastBeat:               registeredAt,
 		reclaimTimeout:                   *reclaimTimeout,
+		heldReclaimFlag:                  *heldReclaimAfter,
 		flushRetryWindow:                 *flushRetryWindow,
 		privateHosts:                     pluginPrivateHosts,
 		serviceEndpoints:                 serviceEndpoints,
@@ -3164,6 +3169,22 @@ func validateReclaimTimeout(reclaim, heartbeat time.Duration) error {
 				"runs from workers that are alive and checking in normally.\n"+
 				"Raise --reclaim-timeout to at least %v, or lower --heartbeat.",
 			reclaim, heartbeat, floor, floor)
+	}
+	return nil
+}
+
+// validateHeldReclaimAfter refuses a --held-reclaim-after below minimumHeldReclaimAfter(heartbeat): shorter than that, a worker whose heartbeat was merely late (one failed and
+// retried call) would have its held runs reclaimed. 0 derives it and a negative value turns the fast path off; neither is checked. Refused, not clamped, for the reason
+// validateReclaimTimeout gives.
+func validateHeldReclaimAfter(held, heartbeat time.Duration) error {
+	if held <= 0 {
+		return nil
+	}
+	if floor := minimumHeldReclaimAfter(heartbeat); held < floor {
+		return fmt.Errorf(
+			"--held-reclaim-after %v is below the minimum safe window for --heartbeat %v (%v).\n"+
+				"Raise --held-reclaim-after to at least %v, lower --heartbeat, or pass a negative value to turn the held-run fast path off.",
+			held, heartbeat, floor, floor)
 	}
 	return nil
 }
