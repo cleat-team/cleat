@@ -36,6 +36,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/url"
 	"os"
@@ -106,8 +107,9 @@ func parseBenchConfig(get func(string) string) (benchConfig, error) {
 	}
 	if v := get("CLEAT_BENCH_NOISY_LOAD"); v != "" {
 		f, err := strconv.ParseFloat(v, 64)
-		if err != nil || f <= 0 {
-			return c, fmt.Errorf("CLEAT_BENCH_NOISY_LOAD=%q is not a positive number", v)
+		// ParseFloat accepts "NaN" and "Inf", and NaN <= 0 is false, so the sign test alone lets a NaN threshold through: a threshold nothing exceeds, and no cell is ever marked NOISY.
+		if err != nil || !(f > 0) || math.IsInf(f, 0) {
+			return c, fmt.Errorf("CLEAT_BENCH_NOISY_LOAD=%q is not a positive finite number", v)
 		}
 		c.NoisyLoad = f
 	}
@@ -132,14 +134,18 @@ func TestBenchConfigRefusesWhatItCannotParse(t *testing.T) {
 		t.Errorf("valid knobs: %+v, %v", c, err)
 	}
 	for name, kv := range map[string]map[string]string{
-		"an unparseable poll":   {"CLEAT_BENCH_POLL": "fast"},
-		"a poll with no unit":   {"CLEAT_BENCH_POLL": "100"},
-		"a zero poll":           {"CLEAT_BENCH_POLL": "0s"},
-		"a mistyped row":        {"CLEAT_BENCH_ROWS": "start,signall"},
-		"a non-numeric trials":  {"CLEAT_BENCH_TRIALS": "many"},
-		"zero reps":             {"CLEAT_BENCH_REPS": "0"},
-		"a non-numeric K":       {"CLEAT_BENCH_K": "0,ten"},
-		"a negative noisy load": {"CLEAT_BENCH_NOISY_LOAD": "-1"},
+		"an unparseable poll":    {"CLEAT_BENCH_POLL": "fast"},
+		"a poll with no unit":    {"CLEAT_BENCH_POLL": "100"},
+		"a zero poll":            {"CLEAT_BENCH_POLL": "0s"},
+		"a mistyped row":         {"CLEAT_BENCH_ROWS": "start,signall"},
+		"a non-numeric trials":   {"CLEAT_BENCH_TRIALS": "many"},
+		"zero reps":              {"CLEAT_BENCH_REPS": "0"},
+		"a non-numeric K":        {"CLEAT_BENCH_K": "0,ten"},
+		"a negative noisy load":  {"CLEAT_BENCH_NOISY_LOAD": "-1"},
+		"a NaN noisy load":       {"CLEAT_BENCH_NOISY_LOAD": "NaN"},
+		"an infinite noisy load": {"CLEAT_BENCH_NOISY_LOAD": "Inf"},
+		"a -Inf noisy load":      {"CLEAT_BENCH_NOISY_LOAD": "-Inf"},
+		"a zero noisy load":      {"CLEAT_BENCH_NOISY_LOAD": "0"},
 	} {
 		if _, err := parseBenchConfig(env(kv)); err == nil {
 			t.Errorf("%s was accepted: %v", name, kv)
