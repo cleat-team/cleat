@@ -107,6 +107,18 @@ func TestAWorkerThatHasHeldNothingStillExportsEveryResidencySeriesAtZero(t *test
 		t.Errorf("the budget gauge is not a positive figure on a fresh set: %v", lines)
 	}
 
+	// Nothing else: a family carries exactly the series the list names, so a cross product (or a series for a pair the engine cannot record) would not pass for want of a check
+	// that it was not there. The count per family is derived from the wanted list, which is written out above and not read from the engine.
+	perFamily := map[string]int{}
+	for _, prefix := range residentSeriesWanted() {
+		perFamily[prefix[:strings.Index(prefix, "{")]]++
+	}
+	for family, want := range perFamily {
+		if got := len(seriesLines(t, body, family+"{")); got != want {
+			t.Errorf("%s carries %d series on a worker that has held nothing, want exactly %d", family, got, want)
+		}
+	}
+
 	// Every counter series the set can emit, at 0.
 	for _, prefix := range residentSeriesWanted() {
 		lines := seriesLines(t, body, prefix)
