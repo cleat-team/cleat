@@ -209,3 +209,104 @@ func TestThePrePushHookRefusesOnlyTheOffendingRef(t *testing.T) {
 		t.Errorf("the refusal blames the GOOD ref: %q", stderr)
 	}
 }
+
+// TestThePrePushHookAllowsABotsBranchByPrefix is cleat#4471. `Validate branch
+// name` exempts a PR by its AUTHOR (`dependabot[bot]`); the hook cannot see the
+// author, only the name, and dependabot's names are fixed. A maintainer pushing
+// the dashboard bundle rebuild onto a dependabot PR's branch was refused a name
+// nobody can change, while the check passed the same PR.
+func TestThePrePushHookAllowsABotsBranchByPrefix(t *testing.T) {
+	for _, name := range []string{
+		"dependabot/npm_and_yarn/web/web-toolchain-dadb0bc5ca", // the name that was refused
+		"dependabot/go_modules/go-minor-and-patch-1a2b3c",
+		"dependabot/github_actions/actions/checkout-9",
+		"dependabot/cargo/crates/serde-1.0.200",
+	} {
+		if code, stderr := runPrePush(t, refLine("refs/heads/"+name, realSHA, "refs/heads/"+name, zeroSHA)); code != 0 {
+			t.Errorf("%s: refused (exit %d); the check exempts dependabot's PRs: %s", name, code, stderr)
+		}
+	}
+}
+
+// TestThePrePushHookExemptsOnlyAPrefixAndNothingElse is the other half, and the
+// half a "contains dependabot" implementation fails: the exemption is for the
+// names a bot gives its branches, and a person's branch that happens to mention
+// the word still needs a prefix, as does every ordinary bad name.
+func TestThePrePushHookExemptsOnlyAPrefixAndNothingElse(t *testing.T) {
+	for _, name := range []string{
+		"feat/x",                  // an ordinary bad name is still refused
+		"chore/x",                 // so is the #2314 one
+		"dependabot",              // the bare word, no slash: not a bot's name
+		"dependabot/",             // the prefix with nothing after it
+		"dependabotx/y",           // a longer first segment
+		"x/dependabot/y",          // the word in the middle
+		"my-dependabot/npm",       // the word as a suffix of the first segment
+		"Dependabot/npm_and_yarn", // the exemption is case-exact, as the check's is
+	} {
+		code, stderr := runPrePush(t, refLine("refs/heads/"+name, realSHA, "refs/heads/"+name, zeroSHA))
+		if code == 0 {
+			t.Errorf("%s: allowed; want refused", name)
+			continue
+		}
+		if !strings.Contains(stderr, name) {
+			t.Errorf("%s: the refusal does not name it: %q", name, stderr)
+		}
+	}
+}
+
+// TestThePrePushHookStopsExemptingABotWhenTheCheckDoes ties the exemption to the
+// check instead of repeating it, the arrangement the rest of this hook exists
+// for. It runs the hook in a scratch repository whose branch-naming.yml is the
+// real one with the bot line taken out, and a dependabot/ branch is then refused
+// like any other. A hook that hardcoded `dependabot/` would still allow it.
+func TestThePrePushHookStopsExemptingABotWhenTheCheckDoes(t *testing.T) {
+	root := repoRoot(t)
+	check, err := os.ReadFile(filepath.Join(root, ".github", "workflows", "branch-naming.yml"))
+	if err != nil {
+		t.Fatalf("reading the check: %v", err)
+	}
+	botLine := regexp.MustCompile(`(?m)^.*author === '[a-z]+\[bot\]'.*$`)
+	if !botLine.Match(check) {
+		t.Fatal("the check no longer exempts a bot by `author === '<name>[bot]'`; the hook derives its " +
+			"bot prefix from that line, so it exempts nothing now. Update the hook and this test together")
+	}
+	without := botLine.ReplaceAll(check, []byte("            if (labels.includes('bot')) {"))
+
+	run := func(workflow []byte) (int, string) {
+		dir := t.TempDir()
+		if out, err := exec.Command("git", "-C", dir, "init", "-q").CombinedOutput(); err != nil {
+			t.Fatalf("git init: %v: %s", err, out)
+		}
+		wf := filepath.Join(dir, ".github", "workflows")
+		if err := os.MkdirAll(wf, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(wf, "branch-naming.yml"), workflow, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		name := "dependabot/npm_and_yarn/web/x"
+		cmd := exec.Command("sh", filepath.Join(root, ".githooks", "pre-push"))
+		cmd.Dir = dir
+		cmd.Stdin = strings.NewReader(refLine("refs/heads/"+name, realSHA, "refs/heads/"+name, zeroSHA))
+		var stderr strings.Builder
+		cmd.Stderr = &stderr
+		err := cmd.Run()
+		if err == nil {
+			return 0, stderr.String()
+		}
+		if ee, ok := err.(*exec.ExitError); ok {
+			return ee.ExitCode(), stderr.String()
+		}
+		t.Fatalf("running the hook: %v", err)
+		return -1, ""
+	}
+
+	// The control: the unmodified check, in the same scratch repository, allows
+	// the name. Without it the refusal below could be the scratch setup failing.
+	if code, stderr := run(check); code != 0 {
+		t.Fatalf("the real check, copied into a scratch repository, did not exempt a dependabot branch (exit %d): %s", code, stderr)
+	}
+	if code, _ := run(without); code == 0 {
+		t.Error("the check no longer exempts dependabot and the hook still does: it is carrying its own copy of the exemption")
+	}
+}

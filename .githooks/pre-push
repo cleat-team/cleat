@@ -50,11 +50,23 @@ set -u
 ROOT=$(git rev-parse --show-toplevel 2>/dev/null || printf '.')
 CHECK="$ROOT/.github/workflows/branch-naming.yml"
 
+# A BOT'S BRANCH IS EXEMPT BY PREFIX, because the hook cannot see the author the
+# check exempts by. `Validate branch name` lets a PR through when
+# `author === 'dependabot[bot]'`, and a maintainer who has to push a commit onto
+# such a PR's branch (the dashboard bundle rebuild in web/README.md) pushes to a
+# name nobody can change: `dependabot/npm_and_yarn/web/...`. The hook refused
+# that while the check passed it (cleat#4471). Dependabot always names its
+# branches `<name>/...`, so the exempt PREFIX is derived from the same
+# `author === '<name>[bot]'` line the check reads, and a check that stops
+# exempting a bot stops the hook exempting it too. It is a PREFIX and not a
+# substring: `x/dependabot/y` and `dependabotx/y` are not a bot's branches.
 PREFIXES=''
 PERMANENT=''
+BOTPREFIXES=''
 if [ -r "$CHECK" ]; then
 	PREFIXES=$(grep -E 'const validPrefixes' "$CHECK" | grep -oE "'[a-z]+/'" | tr -d "'")
 	PERMANENT=$(grep -E 'branch === ' "$CHECK" | grep -oE "'[a-z]+'" | tr -d "'")
+	BOTPREFIXES=$(grep -E "author === '[a-z]+\[bot\]'" "$CHECK" | grep -oE "'[a-z]+\[bot\]'" | sed -E "s/^'([a-z]+)\[bot\]'\$/\1\//")
 fi
 
 # FAIL OPEN. A checkout without .github, or a workflow whose shape has moved, is
@@ -85,6 +97,13 @@ while read -r local_ref local_sha remote_ref _; do
 
 	# A permanent branch is not a work branch and has no prefix to choose.
 	if printf '%s\n' "$PERMANENT" | grep -qx -- "$name"; then continue; fi
+
+	# A bot's branch (see BOTPREFIXES above) has a name its author did not choose.
+	for botprefix in $BOTPREFIXES; do
+		case "$name" in
+			"$botprefix"?*) continue 2 ;;
+		esac
+	done
 
 	ok=0
 	for prefix in $PREFIXES; do
