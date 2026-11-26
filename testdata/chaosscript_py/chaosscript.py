@@ -111,7 +111,8 @@ def chaos_script(h: HostCalls, run: str, ops: list) -> str:
             h.continue_as_new(
                 {
                     "run": run,
-                    "ops": [{"op": "call", "name": o["name"]}],
+                    # A continuation with a script of its own (cleat#4381), or the single call named by the op.
+                    "ops": o.get("next") or [{"op": "call", "name": o["name"]}],
                     "__entry_point": "run",
                 }
             )
