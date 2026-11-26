@@ -224,6 +224,20 @@ func chainOf(db *sql.DB, first string) []string {
 	return chain
 }
 
+func awaitClaimed(t *testing.T, db *sql.DB, id string) {
+	t.Helper()
+	for deadline := time.Now().Add(chainStepWait); time.Now().Before(deadline); time.Sleep(20 * time.Millisecond) {
+		var n int
+		if err := db.QueryRow(`SELECT count(*) FROM workflow_leases WHERE id = $1 AND (assigned_to IS NOT NULL OR status NOT IN ('ready'))`, id).Scan(&n); err != nil {
+			t.Fatalf("UNMEASURED: reading the lease of %s: %v", id, err)
+		}
+		if n == 1 {
+			return
+		}
+	}
+	t.Fatalf("UNMEASURED: no worker ever claimed the successor %s", id)
+}
+
 func awaitSuccessor(t *testing.T, db *sql.DB, first string) string {
 	t.Helper()
 	for deadline := time.Now().Add(chainStepWait); time.Now().Before(deadline); time.Sleep(20 * time.Millisecond) {
@@ -295,7 +309,9 @@ func chainCase(t *testing.T, h *chainHarness, timing, kill string, offset int) {
 		startRun(t, env.db, run, scriptInput(run, sc), h.queue)
 		next := awaitSuccessor(t, env.db, run)
 		armHit()
-		// Parked in its await: the successor has claimed and run up to the wait. Waiting for the A request is not enough (it precedes the continue), the row is.
+		// The successor row exists (awaitSuccessor) and is then waited on until a worker has CLAIMED it; the fixed 300 ms after that is a grace for the guest to reach its await and
+		// is NOT a guarantee that it has. A signal that lands before the await reads it is a legal outcome (the await finds it stored), so the oracle does not depend on the order.
+		awaitClaimed(t, env.db, next)
 		time.Sleep(300 * time.Millisecond)
 		if timing == "after" {
 			send(run)
@@ -332,8 +348,8 @@ func chainCase(t *testing.T, h *chainHarness, timing, kill string, offset int) {
 	time.Sleep(500 * time.Millisecond)
 
 	st := chainState{Chain: chainOf(env.db, run), Performed: map[string]int{}, Left: map[string]int{}, Sent: sent}
-	st.EndStatus = statusOf(env.db, st.Chain[len(st.Chain)-1])
-	st.FirstStatus = statusOf(env.db, run)
+	st.EndStatus = statusOf(t, env.db, st.Chain[len(st.Chain)-1])
+	st.FirstStatus = statusOf(t, env.db, run)
 	for _, r := range env.svc.requestsOf(run) {
 		if !r.Failed {
 			st.Performed[r.Op]++
@@ -341,7 +357,10 @@ func chainCase(t *testing.T, h *chainHarness, timing, kill string, offset int) {
 	}
 	for _, id := range st.Chain {
 		var n int
-		_ = env.db.QueryRow(`SELECT count(*) FROM workflow_signals WHERE workflow_id = $1`, id).Scan(&n)
+		// A failed count must not read as 0 rows left, which is the passing value.
+		if err := env.db.QueryRow(`SELECT count(*) FROM workflow_signals WHERE workflow_id = $1`, id).Scan(&n); err != nil {
+			t.Fatalf("UNMEASURED: counting the signals left under %s: %v", id, err)
+		}
 		st.Left[id] = n
 	}
 	if v := chainViolations(st, kill); len(v) > 0 {
@@ -349,9 +368,12 @@ func chainCase(t *testing.T, h *chainHarness, timing, kill string, offset int) {
 	}
 }
 
-func statusOf(db *sql.DB, id string) string {
+func statusOf(t *testing.T, db *sql.DB, id string) string {
+	t.Helper()
 	var s string
-	_ = db.QueryRow(`SELECT status FROM workflow_leases WHERE id = $1`, id).Scan(&s)
+	if err := db.QueryRow(`SELECT status FROM workflow_leases WHERE id = $1`, id).Scan(&s); err != nil {
+		t.Fatalf("UNMEASURED: reading the status of %s: %v", id, err)
+	}
 	return s
 }
 
