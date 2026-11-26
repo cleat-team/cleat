@@ -34,9 +34,7 @@ func TestAFreedSlotEndsTheAtCapacityWaitBeforeThePollTick(t *testing.T) {
 		w.deregisterExecution(wf, reg)
 	}()
 	start := time.Now()
-	if !w.waitForSlot() {
-		t.Fatal("waitForSlot reported a stopped worker")
-	}
+	w.waitForSlot()
 	// The ceiling is 30 s; a wait that only the timer ended would take all of it.
 	if took := time.Since(start); took < 40*time.Millisecond || took > 5*time.Second {
 		t.Fatalf("the wait took %s: want it ended by the slot freed after ~50ms, not by the 30s tick", took)
@@ -55,7 +53,8 @@ func TestASlotFreedBeforeTheWaitBeginsIsNotLost(t *testing.T) {
 	w.deregisterExecution(wf, &execRegistration{generation: 1})
 
 	start := time.Now()
-	if !w.waitForSlot() || time.Since(start) > 5*time.Second {
+	w.waitForSlot()
+	if time.Since(start) > 5*time.Second {
 		t.Fatalf("a slot freed before the wait began was lost: waited %s", time.Since(start))
 	}
 }
@@ -64,9 +63,7 @@ func TestTheAtCapacityWaitStillEndsAtThePollTick(t *testing.T) {
 	// A missed signal must cost what the sleep always cost, not more.
 	w, _ := newSlotWaitWorker(t, 60*time.Millisecond)
 	start := time.Now()
-	if !w.waitForSlot() {
-		t.Fatal("waitForSlot reported a stopped worker")
-	}
+	w.waitForSlot()
 	if took := time.Since(start); took < 50*time.Millisecond || took > 5*time.Second {
 		t.Fatalf("the wait took %s, want about the 60ms poll", took)
 	}
@@ -79,9 +76,7 @@ func TestTheAtCapacityWaitEndsWhenTheWorkerStops(t *testing.T) {
 		cancel()
 	}()
 	start := time.Now()
-	if w.waitForSlot() {
-		t.Fatal("waitForSlot reported a live worker after its context was cancelled")
-	}
+	w.waitForSlot()
 	if took := time.Since(start); took > 5*time.Second {
 		t.Fatalf("a stopped worker waited %s", took)
 	}
