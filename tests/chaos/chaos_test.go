@@ -22,6 +22,7 @@ type op struct {
 	Hit      string `json:"hit,omitempty"`
 	Miss     string `json:"miss,omitempty"`
 	Delay    int    `json:"delay,omitempty"`
+	Next     []op   `json:"next,omitempty"` // continue_as_new: the continuation's own script (cleat#4381)
 }
 
 type scenario struct {

@@ -74,6 +74,23 @@ it to on purpose, and a `dbwrite` row for it needs a boundary that is not a serv
 final-status check (a replay divergence), not by the row check; the row check's two branches were each proven by a guest mutant (a resolve that never happens;
 a create made twice).
 
+## A signal across continue-as-new (cleat#4381)
+
+`a_signal_across_continue_as_new_test.go`. The script is `call A`, then `continue_as_new` into a continuation (the op's new `next` list, both guests) that awaits the signal `go`, then calls `HIT` (or `MISS` on a timeout) and `B`. The harness sends `go` to the **first run's id through the worker's HTTP API**, not a table insert, which would bypass the forwarding under test.
+
+| timing | what it exercises |
+|---|---|
+| control | the signal to the successor's own id, so a harness that could not deliver does not read green |
+| before | the first run is held at `A`, alive; the signal is stored on it and the continue must CARRY it |
+| after | the continue has committed and the successor is parked in its await; the signal must be FORWARDED |
+| racing | 16 rounds, the signal sent from 12 ms before the release of `A` to 18 ms after it, in 2 ms steps |
+
+The oracle reads the **chain's END** (`workflow_leases.continued_from`, walked from the first run), not the run addressed: the chain is two runs, the first is closed, the END is `done`; `HIT` once and `MISS` never; no `workflow_signals` row left under ANY run of the chain; `A` and `B` once. The one allowance (`HIT` twice) applies only at a kill at HIT's `after` boundary, the documented at-least-once window, and `TestTheChainOracleRefusesWhatItIsMeantToRefuse` pins that it widens nothing else.
+
+`TestASignalAcrossAContinueAsNewSurvivesAKillAtTheSuccessorsHit` kills the worker at HIT's before/after boundary for the before, after and racing timings. Each case takes about 52 s: the successor is HELD (residency is on by default) and a held run is reclaimed on the slow path, which `ageLease` does not shorten (cleat#4490 shortens it).
+
+**Known positives, each made by mutating the engine on Postgres and restored by content:** dropping the carry-over (`UPDATE workflow_signals SET workflow_id` in `store_lifecycle.go`) fails `before` and the racing rounds whose signal precedes the continue (`MISS performed 1`, a signal left under the first run), and passes control and `after`; delivering a forwarded signal to the addressed run instead of the END (`deliverForwardedTx`) fails `after` and the late racing rounds (`HIT performed 0`, `MISS performed 1`), and passes control and `before`. A green sweep says nothing about whether the oracle could see; those two runs do.
+
 ## Ops whose effect the recording service cannot see (cleat#4241)
 
 `signal`, `cron_create`, `cron_delete`, `cron_list` (both guests) and `send` (both guests). Their effect lands in a table or on a goroutine, so each has an oracle of its own,

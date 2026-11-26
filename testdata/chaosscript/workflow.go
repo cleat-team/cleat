@@ -14,6 +14,7 @@
 //	{"op":"await0","name":"go","hit":"HIT","miss":"MISS"}   a signal wait with no wait, then a call named for the branch taken
 //	{"op":"await_signal","name":"go","ms":8000,"hit":"HIT","miss":"MISS"}   a signal wait that WAITS up to ms, then a call named for the branch taken (cleat#4306)
 //	{"op":"continue_as_new","name":"POST"}   continues as a new run whose only operation is a call named POST
+//	{"op":"continue_as_new","next":[...ops]}   continues as a new run that runs the given operations instead (cleat#4381)
 //	{"op":"await_promise","name":"p","ms":1500,"hit":"RES","miss":"TIMEDOUT"}   await an unresolved promise, then a call named for the outcome
 //	{"op":"set_scope","name":"k"}   enter the virtual object ("chaos","k"): the host takes its key, or suspends while another run holds it
 //	{"op":"send","name":"S"}        a fire-and-forget request to the service, named "send_S": recorded first, dispatched after, so at most once
@@ -44,6 +45,8 @@ type op struct {
 	Hit      string `json:"hit"`
 	Miss     string `json:"miss"`
 	Delay    int    `json:"delay"`
+	// Next is the continuation's own script for continue_as_new; empty means the single call named by Name (cleat#4381).
+	Next []op `json:"next,omitempty"`
 }
 
 type scriptInput struct {
@@ -238,7 +241,12 @@ func Script(h cleat.HostCalls, input string) (string, error) {
 			h.SetScope("chaos", o.Name)
 		case "continue_as_new":
 			// Continue as a new run that makes one call named o.Name. The service sees the same run label for both runs.
-			next, _ := json.Marshal(map[string]any{"__entry_point": "script", "run": s.Run, "ops": []map[string]string{{"op": "call", "name": o.Name}}})
+			var nextOps any = []map[string]string{{"op": "call", "name": o.Name}}
+			if len(o.Next) > 0 {
+				// A continuation with a script of its own (cleat#4381): it can wait for a signal sent to THIS run's id and then make a call named for the branch.
+				nextOps = o.Next
+			}
+			next, _ := json.Marshal(map[string]any{"__entry_point": "script", "run": s.Run, "ops": nextOps})
 			if err := h.ContinueAsNew(string(next)); err != nil {
 				return "", err
 			}
