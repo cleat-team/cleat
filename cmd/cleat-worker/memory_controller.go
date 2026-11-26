@@ -61,6 +61,9 @@ type MemoryController struct {
 	// stock --poll; main.go replaces it with the operator's, so a controller built without that line is bounded anyway. Zero turns the bound off.
 	queueDepthEvery time.Duration
 	queueDepthAt    time.Time
+	// now is the clock the queue-depth bound reads, so a test can move time instead of sleeping through it. Nil means time.Now, which is
+	// what every controller built outside a test has. It reads nothing else: the recovery backoff below still uses the wall clock.
+	now func() time.Time
 
 	scalingThreshold  int64 // queue depth that saturates scaling_pressure
 	recoveryAllowedAt time.Time
@@ -154,6 +157,14 @@ func (c *MemoryController) LoadEstimates(ctx context.Context, tenantID string) e
 	return nil
 }
 
+// clock is the time the queue-depth bound reads: the injected clock if a test set one, the wall clock otherwise.
+func (c *MemoryController) clock() time.Time {
+	if c.now != nil {
+		return c.now()
+	}
+	return time.Now()
+}
+
 // Tick performs one iteration of the control loop. It should be called
 // each dispatch loop iteration.
 //
@@ -167,10 +178,11 @@ func (c *MemoryController) Tick(ctx context.Context) {
 	p := PressureLevel(info, c.softLimit, c.hardLimit)
 
 	c.mu.Lock()
-	qd, fresh := c.queueDepth, c.queueDepthEvery > 0 && !c.queueDepthAt.IsZero() && time.Since(c.queueDepthAt) < c.queueDepthEvery
+	at := c.clock()
+	qd, fresh := c.queueDepth, c.queueDepthEvery > 0 && !c.queueDepthAt.IsZero() && at.Sub(c.queueDepthAt) < c.queueDepthEvery
 	if !fresh {
 		// Stamped before the query, so a slow or failing count is not asked again until the interval has passed either.
-		c.queueDepthAt = time.Now()
+		c.queueDepthAt = at
 	}
 	c.mu.Unlock()
 	if !fresh {

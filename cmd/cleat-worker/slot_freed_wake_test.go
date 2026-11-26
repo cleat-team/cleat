@@ -2,6 +2,9 @@ package main
 
 import (
 	"context"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"testing"
 	"time"
 
@@ -102,5 +105,58 @@ func TestDeregisterExecutionDoesNotBlockOrPanicWithoutASlotChannel(t *testing.T)
 	case <-done:
 	case <-time.After(5 * time.Second):
 		t.Fatal("deregisterExecution blocked with a nil slotFreedCh")
+	}
+}
+
+// cleat#4476. The tests above hold waitForSlot and the send that ends it; nothing at PR time held that the dispatch loop's at-capacity branch CALLS
+// waitForSlot, so a change putting a plain time.Sleep back there (the cleat#4311 defect) kept every one of them green, and was caught only by the
+// timing row in the scheduled chaos sweep. The loop is too large to drive without a database and a clock, so this reads it: the `free <= 0` branch
+// of dispatchLoop must call w.waitForSlot and must not sleep on its own.
+func TestTheDispatchLoopsAtCapacityBranchWaitsForASlotAndDoesNotSleep(t *testing.T) {
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "setup.go", nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var branch *ast.BlockStmt
+	for _, d := range file.Decls {
+		fn, ok := d.(*ast.FuncDecl)
+		if !ok || fn.Name.Name != "dispatchLoop" || fn.Body == nil {
+			continue
+		}
+		ast.Inspect(fn.Body, func(n ast.Node) bool {
+			if is, ok := n.(*ast.IfStmt); ok {
+				if b, ok := is.Cond.(*ast.BinaryExpr); ok && b.Op == token.LEQ {
+					if x, ok := b.X.(*ast.Ident); ok && x.Name == "free" {
+						if y, ok := b.Y.(*ast.BasicLit); ok && y.Value == "0" {
+							branch = is.Body
+						}
+					}
+				}
+			}
+			return true
+		})
+	}
+	if branch == nil {
+		t.Fatal("found no `if free <= 0` in dispatchLoop: the test's anchor is gone, so it cannot say what the at-capacity branch does (UNMEASURED, not a pass)")
+	}
+	var waits, sleeps int
+	ast.Inspect(branch, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
+			switch {
+			case sel.Sel.Name == "waitForSlot":
+				waits++
+			case sel.Sel.Name == "Sleep":
+				sleeps++
+			}
+		}
+		return true
+	})
+	if waits != 1 || sleeps != 0 {
+		t.Fatalf("the at-capacity branch of dispatchLoop calls waitForSlot %d times and time.Sleep %d times, want 1 and 0: a worker at its limit must wake when a slot is freed (cleat#4311)", waits, sleeps)
 	}
 }
