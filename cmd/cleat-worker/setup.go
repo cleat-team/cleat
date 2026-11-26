@@ -3403,7 +3403,7 @@ func (w *Worker) dispatchLoop() {
 
 		free := w.memoryController.DynamicConcurrency() - count
 		if free <= 0 {
-			// A cancelled context falls to the top of the loop, whose drain branch has always been what handles it; the result is not needed here.
+			// A cancelled context ends the wait and falls to the top of the loop, whose drain branch has always been what handles it.
 			w.waitForSlot()
 			continue
 		}
@@ -3580,7 +3580,8 @@ func newSlotFreedChannel() chan struct{} { return make(chan struct{}, 1) }
 
 // waitForSlot is what the dispatch loop does when it has no free slot: wait for
 // one to be freed, for the worker to stop, or for one --poll to pass, whichever
-// is first. It returns false when the worker's context is done.
+// is first. It returns nothing: a worker whose context is done ends the wait
+// and the loop's next pass, not the caller, handles that.
 //
 // It was time.Sleep(w.pollInterval), which nothing can interrupt, so at its
 // concurrency limit a worker did not look for work again until the tick even
@@ -3589,16 +3590,14 @@ func newSlotFreedChannel() chan struct{} { return make(chan struct{}, 1) }
 // a missed signal costs what it always did. A NOTIFY is deliberately NOT a wake
 // here: with no free slot it would find nothing to claim, and it would turn a
 // busy channel into a spin.
-func (w *Worker) waitForSlot() bool {
+func (w *Worker) waitForSlot() {
 	t := time.NewTimer(w.pollInterval)
 	defer t.Stop()
 	select {
 	case <-w.ctx.Done():
-		return false
 	case <-w.slotFreedCh:
 	case <-t.C:
 	}
-	return true
 }
 
 // execRegistration is what execCancel maps a workflow id to: the cancel func
