@@ -25,6 +25,14 @@ func (s *countingDepthStore) QueueDepth(context.Context) (int64, error) {
 	return s.depth.Load(), nil
 }
 
+// stepClock is a clock the test moves by hand, so no case here waits for time to pass or depends on how fast a runner is.
+type stepClock struct{ t time.Time }
+
+func newStepClock() *stepClock { return &stepClock{t: time.Date(2026, 11, 26, 0, 0, 0, 0, time.UTC)} }
+
+func (s *stepClock) now() time.Time          { return s.t }
+func (s *stepClock) advance(d time.Duration) { s.t = s.t.Add(d) }
+
 func tickN(c *MemoryController, n int) {
 	for i := 0; i < n; i++ {
 		c.Tick(context.Background())
@@ -35,8 +43,10 @@ func TestAHundredDispatchPassesCountTheReadyLeasesOnceInsideThePollInterval(t *t
 	store := &countingDepthStore{}
 	store.depth.Store(7)
 	c := NewMemoryController(NewMemoryMonitor(time.Second), store, "w", 2, 1<<40, 1<<40)
-	c.queueDepthEvery = time.Hour // far longer than the test: every Tick after the first is inside it
-	tickN(c, 100)
+	clk := newStepClock()
+	c.now = clk.now
+	c.queueDepthEvery = time.Hour
+	tickN(c, 100) // the clock never moves, so every Tick after the first is inside the interval
 	if got := store.calls.Load(); got != 1 {
 		t.Fatalf("100 Ticks inside one interval made %d QueueDepth queries, want 1", got)
 	}
@@ -60,9 +70,16 @@ func TestTheQueueDepthIsCountedAgainOnceTheIntervalHasPassed(t *testing.T) {
 	store := &countingDepthStore{}
 	store.depth.Store(1)
 	c := NewMemoryController(NewMemoryMonitor(time.Second), store, "w", 2, 1<<40, 1<<40)
+	clk := newStepClock()
+	c.now = clk.now
 	c.queueDepthEvery = 40 * time.Millisecond
 	tickN(c, 10)
-	time.Sleep(80 * time.Millisecond)
+	clk.advance(40*time.Millisecond - 1) // one nanosecond short of the interval is still inside it
+	tickN(c, 10)
+	if got := store.calls.Load(); got != 1 {
+		t.Fatalf("Ticks just inside the interval made %d queries in all, want 1", got)
+	}
+	clk.advance(1) // exactly the interval: the bound lifts
 	store.depth.Store(9)
 	tickN(c, 10)
 	if got := store.calls.Load(); got != 2 {
@@ -85,8 +102,9 @@ func TestAControllerIsBoundedWithoutAnyoneSettingTheInterval(t *testing.T) {
 	// main.go replaces the interval with --poll; this is what holds when that line is missing or a controller is built another way.
 	store := &countingDepthStore{}
 	c := NewMemoryController(NewMemoryMonitor(time.Second), store, "w", 2, 1<<40, 1<<40)
+	c.now = newStepClock().now // never moves, so the default interval cannot pass mid-loop
 	tickN(c, 100)
-	if got := store.calls.Load(); got > 2 {
-		t.Fatalf("100 Ticks on a controller nobody configured made %d QueueDepth queries; it should be bounded by default (want 1, 2 at most if the %s boundary passed)", got, defaultQueueDepthEvery)
+	if got := store.calls.Load(); got != 1 {
+		t.Fatalf("100 Ticks on a controller nobody configured made %d QueueDepth queries; it should be bounded by default (want 1)", got)
 	}
 }
