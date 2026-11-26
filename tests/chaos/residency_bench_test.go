@@ -5,8 +5,9 @@ package chaos
 // A repeatable latency benchmark for the resident-run path (cleat#4187, the BENCHMARK half; the tuning half is not here and no residency constant is changed by anything in this file).
 //
 // Real cleat-worker binary, real PostgreSQL, the recording guest service of this harness, one worker at a time, --concurrency 1 and the production --poll of 500 ms. Each worker runs with
-// residency ON at the product defaults ("on"), with residency OFF (--resident-max-runs 0, "off"), and ON a second time ("on2"): on2 is the NOISE FLOOR, the same configuration as "on" run at
-// another point in the same run, so how large "no difference" looks on this machine tonight is printed beside every difference between on and off.
+// residency ON at the product defaults ("on"), with residency OFF (--resident-max-runs 0, "off"), and ON a second time ("on2"): on2 is the same configuration as "on" run at
+// another point in the same run. Its gap to "on" is printed as a DESCRIPTION of how far two runs of one thing differ here, and is not a threshold: under no effect off and on2 are exchangeable.
+// What is claimed is the separation of the per-rep medians (do all R off reps lie on one side of all 2R on/on2 reps? p = 2/C(3R,R) under no effect, 1/42 at R = 3).
 //
 // Rows (each one a table below, one line per arm):
 //
@@ -18,7 +19,7 @@ package chaos
 //
 // How noise is kept visible: trial 0 of every cell is discarded (it compiles the module); the arms are rotated across reps, never run all-ON then all-OFF, so drift lands on every arm;
 // the per-rep medians and their range are printed beside the pooled percentiles; the load average is read before and after every cell and a cell above the core count is marked NOISY; a
-// trial whose run did not take the path the cell is about (held when it should be suspended, or the reverse) is EXCLUDED and counted, never averaged in; a cell that cannot establish its
+// trial whose run did not take the path the cell is about (held when it should be suspended, or the reverse; read per trial in EVERY row, never assumed) is EXCLUDED and counted, never averaged in; a cell that cannot establish its
 // precondition is UNMEASURED with the reason. A p99 over fewer than 100 samples is a maximum, and the line says so.
 //
 // Run:
@@ -54,6 +55,7 @@ type benchConfig struct {
 	Ks           []int
 	Out          string
 	NoisyLoad    float64
+	Poll         string
 }
 
 func benchEnvInt(name string, def int) int {
@@ -64,7 +66,12 @@ func benchEnvInt(name string, def int) int {
 }
 
 func loadBenchConfig() benchConfig {
-	c := benchConfig{Trials: benchEnvInt("CLEAT_BENCH_TRIALS", 30), Reps: benchEnvInt("CLEAT_BENCH_REPS", 3), Rows: map[string]bool{}, Out: os.Getenv("CLEAT_BENCH_OUT"), NoisyLoad: float64(runtime.NumCPU())}
+	c := benchConfig{Trials: benchEnvInt("CLEAT_BENCH_TRIALS", 30), Reps: benchEnvInt("CLEAT_BENCH_REPS", 3), Rows: map[string]bool{}, Out: os.Getenv("CLEAT_BENCH_OUT"), NoisyLoad: float64(runtime.NumCPU()), Poll: "500ms"}
+	if v := os.Getenv("CLEAT_BENCH_POLL"); v != "" {
+		if _, err := time.ParseDuration(v); err == nil {
+			c.Poll = v
+		}
+	}
 	rows := os.Getenv("CLEAT_BENCH_ROWS")
 	if rows == "" {
 		rows = "start,signal,timer,history,queries"
@@ -315,6 +322,22 @@ func (c *benchCtx) parked(id string, within time.Duration) (string, bool) {
 	return "", false
 }
 
+// pathNow says which path a run that has just reached its wait is on, as soon as it is on one: "held" (the worker has it in memory) or "suspended" (the lease row is ready, unassigned and due
+// later). A sleep inside the window is short, so unlike parked this does not wait for a wake time more than 2 s away.
+func (c *benchCtx) pathNow(id string, within time.Duration) (string, bool) {
+	for deadline := time.Now().Add(within); time.Now().Before(deadline); time.Sleep(5 * time.Millisecond) {
+		if n, ok := residentRuns(c.addr); ok && n >= 1 {
+			return "held", true
+		}
+		var n int
+		_ = c.env.db.QueryRow(`SELECT count(*) FROM workflow_leases WHERE id = $1 AND status = 'ready' AND assigned_to IS NULL AND next_wake_at > now()`, id).Scan(&n)
+		if n > 0 {
+			return "suspended", true
+		}
+	}
+	return "", false
+}
+
 func (c *benchCtx) done(id string) bool {
 	_, _, _, ok := awaitStatus(c.env.db, id, 60*time.Second, func(s string) bool { return s != "ready" && s != "running" })
 	return ok
@@ -423,7 +446,7 @@ func (c *benchCtx) rowSignal(row, cell string, k int, waitMs int64, wantPath str
 
 // ---- row: timer
 
-func (c *benchCtx) rowTimer(cell string, d time.Duration, trials int) *benchSample {
+func (c *benchCtx) rowTimer(cell string, d time.Duration, wantPath string, trials int) *benchSample {
 	s := c.newSample("timer", cell)
 	sc := scenario{"bench_timer", []op{{Op: "call", Name: "A"}, {Op: "sleep", Ms: d.Milliseconds()}, {Op: "call", Name: "B"}}, nil}
 	for i := 0; i <= trials; i++ {
@@ -438,6 +461,11 @@ func (c *benchCtx) rowTimer(cell string, d time.Duration, trials int) *benchSamp
 			s.Unmeasured = fmt.Sprintf("trial %d: the first step never arrived", i)
 			break
 		}
+		path, ok := c.pathNow(id, 5*time.Second)
+		if !ok {
+			s.Unmeasured = fmt.Sprintf("trial %d: the run was neither held nor suspended during its sleep", i)
+			break
+		}
 		b, ok := c.arrival(label, "B", 1, d+60*time.Second)
 		if !ok {
 			s.Unmeasured = fmt.Sprintf("trial %d: the step after the sleep never arrived", i)
@@ -447,9 +475,15 @@ func (c *benchCtx) rowTimer(cell string, d time.Duration, trials int) *benchSamp
 			s.Unmeasured = fmt.Sprintf("trial %d: the run did not finish", i)
 			break
 		}
-		if i > 0 {
-			s.Durations = append(s.Durations, b.Sub(a)-d)
+		if i == 0 {
+			continue
 		}
+		s.Paths[path]++
+		if wantPath != "" && path != wantPath {
+			s.Excluded++
+			continue
+		}
+		s.Durations = append(s.Durations, b.Sub(a)-d)
 	}
 	return c.finish(s)
 }
@@ -556,7 +590,7 @@ func TestBenchResidencyLatencyOnPostgres(t *testing.T) {
 	if out, err := exec.Command("git", "-C", tree(t), "rev-parse", "HEAD").Output(); err == nil {
 		gitSHA = strings.TrimSpace(string(out))
 	}
-	header := map[string]any{"kind": "config", "tree_sha": gitSHA, "trials": cfg.Trials, "reps": cfg.Reps, "ks": cfg.Ks, "guest": guestLanguage(), "dialect": "postgres", "poll": "500ms", "concurrency": 1,
+	header := map[string]any{"kind": "config", "tree_sha": gitSHA, "trials": cfg.Trials, "reps": cfg.Reps, "ks": cfg.Ks, "guest": guestLanguage(), "dialect": "postgres", "poll": cfg.Poll, "concurrency": 1,
 		"noisy_load_threshold": cfg.NoisyLoad, "hardware": benchHardware(), "load_at_start": benchLoad(), "chaos_resident_max_runs_env": os.Getenv("CLEAT_CHAOS_RESIDENT_MAX_RUNS")}
 	t.Logf("BENCH config: %v", header)
 
@@ -568,30 +602,31 @@ func TestBenchResidencyLatencyOnPostgres(t *testing.T) {
 			queue := fmt.Sprintf("bench-%s-%s-r%d", tag, arm.name, rep)
 			addr := freeLoopbackAddr(t)
 			deploy(t, env.db, env.wasm, queue)
-			w := startWorker(t, env.bin, queue, env.svc.srv.URL, append([]string{"--api-addr", addr, "--poll", "500ms"}, arm.flags...)...)
+			w := startWorker(t, env.bin, queue, env.svc.srv.URL, append([]string{"--api-addr", addr, "--poll", cfg.Poll}, arm.flags...)...)
 			benchAwaitAPI(t, addr)
 			c := &benchCtx{t: t, env: env, addr: addr, key: benchAPIKey(t, env.bin), queue: queue, arm: arm, rep: rep, cfg: cfg, tag: tag, client: &http.Client{Timeout: 30 * time.Second}}
 			fast := cfg.Trials
 			if cfg.Rows["start"] {
 				results = append(results, c.rowStart())
 			}
-			if cfg.Rows["signal"] {
-				want := func(inWindow bool) string {
-					if arm.name == "off" || !inWindow {
-						return "suspended"
-					}
-					return "held"
+			// want says which path a cell is about for this arm: residency off suspends every wait, residency on holds one inside the window and suspends one past it.
+			want := func(inWindow bool) string {
+				if arm.name == "off" || !inWindow {
+					return "suspended"
 				}
+				return "held"
+			}
+			if cfg.Rows["signal"] {
 				results = append(results, c.rowSignal("signal", "signal to resume, 8 s wait (inside the 10 s window)", 0, 8000, want(true), fast))
 				results = append(results, c.rowSignal("signal", "signal to resume, 20 s wait (past the window)", 0, 20000, want(false), fast))
 			}
 			if cfg.Rows["timer"] {
-				results = append(results, c.rowTimer("timer lateness, sleep 2 s (inside the window)", 2*time.Second, min(fast, 15)))
-				results = append(results, c.rowTimer("timer lateness, sleep 12 s (past the window)", 12*time.Second, min(fast, 5)))
+				results = append(results, c.rowTimer("timer lateness, sleep 2 s (inside the window)", 2*time.Second, want(true), min(fast, 15)))
+				results = append(results, c.rowTimer("timer lateness, sleep 12 s (past the window)", 12*time.Second, want(false), min(fast, 5)))
 			}
 			if cfg.Rows["history"] {
 				for _, k := range cfg.Ks {
-					results = append(results, c.rowSignal("history", fmt.Sprintf("signal to resume, 8 s wait, K=%d prior calls", k), k, 8000, "", min(fast, 10)))
+					results = append(results, c.rowSignal("history", fmt.Sprintf("signal to resume, 8 s wait, K=%d prior calls", k), k, 8000, want(true), min(fast, 10)))
 				}
 			}
 			if cfg.Rows["queries"] {
@@ -651,6 +686,7 @@ func reportBench(t *testing.T, cfg benchConfig, header map[string]any, results [
 		first := cells[ck][0]
 		t.Logf("BENCH [%s] %s", first.row, first.cell)
 		medians := map[string]time.Duration{}
+		repMeds := map[string][]time.Duration{}
 		for _, k := range cells[ck] {
 			reps := pooled[k]
 			var all []time.Duration
@@ -695,6 +731,7 @@ func reportBench(t *testing.T, cfg benchConfig, header map[string]any, results [
 			}
 			s := benchSorted(all)
 			medians[k.arm] = benchMedian(all)
+			repMeds[k.arm] = repMed
 			lo, hi := benchSorted(repMed)[0], benchSorted(repMed)[len(repMed)-1]
 			note := ""
 			if len(all) < 100 {
@@ -714,12 +751,81 @@ func reportBench(t *testing.T, cfg benchConfig, header map[string]any, results [
 		}
 		if on, ok1 := medians["on"]; ok1 {
 			if on2, ok2 := medians["on2"]; ok2 {
-				t.Logf("BENCH   noise floor (on vs on2, the same configuration): median differs by %s ms (%.1f%% of on)", ms(on2-on), 100*float64(on2-on)/float64(max(on, 1)))
+				// Descriptive only. on and on2 are the same configuration, so this is how far two runs of one thing differ here; it is NOT a threshold for a real effect, because under no effect off and
+				// on2 are exchangeable too, and |on-off| > |on-on2| then happens about half the time.
+				t.Logf("BENCH   spread of one configuration (on vs on2, descriptive, not a threshold): medians differ by %s ms (%.1f%% of on)", ms(on2-on), 100*float64(on2-on)/float64(max(on, 1)))
 			}
 			if off, ok3 := medians["off"]; ok3 {
 				t.Logf("BENCH   off minus on: %s ms (off is %.2fx on)", ms(off-on), float64(off)/float64(max(on, 1)))
 			}
 		}
+		if line, ok := separation(repMeds["off"], append(append([]time.Duration(nil), repMeds["on"]...), repMeds["on2"]...)); ok {
+			t.Logf("BENCH   %s", line)
+		}
 	}
 	return unmeasured
+}
+
+// separation asks the question the rep medians can answer without a noise threshold: do ALL the off reps lie on one side of ALL the on and on2 reps? With R reps per arm, the R off medians
+// against the 2R on and on2 medians, and no effect at all, the chance that the off ones are the R lowest or the R highest is 2 / C(3R, R): 1/42 at R = 3. It is a rank statement, so it does not
+// care how loud the machine was, only whether the load happened to fall in the same order as the arms. It needs R >= 3 to be able to say anything.
+func separation(off, rest []time.Duration) (string, bool) {
+	r := len(off)
+	if r < 3 || len(rest) != 2*r {
+		return "", false
+	}
+	minOff, maxOff := benchSorted(off)[0], benchSorted(off)[r-1]
+	sr := benchSorted(rest)
+	below := maxOff < sr[0]
+	above := minOff > sr[2*r-1]
+	p := 2 / binomial(3*r, r)
+	switch {
+	case below:
+		return fmt.Sprintf("separation: all %d off rep medians are BELOW all %d on/on2 rep medians (p = %.4f under no effect, 2/C(%d,%d))", r, 2*r, p, 3*r, r), true
+	case above:
+		return fmt.Sprintf("separation: all %d off rep medians are ABOVE all %d on/on2 rep medians (p = %.4f under no effect, 2/C(%d,%d))", r, 2*r, p, 3*r, r), true
+	}
+	return fmt.Sprintf("separation: NOT separated: the %d off rep medians interleave the %d on/on2 rep medians; no claim of a difference", r, 2*r), true
+}
+
+func binomial(n, k int) float64 {
+	v := 1.0
+	for i := 1; i <= k; i++ {
+		v = v * float64(n-k+i) / float64(i)
+	}
+	return v
+}
+
+// The separation arithmetic has a known answer too: 1/42 at three reps, and the interleaved case must refuse.
+func TestBenchSeparationIsRight(t *testing.T) {
+	ms := func(v ...int) []time.Duration {
+		var d []time.Duration
+		for _, x := range v {
+			d = append(d, time.Duration(x)*time.Millisecond)
+		}
+		return d
+	}
+	if got := binomial(9, 3); got != 84 {
+		t.Errorf("C(9,3) = %v, want 84", got)
+	}
+	line, _ := separation(ms(80, 90, 100), ms(10, 20, 30, 15, 25, 35))
+	if !strings.Contains(line, "ABOVE") || !strings.Contains(line, "p = 0.0238") {
+		t.Errorf("off all above: %q, want ABOVE and p = 0.0238 (1/42)", line)
+	}
+	line, _ = separation(ms(1, 2, 3), ms(10, 20, 30, 15, 25, 35))
+	if !strings.Contains(line, "BELOW") {
+		t.Errorf("off all below: %q, want BELOW", line)
+	}
+	// Above the lowest on/on2 median but not above the highest: still interleaved. A check of only one end passes the case above and fails this one.
+	line, _ = separation(ms(45, 90, 100), ms(20, 30, 40, 50, 60, 70))
+	if !strings.Contains(line, "NOT separated") {
+		t.Errorf("off above the lowest but not the highest: %q, want NOT separated", line)
+	}
+	line, _ = separation(ms(10, 90, 100), ms(20, 30, 40, 50, 60, 70))
+	if !strings.Contains(line, "NOT separated") {
+		t.Errorf("interleaved: %q, want NOT separated", line)
+	}
+	if _, ok := separation(ms(1, 2), ms(3, 4, 5, 6)); ok {
+		t.Errorf("two reps cannot support a rank statement, but separation answered")
+	}
 }
