@@ -120,10 +120,9 @@ done
 [ -n "$bad" ] || exit 0
 
 {
-	echo "cleat: refusing to push a branch name outside the prefixes"
-	echo "       .github/workflows/branch-naming.yml accepts:$bad"
+	echo "cleat: refusing to push a branch name outside the accepted prefixes. Refused:$bad"
 	echo ""
-	echo "The prefixes are: $(printf '%s' "$PREFIXES" | tr '\n' ' ')"
+	echo ".github/workflows/branch-naming.yml accepts these prefixes: $(printf '%s' "$PREFIXES" | tr '\n' ' ')"
 	echo ""
 	echo "The prefix names the KIND OF CHANGE, not the kind of file: \"this only"
 	echo "touches _test.go files\" is a statement about the files, and test-only,"

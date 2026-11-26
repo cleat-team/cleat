@@ -47,7 +47,7 @@ func refLine(localRef, localSHA, remoteRef, remoteSHA string) string {
 	return localRef + " " + localSHA + " " + remoteRef + " " + remoteSHA + "\n"
 }
 
-// wantRefused is how every refusal in this file is read, and it asks for two things a bare `code != 0` does not (cleat#4479). The status must be
+// wantRefused is how every refusal in this file is read, and it asks for what a bare `code != 0` does not (cleat#4479, cleat#4483). The status must be
 // exactly 1, which is the hook's own "refused": a hook that died some other way (a crashed `grep`, a bad invocation) also exits non-zero, and a test
 // that accepts any non-zero status certifies it. And the message must name the branch, because a refusal that says nothing is not one an author can
 // act on, and because it is the only evidence the refusal path (not an earlier exit) produced the status. It reports through t.Errorf and returns
@@ -59,8 +59,15 @@ func wantRefused(t *testing.T, label string, code int, stderr, branch string) bo
 		t.Errorf("%s: exit status %d, want 1 (the hook's refusal; 0 is an allow and anything else is the hook failing some other way): %q", label, code, stderr)
 		ok = false
 	}
-	if !strings.Contains(stderr, branch) {
-		t.Errorf("%s: the refusal does not name the branch %q: %q", label, branch, stderr)
+	// The branch must be on a line of its own, as the hook prints the refused names, and not merely appear somewhere in the message: the hook's fixed "accepts these prefixes: feature/ ..."
+	// line contains the string `feature`, so a substring match could not fail for that branch (cleat#4483). And the refused names must come BEFORE the sentence that says what is accepted,
+	// or the message reads as though the refused name were an accepted one (the order it had until cleat#4483).
+	line := strings.Index(stderr, "\n  "+branch+"\n")
+	if line < 0 {
+		t.Errorf("%s: the refusal does not list the branch %q on a line of its own: %q", label, branch, stderr)
+		ok = false
+	} else if accepts := strings.Index(stderr, "accepts"); accepts >= 0 && accepts < line {
+		t.Errorf("%s: the message says what is accepted before it lists the refused branch %q, so the name reads as an accepted one: %q", label, branch, stderr)
 		ok = false
 	}
 	return ok
