@@ -167,3 +167,23 @@ wait (the signal wake source is a later change); a second worker with residency 
 
 Signal and promise polls (#4153), `continue_as_new` (#4159), cancel, a slow-service op (a response longer
 than the instance timeout), seeds, the CI sample/full split, MySQL and SQL Server.
+
+## Residency latency benchmark (cleat#4187)
+
+`residency_bench_test.go`, tags `chaos bench`: a repeatable latency benchmark of the resident-run path, over a real worker binary, a real PostgreSQL and this harness's recording service. It asserts nothing about the numbers; it prints them, and fails only when a cell could not establish what it measures (`UNMEASURED`). **It changes no residency constant and tests none.**
+
+| row | measures |
+|---|---|
+| `start` | the API start request to the guest's first call arriving at the service |
+| `signal` | the signal's HTTP commit to the guest's next call, after the run parked: a wait inside the 10 s window (held with residency on, suspended with it off) and one past it (suspended either way) |
+| `timer` | a `sleep` of D: the next call's arrival minus the previous one's, minus D, for D inside and past the window |
+| `history` | the signal row with K calls in the history before the wait: what replay costs as a run grows, and what holding it saves |
+| `queries` | statements the worker's role executes per wait, from `pg_stat_statements` (the run's own container must preload it; otherwise the row prints `UNMEASURED`, never a zero), with the idle rate printed so the per-wait figure can be read net of it |
+
+Three worker arms per rep: `on` (product defaults), `off` (`--resident-max-runs 0`), and `on2`, the same configuration as `on`. **`on` against `on2` is the noise floor**: how big "no difference" looks on this machine tonight, printed beside every difference between `on` and `off`. The arms rotate across reps, trial 0 of every cell is discarded, and a trial that took a different path than the cell is about (held when it should be suspended, or the reverse) is excluded and counted. The load average is read before and after every cell and a cell above `CLEAT_BENCH_NOISY_LOAD` (default: the core count) is marked `NOISY`.
+
+    CLEAT_CRASH_DB='postgres://…' go test -tags 'chaos bench' ./tests/chaos -run TestBenchResidencyLatencyOnPostgres -count=1 -timeout 170m -v
+
+Knobs: `CLEAT_BENCH_TRIALS` (30), `CLEAT_BENCH_REPS` (3), `CLEAT_BENCH_ROWS` (`start,signal,timer,history,queries`), `CLEAT_BENCH_K` (`0,10,100,500`), `CLEAT_BENCH_OUT` (a JSON-lines file: a config header, then one object per cell and rep, with every sample). `CLEAT_CHAOS_GUEST=python` runs the Python guest. A p99 over fewer than 100 samples is the maximum, and the line says so. Read the results with the load beside them; run `uptime` first.
+
+Not measured here: MySQL, SQL Server, a loaded or multi-worker deployment, x86-64.
