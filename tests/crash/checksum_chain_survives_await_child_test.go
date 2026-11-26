@@ -55,22 +55,41 @@ import (
 // actually ran, rather than assuming a flag that looked right did.
 //
 // WHAT THIS DOES AND DOES NOT GUARD (cleat#4475, measured 2026-11-26). It guards
-// the COMPLETING write: a parent's pending await row being updated to its answer
-// by flushEvent, flushAndNotify and the finalize batch. Reverting the fix's
-// non-test files to their state before #2351 turns it red (step 1 stays pending,
-// step 2 fails with a checksum mismatch). It does NOT guard the WHERE clause that
-// refuses to overwrite a row that is already answered: with all five PostgreSQL
-// copies set to `WHERE true` it stays green, at HEAD and at the #2351 commit
-// itself, because nothing in this scenario ever writes an answered await row with
-// different content (a trigger on event_history showed only same-content
-// rewrites). Where an earlier paragraph says a case failed "with only flush.go's
-// guard reverted", that means flush.go's whole upsert put back as it was before
-// #2351, not the WHERE alone. The WHERE clause is covered per copy by the engine
-// tests (TestAStrayReflushOverAnAnsweredAwaitKeepsTheAnswersTimestamp and the
-// *StyleEventCompletesOnEveryDialect family); a stray write that reaches it
-// from another worker meets the lease fence first (insertEventSQL's folded
-// fence, partitionFencedBatch; read from the code, not measured end to end), so
-// a crash test cannot isolate the WHERE without injecting a database fault.
+// the COMPLETING write: a parent's pending await row being updated to its answer.
+// Reverting the fix's non-test files to their state before #2351 turns it red
+// (step 1 stays pending, step 2 fails with a checksum mismatch). It does NOT
+// guard the WHERE clause that refuses to overwrite a row that is already
+// answered: with all five PostgreSQL copies set to `WHERE true` it stays green,
+// at HEAD and at the #2351 commit itself, because nothing in this scenario ever
+// writes an answered await row with different content (a trigger on
+// event_history showed only same-content rewrites). Where an earlier paragraph
+// says a case failed "with only flush.go's guard reverted", that means
+// flush.go's whole upsert put back as it was before #2351, not the WHERE alone.
+//
+// The WHERE clause is covered per copy by the engine tests, measured one copy at
+// a time on PostgreSQL (cleat#4475):
+//   - adaptive_flush.go, flushAndNotify:
+//     TestAdaptiveFlusher_FlushAndNotify_RefusesToOverwriteACompletedAwaitChildRow (#2376)
+//   - adaptive_flush.go, retryBatchFlush:
+//     TestRetryBatchFlush_RefusesToOverwriteACompletedAwaitChildRow (#2376)
+//   - flush.go, insertEventSQL: the *StyleEventCompletesOnEveryDialect family,
+//     the *StaysImmutable tests and
+//     TestFlushEvent_FenceHeld_IdempotentReflushIsNotFenceLost
+//   - store_event_write.go, appendOneEvent (one record):
+//     TestACompletedIntentIsNotOverwrittenByALaterAppend and
+//     TestAStrayReflushOverAnAnsweredAwaitKeepsTheAnswersTimestamp
+//   - store_event_write.go, appendEventsInTx (two or more records): the
+//     batch-of-two cases of that same TestAStrayReflush... test, added by
+//     cleat#4486; before it, no test failed with this copy removed
+//
+// MySQL and SQL Server have one copy each, covered by the same families.
+//
+// A stray write that reaches the WHERE from another worker meets a lease fence
+// first: insertEventSQL's folded fence and partitionFencedBatch on the flush
+// paths, and the claim fence of the finalize writes that call appendEventsInTx
+// (FinalizeWorkflow's fenceHeld check). That is read from the code, not
+// measured end to end, and it is why a crash test cannot isolate the WHERE
+// without injecting a database fault.
 func TestChecksumChainSurvivesAwaitChild(t *testing.T) {
 	for _, tc := range []struct {
 		name          string
