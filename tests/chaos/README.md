@@ -150,13 +150,16 @@ not tell its own control from a broken scrape, and waited out the whole budget).
 deadline is anchored at A's recorded event, not at the claim (`DurableSleep` takes `max(s.nowMs, s.Now(ctx))`, and `Now` is the last history event's timestamp; cleat-review3's reading of the
 code at `3c662e32`, consistent with one measurement and **not measured directly**). So 8 s only has to outlast the detection (a 100 ms poll plus a metrics scrape) and the kill.
 
-**What a kill costs, measured (cleat-review3 on #4273, from the recording service's own `request.At` timestamps, not by the author of this section):** the time from effect A to effect B was
+**What a kill costs, with the lease aged (cleat-review3 on #4273, from the recording service's own `request.At` timestamps, not by the author of this section):** the time from effect A to effect B was
 **9.2 to 9.5 s with residency off** and **40 to 41 s with it on**. With residency off the sleeping run is a *parked row* (ready, unassigned, a wake time ahead), so the next worker claims it
-at its wake time. A held run is still `running`, assigned to the dead worker, so nothing claims it until the reaper does, after its start-up grace. The harness ages the dead worker's
-lease (`ageLease`) instead of waiting out the real reclaim window, because that window cannot go below about 37 s and a sweep over it would be unaffordable, so **the production window
-comes on top and is NOT measured**. **These timing figures are from cleat-review3's machine alone, under heavy load (load average 15 to 40), and have not been reproduced on another.** Exactly-once holds either way; this is latency (cleat#4275 is the fast path, for 0.7.0).
+at its wake time. A held run is still `running`, assigned to the dead worker, so nothing claims it until the reaper does, after its start-up grace. This case ages the dead worker's
+lease (`ageLease`) instead of waiting out the real reclaim window, because that window cannot go below about 37 s and a sweep over it would be unaffordable, so **its 40 to 41 s is NOT the production delay
+and the real window does not come on top of it: it is a different measurement.** **These timing figures are from cleat-review3's machine alone, under heavy load (load average 15 to 40), and have not been reproduced on another.** Exactly-once holds either way.
 
-**Why the second worker has residency off, and what a residency-on second worker needs.** The reclaim lands about 40 s after A, so a replayed 8 s sleep is already due and would never
+**What a kill costs for real, measured with no lease ageing (cleat#4275, PostgreSQL, three runs each, an 8 s sleep between two effects, the surviving worker's reaper already past its start-up grace, the defaults except the harness's `--poll 100ms --concurrency 1`):**
+without the held-run fast path the second effect came **49 to 50 s** after the first (the same on `release/v0.6.0` `7d283ee2`); with it (`--held-reclaim-after`, about 17 s at a 5 s heartbeat) **19 to 20 s**. `TestChaosSigkillWhileAHeldRunSleepsIsReclaimedAtTheHeldWindowWithoutAgeingTheLease` is that case in this suite, at the harness's 1 s heartbeat and with a warm reaper: B ran 19.7, 21.0 and 20.0 s after the kill, and 49.7 s with the held arm removed from `ReapStaleInstances`. It asserts B within 30 s of the kill, because the ordinary window cannot be shorter than about 37 s. Where in the heartbeat and in the reaper's 10 s tick a kill falls was not sampled (expect up to about 10 s more, derived).
+
+**Why the second worker has residency off, and what a residency-on second worker needs.** The reclaim lands about 40 s after A (the lease is aged; for real it is about 49 s, or about 19 s with the fast path), so a replayed 8 s sleep is already due and would never
 park: a residency-on reclaimer would measure nothing about residency. A row for it needs a sleep longer than the reclaim delay.
 
 **Not covered, stated so it is not discovered later:** a kill at the instant the timer fires (the wake and the claim check); a held run with real defers or a long history; a signal
