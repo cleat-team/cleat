@@ -62,11 +62,19 @@ func wantRefused(t *testing.T, label string, code int, stderr, branch string) bo
 	// The branch must be on a line of its own, as the hook prints the refused names, and not merely appear somewhere in the message: the hook's fixed "accepts these prefixes: feature/ ..."
 	// line contains the string `feature`, so a substring match could not fail for that branch (cleat#4483). And the refused names must come BEFORE the sentence that says what is accepted,
 	// or the message reads as though the refused name were an accepted one (the order it had until cleat#4483).
+	// The sentence is matched whole, and its ABSENCE is a failure, not a skip: an order check that finds no such sentence has nothing to order, and passing then lets the message's wording
+	// change (say, "allows:" for "accepts:") reinstate the very defect this guards (cleat#4483, found in review).
+	const acceptsSentence = ".github/workflows/branch-naming.yml accepts these prefixes:"
 	line := strings.Index(stderr, "\n  "+branch+"\n")
-	if line < 0 {
+	accepts := strings.Index(stderr, acceptsSentence)
+	switch {
+	case line < 0:
 		t.Errorf("%s: the refusal does not list the branch %q on a line of its own: %q", label, branch, stderr)
 		ok = false
-	} else if accepts := strings.Index(stderr, "accepts"); accepts >= 0 && accepts < line {
+	case accepts < 0:
+		t.Errorf("%s: the refusal does not carry the sentence %q, so the order of the refused names and the accepted prefixes cannot be checked: %q", label, acceptsSentence, stderr)
+		ok = false
+	case accepts < line:
 		t.Errorf("%s: the message says what is accepted before it lists the refused branch %q, so the name reads as an accepted one: %q", label, branch, stderr)
 		ok = false
 	}
