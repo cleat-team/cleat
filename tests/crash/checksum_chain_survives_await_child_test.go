@@ -53,6 +53,45 @@ import (
 // check trips, so runChecksumChainCase greps the first worker's captured
 // output for that line when forceAdaptive is set -- proving the batch path
 // actually ran, rather than assuming a flag that looked right did.
+//
+// WHAT THIS DOES AND DOES NOT GUARD (cleat#4475, measured 2026-11-26). It guards
+// the COMPLETING write: a parent's pending await row being updated to its answer.
+// Reverting the fix's non-test files to their state before #2351 turns it red
+// (step 1 stays pending, step 2 fails with a checksum mismatch). It does NOT
+// guard the WHERE clause that refuses to overwrite a row that is already
+// answered: with all five PostgreSQL copies set to `WHERE true` it stays green,
+// at HEAD and at the #2351 commit itself, because nothing in this scenario ever
+// writes an answered await row with different content (a trigger on
+// event_history showed only same-content rewrites). Where an earlier paragraph
+// says a case failed "with only flush.go's guard reverted", that means
+// flush.go's whole upsert put back as it was before #2351, not the WHERE alone.
+//
+// The WHERE clause is covered per copy by the engine tests, measured one copy at
+// a time on PostgreSQL (cleat#4475):
+//   - adaptive_flush.go, flushAndNotify:
+//     TestAdaptiveFlusher_FlushAndNotify_RefusesToOverwriteACompletedAwaitChildRow (#2376)
+//   - adaptive_flush.go, retryBatchFlush:
+//     TestRetryBatchFlush_RefusesToOverwriteACompletedAwaitChildRow (#2376)
+//   - flush.go, insertEventSQL: the *StyleEventCompletesOnEveryDialect family,
+//     the *StaysImmutable tests and
+//     TestFlushEvent_FenceHeld_IdempotentReflushIsNotFenceLost
+//   - store_event_write.go, appendOneEvent (one record):
+//     TestACompletedIntentIsNotOverwrittenByALaterAppend and
+//     TestAStrayReflushOverAnAnsweredAwaitKeepsTheAnswersTimestamp
+//   - store_event_write.go, appendEventsInTx (two or more records): the
+//     batch-of-two cases of that same TestAStrayReflush... test, added by
+//     cleat#4486; before it, no test failed with this copy removed
+//
+// MySQL and SQL Server have one copy each, covered by the same families.
+//
+// A stray write from another worker does not commit. On the flush paths it
+// meets a lease fence before the WHERE (insertEventSQL's folded fence;
+// partitionFencedBatch ahead of flushAndNotify and retryBatchFlush). On the
+// finalize paths that call appendEventsInTx (finalizeWorkflowSegmentInner,
+// FinalizeDeferPhase) the write runs first, and the claim fence checked after
+// it in the same transaction rolls it back (ErrFenceLost). That is read from
+// the code, not measured end to end, and it is why a crash test cannot
+// isolate the WHERE without injecting a database fault.
 func TestChecksumChainSurvivesAwaitChild(t *testing.T) {
 	for _, tc := range []struct {
 		name          string
