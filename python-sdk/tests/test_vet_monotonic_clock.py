@@ -123,7 +123,7 @@ def test_py016_an_import_inside_the_function_is_resolved_too(tmp_path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# time.sleep: PY004 stays the error, aliases are the warning
+# time.sleep: PY004 is the error, through an alias too (cleat#4403)
 # ---------------------------------------------------------------------------
 
 
@@ -134,28 +134,25 @@ def test_time_sleep_written_plainly_is_the_existing_error_and_not_reported_twice
     assert _by_code(result, "PY016") == []
 
 
-def test_py016_flags_time_sleep_through_an_alias(tmp_path) -> None:
-    """PY004 matches the spelling ``time.sleep`` and nothing else. The same call through an alias is invisible to it."""
+def test_time_sleep_through_an_alias_is_the_same_py004_error(tmp_path) -> None:
+    """PY004 used to match the spelling ``time.sleep`` and nothing else, and the alias was only a PY016 warning (cleat#4396). It blocks the same way (cleat#4403), so it is the same error."""
     for top, body in (
         ("import time as t\n", "t.sleep(1)"),
         ("from time import sleep\n", "sleep(1)"),
         ("from time import sleep as nap\n", "nap(1)"),
     ):
         result = _analyze(tmp_path, _wrap(body, top=top))
-        warnings = _by_code(result, "PY016")
-        assert len(warnings) == 1, (top, body, result.warnings, result.errors)
-        assert "time.sleep()" in warnings[0]["message"]
-        assert "h.sleep(" in warnings[0]["suggestion"]
-        assert "PY004" not in _codes(result.errors), (
-            "the alias is a warning; it must not newly refuse a build"
-        )
+        errors = [e for e in result.errors if e["code"] == "PY004"]
+        assert len(errors) == 1, (top, body, result.warnings, result.errors)
+        assert "time.sleep()" in errors[0]["message"] and "alias" in errors[0]["message"]
+        assert "h.sleep(" in errors[0]["suggestion"]
+        assert _by_code(result, "PY016") == [], "reported once, as the error, not also as a warning"
 
 
 def test_the_sleep_message_states_what_was_measured_about_the_instance_timeout(tmp_path) -> None:
     """cleat#4403, measured: an in-guest sleep blocks its execution for the whole duration and the instance timeout does not interrupt it."""
-    sleep = _by_code(_analyze(tmp_path, _wrap("t.sleep(1)", top="import time as t\n")), "PY016")[0][
-        "message"
-    ]
+    errors = _analyze(tmp_path, _wrap("t.sleep(1)", top="import time as t\n")).errors
+    sleep = next(e for e in errors if e["code"] == "PY004")["message"]
     assert "instance timeout" in sleep and "cleat#4403" in sleep
     errors = _analyze(tmp_path, _wrap("time.sleep(1)", top="import time\n")).errors
     error = next(e["message"] for e in errors if e["code"] == "PY004")
@@ -245,11 +242,16 @@ def test_py016_module_level_references_in_every_spelling(tmp_path) -> None:
     for top, body, function in (
         ("import time\nclock: object = time.monotonic_ns\n", "clock()", "time.monotonic_ns()"),
         ("import time as t\nclock = t.perf_counter_ns\n", "clock()", "time.perf_counter_ns()"),
-        ("import time\nnap = time.sleep\n", "nap(1)", "time.sleep()"),
     ):
         warnings = _by_code(_analyze(tmp_path, _wrap(body, top=top)), "PY016")
         assert len(warnings) == 1, (top, body, warnings)
         assert function in warnings[0]["message"]
+
+
+def test_a_module_level_reference_to_time_sleep_is_the_py004_error_where_it_is_called(tmp_path) -> None:
+    """``nap = time.sleep`` then ``nap(1)``: the plain-spelling rule cannot see it, the alias rule can, and it is the error."""
+    result = _analyze(tmp_path, _wrap("nap(1)", top="import time\nnap = time.sleep\n"))
+    assert [e["code"] for e in result.errors if e["code"] == "PY004"] == ["PY004"], (result.errors, result.warnings)
 
 
 def test_py016_a_module_level_reference_that_is_never_called_warns_nowhere(tmp_path) -> None:

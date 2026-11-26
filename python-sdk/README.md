@@ -324,7 +324,7 @@ These modules are partially available with documented restrictions:
 | `pathlib` | ⚠️ Limited | Path manipulation works **once `pathlib` is imported at the top level** (it is not in the component otherwise, see the rule above). No real filesystem I/O (`read_text`, `write_text`, etc.) |
 | `random` | ⚠️ Limited | Basic PRNG works. Use `h.random()` for deterministic workflow randomness instead |
 | `json` | ✅ Fully available, see above | |
-| `time` | ⚠️ Limited | `time.time()` works. `time.sleep()` runs and really sleeps (measured: a 0.5 s sleep took 524 ms), blocks its execution for its whole duration and is **not interrupted by the instance timeout** (cleat#4403); `cleat vet` refuses it, use `h.sleep()`. **`time.monotonic()`, `monotonic_ns()`, `perf_counter()` and `perf_counter_ns()` read the host's real clock, which replay does not reproduce, and `time.process_time()` and `process_time_ns()` differ between runs too (measured: -2.0412 and -2.0397 s, negative on both)** (measured: two runs of one workflow id read 0.5029 and 0.5021 s for the same `time.sleep(0.5)`); `cleat vet` warns (PY016); use `h.now()` and subtract two readings |
+| `time` | ⚠️ Limited | `time.time()` works. `time.sleep()` runs and really sleeps (measured: a 0.5 s sleep took 524 ms), blocks its execution for its whole duration and is **not interrupted by the instance timeout** (cleat#4403); `cleat vet` refuses it, **also through an alias** (`from time import sleep`, `import time as t`; PY004), use `h.sleep()`. **`time.monotonic()`, `monotonic_ns()`, `perf_counter()` and `perf_counter_ns()` read the host's real clock, which replay does not reproduce, and `time.process_time()` and `process_time_ns()` differ between runs too (measured: -2.0412 and -2.0397 s, negative on both)** (measured: two runs of one workflow id read 0.5029 and 0.5021 s for the same `time.sleep(0.5)`); `cleat vet` warns (PY016); use `h.now()` and subtract two readings |
 
 ### Imports, but `cleat vet` refuses it in workflow code
 
@@ -333,6 +333,7 @@ These **do import** (measured); it is `cleat vet` that rejects them, because the
 | Module | Refused as | Reason (from `cleat vet`) |
 |---|---|---|
 | `threading`, `asyncio`, `multiprocessing` | PY008 | Cleat workflows are single-threaded; use child workflows for parallelism |
+| `select.select`, a blocking `queue.Queue.get` | PY017 (warning) | A workflow is single-threaded, so these can only wait. `select.select` blocks in the host for its whole timeout, holds a `--concurrency` slot and one OS thread, and **the instance timeout does not interrupt it**; `Queue.get` busy-loops (a CPU core for the whole wait) until the timeout or the instance timeout ends it (measured, cleat#4403). Use `h.sleep()`; `get_nowait()` and `get(block=False)` are fine |
 | `socket` | PY009 | raw sockets produce non-replayable network side effects |
 | `urllib`, `http.client`, `requests` | PY003 | direct HTTP calls produce non-replayable network effects; use host calls (below) |
 | `subprocess`, most of `os` | PY007 | subprocesses and OS operations cannot be replayed |
