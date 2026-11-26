@@ -66,6 +66,12 @@ def chaos_script(h: HostCalls, run: str, ops: list) -> str:
             branch = o["miss"] if res.timed_out else o["hit"]
             h.call("chaos", branch, _request(run, branch))
             seen[branch] = "1"
+        elif kind == "await_signal":
+            # Same op as the Go guest's of the name (cleat#4306): await0 with a real timeout, so a harness can measure the time from a signal's commit to the guest's next step.
+            res = h.await_signals_ms([o["name"]], int(o.get("ms", 0)))
+            branch = o["miss"] if res.timed_out else o["hit"]
+            h.call("chaos", branch, _request(run, branch))
+            seen[branch] = "1"
         elif kind == "await_promise":
             pid = h.create_promise("p-" + o["name"])
             res = h.await_promise(pid, int(o["ms"]) / 1000.0)

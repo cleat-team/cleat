@@ -36,6 +36,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/url"
 	"os"
@@ -58,40 +59,98 @@ type benchConfig struct {
 	Poll         string
 }
 
-func benchEnvInt(name string, def int) int {
-	if v, err := strconv.Atoi(os.Getenv(name)); err == nil && v > 0 {
-		return v
-	}
-	return def
-}
+var benchKnownRows = map[string]bool{"start": true, "signal": true, "timer": true, "history": true, "queries": true}
 
-func loadBenchConfig() benchConfig {
-	c := benchConfig{Trials: benchEnvInt("CLEAT_BENCH_TRIALS", 30), Reps: benchEnvInt("CLEAT_BENCH_REPS", 3), Rows: map[string]bool{}, Out: os.Getenv("CLEAT_BENCH_OUT"), NoisyLoad: float64(runtime.NumCPU()), Poll: "500ms"}
-	if v := os.Getenv("CLEAT_BENCH_POLL"); v != "" {
-		if _, err := time.ParseDuration(v); err == nil {
-			c.Poll = v
+// parseBenchConfig reads the knobs through get (os.Getenv in a run). A knob that is SET and does not parse is an error and not a silent fall back to the default: a mistyped poll or row
+// name would otherwise run a different benchmark from the one asked for and print its numbers as if it were that one (an unparseable CLEAT_BENCH_POLL used to run at 500ms).
+func parseBenchConfig(get func(string) string) (benchConfig, error) {
+	c := benchConfig{Trials: 30, Reps: 3, Rows: map[string]bool{}, Out: get("CLEAT_BENCH_OUT"), NoisyLoad: float64(runtime.NumCPU()), Poll: "500ms"}
+	for _, k := range []struct {
+		name string
+		dst  *int
+	}{{"CLEAT_BENCH_TRIALS", &c.Trials}, {"CLEAT_BENCH_REPS", &c.Reps}} {
+		if v := get(k.name); v != "" {
+			n, err := strconv.Atoi(v)
+			if err != nil || n < 1 {
+				return c, fmt.Errorf("%s=%q is not a positive integer", k.name, v)
+			}
+			*k.dst = n
 		}
 	}
-	rows := os.Getenv("CLEAT_BENCH_ROWS")
+	if v := get("CLEAT_BENCH_POLL"); v != "" {
+		if d, err := time.ParseDuration(v); err != nil || d <= 0 {
+			return c, fmt.Errorf("CLEAT_BENCH_POLL=%q is not a positive duration (for example 500ms)", v)
+		}
+		c.Poll = v
+	}
+	rows := get("CLEAT_BENCH_ROWS")
 	if rows == "" {
 		rows = "start,signal,timer,history,queries"
 	}
 	for _, r := range strings.Split(rows, ",") {
-		c.Rows[strings.TrimSpace(r)] = true
+		r = strings.TrimSpace(r)
+		if !benchKnownRows[r] {
+			return c, fmt.Errorf("CLEAT_BENCH_ROWS names %q, which is not a row (start, signal, timer, history, queries)", r)
+		}
+		c.Rows[r] = true
 	}
-	ks := os.Getenv("CLEAT_BENCH_K")
+	ks := get("CLEAT_BENCH_K")
 	if ks == "" {
 		ks = "0,10,100,500"
 	}
 	for _, k := range strings.Split(ks, ",") {
-		if n, err := strconv.Atoi(strings.TrimSpace(k)); err == nil && n >= 0 {
-			c.Ks = append(c.Ks, n)
+		n, err := strconv.Atoi(strings.TrimSpace(k))
+		if err != nil || n < 0 {
+			return c, fmt.Errorf("CLEAT_BENCH_K names %q, which is not a non-negative integer", k)
 		}
+		c.Ks = append(c.Ks, n)
 	}
-	if v, err := strconv.ParseFloat(os.Getenv("CLEAT_BENCH_NOISY_LOAD"), 64); err == nil && v > 0 {
-		c.NoisyLoad = v
+	if v := get("CLEAT_BENCH_NOISY_LOAD"); v != "" {
+		f, err := strconv.ParseFloat(v, 64)
+		// ParseFloat accepts "NaN" and "Inf", and NaN <= 0 is false, so the sign test alone lets a NaN threshold through: a threshold nothing exceeds, and no cell is ever marked NOISY.
+		if err != nil || !(f > 0) || math.IsInf(f, 0) {
+			return c, fmt.Errorf("CLEAT_BENCH_NOISY_LOAD=%q is not a positive finite number", v)
+		}
+		c.NoisyLoad = f
+	}
+	return c, nil
+}
+
+func loadBenchConfig(t *testing.T) benchConfig {
+	t.Helper()
+	c, err := parseBenchConfig(os.Getenv)
+	if err != nil {
+		t.Fatalf("UNMEASURED: %v. This is a failure of the invocation, not a result.", err)
 	}
 	return c
+}
+
+func TestBenchConfigRefusesWhatItCannotParse(t *testing.T) {
+	env := func(kv map[string]string) func(string) string { return func(k string) string { return kv[k] } }
+	if c, err := parseBenchConfig(env(nil)); err != nil || c.Poll != "500ms" || c.Trials != 30 || c.Reps != 3 || len(c.Ks) != 4 || !c.Rows["queries"] {
+		t.Errorf("defaults: %+v, %v", c, err)
+	}
+	if c, err := parseBenchConfig(env(map[string]string{"CLEAT_BENCH_POLL": "100ms", "CLEAT_BENCH_ROWS": "timer, start", "CLEAT_BENCH_K": "0,7"})); err != nil || c.Poll != "100ms" || !c.Rows["timer"] || !c.Rows["start"] || c.Rows["signal"] || len(c.Ks) != 2 || c.Ks[1] != 7 {
+		t.Errorf("valid knobs: %+v, %v", c, err)
+	}
+	for name, kv := range map[string]map[string]string{
+		"an unparseable poll":    {"CLEAT_BENCH_POLL": "fast"},
+		"a poll with no unit":    {"CLEAT_BENCH_POLL": "100"},
+		"a zero poll":            {"CLEAT_BENCH_POLL": "0s"},
+		"a mistyped row":         {"CLEAT_BENCH_ROWS": "start,signall"},
+		"a non-numeric trials":   {"CLEAT_BENCH_TRIALS": "many"},
+		"zero reps":              {"CLEAT_BENCH_REPS": "0"},
+		"a non-numeric K":        {"CLEAT_BENCH_K": "0,ten"},
+		"a negative noisy load":  {"CLEAT_BENCH_NOISY_LOAD": "-1"},
+		"a NaN noisy load":       {"CLEAT_BENCH_NOISY_LOAD": "NaN"},
+		"an infinite noisy load": {"CLEAT_BENCH_NOISY_LOAD": "Inf"},
+		"a -Inf noisy load":      {"CLEAT_BENCH_NOISY_LOAD": "-Inf"},
+		"a zero noisy load":      {"CLEAT_BENCH_NOISY_LOAD": "0"},
+	} {
+		if _, err := parseBenchConfig(env(kv)); err == nil {
+			t.Errorf("%s was accepted: %v", name, kv)
+		}
+	}
 }
 
 // benchArm is one worker configuration. nil flags leave the product default in force: that is what "on" means.
@@ -583,7 +642,7 @@ func benchHardware() map[string]string {
 }
 
 func TestBenchResidencyLatencyOnPostgres(t *testing.T) {
-	cfg := loadBenchConfig()
+	cfg := loadBenchConfig(t)
 	env := newEnv(t)
 	tag := fmt.Sprintf("%d", time.Now().Unix())
 	gitSHA := ""
@@ -759,8 +818,12 @@ func reportBench(t *testing.T, cfg benchConfig, header map[string]any, results [
 				t.Logf("BENCH   off minus on: %s ms (off is %.2fx on)", ms(off-on), float64(off)/float64(max(on, 1)))
 			}
 		}
-		if line, ok := separation(repMeds["off"], append(append([]time.Duration(nil), repMeds["on"]...), repMeds["on2"]...)); ok {
-			t.Logf("BENCH   %s", line)
+		if k0 := cells[ck][0]; k0.row != "queries" {
+			if line, ok := separation(repMeds["off"], append(append([]time.Duration(nil), repMeds["on"]...), repMeds["on2"]...)); ok {
+				t.Logf("BENCH   %s", line)
+			} else {
+				t.Logf("BENCH   separation: CANNOT SAY (needs 3 or more reps with every arm measured; got %d off, %d on, %d on2); no claim of a difference or of none", len(repMeds["off"]), len(repMeds["on"]), len(repMeds["on2"]))
+			}
 		}
 	}
 	return unmeasured
@@ -824,6 +887,15 @@ func TestBenchSeparationIsRight(t *testing.T) {
 	line, _ = separation(ms(10, 90, 100), ms(20, 30, 40, 50, 60, 70))
 	if !strings.Contains(line, "NOT separated") {
 		t.Errorf("interleaved: %q, want NOT separated", line)
+	}
+	// A tie is not separation: an off median EQUAL to the highest on/on2 median is not above it. Counting ties as separated (<=) would pass the case above and fail this one.
+	line, _ = separation(ms(30, 90, 100), ms(10, 20, 30, 15, 25, 5))
+	if !strings.Contains(line, "NOT separated") {
+		t.Errorf("off tied with the highest on/on2: %q, want NOT separated", line)
+	}
+	line, _ = separation(ms(1, 2, 5), ms(5, 20, 30, 15, 25, 35))
+	if !strings.Contains(line, "NOT separated") {
+		t.Errorf("off tied with the lowest on/on2: %q, want NOT separated", line)
 	}
 	if _, ok := separation(ms(1, 2), ms(3, 4, 5, 6)); ok {
 		t.Errorf("two reps cannot support a rank statement, but separation answered")
