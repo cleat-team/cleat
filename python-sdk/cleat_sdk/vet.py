@@ -56,6 +56,12 @@ WARN_LAZY_IMPORT_CALL = "PY015"  # call that imports a module the first time it 
 #: that PY004 and PY005 never named.
 WARN_REAL_TIME_CLOCK = "PY016"
 
+#: A wait that blocks the worker in code the workflow executes (cleat#4403): ``select.select`` and a ``queue.Queue.get`` that can block. A WARNING, never an
+#: error. Measured 2026-11-26 (develop 4f2addca, PostgreSQL, macOS arm64): ``select.select([], [], [], t)`` blocks in the host for the whole timeout like
+#: ``time.sleep`` does (0.44 CPU-s over 5 s, one --concurrency slot, one OS thread, not interrupted by --wasm-instance-timeout), and
+#: ``queue.Queue().get(timeout=t)`` busy-loops in the guest (5.17 CPU-s over 5 s, one slot, stopped by --wasm-instance-timeout).
+WARN_BLOCKING_WAIT = "PY017"
+
 #: The ``time`` functions that read the host's real monotonic clock. Measured 2026-11-23 (componentize-py 0.25.1): two runs of one workflow id read
 #: different values, so anything computed from them differs between a run and its replay. ``time.time`` is PY005's and ``time.sleep`` is PY004's.
 MONOTONIC_CLOCK_CALLS: tuple[str, ...] = (
@@ -927,6 +933,143 @@ class RealTimeClockChecker(ast.NodeVisitor):
             self._warn(node, self._functions[node.id])
 
 
+_QUEUE_CLASSES = {"Queue", "LifoQueue", "PriorityQueue", "SimpleQueue"}
+
+
+class BlockingWaitChecker(ast.NodeVisitor):
+    """Warns about a wait that blocks the worker: ``select.select`` and a ``queue.Queue.get`` that can block (cleat#4403).
+
+    A workflow is single-threaded and nothing else can wake it or fill a queue, so the only thing either call can do is wait for its timeout, in a way
+    that is neither durable nor replayable. ``select.select(...)`` blocks in the host for the whole timeout, as ``time.sleep`` does: a
+    ``--concurrency`` slot and one OS thread for the duration, and ``--wasm-instance-timeout`` does not interrupt it. ``Queue.get`` with a timeout (or
+    none) busy-loops in the guest, which burns a CPU core and holds a slot until the instance timeout stops it. Both measured, cleat#4403.
+
+    One warning code, PY017, over the scope RealTimeClockChecker uses (the functions the entry points reach). Names are resolved through the file's own
+    imports (``import select as s``, ``from select import select as sel``, ``from queue import Queue as Q``), and a queue is a name bound with
+    ``q = queue.Queue()`` (or one of the other queue classes) anywhere in the file, or the constructor call itself. That is a name-level reading, not a type
+    inference: an object that comes from a parameter, or is held as an attribute (``self.q``), is not recognised, and a name rebound to something else is still
+    read as a queue. ``get(False)``, ``get(block=False)``, ``get(timeout=0)`` and ``get_nowait()`` do not block and are not reported. ``select.poll``,
+    ``select.epoll`` and ``selectors`` (``DefaultSelector().select()``) are not looked at.
+    """
+
+    def __init__(self, filepath: str, tree: ast.AST, target_funcs: set[str]) -> None:
+        self.filepath = filepath
+        self.target_funcs = target_funcs
+        self.warnings: list[dict[str, Any]] = []
+        self._depth = 0
+        self._select_modules: set[str] = {"select"}
+        self._queue_modules: set[str] = {"queue"}
+        self._select_functions: set[str] = set()  # local names that mean select.select
+        self._queue_classes: set[str] = set()  # local names that mean queue.Queue and its siblings
+        self._queues: set[str] = set()  # names bound to a queue instance
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    if alias.name == "select" and alias.asname:
+                        self._select_modules.add(alias.asname)
+                    elif alias.name == "queue" and alias.asname:
+                        self._queue_modules.add(alias.asname)
+            elif isinstance(node, ast.ImportFrom) and node.level == 0:
+                for alias in node.names:
+                    if node.module == "select" and alias.name == "select":
+                        self._select_functions.add(alias.asname or alias.name)
+                    elif node.module == "queue" and alias.name in _QUEUE_CLASSES:
+                        self._queue_classes.add(alias.asname or alias.name)
+        for node in ast.walk(tree):
+            value = node.value if isinstance(node, (ast.Assign, ast.AnnAssign)) else None
+            if isinstance(value, ast.Call) and self._is_queue_constructor(value):
+                targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+                for target in targets:
+                    if isinstance(target, ast.Name):
+                        self._queues.add(target.id)
+
+    def _is_queue_constructor(self, call: ast.Call) -> bool:
+        func = call.func
+        if isinstance(func, ast.Name):
+            return func.id in self._queue_classes
+        return (
+            isinstance(func, ast.Attribute)
+            and func.attr in _QUEUE_CLASSES
+            and isinstance(func.value, ast.Name)
+            and func.value.id in self._queue_modules
+        )
+
+    def _is_select(self, call: ast.Call) -> bool:
+        func = call.func
+        if isinstance(func, ast.Name):
+            return func.id in self._select_functions
+        return (
+            isinstance(func, ast.Attribute)
+            and func.attr == "select"
+            and isinstance(func.value, ast.Name)
+            and func.value.id in self._select_modules
+        )
+
+    def _is_blocking_get(self, call: ast.Call) -> bool:
+        func = call.func
+        if not (isinstance(func, ast.Attribute) and func.attr == "get"):
+            return False
+        receiver = func.value
+        is_queue = (isinstance(receiver, ast.Name) and receiver.id in self._queues) or (
+            isinstance(receiver, ast.Call) and self._is_queue_constructor(receiver)
+        )
+        if not is_queue:
+            return False
+        # get(False), get(block=False), get(0) and get(timeout=0) do not wait: a falsy constant block, or a zero timeout, raises Empty at once.
+        if call.args and isinstance(call.args[0], ast.Constant) and not call.args[0].value:
+            return False
+        for keyword in call.keywords:
+            if isinstance(keyword.value, ast.Constant) and keyword.arg == "block" and not keyword.value.value:
+                return False
+            if isinstance(keyword.value, ast.Constant) and keyword.arg == "timeout" and keyword.value.value == 0:
+                return False
+        return not (len(call.args) > 1 and isinstance(call.args[1], ast.Constant) and call.args[1].value == 0)
+
+    def _warn(self, node: ast.AST, what: str) -> None:
+        if what == "select":
+            message = (
+                "select.select() waits in the host: it blocks its execution for its whole timeout, holds a --concurrency slot and one OS thread, "
+                "and the instance timeout does not interrupt it (measured, cleat#4403). A workflow is single-threaded, so nothing can make a "
+                "descriptor ready; the call can only wait, and it is not durable."
+            )
+        else:
+            message = (
+                "queue.Queue.get() that can block waits for an item nothing can put (a workflow is single-threaded): it busy-loops, burning a CPU "
+                "core and holding a --concurrency slot until the timeout or the instance timeout ends it (measured: 5.17 CPU-seconds over 5 s, "
+                "cleat#4403). It is not durable."
+            )
+        self.warnings.append(
+            {
+                "code": WARN_BLOCKING_WAIT,
+                "file": self.filepath,
+                "line": getattr(node, "lineno", 0),
+                "column": getattr(node, "col_offset", 0),
+                "message": message,
+                "suggestion": "Use h.sleep(seconds) to wait durably; use get_nowait() or get(block=False) for a queue that is only read",
+            }
+        )
+
+    def _check_function(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
+        if node.name in self.target_funcs:
+            self._depth += 1
+            self.generic_visit(node)
+            self._depth -= 1
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+        self._check_function(node)
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+        self._check_function(node)
+
+    def visit_Call(self, node: ast.Call) -> None:
+        if self._depth:
+            if self._is_select(node):
+                self._warn(node, "select")
+            elif self._is_blocking_get(node):
+                self._warn(node, "queue")
+        self.generic_visit(node)
+
+
 class RuntimeImportChecker(ast.NodeVisitor):
     """Warns about imports that happen only when the workflow RUNS (cleat#4266).
 
@@ -1360,6 +1503,18 @@ def analyze_file(filepath: str) -> AnalysisResult:
     real_time = RealTimeClockChecker(filepath, tree, to_check)
     real_time.visit(tree)
     for warning in real_time.warnings:
+        result.add_warning(
+            warning["code"],
+            warning["line"],
+            warning["message"],
+            warning["suggestion"],
+            warning["column"],
+        )
+
+    # --- A wait that blocks the worker: select.select, a blocking queue get (warning; cleat#4403) ---
+    blocking_wait = BlockingWaitChecker(filepath, tree, to_check)
+    blocking_wait.visit(tree)
+    for warning in blocking_wait.warnings:
         result.add_warning(
             warning["code"],
             warning["line"],

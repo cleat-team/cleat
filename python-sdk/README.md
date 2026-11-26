@@ -333,6 +333,7 @@ These **do import** (measured); it is `cleat vet` that rejects them, because the
 | Module | Refused as | Reason (from `cleat vet`) |
 |---|---|---|
 | `threading`, `asyncio`, `multiprocessing` | PY008 | Cleat workflows are single-threaded; use child workflows for parallelism |
+| `select.select`, a blocking `queue.Queue.get` | PY017 (warning) | A workflow is single-threaded, so these can only wait. `select.select` blocks in the host for its whole timeout, holds a `--concurrency` slot and one OS thread, and **the instance timeout does not interrupt it**; `Queue.get` busy-loops (a CPU core for the whole wait) until the timeout or the instance timeout ends it (measured, cleat#4403). Use `h.sleep()`; `get_nowait()` and `get(block=False)` are fine |
 | `socket` | PY009 | raw sockets produce non-replayable network side effects |
 | `urllib`, `http.client`, `requests` | PY003 | direct HTTP calls produce non-replayable network effects; use host calls (below) |
 | `subprocess`, most of `os` | PY007 | subprocesses and OS operations cannot be replayed |
