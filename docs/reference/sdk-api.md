@@ -664,9 +664,17 @@ while a run was in such a wait was not handled until the wait ended: a workflow
 that went on to another wait handled it there, and one that returned right after
 the wait had the update rejected as the run completed, with "reached terminal
 status ... with this update still pending, so it can never be handled". Waiting
-in short slices was the workaround.) **`WaitForEvent` is the exception:** an
-update sent to a run waiting in it is not handled until the wait returns
-(cleat#4539).
+in short slices was the workaround.) **There are two exceptions, where an update
+is still handled only when the wait ends.** A wait the worker holds in memory (one
+due within the residency window, which is on by default) is not woken by the
+update, so the update is handled when the wait ends. The worker holds a wait only
+if it is due within the residency window (`--resident-window-floor`, 10 seconds
+by default, up to `--resident-window-cap`, 5 minutes), so the delay is at most
+that window; measured on a real worker with default flags, an update sent 2.0
+seconds into an 8-second held wait was handled at 8.2 seconds, while a 20-second
+wait and a one-hour wait, which are not held, handled one within 0.3 seconds. And
+an update sent to a run waiting in `WaitForEvent`
+is not handled until the wait returns (cleat#4539).
 
 There is no `RegisterQueryHandler` -- it was removed 2026-08-09 (see
 `docs/determinism.md`, "Why there is no RegisterQueryHandler"). It recorded a
