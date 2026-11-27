@@ -1758,7 +1758,11 @@ func TestFinalizeWorkflowSegment_Success(t *testing.T) {
 }
 
 func TestRequestCancellation_Success(t *testing.T) {
-	ss, _ := makeShardedStore(t, 2)
+	ss, mocks := makeShardedStore(t, 2)
+	// A cancel is routed to the shard that HOLDS the run (cleat#4500), which it learns by asking, so the run has to exist on a shard.
+	for _, m := range mocks {
+		m.getWorkflowByIDFn = func(_ context.Context, id string) (*WorkflowInstance, error) { return &WorkflowInstance{ID: id}, nil }
+	}
 	err := ss.RequestCancellation(context.Background(), "wf-1", "user requested")
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
