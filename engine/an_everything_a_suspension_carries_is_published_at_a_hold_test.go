@@ -258,6 +258,9 @@ var suspensionAssigns = map[string]string{
 		"is in w.inflight, and the heartbeat keeps the reaper off it. This is the one user-visible difference a hold makes, and it is why design invariant 4 carries an exception for it",
 	"nextWakeAt": "the suspension writes next_wake_at from SuspendUntil so another worker can claim the run at the wake; a held run has no wake time in the store because it wakes in-process. If its worker " +
 		"dies the reaper recovers it after about 47 s and it replays, as for any running run (design doc 4.2)",
+	"call:w.timerNudge.at": "the suspension schedules a poll of an IDLE worker for the wake time it just wrote (cleat#4491), because a suspended run waits in the store and an idle worker only looks at its next backoff tick. " +
+		"A held run is not in the store: it wakes in-process from its own local timer at Until, so there is nothing for a poll to find and a hold schedules no nudge. When a hold ends in a suspension " +
+		"(evicted, or past the window) that run goes through this same path and the nudge is scheduled then",
 	"call:w.logger.InfoContext": "the 'workflow suspended' log line, which writes nothing to a store; a held run logs nothing at its hold, and the wake is visible in the held-run counters",
 }
 
