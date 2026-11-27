@@ -1856,7 +1856,11 @@ required_contexts:
       covers: undeclared
       why_required: |
         The seeded fault-injection sample: `go test -tags chaos ./tests/chaos -run TestChaosSeeded`
-        against a real worker and database, 60 seeds, about seven minutes. `./tests/chaos` is in
+        against a real worker and database, 60 seeds, about seven minutes. The same invocation also runs
+        the benchmark's three pure-unit tests (`TestBenchConfigRefusesWhatItCannotParse`,
+        `TestBenchPercentilesAreRight`, `TestBenchSeparationIsRight`; cleat#4493), which need no worker or
+        database and take milliseconds, and the step fails unless each reports a pass, so a rename
+        cannot drop them. `./tests/chaos` is in
         no tier in this file, so this context gates a package that tiers.yaml neither claims nor
         parks; that is the gap `covers: undeclared` exists to make visible, and it is recorded
         here rather than closed by assigning the package a tier in a PR about something else.
