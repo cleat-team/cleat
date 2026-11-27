@@ -278,9 +278,9 @@ jobs:
         run: |
           set -euo pipefail
           CLEAT_CHAOS_GUEST=python CLEAT_CHAOS_SCENARIO=calls go test -json -tags chaos -count=1 -timeout 60m ./tests/chaos \
-            -run 'TestChaosSigkillThenReclaimAtEveryBoundary|TestChaosASlowServiceCallIsNotKilledByTheInstanceTimeout|TestChaosSigkillWhileAHeldRunSleepsThenReclaim|TestChaosTheDeployedScriptGuestIsTheLanguageThatWasAskedFor' 2>&1 | tee chaos-python.log
-          # `go test -run` that selects nothing exits 0, so a renamed row would leave this step green having run nothing. Require the pass event of the two rows added for the Python arm.
-          for row in TestChaosSigkillWhileAHeldRunSleepsThenReclaim TestChaosTheDeployedScriptGuestIsTheLanguageThatWasAskedFor; do
+            -run 'TestChaosSigkillThenReclaimAtEveryBoundary|TestChaosASlowServiceCallIsNotKilledByTheInstanceTimeout|TestChaosSigkillWhileAHeldRunSleepsThenReclaim|TestChaosTheDeployedScriptGuestIsTheLanguageThatWasAskedFor|TestASignalAcrossAContinueAsNewReachesItsSuccessorOnceAtEveryTiming|TestASignalAcrossAContinueAsNewSurvivesAKillAtTheSuccessorsHit' 2>&1 | tee chaos-python.log
+          # `go test -run` that selects nothing exits 0, so a renamed row would leave this step green having run nothing. Require the pass event of the rows added for the Python arm (the two chaos rows, then the two signal-across-continue-as-new rows of cleat#4381).
+          for row in TestChaosSigkillWhileAHeldRunSleepsThenReclaim TestChaosTheDeployedScriptGuestIsTheLanguageThatWasAskedFor TestASignalAcrossAContinueAsNewReachesItsSuccessorOnceAtEveryTiming TestASignalAcrossAContinueAsNewSurvivesAKillAtTheSuccessorsHit; do
             grep -E "\"Action\":\"pass\",\"Package\":\"[^\"]*\",\"Test\":\"${row}\"" chaos-python.log > /dev/null \
               || { echo "::error::the Python row ${row} reported no pass: the -run pattern selected nothing, it failed, or it never finished"; exit 1; }
           done

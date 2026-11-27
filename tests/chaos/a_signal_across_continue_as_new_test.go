@@ -38,7 +38,7 @@ const (
 	chainSignalName = "go"
 	chainAwaitMs    = 12000 // a lost signal ends as MISS inside the run budget, not after it
 	chainRaceRounds = 16
-	chainStepWait   = 60 * time.Second
+	chainStepWait   = 180 * time.Second // was 60 s: on the Python guest a started run was sometimes not claimed for 59-60 s (see the README), which ended a round as UNMEASURED
 	chainHitAfter   = "hit-after"
 	chainHitBefore  = "hit-before"
 )
@@ -284,8 +284,12 @@ func chainCase(t *testing.T, h *chainHarness, timing, kill string, offset int) {
 		a := &gate{run: run, op: "A", nth: 1, mode: "before"}
 		env.svc.arm(a)
 		startRun(t, env.db, run, scriptInput(run, sc), h.queue)
+		started := time.Now()
 		select {
 		case <-a.arrived:
+			if d := time.Since(started); d > 10*time.Second {
+				t.Logf("NOTE: call A arrived %v after the run was started, so the worker did not claim it promptly (a slow start, not a signal finding)", d.Round(100*time.Millisecond))
+			}
 		case <-time.After(chainStepWait):
 			t.Fatalf("UNMEASURED: call A never arrived")
 		}
