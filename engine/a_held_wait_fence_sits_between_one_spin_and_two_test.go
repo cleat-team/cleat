@@ -54,7 +54,11 @@ func fenceBetweenOneAndTwo(once, twice []time.Duration, tick time.Duration) (fen
 	if bestSlack < margin {
 		return 0, false
 	}
-	return best, true
+	// HALF A TICK ABOVE the boundary, not on it. The guest's budget is re-armed at every budgeted host call as floor((remaining - charged)/tick) ticks, and the guest makes about a dozen at
+	// entry (cleat-review2 measured 749.8 ms left of a 750 ms fence before the first spin): a fence at an exact multiple of the tick loses a whole tick to ANY charge, so the first segment
+	// would fire in ((k-2)*tick, (k-1)*tick] and the margin on the one-spin side would be one tick short. Half a tick absorbs any entry charge under 25 ms and leaves the range at
+	// ((k-1)*tick, k*tick], which is what the selection above assumed.
+	return best + tick/2, true
 }
 
 // median is the upper median: for an even count, the larger of the two middle values.
@@ -80,10 +84,10 @@ func speedSettled(samples []time.Duration) bool {
 
 func ms(n int) time.Duration { return time.Duration(n) * time.Millisecond }
 
-// firesBefore reports, for EVERY phase of the epoch ticker, whether a fence of this value stops a run of the given length: the fence is k = floor(fence/tick) ticks armed at phase
-// p in [0, tick), so it fires after k*tick - p.
-func firesBefore(fence, tick, runLength time.Duration) (always, sometimes bool) {
-	k := fence / tick
+// firesBefore reports, for EVERY phase of the epoch ticker, whether a fence of this value stops a run of the given length once the guest has been charged `charge` before its first spin
+// (the budgeted host calls at entry): the budget is then floor((fence-charge)/tick) ticks armed at phase p in [0, tick), so it fires after k*tick - p.
+func firesBefore(fence, charge, tick, runLength time.Duration) (always, sometimes bool) {
+	k := (fence - charge) / tick
 	if k < 1 {
 		k = 1
 	}
@@ -103,11 +107,11 @@ func TestTheHeldWaitFenceSitsBetweenWhatWasMeasured(t *testing.T) {
 	const tick = 50 * time.Millisecond
 	// KNOWN POSITIVE 1: the fence that FAILED on 2026-11-26, from a pair measured on the row's own machine: one spin at most 179 ms, two at least 305 ms, and the midpoint rule's fence of 242 ms.
 	// That fence is 4 ticks, which fires between 150 and 200 ms: it kills a 179 ms spin for part of the ticker's cycle. If this stops being true the case below is not the one that was observed.
-	if _, sometimes := firesBefore(242*time.Millisecond, tick, 179*time.Millisecond); !sometimes {
+	if _, sometimes := firesBefore(242*time.Millisecond, 0, tick, 179*time.Millisecond); !sometimes {
 		t.Fatalf("a 242 ms fence no longer kills a 179 ms spin for any phase: this does not reproduce the failure the tick-aware rule exists for")
 	}
 	// KNOWN POSITIVE 2: the OLD rule, 1.7 x one spin, on the pair measured while the machine was still speeding up (one 244 ms, two 382 ms): 415 ms, which two spins do not reliably exceed.
-	if always, _ := firesBefore(ms(414), tick, ms(382)); always {
+	if always, _ := firesBefore(ms(414), 0, tick, ms(382)); always {
 		t.Fatalf("the old 1.7 x fence stops a 382 ms run for every phase: this does not reproduce the failure either")
 	}
 	for _, c := range []struct{ once, twice []time.Duration }{
@@ -121,19 +125,47 @@ func TestTheHeldWaitFenceSitsBetweenWhatWasMeasured(t *testing.T) {
 			t.Errorf("once %v twice %v: no fence, want one", c.once, c.twice)
 			continue
 		}
-		if fence%tick != 0 {
-			t.Errorf("once %v twice %v: fence %s is not a whole number of ticks", c.once, c.twice, fence)
+		if fence%tick != tick/2 {
+			t.Errorf("once %v twice %v: fence %s is not half a tick above a whole number of ticks", c.once, c.twice, fence)
 		}
-		for _, o := range c.once {
-			if _, sometimes := firesBefore(fence, tick, o); sometimes {
-				t.Errorf("once %v twice %v: a one-spin run of %s is killed by the fence %s for some phase of the ticker", c.once, c.twice, o, fence)
+		// With NO charge and with the charge cleat-review2 measured at entry (about 0.2 ms) and a generous 20 ms: the one-spin runs must never be killed and the two-spin runs always.
+		for _, charge := range []time.Duration{0, time.Millisecond, 20 * time.Millisecond} {
+			for _, o := range c.once {
+				if _, sometimes := firesBefore(fence, charge, tick, o); sometimes {
+					t.Errorf("once %v twice %v: a one-spin run of %s is killed by the fence %s for some ticker phase after an entry charge of %s", c.once, c.twice, o, fence, charge)
+				}
+			}
+			for _, w := range c.twice {
+				if always, _ := firesBefore(fence, charge, tick, w); !always {
+					t.Errorf("once %v twice %v: a two-spin run of %s is NOT always killed by the fence %s after an entry charge of %s", c.once, c.twice, w, fence, charge)
+				}
 			}
 		}
-		for _, w := range c.twice {
-			if always, _ := firesBefore(fence, tick, w); !always {
-				t.Errorf("once %v twice %v: a two-spin run of %s is NOT killed by the fence %s for some phase of the ticker", c.once, c.twice, w, fence)
-			}
-		}
+	}
+}
+
+// KNOWN POSITIVE for the entry charge: a fence at an EXACT multiple of the tick (the boundary value the first version returned) loses a whole tick to a 1 ms charge. If this stops being
+// true, the half-tick above is no longer what protects the fence, and the assertion above is not testing what it claims.
+func TestAFenceOnAWholeTickLosesATickToAnyEntryCharge(t *testing.T) {
+	const tick = 50 * time.Millisecond
+	onTheBoundary := 750 * time.Millisecond
+	if got, want := (onTheBoundary-time.Millisecond)/tick, onTheBoundary/tick-1; got != want {
+		t.Fatalf("a 750 ms fence charged 1 ms arms %d ticks, want %d: the boundary no longer loses a tick", got, want)
+	}
+	// A run of 690 ms: with no charge a 750 ms fence is 15 ticks and fires in (700, 750], never before 690; after a 1 ms charge it is 14 ticks and fires in (650, 700], before 690 for most phases.
+	if _, sometimes := firesBefore(onTheBoundary, 0, tick, 690*time.Millisecond); sometimes {
+		t.Errorf("a 690 ms run is killed by an UNCHARGED 750 ms fence for some phase: the control for the case below is wrong")
+	}
+	if _, sometimes := firesBefore(onTheBoundary, time.Millisecond, tick, 690*time.Millisecond); !sometimes {
+		t.Errorf("a 690 ms run is not killed for any phase by a 750 ms fence after a 1 ms charge: it should fire in (650, 700]")
+	}
+	// ... and the fence the helper returns for the same pair does not.
+	fence, ok := fenceBetweenOneAndTwo([]time.Duration{ms(500)}, []time.Duration{ms(1000)}, tick)
+	if !ok {
+		t.Fatal("a 500/1000 ms pair was refused")
+	}
+	if got, want := (fence-time.Millisecond)/tick, fence/tick; got != want {
+		t.Errorf("the fence %s arms %d ticks after a 1 ms charge and %d with none: it is on a boundary", fence, got, want)
 	}
 }
 
@@ -147,12 +179,12 @@ func TestTheHeldWaitFenceIsSizedFromTheMedianSoATrendOrAnOutlierDoesNotCloseTheG
 		t.Fatalf("the trend %v / %v was refused; its medians 333 and 587 have room", once, twice)
 	}
 	for _, later := range []time.Duration{ms(290), ms(333)} {
-		if _, sometimes := firesBefore(fence, tick, later); sometimes {
+		if _, sometimes := firesBefore(fence, 0, tick, later); sometimes {
 			t.Errorf("a later one-spin run of %s is killed by the fence %s for some phase", later, fence)
 		}
 	}
 	for _, later := range []time.Duration{ms(529), ms(587)} {
-		if always, _ := firesBefore(fence, tick, later); !always {
+		if always, _ := firesBefore(fence, 0, tick, later); !always {
 			t.Errorf("a later two-spin run of %s is not always killed by the fence %s", later, fence)
 		}
 	}
