@@ -76,12 +76,28 @@ func logged(configured int) (*MemoryController, *bytes.Buffer, *time.Time) {
 	return mc, &buf, &now
 }
 
+// lastLine is the last line the controller logged.
+func lastLine(buf *bytes.Buffer) string {
+	lines := strings.Split(strings.TrimRight(buf.String(), "\n"), "\n")
+	return lines[len(lines)-1]
+}
+
+// settle ticks until the cap stops moving: a recovery steps up one per recoveryInterval, which a test controller sets to 5 ms of the WALL clock.
+func settle(mc *MemoryController, f float64) {
+	mc.monitor.readFn = usedFraction(f)
+	for i := 0; i < 20; i++ {
+		mc.Tick(context.Background())
+		time.Sleep(7 * time.Millisecond)
+	}
+}
+
 func TestTheWorkerSaysWhenPressureTakesItsCapToZeroOrToTheFloorAndWhenItLetsGo(t *testing.T) {
 	mc, buf, now := logged(10)
 	tick := func(f float64) {
 		mc.monitor.readFn = usedFraction(f)
 		mc.Tick(context.Background())
 	}
+	warns := func() int { return strings.Count(buf.String(), "level=WARN") }
 
 	tick(0.50)
 	if buf.Len() != 0 {
@@ -91,35 +107,106 @@ func TestTheWorkerSaysWhenPressureTakesItsCapToZeroOrToTheFloorAndWhenItLetsGo(t
 	if out := buf.String(); !strings.Contains(out, "level=WARN") || !strings.Contains(out, "floor of 1") || !strings.Contains(out, "concurrency_cap=1") || !strings.Contains(out, "configured_concurrency=10") {
 		t.Fatalf("entering the floor logged %q, want one WARN naming the floor, the cap and the configured concurrency", out)
 	}
-	if n := strings.Count(buf.String(), "level=WARN"); n != 1 {
-		t.Fatalf("%d WARN lines, want 1", n)
-	}
-	tick(0.9499) // still there: no new line
-	tick(0.96)   // the hard limit: 0 is a different state of the same squeeze, not a second entry, so still one line
-	if n := strings.Count(buf.String(), "level=WARN"); n != 1 {
-		t.Fatalf("%d WARN lines after staying squeezed, want 1: %s", n, buf)
-	}
-	tick(0.50) // p == 0: recovery steps up one at a time, so the cap is 1 -> 2 here: leaving the squeeze
 	*now = now.Add(time.Second)
-	time.Sleep(10 * time.Millisecond)
-	tick(0.50)
-	if !strings.Contains(buf.String(), "level=INFO") || !strings.Contains(buf.String(), "above its floor again") {
-		t.Fatalf("leaving the floor logged nothing: %s", buf)
+	tick(0.9499) // still there: no new line
+	if warns() != 1 {
+		t.Fatalf("%d WARN lines after staying at the floor, want 1: %s", warns(), buf)
 	}
 
-	// Flapping inside the interval is not logged again; after it, it is.
-	before := strings.Count(buf.String(), "level=WARN")
-	tick(0.9499)
-	if n := strings.Count(buf.String(), "level=WARN"); n != before {
-		t.Fatalf("re-entering the floor inside %v logged again (%d WARN lines, was %d)", squeezeLogEvery, n, before)
+	// FLOOR -> 0 inside the interval is held back, not dropped: the last line is about the floor while the cap is 0 only until the interval has passed, and then it says the hard limit.
+	tick(0.96)
+	if mc.DynamicConcurrency() != 0 {
+		t.Fatalf("cap %d at the hard limit, want 0", mc.DynamicConcurrency())
 	}
-	tick(0.50)
-	time.Sleep(10 * time.Millisecond)
-	tick(0.50)
 	*now = now.Add(squeezeLogEvery + time.Second)
-	tick(0.9499)
-	if n := strings.Count(buf.String(), "level=WARN"); n != before+1 {
-		t.Fatalf("re-entering the floor after %v logged %d WARN lines in all, want %d", squeezeLogEvery, n, before+1)
+	tick(0.96)
+	if last := lastLine(buf); !strings.Contains(last, "level=WARN") || !strings.Contains(last, "hard limit") || !strings.Contains(last, "concurrency_cap=0") {
+		t.Fatalf("the cap went from the floor to 0 and the last line is %q, want the hard-limit WARN naming a cap of 0", last)
+	}
+
+	// 0 -> recovered: the INFO comes once the interval allows, and says the cap is above the floor, which by then it is.
+	*now = now.Add(squeezeLogEvery + time.Second)
+	settle(mc, 0.50) // the cap climbs 0 -> 1 -> ... -> 10 inside one interval: the lines for the steps in between are held back
+	*now = now.Add(squeezeLogEvery + time.Second)
+	tick(0.50) // and the interval has passed, so what is true now is said
+	if last := lastLine(buf); !strings.Contains(last, "level=INFO") || !strings.Contains(last, "above its floor again") || mc.DynamicConcurrency() < 2 {
+		t.Fatalf("after recovery (cap %d) the last line is %q, want the INFO that the cap is above its floor", mc.DynamicConcurrency(), last)
+	}
+}
+
+// cleat-review's scenario on the first version of this change: an entry made INSIDE the interval was dropped for good, so after a recovery the last line said "fell" while the cap was 0
+// and nothing more was ever logged.
+func TestAnEntryHeldBackByTheIntervalIsLoggedLaterNotDropped(t *testing.T) {
+	mc, buf, now := logged(1)
+	tick := func(f float64) {
+		mc.monitor.readFn = usedFraction(f)
+		mc.Tick(context.Background())
+	}
+	tick(0.96)       // hard limit: WARN
+	settle(mc, 0.50) // recovered to the configured 1, inside the interval: the first version said INFO here, the new one holds it back
+	*now = now.Add(5 * time.Second)
+	tick(0.96) // back at the hard limit 5 s after the WARN: the first version DROPPED this entry (inside the interval) and then never logged it
+	if mc.DynamicConcurrency() != 0 {
+		t.Fatalf("cap %d at the hard limit, want 0", mc.DynamicConcurrency())
+	}
+	*now = now.Add(2 * time.Hour)
+	tick(0.96)
+	if last := lastLine(buf); !strings.Contains(last, "level=WARN") || !strings.Contains(last, "hard limit") || !strings.Contains(last, "concurrency_cap=0") {
+		t.Fatalf("two hours at the hard limit and the last line is %q, want the hard-limit WARN: a line that says the cap fell while it is 0 is false", last)
+	}
+	if n := strings.Count(buf.String(), "level=WARN"); n < 1 {
+		t.Errorf("no WARN logged: %s", buf)
+	}
+	n := strings.Count(buf.String(), "\n")
+	tick(0.96)
+	if strings.Count(buf.String(), "\n") != n {
+		t.Errorf("a cap that has not changed logged again: %s", buf)
+	}
+}
+
+// And the other order, the one cleat-review ran: the INFO IS logged (the interval had passed), then a new entry inside the interval of it.
+func TestAnEntryMadeInsideTheIntervalOfALeavingLineIsLoggedLater(t *testing.T) {
+	mc, buf, now := logged(1)
+	tick := func(f float64) {
+		mc.monitor.readFn = usedFraction(f)
+		mc.Tick(context.Background())
+	}
+	tick(0.96) // WARN
+	*now = now.Add(squeezeLogEvery + time.Second)
+	settle(mc, 0.50) // INFO
+	if last := lastLine(buf); !strings.Contains(last, "level=INFO") {
+		t.Fatalf("after the recovery the last line is %q, want the INFO", last)
+	}
+	*now = now.Add(5 * time.Second)
+	tick(0.96) // inside the interval of the INFO: held back
+	*now = now.Add(2 * time.Hour)
+	tick(0.96)
+	if last := lastLine(buf); !strings.Contains(last, "level=WARN") || !strings.Contains(last, "concurrency_cap=0") {
+		t.Fatalf("two hours at the hard limit and the last line is %q, want the hard-limit WARN", last)
+	}
+}
+
+// A cap that flaps at the floor is one line per interval, and the last line is always true once the interval has passed.
+func TestACapFlappingAtTheFloorLogsOncePerIntervalAndEndsTruthful(t *testing.T) {
+	mc, buf, now := logged(10)
+	for i := 0; i < 20; i++ {
+		f := 0.9499
+		if i%2 == 1 {
+			f = 0.50
+		}
+		mc.monitor.readFn = usedFraction(f)
+		mc.Tick(context.Background())
+		time.Sleep(7 * time.Millisecond)
+		*now = now.Add(time.Second) // 20 s in all, inside one interval
+	}
+	if n := strings.Count(buf.String(), "\n"); n > 2 {
+		t.Errorf("%d lines for 20 s of flapping, want at most 2 (the first entry, and one held-back change)", n)
+	}
+	*now = now.Add(squeezeLogEvery + time.Second)
+	mc.monitor.readFn = usedFraction(0.9499)
+	mc.Tick(context.Background())
+	if last := lastLine(buf); !strings.Contains(last, "floor of 1") {
+		t.Errorf("the cap is at the floor and the last line is %q", last)
 	}
 }
 

@@ -233,8 +233,8 @@ What a worker uses, measured on 2026-11-22/23 (arm64 Linux; cleat#4377 and cleat
 
 Under a cgroup limit the Python compile was killed at 512 MiB and completed at 768 MiB and above, so the old 512Mi
 default could not run a Python workflow at all; and at a 0.5 CPU limit it took 11.4 s against 1.2 to 2.4 s
-unconstrained. Two things scale with the limit: the worker stops claiming new work at `--memory-soft-limit` of the
-container limit (1.6 GiB of 2Gi at the default 0.80), and the residency budget defaults to 20% of the container limit
+unconstrained. Two things scale with the limit: the worker starts scaling its concurrency down at `--memory-soft-limit` of the
+container limit (1.6 GiB of 2Gi at the default 0.80; never below 1 until the hard limit, cleat#4498), and the residency budget defaults to 20% of the container limit
 (`--resident-memory-percent`), 410 MiB at 2Gi, about a fifth of it. When the limit cannot be read it falls back to 8 held runs x the dearest
 per-run charge (472 MiB, because C# is charged 59 MiB).
 

@@ -110,7 +110,7 @@ the work; the engine change is small.
 cost about 9 MiB or less, section 2). Admit on **measured resident cost**: a wasm linear memory never shrinks, so a parked instance's current memory size
 is known exactly at the moment it parks, and the worker can sum the real figure.
 
-- `--memory-soft-limit` (default 0.80) stops claiming at a fraction of memory, and its source is `MemoryMonitor`: cgroup v2 `memory.current`, else host-wide
+- `--memory-soft-limit` (default 0.80) scales concurrency down from a fraction of memory (never below 1 until the hard limit, cleat#4498), and its source is `MemoryMonitor`: cgroup v2 `memory.current` less `inactive_file`, else host-wide
   `/proc/meminfo`, else the Go heap, **which cannot see wasmtime's memory** (macOS lands there). The first two sources do see guest memory (the second is host-wide, so it also counts everything else on
   the machine); **only the Go-heap fallback is blind** (cleat#4196).
   A guard that reads nothing is worse than none: an operator believes it is on.

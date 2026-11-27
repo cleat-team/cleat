@@ -1394,7 +1394,7 @@ The value applies to every language as given, including a value too small for th
 no sizing rationale. Until then, a stock worker ran on 32 MiB and a per-language floor (`languageMemoryFloorBytes`) raised it to 64 MiB for
 C# only when the flag was not passed; the default now clears every runtime's minimum, so the floor, and the worker's practice of passing a
 limit only when the flag was set, were removed. A worker running many workflows at once can in the worst case use this much for each of them,
-so size `--concurrency` and the machine's memory together. `--memory-soft-limit` stops claiming new work at a fraction of memory. It sees a guest's memory when the worker reads cgroup v2 `memory.current` or `/proc/meminfo` (host-wide, so it also counts everything else on the machine), and is blind only on its last-resort Go-heap source, which macOS falls back to (cleat#4196).
+so size `--concurrency` and the machine's memory together. `--memory-soft-limit` scales the worker's concurrency down from a fraction of memory (never below 1 until `--memory-hard-limit`, cleat#4498). It sees a guest's memory when the worker reads cgroup v2 `memory.current` (less inactive file cache) or `/proc/meminfo` (host-wide, so it also counts everything else on the machine), and is blind only on its last-resort Go-heap source, which macOS falls back to (cleat#4196).
 
 ---
 

@@ -70,10 +70,10 @@ type MemoryController struct {
 	recoveryAllowedAt time.Time
 	recoveryInterval  time.Duration
 
-	// squeezed is true while pressure has cut the cap to the floor or to 0, and lastSqueezeLog is when that was last said (cleat#4498). Tick logs a WARN on ENTERING that
-	// state, at most once per squeezeLogEvery, and an INFO on leaving it if the WARN was said, so a cap that flaps around the floor is one line per half minute, not one per poll.
-	squeezed       bool
-	squeezeLogged  bool
+	// squeezeLogged is the squeeze level the LAST line Tick logged was about (squeezeNone, squeezeFloor or squeezeHard), and lastSqueezeLog is when. Tick logs when the cap's level
+	// differs from it, at most once per squeezeLogEvery: a line the interval holds back is DEFERRED to a later Tick, never dropped, so the last line logged is true of the current cap
+	// once the interval has passed (cleat#4498, cleat-review's FINAL NOT OK on the first version, which dropped an entry made inside the interval and then said 'fell' for good).
+	squeezeLogged  int
 	lastSqueezeLog time.Time
 
 	defEstimates map[memoryEstimateKey]float64 // (tenant, def_name) -> EWMA mean bytes
@@ -234,7 +234,7 @@ func (c *MemoryController) Tick(ctx context.Context) {
 	c.queueDepth = qd
 	c.scalingPressure = sp
 	capNow := c.dynamicConcurrency
-	log, logLevel, logMsg := c.noteSqueeze(capNow, p, info, at)
+	log, logLevel, logMsg := c.noteSqueeze(capNow, at)
 
 	c.mu.Unlock()
 
@@ -245,31 +245,42 @@ func (c *MemoryController) Tick(ctx context.Context) {
 	}
 }
 
-// noteSqueeze says whether Tick should log, and what, for the cap it just set. The caller holds c.mu. A cap is SQUEEZED when pressure holds it at 0, or at 1 under a larger
-// configured concurrency; a worker configured for 1 is never squeezed at 1, because that is its setting and nothing was taken from it (cleat#4498).
-func (c *MemoryController) noteSqueeze(capNow int, p float64, info MemoryInfo, at time.Time) (bool, slog.Level, string) {
-	squeezed := capNow == 0 || (capNow == 1 && c.configuredConcurrency > 1)
+const (
+	squeezeNone  = iota // the cap is what the worker was configured for, or under it without being at the floor
+	squeezeFloor        // pressure holds the cap at 1 under a larger configured concurrency
+	squeezeHard         // the cap is 0: the hard limit
+)
+
+// squeezeLevel is what a cap means for the log. A worker configured for 1 and held at 1 is not squeezed: that is its setting and nothing was taken from it (cleat#4498).
+func (c *MemoryController) squeezeLevel(capNow int) int {
 	switch {
-	case squeezed && !c.squeezed:
-		c.squeezed = true
-		if !c.lastSqueezeLog.IsZero() && at.Sub(c.lastSqueezeLog) < squeezeLogEvery {
-			return false, 0, ""
-		}
-		c.lastSqueezeLog = at
-		c.squeezeLogged = true
-		if capNow == 0 {
-			return true, slog.LevelWarn, "memory pressure at the hard limit: the worker claims no new workflows until it falls"
-		}
-		return true, slog.LevelWarn, "memory pressure cut the worker's concurrency to its floor of 1: one workflow at a time until it falls"
-	case !squeezed && c.squeezed:
-		c.squeezed = false
-		if !c.squeezeLogged {
-			return false, 0, ""
-		}
-		c.squeezeLogged = false
-		return true, slog.LevelInfo, "memory pressure fell: the worker's concurrency is above its floor again"
+	case capNow == 0:
+		return squeezeHard
+	case capNow == 1 && c.configuredConcurrency > 1:
+		return squeezeFloor
 	}
-	return false, 0, ""
+	return squeezeNone
+}
+
+// noteSqueeze says whether Tick should log, and what, for the cap it just set. The caller holds c.mu. It logs when the level differs from the one the last line was about, and not
+// more than once per squeezeLogEvery; a difference it holds back is still a difference on the next Tick, so it is logged then.
+func (c *MemoryController) noteSqueeze(capNow int, at time.Time) (bool, slog.Level, string) {
+	level := c.squeezeLevel(capNow)
+	if level == c.squeezeLogged {
+		return false, 0, ""
+	}
+	if !c.lastSqueezeLog.IsZero() && at.Sub(c.lastSqueezeLog) < squeezeLogEvery {
+		return false, 0, ""
+	}
+	c.squeezeLogged = level
+	c.lastSqueezeLog = at
+	switch level {
+	case squeezeHard:
+		return true, slog.LevelWarn, "memory pressure at the hard limit: the worker claims no new workflows until it falls"
+	case squeezeFloor:
+		return true, slog.LevelWarn, "memory pressure cut the worker's concurrency to its floor of 1: one workflow at a time until it falls"
+	}
+	return true, slog.LevelInfo, "memory pressure fell: the worker's concurrency is above its floor again"
 }
 
 // CanClaim returns true if the controller allows claiming new workflows.
