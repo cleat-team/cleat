@@ -146,21 +146,37 @@ func (s *execSession) noteInterruptedWait(w *EventRecord, requestID string) {
 	s.updateCarry[requestID] = carry
 }
 
-// releaseWaitCarry is called when an update's complete_update runs, on the original run and on a replay alike. It readies the carry that update left, or
-// clears a stale one, so the first wait after the completion is the only wait that can take it.
+// noteDelivered records that an update has been handed to the guest and has not been completed. It is called by every delivery, fresh or replayed, marked or not,
+// because the SDK's dispatch loop polls until nothing is pending: one wake can deliver SEVERAL updates, and the carry of the first must survive the second
+// (cleat-review2's GAP on #4536).
+func (s *execSession) noteDelivered(requestID string) {
+	if s.openUpdates == nil {
+		s.openUpdates = map[string]bool{}
+	}
+	s.openUpdates[requestID] = true
+}
+
+// releaseWaitCarry is called when an update's complete_update runs, on the original run and on a replay alike. It closes the update, and readies the carry that
+// update left. An update with no carry of its own (it did not interrupt a wait: a second update handled in the same wake) leaves a standing one alone, which
+// is the carry the FIRST update readied for the guest's wait; the guest's wait is what takes it, or clears it.
 func (s *execSession) releaseWaitCarry(requestID string) {
+	delete(s.openUpdates, requestID)
 	c, ok := s.updateCarry[requestID]
 	delete(s.updateCarry, requestID)
-	if !ok {
-		s.waitCarry = nil
-		return
+	if ok {
+		s.waitCarry = &c
 	}
-	s.waitCarry = &c
 }
 
 // takeWaitCarry is called at the entry of every wait, whichever path the call takes (a replayed wait consumes its row and never reaches Fresh): the first
 // wait after a completion is the one that may use the carry, so it is cleared here and handed on only through the call's arguments.
+//
+// While an update is OPEN (delivered, not completed) a wait is that update's HANDLER's, not the guest's own, and takes nothing and clears nothing: the carry is for the
+// wait that comes after the dispatch loop ends. Without this the handler of a second update took the first one's carry (cleat-review2's case B).
 func (s *execSession) takeWaitCarry() *waitCarry {
+	if len(s.openUpdates) > 0 {
+		return nil
+	}
 	c := s.waitCarry
 	s.waitCarry = nil
 	return c

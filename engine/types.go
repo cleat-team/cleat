@@ -723,6 +723,8 @@ type execSession struct {
 	// readied for the first wait after it. Both are rebuilt on a replay by the code that fills them on the original run (cleat#4511, waitCarry).
 	updateCarry map[string]waitCarry
 	waitCarry   *waitCarry
+	// openUpdates are the update requests delivered and not yet completed: a wait made while one is open is that update's HANDLER's, and does not take the carry.
+	openUpdates map[string]bool
 	// unflushed is every event this execution recorded that the engine did NOT write because per-step flush is off, in the order
 	// recorded, each with the predecessor checksum it was chained from. A successful or suspended segment hands these to the
 	// worker, which writes them at finalization. A FAILED one has no finalization: nothing wrote them, and the worker's

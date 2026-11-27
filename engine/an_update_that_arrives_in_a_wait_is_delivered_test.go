@@ -475,3 +475,136 @@ func TestAFreshTimedWaitMeasuresItsDeadlineFromTheClockAfterItsOwnRecord(t *test
 		}
 	})
 }
+
+// cleat-review2's GAP on #4536, both cases measured on bf7d911e and pinned here. The carry is per update, but the run can handle SEVERAL updates in one wake (the SDK's dispatch
+// loop polls until nothing is pending), and two things then went wrong. A: u2's completion cleared the carry u1's completion had readied, because it had none of its own, so the
+// guest's wait got its full timeout back. B: u2's HANDLER made a wait of the same names, which took u1's carry, because "the first wait after u1's completion" was the handler's.
+// The fix tracks the updates that are delivered and not yet completed: a completion with no carry of its own leaves a standing one alone, and no wait takes (or clears) the
+// carry while an update is open, because a wait made then is the handler's.
+var intUpdate2 = UpdateRequestInfo{UpdateName: "bump2", Payload: `{"i":1}`, PromiseID: "prom-2"}
+
+func intTwoUpdateSession(t *testing.T, w intWait, clock *int64) *execSession {
+	t.Helper()
+	store := &fakeUpdateStore{pending: []UpdateRequestInfo{intUpdate, intUpdate2}}
+	return intSession(t, []EventRecord{w.row}, store, clock, w.opts()...)
+}
+
+func intWaitAgain(s *execSession, w intWait, names string, timeoutMs int64) {
+	if w.row.EventType == EventTypeAwaitSignals {
+		callAwaitSignalsNames(s, names, timeoutMs)
+	} else {
+		s.AwaitPromise(contextWithRawMemBuf(context.Background(), make([]byte, 400)), nil, "p1", timeoutMs, 0, 200)
+	}
+}
+
+func TestTwoUpdatesHandledInOneWakeLeaveTheGuestsWaitItsOriginalDeadline(t *testing.T) {
+	for _, w := range intWaits() {
+		if w.row.TimeoutMs == 0 {
+			continue
+		}
+		t.Run(w.name, func(t *testing.T) {
+			clock := intT
+			s := intTwoUpdateSession(t, w, &clock)
+			d1, found := intPoll(t, s)
+			if !found {
+				t.Fatal("u1 not delivered")
+			}
+			completeIt(t, s, d1)
+			d2, found := intPoll(t, s)
+			if !found || d2.RequestID == d1.RequestID {
+				t.Fatalf("u2 not delivered as its own request (found %v, ids %q and %q)", found, d1.RequestID, d2.RequestID)
+			}
+			completeIt(t, s, d2)
+			intWaitAgain(s, w, awaitNames, 3_600_000)
+			got := s.history[len(s.history)-1]
+			if got.EventType != w.row.EventType {
+				t.Fatalf("the last record is %s, want the guest's wait %s", got.EventType, w.row.EventType)
+			}
+			if want := w.row.TimestampMs + w.row.TimeoutMs; got.TimestampMs+got.TimeoutMs != want {
+				t.Errorf("after TWO updates in one wake the guest's wait has deadline %d (timeout %d), want the first wait's %d: the second completion cleared the carry the first had readied",
+					got.TimestampMs+got.TimeoutMs, got.TimeoutMs, want)
+			}
+			// The deadline alone cannot tell: this session's clock stands still, so a record with no carry is stamped at the first wait's own timestamp and the sum
+			// comes out the same. The timeout is what says whether the guest's full hour was given back.
+			if got.TimeoutMs >= 3_600_000 {
+				t.Errorf("the guest's wait recorded the full %d ms again after two updates", got.TimeoutMs)
+			}
+		})
+	}
+}
+
+func TestAWaitTheSecondUpdatesHandlerMakesDoesNotTakeTheFirstUpdatesCarry(t *testing.T) {
+	w := intWaits()[0]
+	t.Run("the handler's wait suspends: it records its own timeout", func(t *testing.T) {
+		clock := intT
+		s := intTwoUpdateSession(t, w, &clock)
+		d1, _ := intPoll(t, s)
+		completeIt(t, s, d1)
+		if _, found := intPoll(t, s); !found {
+			t.Fatal("u2 not delivered")
+		}
+		callAwaitSignalsNames(s, awaitNames, 3_600_000) // u2's handler, before u2's completion
+		got := s.history[len(s.history)-1]
+		if got.EventType != EventTypeAwaitSignals || got.TimeoutMs != 3_600_000 {
+			t.Errorf("the handler's wait recorded %s with timeout %d, want its own 3600000: it took the carry of the update that had already completed", got.EventType, got.TimeoutMs)
+		}
+		if s.waitCarry == nil {
+			t.Error("the handler's wait cleared the carry, so the guest's own wait will not find it")
+		}
+	})
+	t.Run("the handler's wait is answered: the guest's wait still gets the carry", func(t *testing.T) {
+		clock := intT
+		s := intTwoUpdateSession(t, w, &clock)
+		world := &awaitWorld{deliveries: map[string][]SignalDelivery{"a": {{ID: 7, Payload: `{}`}}}}
+		s.engine.signalStore = world
+		d1, _ := intPoll(t, s)
+		completeIt(t, s, d1)
+		d2, found := intPoll(t, s)
+		if !found {
+			t.Fatal("u2 not delivered")
+		}
+		callAwaitSignalsNames(s, awaitNames, 3_600_000) // answered at once: records no await row
+		completeIt(t, s, d2)
+		world.deliveries = map[string][]SignalDelivery{} // the handler's signal is consumed: the guest's wait has nothing to find and records its await
+		callAwaitSignalsNames(s, awaitNames, 3_600_000)  // the guest's wait
+		got := s.history[len(s.history)-1]
+		if got.EventType != EventTypeAwaitSignals || got.TimestampMs+got.TimeoutMs != w.row.TimestampMs+w.row.TimeoutMs {
+			t.Errorf("the guest's wait recorded %s with deadline %d, want the first wait's %d", got.EventType, got.TimestampMs+got.TimeoutMs, w.row.TimestampMs+w.row.TimeoutMs)
+		}
+		if got.TimeoutMs >= 3_600_000 {
+			t.Errorf("the guest's wait recorded the full %d ms: the handler's answered wait used up the carry", got.TimeoutMs)
+		}
+	})
+}
+
+// The same two cases from a RECORDED history, because the open-update set is rebuilt on a replay by the same two places that fill it on the original run.
+func TestTheOpenUpdatesAndTheCarryAreRebuiltWhenTwoUpdatesAreReplayedFromHistory(t *testing.T) {
+	w := intWaits()[0]
+	clock := intT
+	s := intTwoUpdateSession(t, w, &clock)
+	d1, _ := intPoll(t, s)
+	completeIt(t, s, d1)
+	d2, _ := intPoll(t, s)
+	completeIt(t, s, d2)
+	hist := append([]EventRecord(nil), s.history...)
+	// A replay of that history: both deliveries, both completions, then the guest's wait, on a store with nothing pending.
+	r := intSession(t, hist, &fakeUpdateStore{}, &clock, w.opts()...)
+	if _, found := intPoll(t, r); !found {
+		t.Fatal("replay: u1 not delivered from history")
+	}
+	completeIt(t, r, d1)
+	if _, found := intPoll(t, r); !found {
+		t.Fatal("replay: u2 not delivered from history")
+	}
+	// u2 is delivered and not completed: a wait made now is its handler's, and neither takes nor clears the carry u1 readied.
+	if len(r.openUpdates) != 1 {
+		t.Errorf("a replayed delivery left %d update(s) open, want 1: the open set is not rebuilt from history", len(r.openUpdates))
+	}
+	if got := r.takeWaitCarry(); got != nil || r.waitCarry == nil {
+		t.Errorf("a wait made inside u2's handler took %v and left the carry %v, want it to take nothing and leave the carry", got, r.waitCarry)
+	}
+	completeIt(t, r, d2)
+	if r.waitCarry == nil || len(r.openUpdates) != 0 {
+		t.Errorf("after replaying both completions the carry is %v and %d update(s) are open, want the carry held and none open", r.waitCarry, len(r.openUpdates))
+	}
+}

@@ -117,6 +117,8 @@ var pollUpdateStep = stepSpec{
 	// A wait that suspended the run is the last row of history and an update arrived during it: deliver across that row (cleat#4511, an_update_interrupts_a_wait.go).
 	OverWait: pollOverWait,
 	Decode: func(c *stepCtx, rec *EventRecord) int64 {
+		// Every replayed delivery opens its update, as the original run's did (cleat#4511, noteDelivered).
+		c.s.noteDelivered(rec.UpdateRequestID)
 		// A replayed delivery that interrupted a wait: rebuild the deadline its wait carried, which the original run noted when it recorded this record.
 		if c.overWait != nil {
 			c.s.noteInterruptedWait(c.overWait, rec.UpdateRequestID)
@@ -167,6 +169,7 @@ var pollUpdateStep = stepSpec{
 			// that timed out (cleat#4511).
 			UpdateInterruptsWait: c.overWait != nil,
 		})
+		s.noteDelivered(updateRequestKey(upd))
 		if c.overWait != nil {
 			s.noteInterruptedWait(c.overWait, updateRequestKey(upd))
 		}
