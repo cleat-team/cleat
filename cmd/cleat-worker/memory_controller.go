@@ -32,6 +32,7 @@ const (
 	defaultAlpha            = 0.3 // EWMA smoothing factor
 	defaultRecoveryInterval = 5 * time.Second
 	defaultScalingThreshold = 50
+	squeezeLogEvery         = 30 * time.Second
 	defaultMemoryEstimate   = 32 * 1024 * 1024 // 32 MB safe default
 )
 
@@ -68,6 +69,12 @@ type MemoryController struct {
 	scalingThreshold  int64 // queue depth that saturates scaling_pressure
 	recoveryAllowedAt time.Time
 	recoveryInterval  time.Duration
+
+	// squeezed is true while pressure has cut the cap to the floor or to 0, and lastSqueezeLog is when that was last said (cleat#4498). Tick logs a WARN on ENTERING that
+	// state, at most once per squeezeLogEvery, and an INFO on leaving it if the WARN was said, so a cap that flaps around the floor is one line per half minute, not one per poll.
+	squeezed       bool
+	squeezeLogged  bool
+	lastSqueezeLog time.Time
 
 	defEstimates map[memoryEstimateKey]float64 // (tenant, def_name) -> EWMA mean bytes
 
@@ -200,13 +207,18 @@ func (c *MemoryController) Tick(ctx context.Context) {
 	c.mu.Lock()
 
 	// Adjust dynamic concurrency with hysteresis.
+	//
+	// THE CAP IS 0 ONLY AT THE HARD LIMIT (p >= 1), which is what CanClaim's comment has always said. Between the limits it scales with 1-p but never below ONE (cleat#4498): the
+	// rounding below used to reach 0 at p > 0.5 for --concurrency 1 (p > 0.75 for 2), so a worker 'under soft pressure' claimed nothing at all, with nothing in flight to relieve
+	// the pressure and nothing in the log. ONE rather than 'one while nothing is in flight' because the dispatch loop already subtracts what is in flight (free = cap - count,
+	// setup.go): a floor of 1 means exactly one run at a time under pressure, never a second on top of a running one, and it needs no in-flight count here.
 	switch {
 	case p >= 1.0:
 		c.dynamicConcurrency = 0
 	case p > 0:
 		target := int(math.Round(float64(c.configuredConcurrency) * (1.0 - p)))
-		if target < 0 {
-			target = 0
+		if target < 1 && c.configuredConcurrency >= 1 {
+			target = 1
 		}
 		c.dynamicConcurrency = target
 	default:
@@ -221,12 +233,47 @@ func (c *MemoryController) Tick(ctx context.Context) {
 	c.pressure = p
 	c.queueDepth = qd
 	c.scalingPressure = sp
+	capNow := c.dynamicConcurrency
+	log, logLevel, logMsg := c.noteSqueeze(capNow, p, info, at)
 
 	c.mu.Unlock()
+
+	if log {
+		c.log().Log(context.Background(), logLevel, logMsg, "worker_id", c.workerID, "concurrency_cap", capNow, "configured_concurrency", c.configuredConcurrency,
+			"memory_pressure", p, "memory_source", info.Source, "memory_total_mib", info.TotalBytes>>20, "memory_available_mib", info.AvailableBytes>>20,
+			"soft_limit", c.softLimit, "hard_limit", c.hardLimit)
+	}
+}
+
+// noteSqueeze says whether Tick should log, and what, for the cap it just set. The caller holds c.mu. A cap is SQUEEZED when pressure holds it at 0, or at 1 under a larger
+// configured concurrency; a worker configured for 1 is never squeezed at 1, because that is its setting and nothing was taken from it (cleat#4498).
+func (c *MemoryController) noteSqueeze(capNow int, p float64, info MemoryInfo, at time.Time) (bool, slog.Level, string) {
+	squeezed := capNow == 0 || (capNow == 1 && c.configuredConcurrency > 1)
+	switch {
+	case squeezed && !c.squeezed:
+		c.squeezed = true
+		if !c.lastSqueezeLog.IsZero() && at.Sub(c.lastSqueezeLog) < squeezeLogEvery {
+			return false, 0, ""
+		}
+		c.lastSqueezeLog = at
+		c.squeezeLogged = true
+		if capNow == 0 {
+			return true, slog.LevelWarn, "memory pressure at the hard limit: the worker claims no new workflows until it falls"
+		}
+		return true, slog.LevelWarn, "memory pressure cut the worker's concurrency to its floor of 1: one workflow at a time until it falls"
+	case !squeezed && c.squeezed:
+		c.squeezed = false
+		if !c.squeezeLogged {
+			return false, 0, ""
+		}
+		c.squeezeLogged = false
+		return true, slog.LevelInfo, "memory pressure fell: the worker's concurrency is above its floor again"
+	}
+	return false, 0, ""
 }
 
 // CanClaim returns true if the controller allows claiming new workflows.
-// Returns false when dynamicConcurrency reaches zero (hard limit).
+// Returns false when dynamicConcurrency reaches zero, which is only at the hard limit (cleat#4498).
 func (c *MemoryController) CanClaim() bool {
 	c.mu.RLock()
 	defer c.mu.RUnlock()

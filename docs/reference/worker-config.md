@@ -414,10 +414,18 @@ What one worker costs depends on the guest language far more than on anything el
 |------|---------|-------------|
 | float | `0.80` | Memory soft limit fraction (0.0-1.0) |
 
-When system memory usage exceeds this fraction, the worker stops claiming new
-work from the database but continues executing in-flight workflows.
+When system memory usage exceeds this fraction, the worker scales its concurrency
+down; it does not stop claiming. The cap is `round(--concurrency × (1 − p))`, where
+`p` rises from 0 at this limit to 1 at `--memory-hard-limit`, and **it is never
+below 1 until the hard limit** (cleat#4498): a worker with nothing in flight still
+takes one workflow at a time, and a worker with one running takes no second one
+(free slots are the cap minus what is in flight). Before cleat#4498 the cap reached
+0 as soon as `p` passed 0.5 at `--concurrency 1` (0.75 at 2), and the worker claimed
+nothing while idle, with nothing in the log. A worker whose cap is held at 0 or at
+the floor logs a WARN saying so (at most one line per 30 s) and an INFO when it lets
+go. In-flight workflows keep executing.
 
-**A fraction of what?** Of the worker's memory **limit**, and the usage is that same cgroup's (cleat#4431). On cgroup v2 every cgroup on the worker's own path (from `/proc/self/cgroup`) with a numeric `memory.max` is a candidate, each measured against **its own** `memory.current` (a parent's limit bounds the parent's whole use, siblings included), and **at every reading the one with the least headroom is used**, because that is the level that runs out first and it changes over time; with no limit at any level it is the host's `MemTotal` against the host-wide `MemAvailable` (`/proc/meminfo`), since with no limit the host's memory is what runs out. Before cleat#4431 it read the cgroup mount's root, which is the worker's own cgroup only inside a private cgroup namespace: under `docker run --cgroupns=host`, or a systemd unit with `MemoryMax=`, a 512 MiB container had its fractions taken of the host's memory and the host's usage. The worker logs what it is measuring against once at start-up (`memory monitor`: source, total, used, and both fractions). **cgroup v1 is not read:** on a v1 host the monitor falls back to `/proc/meminfo`, which is the host's memory, so set a container limit on v2 or size `--concurrency` and the machine's memory together. The residency budget (`--resident-memory-percent`) reads the same limit by the same code.
+**A fraction of what?** Of the worker's memory **limit**, and the usage is that same cgroup's (cleat#4431), **less its inactive file cache** (`memory.stat` `inactive_file`, the kubelet's working set, cleat#4498): the kernel lets a cgroup's page cache grow to its limit and reclaims it there, so the raw counter reads a container that has only read files as full. **With neither a cgroup limit nor `/proc/meminfo` (macOS) the reading is the Go process's own heap (`Sys` against `HeapInuse`), a much weaker signal on a small heap, which is why the floor above matters most there.** On cgroup v2 every cgroup on the worker's own path (from `/proc/self/cgroup`) with a numeric `memory.max` is a candidate, each measured against **its own** `memory.current` (a parent's limit bounds the parent's whole use, siblings included), and **at every reading the one with the least headroom is used**, because that is the level that runs out first and it changes over time; with no limit at any level it is the host's `MemTotal` against the host-wide `MemAvailable` (`/proc/meminfo`), since with no limit the host's memory is what runs out. Before cleat#4431 it read the cgroup mount's root, which is the worker's own cgroup only inside a private cgroup namespace: under `docker run --cgroupns=host`, or a systemd unit with `MemoryMax=`, a 512 MiB container had its fractions taken of the host's memory and the host's usage. The worker logs what it is measuring against once at start-up (`memory monitor`: source, total, used, and both fractions). **cgroup v1 is not read:** on a v1 host the monitor falls back to `/proc/meminfo`, which is the host's memory, so set a container limit on v2 or size `--concurrency` and the machine's memory together. The residency budget (`--resident-memory-percent`) reads the same limit by the same code.
 
 ---
 
@@ -428,7 +436,8 @@ work from the database but continues executing in-flight workflows.
 | float | `0.95` | Memory hard limit fraction (0.0-1.0) |
 
 When system memory exceeds this fraction, the worker rejects API-initiated
-workflow starts (returns HTTP 503).
+workflow starts (returns HTTP 503), and its concurrency cap is 0: this is the one
+place it claims nothing at all.
 
 ---
 

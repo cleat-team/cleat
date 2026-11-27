@@ -30,8 +30,11 @@ concurrency = (target_throughput_rps × avg_workflow_duration_s)
 
 ### Memory interaction
 
-`--concurrency` interacts with `--memory-soft-limit`. When system memory exceeds the
-soft limit, the worker stops claiming new work even if concurrency slots are available.
+`--concurrency` interacts with `--memory-soft-limit`. Above the soft limit the worker
+scales its concurrency down toward 1 as memory approaches `--memory-hard-limit`, and
+it never goes below 1 until the hard limit, where it claims nothing. So a worker run
+at `--concurrency 1` or `2` still makes progress under pressure, one workflow at a
+time (cleat#4498). When the cap is held at its floor the worker logs a WARN.
 
 ## Heartbeat (`--heartbeat`) and reclaim (`--reclaim-timeout`)
 
@@ -187,8 +190,8 @@ Three memory controls work together:
 | Flag | What it does |
 |------|-------------|
 | `--wasm-memory-max-mb` | Per-WASM-module linear memory cap. A workflow exceeding this is killed. Leave it unset for a C# guest: unset, C# gets 64 MiB (a .NET runtime needs 52 MiB to start); setting it applies that value to every language, so the `32` in the examples below would stop a C# guest from starting. |
-| `--memory-soft-limit` | When system memory exceeds this fraction (0.0–1.0), stop claiming new work. |
-| `--memory-hard-limit` | When system memory exceeds this fraction, reject API workflow starts (HTTP 503). |
+| `--memory-soft-limit` | When system memory exceeds this fraction (0.0–1.0), scale concurrency down toward 1 (never below 1 until the hard limit). |
+| `--memory-hard-limit` | When system memory exceeds this fraction, reject API workflow starts (HTTP 503) and claim nothing. |
 
 ### Sizing
 
