@@ -655,6 +655,15 @@ The consequence to know: **an update is handled at the next dispatch point, not
 the instant it arrives.** A workflow in a tight loop of durable calls with no
 suspension will not service updates until it suspends.
 
+A run that is already suspended in a wait (`AwaitSignals`, `AwaitPromise` or one
+of the child awaits) is woken by an update and handles it at that wait: the
+handler runs, the caller's promise resolves, and the run goes back to the same
+wait. **The wait keeps its original deadline**, so an update does not extend a
+timeout the workflow asked for once. (Until cleat#4511, an update that arrived
+after the run had suspended in a long wait was handled only if it had already
+been pending when the run first reached the wait; the workaround was to wait in
+short slices.)
+
 There is no `RegisterQueryHandler` -- it was removed 2026-08-09 (see
 `docs/determinism.md`, "Why there is no RegisterQueryHandler"). It recorded a
 handler name but nothing ever routed an external query to it, so it was

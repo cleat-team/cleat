@@ -114,7 +114,13 @@ var pollUpdateStep = stepSpec{
 		return callSuspendSentinel
 	},
 	ForeignFirst: func(stepArgs) (int64, bool) { return 0, true },
+	// A wait that suspended the run is the last row of history and an update arrived during it: deliver across that row (cleat#4511, an_update_interrupts_a_wait.go).
+	OverWait: pollOverWait,
 	Decode: func(c *stepCtx, rec *EventRecord) int64 {
+		// A replayed delivery that interrupted a wait: rebuild the deadline its wait carried, which the original run noted when it recorded this record.
+		if c.overWait != nil {
+			c.s.noteInterruptedWait(c.overWait, rec.UpdateRequestID)
+		}
 		return c.s.writeUpdateDelivery(c.ctx, c.m, c.args.outPtr, c.args.outMaxLen, updateDelivery{
 			Name:      rec.UpdateHandlerName,
 			Payload:   rec.UpdatePayload,
@@ -127,12 +133,17 @@ var pollUpdateStep = stepSpec{
 			c.RecordsNothing(pollNothingNoStore)
 			return 0
 		}
-		pending, err := s.engine.updateStore.GetPendingUpdateRequests(ctx, s.engine.workflowID)
-		if err != nil {
-			s.engine.log().ErrorContext(ctx, "poll_update: reading pending update requests",
-				"workflow_id", s.engine.workflowID, "error", err)
-			c.RecordsNothing(pollNothingUnreadable)
-			return 0
+		// A delivery across a wait (OverWait) has already read the store, and delivers from that read: a second one could answer differently.
+		pending := c.pending
+		if c.overWait == nil {
+			var err error
+			pending, err = s.engine.updateStore.GetPendingUpdateRequests(ctx, s.engine.workflowID)
+			if err != nil {
+				s.engine.log().ErrorContext(ctx, "poll_update: reading pending update requests",
+					"workflow_id", s.engine.workflowID, "error", err)
+				c.RecordsNothing(pollNothingUnreadable)
+				return 0
+			}
 		}
 		if len(pending) == 0 {
 			c.RecordsNothing(pollNothingPending)
@@ -152,7 +163,13 @@ var pollUpdateStep = stepSpec{
 			UpdateHandlerName: upd.UpdateName,
 			UpdatePayload:     upd.Payload,
 			UpdateRequestID:   updateRequestKey(upd),
+			// Marked when this delivery crossed the wait row the run had suspended in, so a replay can tell it from a poll that found an update after a wait
+			// that timed out (cleat#4511).
+			UpdateInterruptsWait: c.overWait != nil,
 		})
+		if c.overWait != nil {
+			s.noteInterruptedWait(c.overWait, updateRequestKey(upd))
+		}
 
 		return s.writeUpdateDelivery(ctx, c.m, c.args.outPtr, c.args.outMaxLen, updateDelivery{
 			Name:      upd.UpdateName,
@@ -171,6 +188,9 @@ func init() { registerStepSpec(&pollUpdateStep) }
 // handler that returns an empty string and no error completes successfully with
 // an empty result, which is a legitimate outcome and not a missing one.
 func (s *execSession) DurableCompleteUpdate(ctx context.Context, m api.Module, requestID, result, errMsg string) int64 {
+	// The first wait after this completion may take the deadline of the wait this update interrupted (cleat#4511, waitCarry). Released here, on a replay as on the
+	// original run, because this call is on both.
+	s.releaseWaitCarry(requestID)
 	return s.step(ctx, m, &completeUpdateStep, stepArgs{s1: requestID, s2: result, s3: errMsg})
 }
 

@@ -262,6 +262,9 @@ type CompactedEvent struct {
 	// compacted history, which nothing else would notice: the record still reads as a settlement.
 	FirstRead    bool   `json:"fr,omitempty"`
 	PromiseError string `json:"prom_err,omitempty"`
+	// UpdateInterruptsWait mirrors EventRecord.UpdateInterruptsWait on an update_received (cleat#4511). A compaction that dropped it would turn the pair it
+	// marks back into the ambiguous one on the first replay of a compacted history, and the update would be handed to no poll.
+	UpdateInterruptsWait bool `json:"uiw,omitempty"`
 
 	// ErrNonRetryable mirrors EventRecord.ErrNonRetryable for a call event
 	// (call or call_heartbeat -- both use EventTypeCall). Its omission here
@@ -730,6 +733,7 @@ func extractCompactionStateFrom(prev *CompactionState, events []EventRecord) (*C
 			ce.PromiseName = ev.UpdateHandlerName
 			ce.PromiseID = ev.UpdateRequestID
 			ce.Request = ev.UpdatePayload
+			ce.UpdateInterruptsWait = ev.UpdateInterruptsWait
 		case EventTypeUpdateCompleted:
 			ce.PromiseName = ev.UpdateHandlerName
 			ce.PromiseID = ev.UpdateRequestID
@@ -947,6 +951,7 @@ func buildFullHistoryFromCompaction(tail []EventRecord, cs *CompactionState) []E
 			rec.UpdateHandlerName = ce.PromiseName
 			rec.UpdateRequestID = ce.PromiseID
 			rec.UpdatePayload = ce.Request
+			rec.UpdateInterruptsWait = ce.UpdateInterruptsWait
 		case EventCodeUpdateCompleted:
 			rec.UpdateHandlerName = ce.PromiseName
 			rec.UpdateRequestID = ce.PromiseID

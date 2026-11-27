@@ -289,6 +289,7 @@ func (s *execSession) childWorkflowWithVersion(ctx context.Context, m api.Module
 // replays. Its history is ONE record, [await_child]: recorded EMPTY while the child is still running, and answered OVER that same record (the same step,
 // the store's conflict clause reopening it) by the wake that finds the child done.
 func (s *execSession) AwaitChild(ctx context.Context, m api.Module, runID string, resultPtr, resultMaxLen uint32) int64 {
+	s.takeWaitCarry() // cleat#4511: a child wait has no deadline to carry, and is still the first wait after the completion, so it clears it
 	return s.step(ctx, m, &awaitChildStep, stepArgs{s1: runID, outPtr: resultPtr, outMaxLen: resultMaxLen})
 }
 
@@ -534,6 +535,7 @@ func sameRunIDSet(a, b string) bool {
 // EMPTY await_any_child records (one per wake that found every child still running; cleat#3391 histories hold two), then the answer, a NON-EMPTY record at a later
 // step.
 func (s *execSession) AwaitAnyChild(ctx context.Context, m api.Module, runIDsJSON string, resultPtr, resultMaxLen uint32) int64 {
+	s.takeWaitCarry() // cleat#4511: a child wait has no deadline to carry, and is still the first wait after the completion, so it clears it
 	return s.step(ctx, m, &awaitAnyChildStep, stepArgs{s1: runIDsJSON, outPtr: resultPtr, outMaxLen: resultMaxLen})
 }
 
@@ -643,6 +645,7 @@ func init() { registerStepSpec(&awaitAnyChildStep) }
 // AwaitAllChildren waits for every child in a list. It is a step on the replay dispatcher (cleat#4152, W3a), and like AwaitChild its history is ONE
 // record, [await_all_children], recorded EMPTY while any child is running and answered OVER that record by the wake that finds them all done.
 func (s *execSession) AwaitAllChildren(ctx context.Context, m api.Module, runIDsJSON string, resultsPtr, resultsMaxLen uint32) int64 {
+	s.takeWaitCarry() // cleat#4511: a child wait has no deadline to carry, and is still the first wait after the completion, so it clears it
 	return s.step(ctx, m, &awaitAllChildrenStep, stepArgs{s1: runIDsJSON, outPtr: resultsPtr, outMaxLen: resultsMaxLen})
 }
 
