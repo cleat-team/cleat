@@ -10,6 +10,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -250,12 +251,32 @@ func TestAFinishedRunSchedulesNoNudge(t *testing.T) {
 	}
 }
 
+// Every way the finalize can fail returns before the nudge, and each is its own branch of executeWorkflow: a lost fence (another worker owns the run), a connection error (the run is
+// released) and any other error (the run is failed). A nudge placed just after the first return, which is one natural edit away, still passes the lost-fence case alone and fires on the
+// other two (cleat-review2 measured exactly that), so all three are pinned. isConnectionError matches on the error's text, so the connection case is a text it recognises.
 func TestASuspensionTheStoreRefusedSchedulesNoNudge(t *testing.T) {
-	status, _, _, s := runSuspension(t, &sleepingGuest{ms: 5000}, engine.ErrFenceLost)
-	if status != "ready" {
-		t.Fatalf("the segment finalized as %q, want ready: this did not reach the finalize it refuses", status)
-	}
-	if len(s.d) != 0 {
-		t.Errorf("a finalize that lost its fence scheduled %v: another worker owns the run, and a nudge for it is a wasted claim", s.d)
+	for _, c := range []struct {
+		name string
+		err  error
+	}{
+		{"the fence was lost", engine.ErrFenceLost},
+		{"a connection error", errors.New("driver: bad connection")},
+		{"any other error", errors.New("constraint violation")},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			if c.name == "a connection error" && !isConnectionError(c.err) {
+				t.Fatalf("%q is not a connection error to isConnectionError: this case does not reach the branch it is named for", c.err)
+			}
+			if c.name == "any other error" && isConnectionError(c.err) {
+				t.Fatalf("%q IS a connection error to isConnectionError: this case does not reach the branch it is named for", c.err)
+			}
+			status, _, _, s := runSuspension(t, &sleepingGuest{ms: 5000}, c.err)
+			if status != "ready" {
+				t.Fatalf("the segment finalized as %q, want ready: this did not reach the finalize it refuses", status)
+			}
+			if len(s.d) != 0 {
+				t.Errorf("a finalize that failed with %v scheduled %v: the run is not suspended on a wake time this worker owns, and a nudge for it is a wasted claim", c.err, s.d)
+			}
+		})
 	}
 }
