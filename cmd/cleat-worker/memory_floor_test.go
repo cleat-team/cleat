@@ -164,7 +164,8 @@ func TestAnEntryHeldBackByTheIntervalIsLoggedLaterNotDropped(t *testing.T) {
 	}
 }
 
-// And the other order, the one cleat-review ran: the INFO IS logged (the interval had passed), then a new entry inside the interval of it.
+// The other order, a control rather than a falsifier (it passes on the first version too, because the first version's interval ran from the WARN and not from the INFO): the INFO is
+// logged after the interval, then a new entry is made inside the interval of the INFO.
 func TestAnEntryMadeInsideTheIntervalOfALeavingLineIsLoggedLater(t *testing.T) {
 	mc, buf, now := logged(1)
 	tick := func(f float64) {
