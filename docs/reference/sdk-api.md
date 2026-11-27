@@ -660,9 +660,13 @@ of the child awaits) is woken by an update and handles it at that wait: the
 handler runs, the caller's promise resolves, and the run goes back to the same
 wait. **The wait keeps its original deadline**, so an update does not extend a
 timeout the workflow asked for once. (Until cleat#4511, an update that arrived
-after the run had suspended in a long wait was handled only if it had already
-been pending when the run first reached the wait; the workaround was to wait in
-short slices.)
+while a run was in such a wait was not handled until the wait ended: a workflow
+that went on to another wait handled it there, and one that returned right after
+the wait had the update rejected as the run completed, with "reached terminal
+status ... with this update still pending, so it can never be handled". Waiting
+in short slices was the workaround.) **`WaitForEvent` is the exception:** an
+update sent to a run waiting in it is not handled until the wait returns
+(cleat#4539).
 
 There is no `RegisterQueryHandler` -- it was removed 2026-08-09 (see
 `docs/determinism.md`, "Why there is no RegisterQueryHandler"). It recorded a
