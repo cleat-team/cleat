@@ -601,7 +601,9 @@ func (s *MSSQLStore) appendEventsInTxOpts(ctx context.Context, tx *sql.Tx, workf
 			        @p21, @p22, @p23, @p24, @p25, @p26, @p27, @p28, @p29, @p30, @p31, @p32, @p33)
 			WHEN MATCHED AND target.event_type IN ('await_child', 'await_promise', 'await_all_children')
 			     AND target.response IS NULL AND target.error IS NULL
-			     AND target.promise_result IS NULL AND target.promise_error IS NULL THEN UPDATE SET
+			     AND target.promise_result IS NULL AND target.promise_error IS NULL
+			     AND NOT EXISTS (SELECT 1 FROM event_history nx WHERE nx.tenant_id = target.tenant_id AND nx.workflow_id = target.workflow_id
+			                     AND nx.step = target.step + 1 AND nx.event_type = 'update_received') THEN UPDATE SET
 				response = @p7, error = @p8, promise_result = @p27, promise_error = @p28,
 				checksum = @p31, payload = @p29, payload_encoding = @p33, event_type = @p3, created_at = @p30;
 		`, workflowID, rec.Step, rec.EventType,

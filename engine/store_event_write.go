@@ -63,6 +63,7 @@ func (s *PostgresStore) appendEventsInTx(ctx context.Context, tx *sql.Tx, workfl
 			WHERE event_history.event_type IN ('await_child', 'await_promise', 'await_all_children')
 			  AND event_history.response IS NULL AND event_history.error IS NULL
 			  AND event_history.promise_result IS NULL AND event_history.promise_error IS NULL
+			  AND NOT EXISTS (SELECT 1 FROM event_history nx WHERE nx.tenant_id = event_history.tenant_id AND nx.workflow_id = event_history.workflow_id AND nx.step = event_history.step + 1 AND nx.event_type = 'update_received')
 		`)
 		if err != nil {
 			return fmt.Errorf("append events in tx: prepare: %w", err)
@@ -176,6 +177,7 @@ func (s *PostgresStore) appendOneEvent(ctx context.Context, tx *sql.Tx, workflow
 			WHERE event_history.event_type IN ('await_child', 'await_promise', 'await_all_children')
 			  AND event_history.response IS NULL AND event_history.error IS NULL
 			  AND event_history.promise_result IS NULL AND event_history.promise_error IS NULL
+			  AND NOT EXISTS (SELECT 1 FROM event_history nx WHERE nx.tenant_id = event_history.tenant_id AND nx.workflow_id = event_history.workflow_id AND nx.step = event_history.step + 1 AND nx.event_type = 'update_received')
 	`, workflowID, rec.Step, rec.EventType,
 		nullStr(rec.Service), nullStr(rec.Op), nullStr(stored.Request), nullStr(stored.Response), nullStr(stored.Err),
 		nullInt64(rec.DurationMs), nullStr(rec.SignalNames), nullInt64(rec.TimeoutMs),

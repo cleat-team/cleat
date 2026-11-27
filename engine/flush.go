@@ -414,7 +414,8 @@ const insertEventSQL = `
 		event_type = EXCLUDED.event_type, created_at = EXCLUDED.created_at
 		WHERE event_history.event_type IN ('await_child', 'await_promise', 'await_all_children')
 		  AND event_history.response IS NULL AND event_history.error IS NULL
-		  AND event_history.promise_result IS NULL AND event_history.promise_error IS NULL`
+		  AND event_history.promise_result IS NULL AND event_history.promise_error IS NULL
+		  AND NOT EXISTS (SELECT 1 FROM event_history nx WHERE nx.tenant_id = event_history.tenant_id AND nx.workflow_id = event_history.workflow_id AND nx.step = event_history.step + 1 AND nx.event_type = 'update_received')`
 
 // setRLSOnTx sets the transaction-local tenant context that the row-level
 // security policies require.
