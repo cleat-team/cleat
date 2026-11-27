@@ -286,7 +286,11 @@ func (s *ShardedStore) onHolder(ctx context.Context, op, id string, fn func(shar
 		return err
 	}
 	holder, herr := s.otherShardHolding(ctx, id, shard)
-	if herr != nil || holder == nil {
+	if herr != nil {
+		// Not the original not-found: a client treats that as final, and a shard that could not answer has not said it has no such run (cleat-review2, GAP on the first version).
+		return fmt.Errorf("%s: %s was not found on shard %q and another shard could not be read: %w", op, id, shard.Config.Name, herr)
+	}
+	if holder == nil {
 		return err
 	}
 	return fn(holder)
