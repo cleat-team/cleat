@@ -42,14 +42,18 @@ func (s *PostgresStore) requestCancellationTo(ctx context.Context, workflowID, r
 	if settled != nil {
 		*settled = end
 	}
-	// The end's status, under the lock lockChainEndTx took. An end that does not exist for this tenant falls through to the update, which matches nothing, as before.
+	// The end's status, under the lock lockChainEndTx took. An end that does not exist for this tenant is ErrWorkflowNotFound, as for a signal, a terminate and a pre-emptive cancel
+	// (cleat#4503): it used to fall through to the update, which matched nothing, and the caller was told a cancel was requested for a run that was not there. The answer is the same
+	// for a run that does not exist and one that belongs to another tenant, as it is everywhere else (cleat#2218).
 	var endStatus string
 	switch err := tx.QueryRowContext(ctx, `SELECT status FROM workflow_leases WHERE id = $1 AND tenant_id = $2`, end, s.tenantID).Scan(&endStatus); {
 	case err == nil:
 		if refusal := cooperativeRefusal(workflowID, end, endStatus); refusal != nil {
 			return refusal
 		}
-	case !errors.Is(err, sql.ErrNoRows):
+	case errors.Is(err, sql.ErrNoRows):
+		return ErrWorkflowNotFound
+	default:
 		return fmt.Errorf("request cancellation: read the end's status: %w", err)
 	}
 	workflowID = end
