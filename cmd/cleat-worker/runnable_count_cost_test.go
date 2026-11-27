@@ -24,8 +24,8 @@ import (
 // would quietly reintroduce the cost this design exists to avoid, while every
 // other test still passed.
 //
-// idleTicks resets only on a parent wake or a NOTIFY, and neither fires here,
-// so `idleTicks == maxIdleTicks` is true EXACTLY ONCE per idle streak. Over a
+// idleTicks resets only on a parent wake, a NOTIFY or a timer nudge (cleat#4491),
+// and none fires here, so `idleTicks == maxIdleTicks` is true EXACTLY ONCE per idle streak. Over a
 // run of many empty polls the count must therefore be asked once -- not once
 // per poll, and not once per six polls.
 func TestTheRunnableCountIsAskedOnlyAtFullBackoff(t *testing.T) {
@@ -79,7 +79,7 @@ func TestTheRunnableCountIsAskedOnlyAtFullBackoff(t *testing.T) {
 	}
 	if gotCounts > 1 {
 		t.Errorf("the runnable count was asked %d times across %d idle cycles, want exactly 1.\n\n"+
-			"idleTicks resets only on a parent wake or a NOTIFY, neither of which fires here, so "+
+			"idleTicks resets only on a parent wake, a NOTIFY or a timer nudge, none of which fires here, so "+
 			"`idleTicks == maxIdleTicks` is true once per idle streak. More than one means the "+
 			"query moved onto a hotter path -- most likely `>=` in place of `==` -- which puts a "+
 			"query on this loop's most common path and reintroduces the cost that ruled out the "+

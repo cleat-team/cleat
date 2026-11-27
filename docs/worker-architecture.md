@@ -80,7 +80,7 @@ Key properties:
 - **`namespace` scoping** — tenant isolation.
 - **`next_wake_at <= now()`** — suspended workflows only wake when timer expires.
 - **Progressive backoff** — idle poll interval grows from 500ms to 3s; resets
-  when work is found.
+  when work is found, or when a timer this worker suspended comes due (cleat#4491).
 - **Two-phase claim**: `ClaimStickyWorkflows` first (fast path on
   `idx_instances_sticky`), then `ClaimWorkflows` to fill remaining capacity.
 

@@ -2684,6 +2684,11 @@ type Worker struct {
 	// idle sleep, waking immediately to claim the newly-ready parent.
 	parentWakeCh chan struct{}
 
+	// timerWakeCh is signaled (non-blocking, one token) when a run this worker suspended on a timer comes due, by timerNudge. ONLY the idle backoff in dispatchLoop reads it, so
+	// that it polls then and not at the next rung of the ladder (cleat#4491). nil in a Worker built without it, which makes the send a no-op and the case never ready.
+	timerWakeCh chan struct{}
+	timerNudge  *dispatchNudger
+
 	// slotFreedCh is signaled (non-blocking, one token) when an execution
 	// leaves w.inflight. A dispatch loop that found no free slot waits on it
 	// instead of sleeping a whole --poll: a plain sleep cannot be woken by
@@ -3526,6 +3531,8 @@ func (w *Worker) dispatchLoop() {
 				idleTicks = 0 // reset backoff, poll immediately
 			case <-w.notifyCh:
 				idleTicks = 0 // PostgreSQL NOTIFY: reset backoff, poll immediately
+			case <-w.timerWakeCh:
+				idleTicks = 0 // a timer this worker suspended came due (cleat#4491): poll now, not at the next rung of the ladder
 			case <-time.After(sleep):
 			}
 			continue
@@ -4533,6 +4540,12 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 		return
 	}
 	w.Metrics.RecordDBQueryLatency(context.Background(), time.Since(queryStart), "finalize")
+
+	// A run suspended on a timer comes due at nextWakeAt, and nothing else wakes an idle worker for it (cleat#4491): schedule the poll for that moment. After the finalize SUCCEEDED, and
+	// not before it: a fence-lost or failed finalize returned above, and a nudge for a run this worker no longer owns would be a wasted claim.
+	if finalStatus == "ready" {
+		w.timerNudge.at(nextWakeAt)
+	}
 
 	// finalStatus here is only ever "done" or "ready" (set a few lines up),
 	// never "failed" -- a segment that fails does not reach FinalizeWorkflowSegment
