@@ -12,7 +12,7 @@ import (
 // The memory a worker's held runs are a share of (cleat#4377).
 //
 // "Available" means the LIMIT, not the limit minus what is in use now. A budget that shrank as running runs grew would refuse by load, and the dynamic backstop
-// already exists: --memory-soft-limit reads the cgroup's real memory.current and stops a hold while the worker is under pressure. This reads one number, once, at
+// already exists: --memory-soft-limit reads the cgroup's working set (memory.current less inactive_file, cleat#4498) and stops a hold while the worker is under pressure. This reads one number, once, at
 // start-up, and the budget is that number times --resident-memory-percent.
 //
 // The order, which is the order of how much the number means:

@@ -167,8 +167,8 @@ var (
 			"event-history size and row count, and active concurrency keys. 0 disables the sweep.")
 	shardsFile            = flag.String("shards-file", "", "Path to shards JSON config for multi-shard operation")
 	pluginConfigFile      = flag.String("plugin-config", "", "path to plugin config JSON file")
-	memorySoftLimit       = flag.Float64("memory-soft-limit", 0.80, "Memory soft limit fraction 0.0-1.0 (stop claiming new work)")
-	memoryHardLimit       = flag.Float64("memory-hard-limit", 0.95, "Memory hard limit fraction 0.0-1.0 (reject API workflows)")
+	memorySoftLimit       = flag.Float64("memory-soft-limit", 0.80, "Memory soft limit fraction 0.0-1.0 (scale concurrency down toward 1; it claims nothing only at --memory-hard-limit)")
+	memoryHardLimit       = flag.Float64("memory-hard-limit", 0.95, "Memory hard limit fraction 0.0-1.0 (reject API workflows and claim nothing)")
 	memoryCheckInterval   = flag.Duration("memory-check-interval", 2*time.Second, "Interval between memory readings")
 	memorySampleRetention = flag.Int("memory-sample-retention", 1000, "Max samples per workflow definition")
 

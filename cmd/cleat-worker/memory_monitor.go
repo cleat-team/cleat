@@ -48,7 +48,7 @@ func (m *MemoryMonitor) log() *slog.Logger {
 // MemoryMonitor that uses it consistently.
 //
 // Probe order:
-//  1. cgroup v2 (/sys/fs/cgroup/memory.max + memory.current)
+//  1. cgroup v2 (/sys/fs/cgroup/memory.max + memory.current - memory.stat inactive_file)
 //  2. /proc/meminfo (MemTotal + MemAvailable)
 //  3. Go runtime heap stats (runtime.ReadMemStats)
 func NewMemoryMonitor(interval time.Duration) *MemoryMonitor {
@@ -110,6 +110,16 @@ func probeCgroupV2At(root string) (func() (MemoryInfo, error), bool) {
 				lastErr = err
 				continue
 			}
+			// THE WORKING SET, NOT THE RAW COUNTER (cleat#4498). memory.current counts page cache, and the kernel lets a cgroup's cache grow up to its limit and reclaims it only there,
+			// so a container that has merely read files sits near 100% by this counter while nothing in it is short of memory. Inactive file pages are what the kernel drops first;
+			// subtracting them is what the kubelet does (working set = usage - inactive_file) for the same reason. Where memory.stat cannot be read the raw counter stands, which is
+			// the stricter reading and the one this source always gave.
+			if inactive, ok := cgroupInactiveFile(root + "sys/fs/cgroup" + l.Dir + "memory.stat"); ok {
+				if inactive > used {
+					inactive = used
+				}
+				used -= inactive
+			}
 			avail := l.Limit - used
 			if l.Limit < used {
 				avail = 0
@@ -125,6 +135,25 @@ func probeCgroupV2At(root string) (func() (MemoryInfo, error), bool) {
 		}
 		return best, nil
 	}, true
+}
+
+// cgroupInactiveFile returns the inactive_file figure, in bytes, from a cgroup v2 memory.stat. ok is false when the file cannot be read or has no such line.
+func cgroupInactiveFile(path string) (uint64, bool) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return 0, false
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		f := strings.Fields(line)
+		if len(f) == 2 && f[0] == "inactive_file" {
+			v, err := strconv.ParseUint(f[1], 10, 64)
+			if err != nil {
+				return 0, false
+			}
+			return v, true
+		}
+	}
+	return 0, false
 }
 
 // probeProcMeminfo checks for /proc/meminfo and returns a read function
