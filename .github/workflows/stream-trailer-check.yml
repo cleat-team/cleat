@@ -1,8 +1,21 @@
 # ---------------------------------------------------------------------------
-# Stream Trailer Check — every commit names the workstream that wrote it
+# Stream Trailer Check — a Claude-Stream line that git cannot read as a trailer
 #
-# Commits carry `Claude-Stream: <value>`, with the values enumerated ONCE, in
-# VALID below (every message that lists them is derived from it). The convention
+# CHANGED 2026-11-28 (owner decision): a commit no longer has to carry a
+# `Claude-Stream:` trailer, and the value is no longer checked against a set.
+# Development moved to a process in which the author is not one of a fixed list
+# of workstreams, so a check that demanded one of them rejected correct commits.
+# What this check still fails is a commit whose message HAS a `Claude-Stream:`
+# line that git's trailer parser does not read as a trailer, because that shape
+# also voids the `Signed-off-by:` that follows it (see the loop below). The DCO
+# check is a separate workflow and is unchanged.
+#
+# Everything below that speaks of the trailer being required, or of VALID, is
+# the history of the check as it was written on 2026-09-17, kept because the
+# measurements in it still explain the two parsers.
+#
+# Commits used to carry `Claude-Stream: <value>`, with the values enumerated ONCE,
+# in a VALID set. The convention
 # replaced a session id on 2026-09-17 for one reason: a session id does not
 # survive a host restart and a stream does. After the 2026-09-16 reboot every
 # recorded `session_…` mapping named a session that no longer existed, three
@@ -114,39 +127,10 @@ jobs:
               ;;
           esac
 
-          # cleat-review is a REVIEW session rather than a delivery stream: it
-          # reads the tree and opens a pull request only for what that reading
-          # turns up. Added 2026-09-17 because the set had no value for one and
-          # the nearest was actively wrong -- two of its PRs went out as
-          # `coordinator`, which is not "unattributed", it is attributed to
-          # someone else. The coordinator session found a red PR carrying its
-          # own name that it had not opened, and correctly declined to touch 80
-          # files of WASM host ABI on that basis.
-          #
-          # An enumerated set is still right: this check exists to catch a typo,
-          # and an open set catches none. What it costs is exactly this -- a new
-          # participant is a CI change, and cannot land it under its own name.
-          #
-          # WS-cleat and WS-clew added 2026-10-25 (cleat#3371): the two streams
-          # the owner started for the 0.5.0 run-in -- engine work, and the
-          # clew-service port whose own PRs land in cleat-team/clew but which
-          # opens cleat PRs for the gaps it hits. Landed by the coordinator,
-          # for the reason the paragraph above gives.
-          # WS-cleat-2 added 2026-10-26: a second cleat delivery stream the owner
-          # started so the release-gate items that do not depend on the storage
-          # split (cleat#3377, #3386, #3398) run in parallel with it. Landed by
-          # the coordinator, same reason as above.
-          # WS-cleat-3 added 2026-10-26: a third cleat delivery stream the owner
-          # started for the correctness bugs filed in the 0.5.0 window (release
-          # gate G9: cleat#3383, #3393, #3409, #3390), in parallel with the
-          # storage split. Landed by the coordinator, same reason as above.
-          VALID='^(WS-1|WS-2|WS-3|WS-4|WS-cleat|WS-cleat-2|WS-cleat-3|WS-clew|coordinator|cleat-review)$'
-          # The human-readable list is DERIVED from VALID, never repeated: two
-          # lists drift, and the drift is silent in the direction that matters
-          # (cleat#3372 review: a rejected author was told a list without the
-          # value it should have used). Same reason .githooks/prepare-commit-msg
-          # reads the set from this file rather than carrying its own.
-          VALID_LIST=$(printf '%s\n' "$VALID" | sed 's/^\^(//; s/)\$$//; s/|/, /g')
+          # There used to be an enumerated set of valid values here (VALID), and a
+          # finding for a commit with no trailer or with a value outside it. Both
+          # were removed 2026-11-28 (see the header): neither the presence nor the
+          # value of a Claude-Stream trailer is checked now.
 
           # Commits that PREDATE the convention cannot carry the trailer, and a
           # check that demands one of them is asking for something impossible.
@@ -253,37 +237,28 @@ jobs:
             fi
             value=$(git show -s --format='%(trailers:key=Claude-Stream,valueonly)' "$commit" | head -1 | tr -d '\r')
             if [ -z "$value" ]; then
-              # TWO CAUSES, ONE SYMPTOM, DIFFERENT REPAIRS. An empty parse means
-              # either there is no such line, or there IS one and git will not
-              # read it as a trailer -- because it is not in the message's FINAL
+              # An empty parse has two causes. There is no Claude-Stream line at
+              # all, which is no longer a finding, or there IS one and git will
+              # not read it as a trailer because it is not in the message's FINAL
               # paragraph. A blank line between it and Signed-off-by is enough:
               #
               #     Claude-Stream: WS-2
               #                             <- this blank line is the defect
               #     Signed-off-by: ...
               #
-              # The second looks exactly like the first from outside, and cost a
-              # session ten minutes on this check's first run. Distinguish them,
-              # because "add the trailer" is the wrong instruction for a commit
-              # that already has one.
+              # That second shape is still a finding: the blank line also stops
+              # git reading the Signed-off-by after it as a trailer.
               #
-              # BOTH OF THOSE CAUSES ARE ABOUT THIS RANGE. On MERGED history the
-              # empty parse has a THIRD cause, and neither repair above applies:
-              # `COMMIT_MESSAGES` concatenation lands the block mid-body, and it
-              # is GitHub's appended block -- not the author's formatting -- that
-              # holds the final paragraph. Measured on e15d4857, 2026-09-27; see
-              # the header and CONTRIBUTING.md, "Claude-Stream".
-              #
-              # So the message below is correct where this loop runs, and would
-              # send someone to edit a message that was never wrong if the loop
-              # were ever pointed at develop.
+              # This is correct where the loop runs (the pull request's own
+              # commits). On MERGED history the empty parse has a third cause, and
+              # the repair below does not apply: `COMMIT_MESSAGES` concatenation
+              # lands the block mid-body, and it is GitHub's appended block, not
+              # the author's formatting, that holds the final paragraph. Measured
+              # on e15d4857, 2026-09-27; see the header and CONTRIBUTING.md,
+              # "Claude-Stream".
               if git log -1 --format='%B' "$commit" | grep -qE '^Claude-Stream:'; then
                 printf '%s\t%s\n' "$commit" "  $(git log -1 --format='%h %s' "$commit")  -- has a Claude-Stream: line that git does NOT parse as a trailer (it is not in the final paragraph -- remove the blank line before the trailer block)"
-              else
-                printf '%s\t%s\n' "$commit" "  $(git log -1 --format='%h %s' "$commit")  -- no Claude-Stream trailer"
               fi
-            elif ! printf '%s' "$value" | grep -qE "$VALID"; then
-              printf '%s\t%s\n' "$commit" "  $(git log -1 --format='%h %s' "$commit")  -- Claude-Stream: '$value' is not one of $VALID_LIST"
             fi
           done)
 
@@ -377,28 +352,25 @@ jobs:
             echo ""
             echo "$FAILING"
             echo ""
-            echo "Add the trailer to each commit, e.g.:"
-            echo "  git commit --amend --trailer 'Claude-Stream: WS-1'"
-            echo "  git rebase --exec \"git commit --amend --no-edit --trailer 'Claude-Stream: WS-1'\" ${BASE}"
+            echo "A Claude-Stream trailer is not required, and its value is not checked."
+            echo "What fails is a commit that HAS such a line which git will not read as"
+            echo "a trailer: it must be in the message's FINAL paragraph, with no blank"
+            echo "line between it and Signed-off-by. Remove the blank line (or delete the"
+            echo "stray line), then:"
+            echo "  git commit --amend            # the latest commit"
+            echo "  git rebase -i ${BASE}         # reword an earlier one"
             echo "  git push --force-with-lease"
-            echo ""
-            echo "Valid values: $VALID_LIST."
-            echo ""
-            echo "If a commit is reported as carrying a line git will not parse:"
-            echo "  the trailer must be in the message's FINAL paragraph, with no"
-            echo "  blank line between it and Signed-off-by. Check with:"
-            echo "    git show -s --format='%(trailers:key=Claude-Stream,valueonly)' <sha>"
-            echo "It is a claim about which workstream wrote the commit, not a"
-            echo "credential -- see WORKSTREAM.md, 'Shared files'."
+            echo "Check with:"
+            echo "  git show -s --format='%(trailers:key=Claude-Stream,valueonly)' <sha>"
             exit 1
           fi
 
           # Only when something WAS checked. Printed unconditionally it says
-          # "all commits carry a valid trailer" about a run that examined none
-          # -- vacuously true, and the exact register this check exists to
-          # refuse. The CHECKED == 0 branch above has already said what happened.
+          # "nothing is malformed" about a run that examined none -- vacuously
+          # true, and the exact register this check exists to refuse. The
+          # CHECKED == 0 branch above has already said what happened.
           if [ "$CHECKED" -gt 0 ] && [ "$NOTICED" -eq 0 ]; then
-            echo "All $CHECKED checked commit(s) carry a valid Claude-Stream trailer."
+            echo "All $CHECKED checked commit(s) are free of a Claude-Stream line that git cannot read as a trailer (a trailer is not required)."
           elif [ "$CHECKED" -gt 0 ]; then
-            echo "Of $CHECKED checked commit(s), $((CHECKED - NOTICED)) carry a valid Claude-Stream trailer and $NOTICED are already-published commits reported above."
+            echo "Of $CHECKED checked commit(s), $((CHECKED - NOTICED)) are free of a Claude-Stream line that git cannot read as a trailer and $NOTICED are already-published commits reported above."
           fi

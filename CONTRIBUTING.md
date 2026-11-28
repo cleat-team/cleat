@@ -80,16 +80,20 @@ signing anything twice.
 ### Claude-Stream
 
 The same hook stamps a second trailer naming the workstream that produced the
-commit, which `Stream Trailer Check` enforces the same way `DCO Check`
-enforces the first. It needs one more setting, **per checkout**:
+commit. Since 2026-11-28 `Stream Trailer Check` does **not** require it and
+does not check its value: a commit with no `Claude-Stream:` line, or with any
+value, passes. What the check still fails is a `Claude-Stream:` line that git
+cannot read as a trailer (see below). `DCO Check` is unchanged.
+
+If you use the hook, it needs one more setting, **per checkout**:
 
 ```
 git config --local cleat.stream <stream>
 ```
 
-The hook refuses a commit when this is unset, and refuses a value the check
-would reject. Both refusals print the accepted values, which it reads out of
-`.github/workflows/stream-trailer-check.yml` rather than keeping its own copy.
+The hook refuses a commit when this is unset, and stamps any value it is given;
+it used to refuse a value outside a set that the check enumerated, and that set
+is gone. A checkout that does not use the hook is not affected.
 
 It refuses rather than defaulting because there is no default worth having: a
 wrong stream is not "unattributed", it is attributed to someone else. That is

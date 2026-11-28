@@ -225,11 +225,17 @@ func TestAnUnsetStreamIsRefusedRatherThanGuessed(t *testing.T) {
 	}
 }
 
-// A stream the check would reject is refused locally, rather than committed and
-// discovered in CI.
-func TestAStreamTheCheckWouldRejectIsRefusedLocally(t *testing.T) {
-	if _, err := runHook(t, "WS-9", "fix: something\n"); err == nil {
-		t.Fatal("the hook stamped 'WS-9', which the stream check does not accept")
+// Neither the check nor the hook restricts the value any more (2026-11-28): the
+// check used to refuse a stream outside an enumerated set, and the hook read
+// that set from it to refuse the same value locally. A value outside the old
+// set is stamped as configured.
+func TestAStreamOutsideTheOldSetIsStampedAsConfigured(t *testing.T) {
+	got, err := runHook(t, "WS-9", "fix: something\n")
+	if err != nil {
+		t.Fatalf("the hook refused 'WS-9', which no check restricts any more: %v", err)
+	}
+	if !strings.Contains(got, "Claude-Stream: WS-9") {
+		t.Errorf("the configured stream was not stamped:\n%s", got)
 	}
 }
 
@@ -427,14 +433,13 @@ func TestAGenuinelyMissingTrailerIsStillStamped(t *testing.T) {
 	}
 }
 
-// The hook and the check agree about the valid set, because the hook reads it
-// from the check.
+// There is no valid set to read any more (2026-11-28), and a second copy of one
+// appearing in the hook would silently refuse values no check restricts.
 //
-// This does not compare two lists -- it asserts there is only one. The failure
-// it guards against is a second copy appearing in the hook during some later
-// edit, at which point the two drift and every symptom looks like a broken
-// hook rather than a stale one.
-func TestTheHookReadsTheValidSetFromTheCheck(t *testing.T) {
+// Two things are asserted. The check has no VALID='...' line, so the hook's
+// extraction (which skips validation when it finds none) has nothing to read;
+// and the hook does not carry an alternation of stream names of its own.
+func TestNeitherTheCheckNorTheHookCarriesAValidSet(t *testing.T) {
 	root := repoRoot(t)
 
 	hookSrc, err := os.ReadFile(filepath.Join(root, ".githooks", "prepare-commit-msg"))
@@ -446,34 +451,11 @@ func TestTheHookReadsTheValidSetFromTheCheck(t *testing.T) {
 		t.Fatalf("reading the check: %v", err)
 	}
 
-	valid := regexp.MustCompile(`(?m)^\s*VALID='(.*)'\s*$`).FindSubmatch(checkSrc)
-	if valid == nil {
-		t.Fatal("the check no longer has a VALID='...' line; the hook's extraction " +
-			"silently skips validation when it cannot find one, so this is the only " +
-			"thing that would notice")
+	if regexp.MustCompile(`(?m)^\s*VALID='(.*)'\s*$`).Match(checkSrc) {
+		t.Error("the check has a VALID='...' line again; the hook would start refusing " +
+			"every value outside it, which the owner decision of 2026-11-28 removed")
 	}
-
-	// Every accepted value, taken from the check, must be accepted by the hook.
-	// Running the hook rather than re-reading its source is the point: it tests
-	// the extraction, not a second parse of the same line.
-	inner := strings.Trim(string(valid[1]), "^$")
-	inner = strings.TrimPrefix(inner, "(")
-	inner = strings.TrimSuffix(inner, ")")
-	streams := strings.Split(inner, "|")
-	if len(streams) < 2 {
-		t.Fatalf("parsed %d stream(s) from %q; the check's format has changed", len(streams), valid[1])
-	}
-	for _, s := range streams {
-		if _, err := runHook(t, s, "fix: something\n"); err != nil {
-			t.Errorf("the check accepts %q but the hook refused it: %v", s, err)
-		}
-	}
-
-	// And the hook must not carry its own copy of the list. One literal stream
-	// name in an error message or comment is fine; the whole alternation is
-	// not.
 	if regexp.MustCompile(`WS-1\|WS-2\|WS-3`).Match(hookSrc) {
-		t.Error("the hook contains its own copy of the valid-stream alternation; " +
-			"it should read the set from the check instead, or the two will drift")
+		t.Error("the hook contains its own copy of a valid-stream alternation")
 	}
 }
