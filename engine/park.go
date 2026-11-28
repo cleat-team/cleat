@@ -150,12 +150,28 @@ func (s *execSession) parkOrSuspend(ctx context.Context, req parkRequest) parkOu
 		if !s.publishForHold(waitCtx) {
 			return s.suspendFor(req)
 		}
+		// cleat#4275: say in the store that this run is held, so its holder's death is noticed at the held window. LAST before the hold, so a refusal above leaves no marker; an error
+		// refuses the hold (the run suspends, which is the ordinary path). clearHeld below is its other half.
+		if s.engine.markHeld != nil {
+			if err := s.engine.markHeld(waitCtx); err != nil {
+				s.holdPublishFailures = append(s.holdPublishFailures, "marking the run held failed: "+err.Error())
+				return s.suspendFor(req)
+			}
+		}
 		switch out := s.engine.wakeSource.Wait(waitCtx, req); out {
 		case parkWoke, parkDeadline:
 			// This is the one place a held run returns to its guest, so it is the one place the claim is revalidated, and no wake source (the timer now, a
 			// signal later) can skip it. The store learned of a terminate, a cancel or a reclaim when it happened; this worker would learn of it at its next
 			// heartbeat, which may be after the timer fires. A suspended run could not act in that interval, because there would be no claim for it to win, so a
 			// held one must not either. Lost, and unknown (the store could not be asked), both suspend: suspending is always safe, and a wrong guess costs one replay.
+			// cleat#4275: the marker is cleared BEFORE the claim check, and a clear that fails suspends the run. That ordering is the safety argument of the fast reclaim: a run the guest is
+			// about to resume is never marked, so it is never reclaimed at the held window while it executes. A clear refused because the claim moved is the same loss the check reports.
+			if clear := s.engine.clearHeld; clear != nil {
+				if err := clear(waitCtx); err != nil {
+					s.claimCheckFailures = append(s.claimCheckFailures, "clearing the held marker failed: "+err.Error())
+					return s.suspendFor(req)
+				}
+			}
 			if check := s.engine.claimCheck; check != nil {
 				if err := check(waitCtx); err != nil {
 					s.claimCheckFailures = append(s.claimCheckFailures, err.Error())

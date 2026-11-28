@@ -1,0 +1,4 @@
+---
+section: upgrade
+---
+- **A new nullable column, `held_generation`, is added to the lease row by a migration (PostgreSQL 012, MySQL 013, SQL Server 021), and a worker that holds a run through a wait now uses it (cleat#4275).** Run the migration before starting the new workers (`cleat-worker --migrate-only`, as for every migration): a new worker refuses to start on a database the migration has not reached, and an older worker starts on the migrated one with the usual warning. The column is `NULL` for every run that is not held, so an older worker that ignores it reads nothing different, and a mixed fleet is safe: an old worker's reaper reclaims a held run at `--reclaim-timeout` as before. Only a run its holder marked held at its current generation is read as held; a marker that outlives a reclaim names the old generation and does nothing to the run's next owner.

@@ -390,6 +390,11 @@ type ResidentRunInfo struct {
 	// run suspends instead, and a suspension writes the state. nil means the handle cannot publish: a run with NO query state is still held (there is nothing to publish), and
 	// a run WITH some is refused, so an omission fails closed and never silent.
 	PublishState func(ctx context.Context, state map[string]string) error
+	// MarkHeld and ClearHeld (cleat#4275) record in the store that this run is held, and clear it. MarkHeld is called at hold admission, after PublishState, and an error REFUSES the
+	// hold. ClearHeld is called when a hold ends, before ClaimCheck, and an error suspends the run instead of resuming it. Both fenced on the run's claim by the store. Either nil, or
+	// only one of the two set, means the run is held with no marker, which is the safe reading: it is reclaimed at the ordinary window.
+	MarkHeld  func(ctx context.Context) error
+	ClearHeld func(ctx context.Context) error
 }
 
 // ResidentRun is one run's handle on the set: it is the engine's wakeSource for that run, and carries what Wait does not receive.

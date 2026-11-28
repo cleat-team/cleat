@@ -311,6 +311,42 @@ still follows `--heartbeat`.
 
 ---
 
+### --held-reclaim-after
+
+| Type | Default | Description |
+|------|---------|-------------|
+| duration | `0` | How long a run **held in memory** through a wait (`--resident-max-runs`) may go without a heartbeat before another worker may claim it (`0` = derive, negative = off) |
+
+cleat#4275. A worker that dies while holding a run leaves it `running` and assigned
+to the dead worker, so, unlike a suspended run, it is not claimable until the
+reaper reclaims it. At `--reclaim-timeout` (about 47s at the default heartbeat) that
+is how long it waits, and the wait does not add to the sleep's own time: measured on PostgreSQL at the defaults
+with a real `SIGKILL`, a held run's next step ran about 49 to 50s after the first
+(three runs on develop, three on the 0.6.0 release tip).
+
+`0` derives the held window as the reclaim window **without its database-stall
+allowance**, about 17s at the default heartbeat. That allowance is what keeps a
+database stall from reclaiming a running run whose heartbeat the stall delayed,
+where a false reclaim repeats an effect. A held run is not executing, and a hold
+ends only through a claim check that is a fenced write, so a held run reclaimed by
+mistake costs one replay and not a repeated effect.
+
+How it works: the holder marks the run held at the generation it holds (fenced on
+its claim) when a hold starts, and clears the marker, again fenced, **before** the
+hold's claim check returns and the guest resumes. A marker is read only while it
+names the run's current generation, so one that outlives a reclaim does nothing to
+the next owner. Only a marked run is reclaimed at this window; every other run is
+reclaimed at `--reclaim-timeout` as before.
+
+The reaper still waits a full `--reclaim-timeout` after any database trouble of its
+own before it reclaims anything, so a database-wide stall does not reclaim every
+held run at once, and `--max-reclaim-per-tick` still bounds a sweep.
+
+Refused below the derived floor. Ignored (no fast path) when it is not shorter than
+the reclaim window. A negative value turns the fast path off.
+
+---
+
 ### --heartbeat-max-connections
 
 | Type | Default | Description |
@@ -462,7 +498,7 @@ A durable sleep that is due soon can be **held on the worker** instead of suspen
 |------|---------|-------------|
 | int | `1024` | Most runs held in memory through a wait that is due soon, a ceiling on the count; 0 turns residency off |
 
-**On by default since 0.6.0 (cleat#4162). Since cleat#4377 this is a ceiling and not the usual limit:** the memory budget (`--resident-memory-percent`) is what normally decides how many runs a worker holds, and 1024 is the largest count the scheduler was measured at. It was 8, "a conservative guess, not a measured optimum", until then; tuning on real workflows is cleat#4187. **If a worker dies while it holds runs, their wakes are delayed until the runs are reclaimed.** The kill-while-held scenario (`tests/chaos`, `TestChaosSigkillWhileAHeldRunSleepsThenReclaim`) kills a worker mid-hold and shows the run is reclaimed and every effect happens exactly once, and measures the cost: the second effect came **40 to 41 s** after the first, against **9.2 to 9.5 s** with residency off (measured by cleat-review3 on one loaded machine, from the recording service's own timestamps), because a held run is still assigned to the dead worker, so only the reaper can take it, after its start-up grace, while a suspended run is simply claimable at its wake time. The harness ages the dead worker's lease instead of waiting out the real reclaim window, so **the production window comes on top of those figures: about 47 s at the default `--heartbeat`, which is derived from the formula in `--heartbeat`'s help and has not been measured**. **In short: a worker crash during a hold delays the sleeping run's wake to the reaper's reclaim, about 40 s measured plus that derived production window, against about 9 s with residency off; every effect still happens exactly once.** A faster path for held runs is cleat#4275 (0.7.0). A worker that is draining or cordoned, or at its memory hard limit, already sends every held run back (tested).
+**On by default since 0.6.0 (cleat#4162). Since cleat#4377 this is a ceiling and not the usual limit:** the memory budget (`--resident-memory-percent`) is what normally decides how many runs a worker holds, and 1024 is the largest count the scheduler was measured at. It was 8, "a conservative guess, not a measured optimum", until then; tuning on real workflows is cleat#4187. **If a worker dies while it holds runs, their wakes are delayed until the runs are reclaimed.** The kill-while-held scenario (`tests/chaos`, `TestChaosSigkillWhileAHeldRunSleepsThenReclaim`) kills a worker mid-hold and shows the run is reclaimed and every effect happens exactly once. The wake is delayed because a held run is still assigned to the dead worker, so only the reaper can take it, while a suspended run is simply claimable at its wake time. **What it costs, measured with a real kill at the defaults and no shortened lease** (effect A, an 8 s sleep, effect B; three runs on PostgreSQL, the surviving worker's reaper already past its start-up grace): **without the held-run fast path** (0.6.0) the run was reclaimed 48 to 49 s after the kill and the second effect came **49 to 50 s** after the first. That is consistent with the reclaim window (about 47 s at the default `--heartbeat`, from the formula in `--heartbeat`'s help) plus a reaper tick, which is derived, not measured. With residency off the second effect came **9.2 to 9.5 s** after the first (measured by cleat-review3 in the test harness, on one loaded machine). **With the held-run fast path (`--held-reclaim-after`, cleat#4275)** the same measurement gave **19 to 20 s** (three runs, A to B 19.2 to 19.8 s after the kill). The test harness's own `TestChaosSigkillWhileAHeldRunSleepsThenReclaim` shortens the dead worker's lease, so its 40 to 41 s figure is not the production delay. **Not measured:** where in the heartbeat and the reaper's tick a kill falls (expect up to about 10 s more, derived), a reaper on a worker that has only just started (it also waits out its start-up grace), and MySQL and SQL Server. **In short: a worker crash during a hold delays the sleeping run's wake to the reaper's reclaim, about 50 s measured without the fast path and about 20 s with it, against about 9 s with residency off; every effect still happens exactly once.** A worker that is draining or cordoned, or at its memory hard limit, already sends every held run back (tested).
 
 A held run keeps its instance and one OS thread (measured: about one thread per held instance, 1053 for 1024 Go instances), so this is also a bound on threads. 1024 is the largest count measured; the thread cost above it was not.
 

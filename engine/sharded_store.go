@@ -2558,3 +2558,25 @@ func (s *ShardedStore) warnShardedRunLimitsUnsupported(ctx context.Context, shar
 			"silently gets the tenant's settings instead of its own override",
 		"shard", shard.Config.Name, "store_type", fmt.Sprintf("%T", shard.Store))
 }
+
+// MarkRunHeld and ClearRunHeld go to the shard that owns the run, as PublishQueryState does. A shard whose store cannot mark returns an error, which refuses the hold: the run is
+// suspended and replayed as if residency were off, so a shard without the marker loses holding for its runs altogether, not only the fast path.
+func (s *ShardedStore) MarkRunHeld(ctx context.Context, runID, workerID string, generation int64) error {
+	return s.heldMarkerFor(runID, "mark run held", func(m HeldRunMarker) error { return m.MarkRunHeld(ctx, runID, workerID, generation) })
+}
+
+func (s *ShardedStore) ClearRunHeld(ctx context.Context, runID, workerID string, generation int64) error {
+	return s.heldMarkerFor(runID, "clear run held", func(m HeldRunMarker) error { return m.ClearRunHeld(ctx, runID, workerID, generation) })
+}
+
+func (s *ShardedStore) heldMarkerFor(runID, what string, do func(HeldRunMarker) error) error {
+	shard := s.getShard(runID)
+	if shard == nil {
+		return fmt.Errorf("%s: no shard available -- check shard configuration in CLEAT_SHARD_CONFIG", what)
+	}
+	m, ok := shard.Store.(HeldRunMarker)
+	if !ok {
+		return fmt.Errorf("%s: the shard's store cannot mark a run held", what)
+	}
+	return do(m)
+}

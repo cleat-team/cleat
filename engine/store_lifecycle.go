@@ -2125,14 +2125,16 @@ func (s *PostgresStore) ReapStaleInstances(ctx context.Context, timeout time.Dur
 		WHERE id IN (
 		    SELECT l.id FROM workflow_leases l
 		    WHERE l.status = 'running'
-		      AND l.heartbeat_at < now() - $1::interval
+		      AND l.heartbeat_at < now() - $3::interval
+		      AND (l.heartbeat_at < now() - $1::interval OR l.held_generation = l.generation)
 		    ORDER BY l.heartbeat_at
 		    LIMIT $2
 		)
 		  AND status = 'running'
-		  AND heartbeat_at < now() - $1::interval
+		  AND heartbeat_at < now() - $3::interval
+		  AND (heartbeat_at < now() - $1::interval OR held_generation = generation)
 		RETURNING id
-	`, fmt.Sprintf("%d milliseconds", timeout.Milliseconds()), reapLimitArg(limit))
+	`, fmt.Sprintf("%d milliseconds", timeout.Milliseconds()), reapLimitArg(limit), heldIntervalText(heldStaleness(ctx, timeout)))
 	if err != nil {
 		return 0, fmt.Errorf("reap stale instances: %w", err)
 	}
@@ -2163,10 +2165,11 @@ func (s *PostgresStore) ListStaleHolders(ctx context.Context, timeout time.Durat
 	rows, err := tx.QueryContext(ctx, `
 		SELECT id, generation, assigned_to FROM workflow_leases
 		WHERE status = 'running'
-		  AND heartbeat_at < now() - $1::interval
+		  AND heartbeat_at < now() - $3::interval
+		  AND (heartbeat_at < now() - $1::interval OR held_generation = generation)
 		ORDER BY heartbeat_at
 		LIMIT $2
-	`, fmt.Sprintf("%d milliseconds", timeout.Milliseconds()), reapLimitArg(limit))
+	`, fmt.Sprintf("%d milliseconds", timeout.Milliseconds()), reapLimitArg(limit), heldIntervalText(heldStaleness(ctx, timeout)))
 	if err != nil {
 		return nil, fmt.Errorf("list stale holders: %w", err)
 	}
@@ -2225,7 +2228,8 @@ func (s *PostgresStore) ReapStaleInstancesExcept(ctx context.Context, timeout ti
 		WHERE id IN (
 		    SELECT l.id FROM workflow_leases l
 		    WHERE l.status = 'running'
-		      AND l.heartbeat_at < now() - $1::interval
+		      AND l.heartbeat_at < now() - $5::interval
+		      AND (l.heartbeat_at < now() - $1::interval OR l.held_generation = l.generation)
 		      AND NOT EXISTS (
 		          SELECT 1 FROM unnest($3::text[], $4::bigint[]) AS ex(id, generation)
 		          WHERE ex.id = l.id AND ex.generation = l.generation
@@ -2234,13 +2238,14 @@ func (s *PostgresStore) ReapStaleInstancesExcept(ctx context.Context, timeout ti
 		    LIMIT $2
 		)
 		  AND status = 'running'
-		  AND heartbeat_at < now() - $1::interval
+		  AND heartbeat_at < now() - $5::interval
+		  AND (heartbeat_at < now() - $1::interval OR held_generation = generation)
 		  AND NOT EXISTS (
 		      SELECT 1 FROM unnest($3::text[], $4::bigint[]) AS ex(id, generation)
 		      WHERE ex.id = workflow_leases.id AND ex.generation = workflow_leases.generation
 		  )
 		RETURNING id
-	`, fmt.Sprintf("%d milliseconds", timeout.Milliseconds()), reapLimitArg(limit), excludeIDs, excludeGenerations)
+	`, fmt.Sprintf("%d milliseconds", timeout.Milliseconds()), reapLimitArg(limit), excludeIDs, excludeGenerations, heldIntervalText(heldStaleness(ctx, timeout)))
 	if err != nil {
 		return 0, fmt.Errorf("reap stale instances except: %w", err)
 	}
