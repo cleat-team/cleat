@@ -1,4 +1,0 @@
----
-section: fixed
----
-- **A Python or C# component that calls `wasi:random/insecure-seed` no longer traps, and gets the workflow's seeded entropy (cleat#4396).** The function was shadowed with the callback for a plain `u64`, but the interface returns a `tuple<u64, u64>`, so any guest that called it died with `type mismatch: expected tuple, found u64` instead of reading anything. Nothing had exercised it: no test named the two `insecure` interfaces, and no standard-library path of the guests measured calls them, which is why it went unseen. It now returns two draws of the workflow's seeded source, so a guest that seeds a hash table or a PRNG from it gets the same pair on every replay. `wasi:random/insecure` was already shadowed correctly and is now covered too, at every WASI 0.2 minor the engine registers (0.2.0, 0.2.3, 0.2.6, 0.2.9, 0.2.10). This does not change the monotonic clock, which the same issue is still open for.
