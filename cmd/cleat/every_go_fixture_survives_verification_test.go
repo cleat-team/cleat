@@ -107,6 +107,8 @@ var goFixtureExpectations = map[string]string{
 	"signalworkflow": "",
 	"spin":           "",
 	"updatedispatch": "",
+	// cleat#4511: one long AwaitSignals in a loop, with an update handler. One entry point, one host call each, so it must verify cleanly.
+	"updatelongwait": "",
 	// cleat#3418: the one-call fixtures behind TestEachRewiredMethodWiresItsImport's
 	// SetScope, GetScope and RunDetached rows (wasm/hostcall_wiring_test.go).
 	// One entry point, one host call each, so they must verify cleanly. This

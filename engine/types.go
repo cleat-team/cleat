@@ -362,6 +362,17 @@ type EventRecord struct {
 	// came from, so the completion can settle the right caller's promise.
 	UpdateRequestID string `json:"update_request_id,omitempty"`
 
+	// UpdateInterruptsWait marks an update_received that the poll in FRONT of a wait delivered after the run had already suspended in that wait: the wait's own
+	// row is the record just before this one, unanswered, and the guest has not yet made the wait call that row belongs to again (cleat#4511). Without it
+	// [wait row, update_received] is ambiguous: it is also what a wait that TIMED OUT followed by the next call's poll finding an update records, and a
+	// replay that read the second as the first would hand an update to a poll that did not deliver it on the original run.
+	//
+	// The same convention as FirstRead (cleat#4277): inside the checksum payload and only when true, so every event written before it keeps its checksum;
+	// carried in the event's JSON, so there is no column and no migration; absent, so false, on every event written before it, which therefore replays as it
+	// always did. A worker that does not know the key reads the row without it and recomputes a different checksum, so it fails verification before any
+	// guest code runs (cleat#4511, "Rolling back").
+	UpdateInterruptsWait bool `json:"update_interrupts_wait,omitempty"`
+
 	// State mutation fields.
 	StateKey   string `json:"state_key,omitempty"`
 	StateValue string `json:"state_value,omitempty"`
@@ -708,6 +719,12 @@ type execSession struct {
 
 	deferPhaseBeganSuspended bool
 	awaitRejected            bool // the last AwaitPromise ended in a rejection (cleat#3425)
+	// updateCarry holds, per update request id, the deadline of the wait that update's delivery interrupted; waitCarry is what the update's completion
+	// readied for the first wait after it. Both are rebuilt on a replay by the code that fills them on the original run (cleat#4511, waitCarry).
+	updateCarry map[string]waitCarry
+	waitCarry   *waitCarry
+	// openUpdates are the update requests delivered and not yet completed: a wait made while one is open is that update's HANDLER's, and does not take the carry.
+	openUpdates map[string]bool
 	// unflushed is every event this execution recorded that the engine did NOT write because per-step flush is off, in the order
 	// recorded, each with the predecessor checksum it was chained from. A successful or suspended segment hands these to the
 	// worker, which writes them at finalization. A FAILED one has no finalization: nothing wrote them, and the worker's

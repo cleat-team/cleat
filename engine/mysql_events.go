@@ -229,7 +229,7 @@ func (s *MySQLStore) appendEventsInTxOpts(ctx context.Context, tx *sql.Tx, workf
 			-- session variable instead of the guard -- see this file's
 			-- "THE GUARD IS FROZEN INTO A SESSION VARIABLE" doc comment above
 			-- appendEventsInTxOpts for why no other ordering works.
-			checksum = IF(@cleat_pending := (event_type IN ('await_child','await_promise','await_all_children') AND response IS NULL AND error IS NULL AND promise_result IS NULL AND promise_error IS NULL), VALUES(checksum), checksum),
+			checksum = IF(@cleat_pending := (event_type IN ('await_child','await_promise','await_all_children') AND response IS NULL AND error IS NULL AND promise_result IS NULL AND promise_error IS NULL AND NOT EXISTS (SELECT 1 FROM event_history nx WHERE nx.tenant_id = event_history.tenant_id AND nx.workflow_id = event_history.workflow_id AND nx.step = event_history.step + 1 AND nx.event_type = 'update_received')), VALUES(checksum), checksum),
 			payload = IF(@cleat_pending, VALUES(payload), payload),
 			payload_encoding = IF(@cleat_pending, VALUES(payload_encoding), payload_encoding),
 			response = IF(@cleat_pending, VALUES(response), response),

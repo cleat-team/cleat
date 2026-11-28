@@ -374,6 +374,11 @@ func eventRecordToPayload(rec EventRecord) ([]byte, error) {
 		// Not omitted when empty: an update whose payload is "" must replay as
 		// "" rather than as absent, because the handler is called with it.
 		payload["update_payload"] = rec.UpdatePayload
+		// Replay reads it (an update delivered across the wait it interrupted, cleat#4511), so it is inside the checksum, and only when true: every event
+		// written before it keeps its checksum.
+		if rec.UpdateInterruptsWait {
+			payload["update_interrupts_wait"] = true
+		}
 	case "update_completed":
 		if rec.UpdateHandlerName != "" {
 			payload["update_handler_name"] = rec.UpdateHandlerName
@@ -887,6 +892,9 @@ func populateFromPayload(rec *EventRecord, payload []byte) {
 		}
 		if v, ok := m["update_payload"].(string); ok {
 			rec.UpdatePayload = v
+		}
+		if v, ok := m["update_interrupts_wait"].(bool); ok {
+			rec.UpdateInterruptsWait = v
 		}
 	case "update_completed":
 		if v, ok := m["update_handler_name"].(string); ok {

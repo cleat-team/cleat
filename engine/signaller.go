@@ -14,7 +14,7 @@ import (
 // nine bugs (cleat#933, #947, #975, #1331, #3378, #4105, #4144, #4153, #4157); each is kept next to the rule it produced, below.
 func (s *execSession) DurableAwaitSignals(ctx context.Context, m api.Module, signalNames string, timeoutMs int64, sigNamePtr, sigNameMaxLen, payloadPtr, payloadMaxLen uint32) int64 {
 	return s.step(ctx, m, &awaitSignalsStep, stepArgs{
-		s1: signalNames, i1: timeoutMs,
+		s1: signalNames, i1: timeoutMs, carry: s.takeWaitCarry(),
 		// A divergence message goes to the payload buffer, as it always did; the signal's name has its own.
 		outPtr: payloadPtr, outMaxLen: payloadMaxLen,
 		out2Ptr: sigNamePtr, out2MaxLen: sigNameMaxLen,
@@ -179,8 +179,19 @@ var awaitSignalsStep = stepSpec{
 			return packAwaitSignalsResult(0, 0, true, 0)
 		}
 		// Record the await, then wait: it is written BEFORE the call blocks or suspends, once, and never per iteration of a park.
-		c.Record(EventRecord{Step: s.stepCount, EventType: EventTypeAwaitSignals, SignalNames: names, TimeoutMs: timeoutMs})
+		//
+		// The first wait after an update that interrupted a wait of these names keeps THAT wait's deadline (cleat#4511, waitCarry): the guest called once.
+		recTimeoutMs, recStampMs, carriedUntil, carried := c.carriedWait(EventTypeAwaitSignals, func(k string) bool { return sameSignalNames(parseSignalNames(k), parseSignalNames(names)) }, timeoutMs)
+		if !carried {
+			recTimeoutMs, recStampMs = timeoutMs, 0
+		}
+		c.Record(EventRecord{Step: s.stepCount, EventType: EventTypeAwaitSignals, SignalNames: names, TimeoutMs: recTimeoutMs, TimestampMs: recStampMs})
+		// AFTER the record, as it always was: recording moves the session's clock to the event's timestamp, and a deadline measured from the clock BEFORE it is
+		// earlier by however long it had been since the last event (a held wait then looks too close to hold, a real-guest test said so).
 		until := time.UnixMilli(s.nowMs).Add(guestMsDuration(timeoutMs))
+		if carried {
+			until = carriedUntil
+		}
 		return awaitSuspendOrPark(c, deliverIfWaiting, parkRequest{
 			Kind: wakeSignal, Key: names, DeadlineMs: until.UnixMilli(),
 			Reason:  fmt.Sprintf("await_signals(%s, %dms)", names, timeoutMs),

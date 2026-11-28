@@ -486,6 +486,7 @@ func (af *AdaptiveFlusher) flushAndNotify(ctx context.Context, batch []batchEntr
 			WHERE event_history.event_type IN ('await_child', 'await_promise', 'await_all_children')
 			  AND event_history.response IS NULL AND event_history.error IS NULL
 			  AND event_history.promise_result IS NULL AND event_history.promise_error IS NULL
+			  AND NOT EXISTS (SELECT 1 FROM event_history nx WHERE nx.tenant_id = event_history.tenant_id AND nx.workflow_id = event_history.workflow_id AND nx.step = event_history.step + 1 AND nx.event_type = 'update_received')
 	`, string(eventsJSON))
 	dbUs := time.Since(t1).Microseconds()
 	af.totalDBUs.Add(dbUs)
@@ -735,6 +736,7 @@ func retryBatchFlush(ctx context.Context, af *AdaptiveFlusher, eventsJSON []byte
 				WHERE event_history.event_type IN ('await_child', 'await_promise', 'await_all_children')
 				  AND event_history.response IS NULL AND event_history.error IS NULL
 				  AND event_history.promise_result IS NULL AND event_history.promise_error IS NULL
+				  AND NOT EXISTS (SELECT 1 FROM event_history nx WHERE nx.tenant_id = event_history.tenant_id AND nx.workflow_id = event_history.workflow_id AND nx.step = event_history.step + 1 AND nx.event_type = 'update_received')
 		`, string(eventsJSON))
 		return err
 	})

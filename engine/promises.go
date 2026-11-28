@@ -130,6 +130,7 @@ func init() { registerStepSpec(&createPromiseStep) }
 // error and nothing is consumed. A history that DOES hold the call's own records still replays without a store (a CLI replay of a real history).
 // Everything else that is foreign is a divergence (the cleat#4157 class; cleat#947 was the await_signals case, below).
 func (s *execSession) AwaitPromise(ctx context.Context, m api.Module, promiseID string, timeoutMs int64, resultPtr, resultMaxLen uint32) int64 {
+	carry := s.takeWaitCarry() // cleat#4511: the first wait after an update's completion; cleared here whichever path the call takes
 	s.setAwaitRejected(false)
 	if s.engine.promiseStore == nil && s.isReplay && s.stepCount < len(s.history) {
 		switch s.history[s.stepCount].EventType {
@@ -138,7 +139,7 @@ func (s *execSession) AwaitPromise(ctx context.Context, m api.Module, promiseID 
 			return s.awaitPromiseWithoutAStore(ctx, m, resultPtr, resultMaxLen)
 		}
 	}
-	return s.step(ctx, m, &awaitPromiseStep, stepArgs{s1: promiseID, i1: timeoutMs, outPtr: resultPtr, outMaxLen: resultMaxLen})
+	return s.step(ctx, m, &awaitPromiseStep, stepArgs{s1: promiseID, i1: timeoutMs, carry: carry, outPtr: resultPtr, outMaxLen: resultMaxLen})
 }
 
 // awaitPromiseIdentity is the identity check of await_promise: the record must name the promise being awaited, and must be the await's OWN
@@ -326,8 +327,18 @@ var awaitPromiseStep = stepSpec{
 			return timedOut
 		}
 		// First time: record the await WITH its timeout, so a later wake can measure against the original deadline, then wait.
-		c.Record(EventRecord{Step: s.stepCount, EventType: EventTypeAwaitPromise, PromiseID: promiseID, TimeoutMs: timeoutMs})
+		//
+		// The first wait after an update that interrupted a wait on this promise keeps THAT wait's deadline (cleat#4511, waitCarry): the guest called once.
+		recTimeoutMs, recStampMs, carriedUntil, carried := c.carriedWait(EventTypeAwaitPromise, func(k string) bool { return k == promiseID }, timeoutMs)
+		if !carried {
+			recTimeoutMs, recStampMs = timeoutMs, 0
+		}
+		c.Record(EventRecord{Step: s.stepCount, EventType: EventTypeAwaitPromise, PromiseID: promiseID, TimeoutMs: recTimeoutMs, TimestampMs: recStampMs})
+		// AFTER the record, as it always was (see await_signals): the clock moves with the record.
 		until := time.UnixMilli(s.nowMs).Add(guestMsDuration(timeoutMs))
+		if carried {
+			until = carriedUntil
+		}
 		return awaitSuspendOrPark(c, deliverIfSettled, parkRequest{Kind: wakePromise, Key: promiseID, DeadlineMs: until.UnixMilli(), Reason: reason, Until: until}, timedOut)
 	},
 }

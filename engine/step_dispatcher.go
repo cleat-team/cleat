@@ -99,6 +99,8 @@ type stepArgs struct {
 	outPtr, outMaxLen uint32
 	// out2Ptr and out2MaxLen are a second buffer for a call that returns two things (an await's delivery: the signal's name and its payload).
 	out2Ptr, out2MaxLen uint32
+	// carry is the deadline of the wait an update interrupted, handed to the first wait after that update's completion (cleat#4511). nil for every other call.
+	carry *waitCarry
 }
 
 // stepCtx is what a spec's Decode and Fresh are handed.
@@ -123,6 +125,11 @@ type stepCtx struct {
 	// unreadAtForeign is how many history records a run left UNREAD when it ended at a foreign record and the spec resumes fresh there (ResumesFreshAtForeign). step reads it
 	// to leave replay through the named exit, leaveReplayAtPending, and not through leaveReplay, which treats unread history as a violation.
 	unreadAtForeign int
+	// overWait is the wait row a poll consumed to deliver across it (cleat#4511, OverWait): on a fresh delivery the unanswered row the run suspended in, on a
+	// replay the row in front of a marked update_received. The spec reads it to note the deadline that row carries.
+	overWait *EventRecord
+	// pending is what the OverWait hook read from the update store, so the Fresh that follows delivers from the same read and not a second one.
+	pending []UpdateRequestInfo
 }
 
 // Reinvoking says that this Fresh is a replayed call running AGAIN, live, because its spec's Reinvoke said so: the record is already in history and already
@@ -257,6 +264,13 @@ type stepSpec struct {
 	// that would turn a resumable history into a divergence, which a migration may not do. It is not called for a record whose Role is not
 	// one of the three (a bug in the spec is always a divergence), and it must not touch the world: it is a pure function of the arguments.
 	ForeignFirst func(a stepArgs) (res int64, ok bool)
+	// OverWait is a poll's second look at a record that is another call's, BEFORE ForeignFirst answers (cleat#4511). When that record is the row a WAIT left when it
+	// suspended the run, a poll that answers "nothing here" leaves an update that arrived during the wait pending for as long as the wait lasts, because nothing
+	// polls again. The hook says what to do: overWaitFresh (the row is the last one, still unanswered, and an update is pending: consume the row, leave replay and
+	// run Fresh, which records the delivery marked), overWaitReplay (the row is followed by a MARKED update_received: consume the row and replay that record), or
+	// overWaitNone (answer as ForeignFirst does). It may read the stores, to decide, and puts what it read in c.pending; it must not consume or record anything:
+	// the step does that, so the dispatcher's one-writer rule for history holds. Only a single-record step may have one, and only poll_update does.
+	OverWait func(c *stepCtx, rec *EventRecord) overWaitKind
 	// OverPending, for a SINGLE-record step, names a record of this call that is a PENDING MARKER: the call was recorded and not yet answered, and its
 	// answer is recorded OVER that record, at the same step, by the next wake (cleat#4152, W3: await_child and await_all_children record an empty
 	// await, and the store's conflict clause reopens it). Such a record is not consumed: step leaves replay AT it, calls Fresh with stepCount still on it,
@@ -454,7 +468,30 @@ func (s *execSession) step(ctx context.Context, m api.Module, sp *stepSpec, args
 			}
 		} else if s.stepCount < len(s.history) {
 			rec := s.history[s.stepCount]
-			if rec.EventType != sp.Want {
+			// A poll that finds the row a wait suspended in (cleat#4511): see OverWait. A fresh delivery consumes that row and leaves replay below, with
+			// nothing left to read; a replayed one consumes it and goes on with the marked record that follows, as any recorded delivery.
+			deliveredFresh := false
+			if rec.EventType != sp.Want && sp.OverWait != nil {
+				switch sp.OverWait(c, &rec) {
+				case overWaitFresh:
+					wait := rec
+					if !s.advanceReplayStep(ctx, &rec) {
+						return 0
+					}
+					c.overWait = &wait
+					deliveredFresh = true
+				case overWaitReplay:
+					wait := rec
+					if !s.advanceReplayStep(ctx, &rec) {
+						return 0
+					}
+					c.overWait = &wait
+					rec = s.history[s.stepCount] // the marked update_received the hook saw behind it
+				}
+			}
+			if deliveredFresh {
+				// Nothing is left to read: the wait row was the last. Replay is left by the common exit below, and Fresh records the delivery.
+			} else if rec.EventType != sp.Want {
 				// A poll answers "nothing here" and leaves the record, and replay, as they were (ForeignFirst).
 				if sp.ForeignFirst != nil {
 					if res, ok := sp.ForeignFirst(args); ok {
@@ -463,13 +500,14 @@ func (s *execSession) step(ctx context.Context, m api.Module, sp *stepSpec, args
 				}
 				// Not consumed: replayDivergenceAt leaves the record for the call it belongs to (cleat#4157).
 				return sp.divergenceAnswer(s.replayDivergenceAt(ctx, m, &rec, sp.Want, sp.divergenceDetailFor(args, &rec), args.outPtr, args.outMaxLen))
-			}
-			if sp.Identity != nil {
+			} else if sp.Identity != nil {
 				if why := sp.Identity(args, &rec); why != "" {
 					return sp.divergenceAnswer(s.replayIdentityDivergenceAt(ctx, m, &rec, sp.Name, why, sp.divergenceDetailFor(args, &rec), args.outPtr, args.outMaxLen))
 				}
 			}
-			if sp.OverPending != nil && sp.OverPending(args, &rec) {
+			if deliveredFresh {
+				// The wait row was consumed above and was the last one: nothing to decode, and Fresh records the delivery.
+			} else if sp.OverPending != nil && sp.OverPending(args, &rec) {
 				// Its own pending record: not consumed. The answer is recorded over it, so the step leaves replay with stepCount ON it.
 				overPending = true
 			} else {
