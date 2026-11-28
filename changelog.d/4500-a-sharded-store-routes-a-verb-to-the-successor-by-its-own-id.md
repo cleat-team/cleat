@@ -1,0 +1,4 @@
+---
+section: fixed
+---
+- **On a sharded store, a signal, a cancel or a terminate addressed to a continued run's successor by the successor's own id is no longer refused or dropped (cleat#4500).** A continue-as-new inserts the successor on the shard of the run it continues, but the store routed the verb by the hash of the id it was given, which names that shard only about half the time with two shards. Over two real PostgreSQL databases a signal, a terminate and `CancelWorkflow` returned `workflow not found`, and the cooperative cancel returned success and changed nothing on either shard. Each verb now finds the shard that holds the run: the hashed shard first, so the usual call is unchanged, then the others on a not-found. A cooperative cancel of a run no shard holds now returns `ErrWorkflowNotFound`. Measured on PostgreSQL with two shards; MySQL and SQL Server, and more than two shards, were not run. Sharding is experimental.

@@ -19,6 +19,12 @@ func (s *refusingShard) DeliverSignal(_ context.Context, id, _, _ string) error 
 func (s *refusingShard) DeliverSignalIdempotent(_ context.Context, id, _, _, _ string) (bool, error) {
 	return false, s.refuse(id)
 }
+
+// GetWorkflowByID: the stub holds no rows. A refusal of ErrWorkflowNotFound makes the ShardedStore look for another shard that has the run (cleat#4500); this says none does, so the not-found
+// the test expects comes back unchanged.
+func (s *refusingShard) GetWorkflowByID(context.Context, string) (*WorkflowInstance, error) {
+	return nil, nil
+}
 func (s *refusingShard) successorOfRun(_ context.Context, id string) (string, error) {
 	return s.successors[id], nil
 }
