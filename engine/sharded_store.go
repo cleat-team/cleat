@@ -317,8 +317,8 @@ func (s *ShardedStore) otherShardHolding(ctx context.Context, id string, not *Sh
 	return nil, nil
 }
 
-// shardHoldingRun is onHolder's lookup for a verb whose store answers a missing row with SUCCESS, which is the cooperative cancel: it asks the hashed shard first, then the others, and
-// returns ErrWorkflowNotFound if none holds the run, so a cancel that matched nothing is not reported as one that worked.
+// shardHoldingRun is onHolder's lookup for a verb whose store used to answer a missing row with SUCCESS, which was the cooperative cancel until cleat#4503: it asks the hashed shard first, then the others, and
+// returns ErrWorkflowNotFound if none holds the run. It was written for the days a cancel that matched nothing was reported as one that worked; the stores now refuse it themselves, and the lookup stays because it also finds the shard that holds the run.
 func (s *ShardedStore) shardHoldingRun(ctx context.Context, op, id string) (*Shard, error) {
 	shard := s.getShard(id)
 	if shard == nil {
@@ -790,7 +790,8 @@ func (s *ShardedStore) FinalizeWorkflowSegment(ctx context.Context, runID, worke
 
 // RequestCancellation routes by workflow ID.
 func (s *ShardedStore) RequestCancellation(ctx context.Context, workflowID, reason string) error {
-	// A store answers a cancel that matched no row with success, so the shard that holds the run is found FIRST (cleat#4500); a run no shard holds is ErrWorkflowNotFound.
+	// The shard that holds the run is found FIRST (cleat#4500), because the hashed shard need not hold it. A store used to answer a cancel that matched no row with success (cleat#4503), which is why this lookup
+	// also had to refuse a run no shard holds; a run no shard holds is ErrWorkflowNotFound.
 	shard, err := s.shardHoldingRun(ctx, "request_cancellation", workflowID)
 	if err != nil {
 		return err
@@ -2013,7 +2014,7 @@ func (s *ShardedStore) TerminateWorkflowReceipt(ctx context.Context, workflowID,
 }
 
 func (s *ShardedStore) RequestCancellationReceipt(ctx context.Context, workflowID, reason string) (SettleReceipt, error) {
-	// Found first, like RequestCancellation: this store answers a cancel that matched no row with success (cleat#4500).
+	// Found first, like RequestCancellation (cleat#4500). A store used to answer a cancel that matched no row with success (cleat#4503); a run no shard holds is ErrWorkflowNotFound.
 	shard, err := s.shardHoldingRun(ctx, "request_cancellation", workflowID)
 	if err != nil {
 		return SettleReceipt{}, err

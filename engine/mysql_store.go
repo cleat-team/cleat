@@ -344,7 +344,9 @@ func (s *MySQLStore) requestCancellationOnceTo(ctx context.Context, workflowID, 
 		if refusal := cooperativeRefusal(workflowID, end, endStatus); refusal != nil {
 			return refusal
 		}
-	case !errors.Is(err, sql.ErrNoRows):
+	case errors.Is(err, sql.ErrNoRows):
+		return ErrWorkflowNotFound
+	default:
 		return fmt.Errorf("request cancellation: read the end's status: %w", err)
 	}
 	workflowID = end

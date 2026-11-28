@@ -260,8 +260,9 @@ func TestAdminLoginControlPlaneWritesTouchOnlyTheCallersOwnWorkflow(t *testing.T
 	})
 
 	t.Run("RequestCancellation", func(t *testing.T) {
-		if err := storeB.RequestCancellation(ctx, cpWorkflowA, "not yours"); err != nil {
-			t.Fatalf("RequestCancellation across tenants: %v", err)
+		// ErrWorkflowNotFound since cleat#4503: tenant A's run is not B's to cancel, and to B it reads as a run that does not exist. It used to return nil here and write nothing.
+		if err := storeB.RequestCancellation(ctx, cpWorkflowA, "not yours"); !errors.Is(err, ErrWorkflowNotFound) {
+			t.Fatalf("RequestCancellation across tenants = %v, want ErrWorkflowNotFound", err)
 		}
 		if got := instanceField(t, storeA, "cancellation_requested", cpWorkflowA, unscopedTenantA); got != "0" {
 			t.Errorf("tenant B flagged tenant A's workflow cancelled: A's cancellation_requested is %q", got)

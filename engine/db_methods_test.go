@@ -4031,7 +4031,10 @@ func TestPostgresStore_TraceWorkflow_BeginError(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestPostgresStore_RequestCancellation_Success(t *testing.T) {
-	db := newMockDBForPostgres(t, nil, []mockExecResult{
+	// The run exists: a cooperative cancel of a run no row holds is ErrWorkflowNotFound (cleat#4503), so the mock holds it.
+	db := newMockDBForPostgres(t, []mockRowsResult{
+		{match: "SELECT status FROM workflow_leases", data: [][]driver.Value{{"running"}}},
+	}, []mockExecResult{
 		{match: "SET cancellation_requested", affected: 1},
 	})
 	defer db.Close()
