@@ -283,6 +283,16 @@ jobs:
           esac
           echo "exists=false" >> "$GITHUB_OUTPUT"
 
+      # cleat#3487: the labels come from the same script release.yml uses, so
+      # the two cannot drift again. No --version here: a develop or rc image has
+      # never carried one and is not required to.
+      - name: Compute cleat-worker image labels
+        id: labels
+        run: |
+          set -euo pipefail
+          python3 scripts/oci_image_labels.py emit \
+            --repo "$GITHUB_REPOSITORY" --ref "$GITHUB_REF_NAME" --sha "$GITHUB_SHA" >> "$GITHUB_OUTPUT"
+
       # Only the sha tags here. `:develop` is moved separately below, so that a
       # slower build of an older commit cannot finish last and drag it back.
       - name: Build and push cleat-worker image (linux/amd64, linux/arm64)
@@ -295,10 +305,7 @@ jobs:
           tags: |
             ${{ steps.worker_image.outputs.short }}
             ${{ steps.worker_image.outputs.full }}
-          labels: |
-            org.opencontainers.image.source=https://github.com/${{ github.repository }}
-            org.opencontainers.image.revision=${{ github.sha }}
-            org.opencontainers.image.ref.name=${{ github.ref_name }}
+          labels: ${{ steps.labels.outputs.labels }}
 
       # Move `:develop` only if this commit is still develop's head. Two merges
       # seconds apart run in separate groups (above), and the older one can

@@ -191,7 +191,9 @@ runtime role, no DDL rights needed) and:
 Ahead starts because a rolling upgrade migrates to the new version while workers on
 the old one are still running or restarting; refusing there would wedge the rollout
 on the workers it is replacing. It relies on migrations staying additive within a
-release line.
+release line. That is the schema's rule only: it does not make a rolling upgrade
+supported, and for 0.5.0 to 0.6.0 it is not (see
+[Upgrading](../operations/upgrading.md#automatic-migration-recommended)).
 
 ---
 
@@ -331,6 +333,15 @@ own `heartbeat=N` term.
 **Not yet supported on a sharded deployment (`--shards-file`).** A sharded
 worker's heartbeat stays on the execution pool regardless of this flag.
 
+**Which runs it covers.** Every tenant's, on PostgreSQL and SQL Server. A worker
+that serves other tenants (`--claim-across-tenants`) beats their runs through this
+same pool, re-scoped to each tenant per call, so it costs no connection beyond
+this flag's ceiling. Before cleat#3571 only the worker's own tenant's runs used
+it, and another tenant's beat went through the execution pool. MySQL, whose tenant
+is the database a pool was opened on, is single-tenant and has nothing to cover.
+It protects against a saturated execution pool; it does nothing for a paused
+process or a degraded network path.
+
 A heartbeat that succeeds through this pool still records the worker's database
 contact as OK (`recordDBContactOK`), the same signal an idle worker's DB ping
 records -- so the DB-health gate cleat#2166 added does not distinguish which
@@ -347,6 +358,11 @@ pool answered, only whether the database is reachable.
 How long the worker waits between dispatch-loop iterations when no runnable
 workflows are found. Uses progressive backoff up to 6x this value.
 
+With `--resident-max-runs` above zero it is also how often a run held through a
+signal wait checks the store for its signal, which bounds how long a signal can
+wait on a held run (see `--resident-max-runs`). A zero or negative value is not
+an interval for that purpose and leaves the 500 ms default.
+
 ### --max-workflow-duration
 
 | Type | Default | Description |
@@ -361,6 +377,35 @@ Example: `--max-workflow-duration 5m`
 
 ---
 
+## Sizing a worker by language
+
+What one worker costs depends on the guest language far more than on anything else, and the figures differ by more than an order of magnitude between languages. Every number below is **measured**, says where it comes from, and holds only for the conditions in the last paragraph. The held figures are what `--resident-memory-percent` and `--resident-memory-budget-mb` charge against; the compile figures are what a worker's memory has to cover beside them.
+
+| | Go | Python | C# |
+|---|---:|---:|---:|
+| **Held run, idle instance** (private memory, Pss, per held instance) | 1.5 MiB | 1.3 MiB | 16.8 MiB |
+| **Held run after the guest has handled large objects** (allocated and dropped 256 MiB in 4 MiB chunks) | 19.6 MiB | 9.5 MiB | **57.4 MiB** |
+| **What a held run is charged** (0.6.0) | 24 MiB | 11 MiB | **59 MiB** |
+| **Held runs in the default budget of a 2Gi worker** (20% = 409 MiB, whole runs) | 17 | 37 | **6** |
+| First distinct component compiled **in the worker** (peak above the level before it) | not measured | +486 to +512 MiB (RSS) | +60 to +118 MiB, of which +60 to +70 is kept (the larger includes the engine's own start-up) |
+| Each further distinct component compiled in the worker | not measured | +185 to +268 MiB kept (RSS); up to about 300 MiB (198 to 308 for each of the first four further components, then 44 to 76) in a 2 GiB container | peak +11 to +42 MiB, +9 to +41 MiB kept |
+| Same, with **`--component-precompile`** (the worker keeps the artifact, the compile runs in a child) | not measured | +27 MiB | +2.4 MiB |
+| Charge of one entry in the compiled-module cache (3.5 times its serialized artifact, cleat#4391) | not applicable (a core module) | 111 to 153 MiB, from serialized artifacts of 31.9 to 43.7 MiB (about 6 to 9 entries per 1 GiB bound) | about 11 to 30 MiB, from artifacts of 3.1 and 8.5 MiB |
+
+**Where each number comes from.** Held, idle: a fit of Pss against the number of held instances, over 1 to 64, three repetitions, R squared 1.0000, 2026-11-22, on the builds with cleat#4386 (C#: 8 MiB GC segments, 48.7 MiB before) and cleat#4387 (Python: dense data segments, 12.1 MiB before). Held, after large objects: the stage-0 probe's pattern, re-run on the fixed builds on 2026-11-23, a fit over 4 to 16 held instances, held count read from the held set and equal to N in every row (raw rows: `testdata/heldmem/raw/churn/` on `feature/resident-memory-percent-design`); an independent re-run by a second reviewer gave C# 57.55 MiB (65.1 on the default GC segments), and Python 5.9 MiB with a different guest. Go's 19.6 MiB is the original design measurement of the same pattern, and its idle figure is a fit over held instances of a minimal guest. Compile: the Python figures are the component-memory measurements of 2026-11-23 (one worker process, RSS above the baseline, arm64 Linux) and a 2 GiB container; the C# figures are the container's own `memory.current` for a worker compiling one component at a time in a 2 GiB container, two components of 1.0 and 2.8 MiB with six variants each (one set of code stamped with different metadata, so each is a different cache key with the same compile cost; a fleet of different libraries costs more). Cache charge: `engine/compiled_size_estimate.go`, the measured serialized artifacts of five distinct components (three Python, 31.9 to 43.7 MiB; two C#, 3.1 MiB for a minimal workflow and 8.5 MiB for the conformance one), at the 3.5 times that cleat#4391 charges; before it, the cache charged 4 times the wasm length.
+
+**C# needs much more memory per held run than Python, and 0.6.0 charges for it.** An idle C# instance is 17 MiB, but one that has handled large objects stays near **57 MiB** (65 on a component built without the 8 MiB GC segments), because the runtime's large-object heap grows with it and wasm memory never shrinks, and a run is charged **59 MiB**. In the default budget of a 2Gi worker that is **6 held C# runs against 37 held Python runs**. Reducing it is planned for 0.7.0 (cleat#4440). Until then, for a worker that serves C# workflows:
+
+- **raise the container's memory limit** (`limits.memory` in the chart): the budget is a share of the limit, so a 4Gi worker holds about 13 C# runs;
+- **or lower `--resident-memory-percent`** if the worker cannot afford the held runs beside everything else, which makes residency hold fewer runs and suspend more (a suspended run costs a replay when it wakes, not correctness);
+- **or run C# on its own workers**, with their own memory limit, task queue and budget, so its cost does not displace a Python or Go worker's.
+
+**What a worker needs for compiling, at the same limit.** Measured on a real worker in a container limited to 2Gi, with nine distinct Python components, **one run of each configuration** on one machine. **With `--component-precompile`, which is on by default since 0.6.0**, the compile runs in a short-lived child that returns its memory, and the nine components, 60 held-eligible runs and one more first-time compile all completed with a **peak of 1107 to 1159 MiB** and no kill; six distinct components arriving at once completed in 41 seconds at a peak of 1425 MiB, because **a worker compiles one component at a time**.
+
+**Compiled in the worker instead** (`--component-precompile=false`, or the fallback when a child fails for an ordinary reason), each further distinct Python component **kept 198 to 308 MiB for each of the first four further components and 44 to 76 for each of the next three (mean 175), for good**: the worker reached 1.76 GiB after eight and, before 0.6.0, the container was **killed by the out-of-memory killer** on the ninth (peak 2013 of 2048 MiB), and six distinct components arriving at once reached the limit within 17 seconds and were killed. Since 0.6.0 the worker compiles one component at a time and, **before a compile in its own process, checks the memory the container has left**: it needs between 256 MiB (a small C# workflow) and 800 MiB (a Python-sized component) scaled by the component's size, and below that **the run is released, not failed**, and components already compiled keep running (`--component-compile-min-headroom-mb`, below). With that check, the same cold start of twenty runs on six distinct Python components and a seventh compile, precompile off, completed with no kill at a peak of 1473 MiB (12 runs done, 8 released); with every child forced to fail (a 1 second child timeout) it completed with no kill at 1608 MiB (10 done, 10 released). **That is a degraded mode, not a full-speed one**, and the memory a compile in the worker keeps does not come back, so a refusal usually lasts until the worker is restarted or its limit raised: keep `--component-precompile` on. A child killed by the out-of-memory killer is refused and not compiled in the worker. The forced failure used `--component-precompile-timeout`; a timeout is treated as an ordinary failure, not a kill, so a child that is merely slow, on a heavily loaded node or with `--component-precompile-parallel false`, can reach the fallback without being forced. Fallbacks are counted on `cleat_component_precompile_fallbacks_total{reason}`: a rate there means the flag is not protecting the worker.
+
+**These figures are for the conditions they were measured under, and are floors for a workflow that does real work.** One machine (an arm64 Linux virtual machine; **x86-64 is not measured**); minimal and synthetic guests, not your workflow; **live data is not in any of them**, and a guest that once held 100 MiB keeps it, one for one, since wasm memory never shrinks; a component built before cleat#4386 (C#, 48.7 MiB idle per held run before) or cleat#4387 (Python, 12.1 MiB idle before) costs more per held run than the table says and is charged short, so rebuild your components. `--memory-soft-limit`, which reads the container's real use, is the backstop for all of it.
+
 ## Memory Management
 
 ### --memory-soft-limit
@@ -371,6 +416,8 @@ Example: `--max-workflow-duration 5m`
 
 When system memory usage exceeds this fraction, the worker stops claiming new
 work from the database but continues executing in-flight workflows.
+
+**A fraction of what?** Of the worker's memory **limit**, and the usage is that same cgroup's (cleat#4431). On cgroup v2 every cgroup on the worker's own path (from `/proc/self/cgroup`) with a numeric `memory.max` is a candidate, each measured against **its own** `memory.current` (a parent's limit bounds the parent's whole use, siblings included), and **at every reading the one with the least headroom is used**, because that is the level that runs out first and it changes over time; with no limit at any level it is the host's `MemTotal` against the host-wide `MemAvailable` (`/proc/meminfo`), since with no limit the host's memory is what runs out. Before cleat#4431 it read the cgroup mount's root, which is the worker's own cgroup only inside a private cgroup namespace: under `docker run --cgroupns=host`, or a systemd unit with `MemoryMax=`, a 512 MiB container had its fractions taken of the host's memory and the host's usage. The worker logs what it is measuring against once at start-up (`memory monitor`: source, total, used, and both fractions). **cgroup v1 is not read:** on a v1 host the monitor falls back to `/proc/meminfo`, which is the host's memory, so set a container limit on v2 or size `--concurrency` and the machine's memory together. The residency budget (`--resident-memory-percent`) reads the same limit by the same code.
 
 ---
 
@@ -398,6 +445,126 @@ workflow starts (returns HTTP 503).
 | Type | Default | Description |
 |------|---------|-------------|
 | int | `1000` | Max memory samples per workflow definition |
+
+---
+
+## Residency
+
+A durable sleep that is due soon can be **held on the worker** instead of suspended: the run keeps its instance and wakes in place when the timer fires, with no claim, no instantiation and no replay (cleat#4162, design: `docs/design/resident-suspended-runs.md`). It is **on by default since 0.6.0 (0 in `--resident-max-runs` or `--resident-memory-percent` turns it off)**, and how many runs it holds is a **share of the worker's memory** (`--resident-memory-percent`, 20% by default; cleat#4377), not a fixed count, and a refusal is always the safe answer: the wait suspends exactly as it always has, so a wrong number here can only hold less than it could.
+
+**What is and is not measured, so you can judge the defaults.** The memory of a held instance is measured for *minimal* guests and then after a guest has allocated and dropped 256 MiB in 4 MiB chunks (Go 2.5 MiB, 19.6 MiB after churn; Python 1.3 MiB, 9.5 after; C# 16.8 MiB at the 8 MiB GC segments of cleat#4386, 57.4 after; and 12.1, 12.1 and 48.7 MiB before cleat#4382 and cleat#4386), not for real workflows. Each held run is charged its figure after that churn, rounded up (Go 24 MiB, **Python 11 MiB, C# 59 MiB**, the last two plus 1 MiB for the store and session; the Python and C# figures were measured on an arm64 Linux VM only, **x86-64 is not measured**). **A component built before those two changes costs about 8 MiB (Python) or 32 MiB (C#) more and is charged short**: rebuild it, and `--memory-soft-limit` is the backstop for one you have not. **The compiled component is deliberately not charged**: it lives in the worker's code cache (an LRU) whether or not anything is held, so a worker that ran the workflow already carries it, and the measured per-process figure (Python about 500 MiB, C# about 81 MiB) also included the Go and wasmtime baseline; it belongs to `--memory-soft-limit`, not to this budget. **A hold never outlives its code's cache entry**: a held instance keeps its compiled code alive even after the cache evicts it, so when the cache evicts a module or component every held run of it is sent back (it suspends, and the next claim replays it, which recompiles); the worst case stays bounded by the cache, as it is without residency. **None of this includes what a guest allocates before it blocks**: measured, a Python or C# guest that touched 64 MiB cost about 64 MiB more, so these are the cost of the runtime and a floor for a guest that does real work; the default budget (`--resident-max-runs` times the dearest language) can still be exceeded by real guests, and `--memory-soft-limit` is the second guard. A component the build did not stamp as C# is detected as Python and charged as Python. The fixed cost of replaying a run is measured (0.44 to 0.67 s per claim for a minimal guest); the cost per recorded event is **not**. The multiplier, the floor and the cap are a starting point and **not measured**; tuning them on real workflows is cleat#4187. So the defaults are conservative, and with the per-event cost left at 0 every run gets the floor as its window.
+
+**Go, Python and C# guests are held, through durable sleeps and signal waits (`await_signals`).** Java, Rust and JavaScript have no measured per-instance figure and are refused, and the other waits (promises, children, updates) are not held yet. **A signal wait is held only if its own timeout is within the window, so at the defaults only short request/reply waits (timeouts up to about 10 s) are held and long approval waits are not, by design:** a held run checks the store for its signal on every `--poll` interval, and polling a wait that lasts minutes to save one replay would cost more than it saves. **How a held signal wait wakes:** the run asks the store whether a delivery of any awaited name exists, once straight after it is held (so a signal committed just before is found at once) and then every `--poll` (500 ms by default), all inside one hold, so its wall-clock limits are paused for the whole hold and restart once, at the end. That read is the correctness path on PostgreSQL, MySQL and SQL Server alike (no LISTEN/NOTIFY is needed). **On PostgreSQL the worker's `--notify-channel` listener (`cleat_dispatch` by default) also makes every held signal wait recheck at once whenever a NOTIFY arrives:** a delivery sends one, and a held run is `running`, so without this the NOTIFY would find nothing to dispatch and the held run would wait for its next `--poll` tick while a suspended one is redispatched at once. The NOTIFY carries no payload, so the nudge wakes every held signal wait on the worker and each asks its own store question; each hold is limited to one nudge-triggered read per 50 ms, because that channel carries every dispatch wake-up and not only signals. A lost nudge costs nothing but the interval. **What is claimed:** the bar is the end-to-end time from the signal's commit to the guest's next step, where a hold also saves the replay a suspended run does. **Measured:** on real PostgreSQL a nudged hold woke 9 ms after the delivery against a 3 s recheck interval, and 2.8 s with the nudge disabled; MySQL and SQL Server wake within one `--poll`. **Not measured:** the held-versus-residency-off comparison at p50 and p99 (cleat#4306), so "never later than residency off" is not claimed. Each check is one store read per awaited name per held run, bounded by `--resident-max-runs`, and is counted by `cleat_resident_rechecks_total{kind="signals",result}` (`found`, `none`, `error`); a check that cannot read the store ends the hold and the run suspends. A signal that lands after the last check and before a held run is sent back (drain, memory pressure) is not lost: the release compares the run's signal sequence with its value at claim and wakes it at once instead of at its deadline. **Measured, locally:** a held run resumed 40 to 48 ms after a real delivery against a 40 ms interval on all three stores. **Not measured:** the comparison with residency off on a real worker, the cost under load, and delivery from a second worker process (the tests deliver from a separate goroutine on the same store; the store is the shared medium). A held run is in flight, so a worker that starts to drain sends every held run back first, and at the memory hard limit it sends them back too; nothing is held while the worker is over `--memory-soft-limit`.
+
+### --resident-max-runs
+
+| Type | Default | Description |
+|------|---------|-------------|
+| int | `1024` | Most runs held in memory through a wait that is due soon, a ceiling on the count; 0 turns residency off |
+
+**On by default since 0.6.0 (cleat#4162). Since cleat#4377 this is a ceiling and not the usual limit:** the memory budget (`--resident-memory-percent`) is what normally decides how many runs a worker holds, and 1024 is the largest count the scheduler was measured at. It was 8, "a conservative guess, not a measured optimum", until then; tuning on real workflows is cleat#4187. **If a worker dies while it holds runs, their wakes are delayed until the runs are reclaimed.** The kill-while-held scenario (`tests/chaos`, `TestChaosSigkillWhileAHeldRunSleepsThenReclaim`) kills a worker mid-hold and shows the run is reclaimed and every effect happens exactly once. The wake is delayed because a held run is still assigned to the dead worker, so only the reaper can take it, while a suspended run is simply claimable at its wake time. **What it costs, measured with a real kill at the defaults and no shortened lease** (effect A, an 8 s sleep, effect B; three runs on PostgreSQL, the surviving worker's reaper already past its start-up grace): the run was reclaimed 48 to 49 s after the kill and the second effect came **49 to 50 s** after the first. That is consistent with the reclaim window (about 47 s at the default `--heartbeat`, from the formula in `--heartbeat`'s help) plus a reaper tick, which is derived, not measured. With residency off the second effect came **9.2 to 9.5 s** after the first (measured by cleat-review3 in the test harness, on one loaded machine). The test harness itself shortens the dead worker's lease, so its own 40 to 41 s figure is not the production delay. **Not measured:** where in the heartbeat and the reaper's tick a kill falls (expect up to about 10 s more, derived), a reaper on a worker that has only just started (it also waits out its start-up grace), and MySQL and SQL Server. **In short: a worker crash during a hold delays the sleeping run's wake to the reaper's reclaim, about 50 s measured against about 9 s with residency off; every effect still happens exactly once.** A faster path for held runs is cleat#4275 (0.7.0). A worker that is draining or cordoned, or at its memory hard limit, already sends every held run back (tested).
+
+A held run keeps its instance and one OS thread (measured: about one thread per held instance, 1053 for 1024 Go instances), so this is also a bound on threads. 1024 is the largest count measured; the thread cost above it was not.
+
+**A held run's limits are paused for the hold and start again when it ends.** The wall-clock limits (`--wasm-wall-clock-ceiling` and `--max-workflow-duration`) are per execution *segment*, and a workflow that suspends and resumes gets a fresh deadline each time. A held wait gets the same: the limits do not run while the run is held, and **they restart at their full duration when it wakes**, as does the execution fence (`--wasm-instance-timeout`, which counts only the guest's own execution). So the held time is charged to none of them, and the work before the wait and the work after it do **not** add up against one limit, which is what suspending and resuming would have given. A limit still binds each segment: work after the wake that is longer than a fresh limit times out, as it would in the next segment of a suspended run.
+
+Measured on real wasmtime (a Go guest through `Engine.Execute`, `TestAHeldRunMeetsItsOwnLimitsAndCancelOnRealWasmtime` and `TestAHeldWaitRestartsTheExecutionsLimitsNotJustExcludesTheHeldTimeOnRealWasmtime`):
+
+| case | residency off | residency on |
+|---|---|---|
+| 150 ms ceiling, 300 ms wait | suspends in 1 ms | held, completes in about 302 ms |
+| work 300 ms, wait 300 ms, work 300 ms under an 800 ms ceiling | suspends at the wait in about 304 ms | **completes in about 904 ms** |
+| work 500 ms, wait, work 500 ms under an 800 ms ceiling | suspends at the wait in about 503 ms | completes in about 1.3 s: a restart, not just an exclusion of the held time |
+| work 50 ms, wait, work 1000 ms under an 800 ms ceiling | suspends at the wait in about 54 ms | times out in the fresh segment: the limit still binds |
+| the run's context cancelled while held | | the run is back as a suspension about 2 ms after the cancel |
+
+**Before this was true, residency could fail a run that suspending would not have** (a hold ran through the ceiling and ended in `execution timed out`; after a hold, the work after the wake had only what was left). Both are gone. A **cancelled context** ends a held run at once, whether or not its limits are paused (the row above). **A terminate, a cancel or a reclaim recorded in the store** bumps the run's generation, and this worker learns that from its heartbeat, which can be up to `--heartbeat` (5 s by default) late; a held run whose timer fires before then **would have woken and acted**, which a suspended run cannot do, because it has no claim to win. Measured on a real worker (Postgres, real wasmtime, an 8 s sleep, the same worker with residency off as the control): with the heartbeat withheld past the timer, a terminated held run reached the call after its sleep, 6 to 7 s after the terminate had committed, where the suspended run stopped in under 300 ms and never reached it. So a held run **checks the store before it goes back to the guest** (it runs the worker's heartbeat tick itself, so "lost" means exactly what it means to the heartbeat), every time a wait ends: if it no longer has the run, or cannot find out, the wait suspends and the run is replayed by whoever holds it next. That re-measures as never reaching the call, for terminate and for cancel, with and without the heartbeat having run. It costs one heartbeat tick per wake (one batched query per tenant that has runs in flight; ticks are serialized). What it does not change: the instance stays in memory until the heartbeat or the timer, whichever is first, so a terminated run's memory is held for up to that long.
+
+**What is still refused, and why.** A wait whose limit has **already ended** is not held (the expiry is on its way), and neither is a wait due within **100 ms** of a deadline that **cannot** be paused, which is a deadline on a context the caller supplied (reason `deadline`); either way the wait suspends as it always did. The 100 ms is from a measurement: a hold ended by a cancel was back as a suspension in a median of 0.3 ms and at most 9 ms (6.8 ms under `-race`) over 120 samples of a minimal guest on a loaded machine, so 100 ms is about ten times the worst. It is not measured for a guest with real defers or a large history.
+
+**What bounds a hold now.** Because the limits are paused, the wall-clock ceiling no longer bounds how long a run is held; `--resident-window-cap` (5 minutes by default) does, and so does `--resident-max-runs`. A worker that is draining, or at its memory hard limit, sends every held run back at once.
+
+**Boot validation.** Every `--resident-*` flag is validated when the worker starts **even when `--resident-max-runs` is 0**: a value that cannot work (a cap below the floor, a negative number, a multiplier of 0) stops the worker with a message naming it. The defaults are all valid, so a worker that sets none of them is unaffected.
+
+---
+
+### --resident-memory-percent
+
+| Type | Default | Description |
+|------|---------|-------------|
+| float | `20` | The share, in percent, of the worker's memory that held runs may be charged; 0 turns residency off |
+
+**The budget is computed once at start-up and logged**, with where the memory figure came from (cleat#4377). The figure is the worker's memory **limit**, in this order: a cgroup v2 `memory.max`; a cgroup v1 `memory.limit_in_bytes` when it is a real limit (the "unlimited" value near 2^63 is not); else the host's **physical** memory (`/proc/meminfo`, or `hw.memsize` on macOS), **with a warning**, because on a host shared with other workloads a share of physical memory can be most of what they need: set a container limit or lower this. A limit at or above the host's memory is no limit. If none of these can be read the budget is 8 runs of the dearest language and a warning says so; residency is never turned on with an unknown budget.
+
+It is the limit and **not what is free now**, so the budget does not shrink as running runs grow; `--memory-soft-limit` is what reacts to real pressure, and it stops a hold while the worker is over it. **20 is the owner's choice, argued from the soft limit's 80%:** the rest has to hold the worker's own baseline (several hundred MB for a Python or C# component) and the runs that are executing, each of which may use up to the per-store limit.
+
+| Worker memory limit | Budget at 20% |
+|---|---|
+| 512 MiB | 102 MiB |
+| 2 GiB | 410 MiB |
+| 8 GiB | 1.6 GiB |
+
+What that buys depends on the language, at the per-run charges below. **The charge is an estimate by language, not a reading**: a guest that allocates more than its charge before it waits adds roughly one for one, and a component guest's real size is not readable by the engine, so that is caught by `--memory-soft-limit` and not by this budget. Two gauges show it: `cleat_resident_memory_budget_bytes` and `cleat_resident_memory_charged_bytes`. **When the budget is full a wait is refused with reason `memory` and suspends as it always did; nothing is evicted to make room** (evicting the run that wakes furthest away is a follow-up).
+
+---
+
+### --resident-memory-budget-mb
+
+| Type | Default | Description |
+|------|---------|-------------|
+| int | `0` | Memory the held runs may add up to, in MB; 0 means derive it from `--resident-memory-percent`, and a value above 0 overrides that |
+
+Each held run is charged a per-language figure: **24 MiB for Go**, rounded up from the 19.6 MiB measured after a guest had allocated and dropped about 256 MiB (a minimal guest is 2.5 MiB); **11 MiB for Python** and **59 MiB for C#**: each its measured per-instance cost after a guest has allocated and dropped 256 MiB in 4 MiB chunks (9.48 and 57.44 MiB; 1.35 and 16.85 with no churn) plus 1 MiB for the store and session, rounded up. They were 17 and 66 MiB, from the same kind of measurement before cleat#4382 and cleat#4378 made the instances smaller. **The 8 MiB GC segments save about 32 MiB for a C# workflow that allocates nothing large and only about 8 for one that churns large objects**, because the GC's large-object heap grows with it. Smaller garbage does not grow an instance (256 MiB dropped as 16 KiB or 1 MiB blocks left C# at 16.8 MiB and Python at 1.3 to 2.4). **Live data is not in these figures and cannot be:** wasm memory never shrinks, so a guest that held 100 MiB once keeps it, one for one; `--memory-soft-limit` is the backstop. The figures are for a component built with those changes; one built before them is charged short (see Residency above).
+
+---
+
+### --resident-window-floor
+
+| Type | Default | Description |
+|------|---------|-------------|
+| duration | `10s` | The shortest a run may be held for; a wait due within this is always eligible |
+
+**Unmeasured**: a starting point. The design notes that 10x a Go run's tiny replay estimate is shorter than a typical wait, which is why a floor exists at all.
+
+---
+
+### --resident-window-cap
+
+| Type | Default | Description |
+|------|---------|-------------|
+| duration | `5m` | The longest a run may be held for; a wait due later than this is never held |
+
+**Unmeasured**: a starting point. A held run is still inside `--wasm-wall-clock-ceiling` (5 minutes by default), which is a context timeout around one execution.
+
+---
+
+### --resident-replay-multiplier
+
+| Type | Default | Description |
+|------|---------|-------------|
+| float | `10` | A wait is held if it is due within this many times the estimated cost of replaying the run, clamped to the floor and cap |
+
+**Unmeasured**: a starting point.
+
+---
+
+### --resident-replay-fixed
+
+| Type | Default | Description |
+|------|---------|-------------|
+| duration | `500ms` | The fixed part of the estimated cost of replaying a run |
+
+Measured at 0.44 to 0.67 s per claim for a minimal guest.
+
+---
+
+### --resident-replay-per-event
+
+| Type | Default | Description |
+|------|---------|-------------|
+| duration | `0s` | The per-recorded-event part of the estimated cost of replaying a run |
+
+**Unmeasured, so 0**: until it is measured the window does not grow with a run's history, and every run's window is the floor.
 
 ---
 
@@ -632,7 +799,7 @@ keyless worker cannot recognise ciphertext by inspecting a row; without this
 guard it would read a sealed column as plaintext, silently. The database
 remembers "payload encryption was enabled here" the first time any worker
 starts with `--encrypt-sensitive-payloads` and a key ring configured
-(`payload_encryption_ever_enabled`, migration 008), and every worker started
+(`payload_encryption_ever_enabled`, defined in the baseline schema), and every worker started
 without one checks that marker before doing anything else.
 
 The marker is insert-only -- nothing in this release clears it. A deployment
@@ -718,13 +885,14 @@ See [Streaming tokens to a client](../how-to/stream-tokens-to-a-client.md).
 General endpoints use this limit.
 
 **Five endpoints do not, and this flag does not move any of them.** There are
-four ceilings in total:
+four ceilings in total, and one of them has a flag of its own,
+[`--max-definition-body-size`](#--max-definition-body-size):
 
 | limit | endpoints | moved by |
 |---|---|---|
 | `--max-body-size`, 1 MiB default | everything not listed below | this flag |
 | **64 KB**, fixed | `POST /api/workflows/:id/signal`, `POST /api/workflows/:id/cancel`, `POST /api/workflows/:id/update/:name` | nothing |
-| **10 MiB**, fixed | `POST /api/definitions` (WASM upload) | nothing |
+| **64 MiB** by default | `POST /api/definitions` (WASM upload) | `--max-definition-body-size` |
 | **1 KB**, fixed | `POST /api/dead-letters/:id/terminate` | nothing |
 
 This line named only "signal endpoints" until cleat#1332, so cancel was
@@ -738,13 +906,39 @@ itself:
 
     {"error":"request body too large: the limit is 1048576 bytes, set by --max-body-size"}
     {"error":"request body too large: the limit is 65536 bytes, fixed for the signal, cancel and update endpoints and not changed by --max-body-size"}
-    {"error":"request body too large: the limit is 10485760 bytes, fixed for the definition upload endpoint and not changed by --max-body-size"}
+    {"error":"request body too large: the limit is 67108864 bytes, set by --max-definition-body-size for the definition upload endpoint and not changed by --max-body-size"}
 
 Seven of the sixteen bounded endpoints used to answer `400 {"error":"invalid
 JSON: http: request body too large"}` instead — a status asserting the body was
 malformed, on a body that was never read. cleat#1338 made all sixteen agree;
 that is a status-code change for those seven, and clients branching on `400`
 for an oversized body need to handle `413`.
+
+---
+
+### --max-definition-body-size
+
+| Type | Default | Description |
+|------|---------|-------------|
+| int64 | `67108864` (64 MiB) | Maximum request body size in bytes for `POST /api/definitions` |
+
+The upload carries the whole workflow component as base64 inside a JSON body
+(`wasm_bytes_base64`), so the body is about a third larger than the component.
+A built Python component is about 19.5 MB, which is about 26 MB on the wire;
+before cleat#4400 this ceiling was a fixed 10 MiB and a Python workflow could
+not be uploaded through the API at all. Go, Rust, TypeScript and C# components
+are a few MB.
+
+`--max-body-size` does not move this ceiling, and this flag does not move any
+other. `cleat deploy` and `cleatctl deploy` write the database directly and
+never reach this endpoint.
+
+The worker holds the request in memory while it decodes it. Measured on one
+upload through the real handler (cleat#4400): a 19.5 MB component, a 26.0 MB
+body, peaked about 93 MB above the heap before the request, and a 30.0 MB
+component about 117 MB. Those figures include the test's own copy of the body,
+so the server's share is smaller by about one body. Raise this flag with that
+multiple in mind on a worker that takes concurrent uploads.
 
 ---
 
@@ -930,7 +1124,7 @@ lease.
 
 | Type | Default | Description |
 |------|---------|-------------|
-| int | `512` | Max **estimated** size of the compiled-module cache, in MB (LRU eviction) |
+| int | `1024` | Max **estimated** size of the compiled-module cache, in MB (LRU eviction) |
 
 **Two different caches, and this is the larger one.** `--wasm-cache-max-mb`
 above bounds the WASM *byte* cache — the artifacts as uploaded.
@@ -939,9 +1133,10 @@ produces from them, which measures 2–3× larger for a release build.
 
 This is the bound to size a deployment against. Its sibling,
 `--wasm-module-cache-max-entries`, cannot say what a hundred modules cost —
-measured on cleat's own artifacts, a hundred entries is **8.6 MB of
-AssemblyScript or 4.6 GB of Python**, a ~500× spread in what one flag value
-means. Both bounds apply: the entry count still bounds map and list overhead
+measured on cleat's own artifacts, a hundred entries was **8.6 MB of
+AssemblyScript or 4.6 GB of Python** when this was measured (AssemblyScript has
+since been removed from cleat; see the historical row below), a ~500× spread in
+what one flag value meant. Both bounds apply: the entry count still bounds map and list overhead
 independently of artifact size.
 
 **Estimated, not measured**, and every layer says so. A compiled
@@ -952,7 +1147,7 @@ each entry is costed at **4× the wasm it came from**.
 
 | artifact | wasm | compiled | ratio |
 |---|---|---|---|
-| widget-store (AssemblyScript) | 9.5 KB | 86 KB | 9.1× |
+| widget-store (AssemblyScript, **historical**) | 9.5 KB | 86 KB | 9.1× |
 | rust-workflow (release) | 149 KB | 458 KB | 3.1× |
 | java-workflow | 299 KB | 694 KB | 2.3× |
 | hostcallsjava | 506 KB | 1.04 MB | 2.1× |
@@ -966,9 +1161,54 @@ is the one failure it cannot tolerate. The cost is that a typical artifact is
 over-counted by about a third, so a given value holds correspondingly fewer
 modules than raw arithmetic suggests.
 
-Both outliers fail safely: tiny AssemblyScript modules run high but cost tens
+The AssemblyScript row is a historical measurement: cleat no longer supports
+that language and the module is not rebuilt for this table. It is kept because
+it is the measured example of a tiny module running high.
+
+Both outliers fail safely: tiny modules (that row was one) run high but cost tens
 of kilobytes, and debug builds run low so the estimate over-counts them
 further. Over-counting shrinks the cache; it cannot overrun the bound.
+
+**Components are costed differently, from 2026-11-23 (cleat#4389).** A Python or C# component
+is costed at **3.5× its serialized compiled artifact**, not 4× its wasm. A component's wasm is
+mostly a memory snapshot (and, for Python since cleat#4382, zero-filled gaps), none of which
+compiles to anything, so its length does not predict what the cache holds. Measured on
+2026-11-23 (arm64 Linux, wasmtime 48; entries 2 to 5 of five distinct components compiled into
+one engine, RssAnon after `malloc_trim`, two repetitions):
+
+| component | wasm | old charge (4× wasm) | serialized | live per entry | live ÷ serialized | new charge |
+|---|---|---|---|---|---|---|
+| Python (componentize-py) | 17.6 MiB | 70.5 MiB | 31.9 MiB | 95 MiB | 3.0× | 111.5 MiB |
+| Python (plugin-harness fixture) | 18.4 MiB | 73.6 MiB | 43.7 MiB | 111 MiB | 2.5× | 152.9 MiB |
+| Python (densified, cleat#4382) | 28.7 MiB | 114.6 MiB | 42.5 MiB | 103 MiB | 2.4× | 148.8 MiB |
+| C# (defer_order) | 1.0 MiB | 4.0 MiB | 3.1 MiB | 8.9 MiB | 2.9× | 10.7 MiB |
+| C# (conformance) | 2.8 MiB | 11.3 MiB | 8.5 MiB | 16.7 MiB | 2.0× | 29.6 MiB |
+
+The old charge under-counted every component that was not densified (Python by 1.35 to 1.5×,
+C# by 1.5 to 2.2×), which is the direction this bound cannot tolerate. The live figures are
+noisy (a single entry read from 34 to 147 MiB for one Python component), so the ratio is over
+means, not a per-entry guarantee. **The first component an engine compiles costs far more
+than any later one** (about 200 MiB live and about 480 MiB at its high-water mark for Python:
+the engine and the compile scratch), and no per-entry bound covers that.
+
+**What this means for a deployment:** the default is **1024 MB** (it was 512 MB until cleat#4389;
+the owner raised it with the new charge), so a worker holds about **six to seven** distinct
+Python components (nine of the smaller ones), where 512 MB at the new charge would have held
+three; one more evicts the least recently used and recompiles it (about 1.5 s and a transient
+of several hundred MB). That is what holding them costs, now stated. The live cost is about
+100 MiB per Python entry, so a full cache is near 650 MiB. **What that costs a 2 GiB worker, measured**
+(2026-11-23: a real worker in a container limited to 2 GiB, the chart's limit since cleat#4394, nine distinct Python
+components that differ in code and data but share the CPython runtime, the stock flags, one run of each configuration on
+one arm64 machine, x86-64 not measured). With `--component-precompile` (the default in 0.6.0) the cache filled, 60
+held-eligible runs and a ninth compile all completed at a container peak of **1107 to 1159 MiB** (anonymous memory at
+most 776) and no out-of-memory kill. Compiled in the worker instead (`--component-precompile=false`), each further
+distinct component **kept 198 to 308 MiB for each of the first four further components and 44 to 76 for each of the next three (mean 175), for good** (anonymous memory after each of eight compiles: 533, 836, 1034, 1277,
+1585, 1661, 1716 and 1760 MiB) and the container was **killed on the ninth** (peak 2013 of 2048 MiB). That retained memory
+is not what the bound limits: the bound limits what the cache *charges*, so at 2Gi compiling in a child matters more than
+this setting does. The bound is not to be raised casually either way. A deployment that runs more than
+six or seven distinct Python workflows should raise
+`--wasm-module-cache-max-mb`, and should size the container for the live figure above, about
+100 MiB per entry plus the first compile's high-water mark.
 
 Observe it with `cleat_wasm_compiled_module_cache_bytes`, beside the entries
 gauge.
@@ -979,18 +1219,167 @@ on every call.
 
 ---
 
+### --component-precompile
+
+| Type | Default | Description |
+|------|---------|-------------|
+| bool | `true` | **ON by default since 0.6.0; `--component-precompile=false` turns it off.** Compile a Component Model component (a Python or C# workflow) in a short-lived child process of this binary, and load the serialized result, one component at a time per worker |
+
+**Why it is the default.** Measured 2026-11-23 on a real worker in a container limited to 2 GiB, the stock flags, nine distinct Python components (one run of each configuration, one arm64 machine, x86-64 not measured; the components differ in code and data but share the CPython runtime, so each is a different cache key with a near-identical compile cost). **Compiling in the worker** retained 198 to 308 MiB for each of the first four further distinct components and 44 to 76 for each of the next three (mean 175) (anonymous memory after each of eight fills: 533, 836, 1034, 1277, 1585, 1661, 1716 and 1760 MiB) and the container was **killed by the out-of-memory killer** when it then compiled a ninth (peak 2013 of 2048 MiB); the same limit with a fresh worker and six distinct components arriving at once was killed within 17 seconds, because six first compiles ran at once. **With this flag** the same nine components, 60 held-eligible runs and a ninth compile all completed, with a container peak of **1159 MiB** and no kill, and the six-at-once start completed in 41 seconds at a peak of 1425 MiB.
+
+**A worker compiles one component at a time**, in the child or in the worker (a fallback below), so a burst of runs of distinct components queues instead of compiling together. Before 0.6.0 only runs of the *same* component waited for each other.
+
+**What it is for.** The first compile of a Python workflow raises the worker's
+resident memory by about 490 MiB, and most of it stays resident for the life of
+the process. With this flag the compile happens in a child that exits, which
+returns its scratch memory to the OS, and the worker loads the serialized
+artifact for about 27 MiB.
+
+**What it does NOT do: it does not lower the compile peak.** The child runs in
+the worker's container, under the same memory limit, so the peak is the
+worker's own memory *plus* the child's, at once. It lowers the *steady state*
+after the compile, not the high-water during it.
+
+Measured 2026-11-23 on one machine (arm64 Linux container on an Apple M4 host, a
+19.5 MB Python component, a worker with the stock flags, three runs each, swap
+off, **host load averaging 14 to 16 on 10 CPUs, so the times below are not
+idle-machine times**). x86-64 is not measured.
+
+| container limit | flag | result | container peak | worker anon after |
+|---|---|---|---|---|
+| 512 MiB | off | **killed by the kernel's OOM killer, 3 of 3** | at the limit | — |
+| 512 MiB | on (`auto`: no parallel) | completes, 3 of 3 | 464 to 512 MiB | 68 MiB |
+| 512 MiB | on, `--component-precompile-parallel=true` | the child is OOM-killed; the run is **released, not failed** (status stays `ready`, retried in 5 min), the worker stays up, 3 of 3 (Docker, `memory.oom.group` 0) | 512 MiB | 65 MiB |
+| 2 GiB | off | completes | 559 to 601 MiB | 529 to 558 MiB |
+| 2 GiB | on (`auto`: parallel) | completes | 661 to 679 MiB | 67 MiB |
+| 2 GiB | on, `--component-precompile-parallel=false` | completes | 476 to 511 MiB | 68 MiB |
+
+**512 MiB is a tight configuration, stated as one.** The chart's default is 2 GiB (owner decision, cleat#4393), where the flag has room to spare.
+
+**At 512 MiB it fits, and barely.** The child's own peak is about 384 MiB and
+the worker about 68 MiB, so the compile uses roughly 450 MiB of anonymous memory
+against a 512 MiB limit. The container's recorded peak reads 512 MiB because it
+includes file cache the kernel can reclaim; no run was OOM-killed. A worker
+under this limit that is also holding other runs has less room than this test did.
+
+The child compile took 3 to 6 s with parallel compilation and 7 to 30 s without
+it, on a loaded host; cleat-77 measured 1.3 s and 5.7 s in the same harness
+configuration. The difference was not isolated.
+
+**A child that is killed does not fall back to compiling in the worker, and the run is not failed.**
+The child asks the kernel to kill it first when memory runs out (`oom_score_adj`
+1000). If it dies of SIGKILL, compiling in the worker would need more memory than
+the child did and kill the worker and every run it holds (measured: 531 MiB
+worker, container killed), so the compile is *refused*. The guest never ran, so
+the run is **released** (it stays `ready`, as for a worker that cannot serve it),
+for the refusal window (5 minutes), and may be served by a worker with more
+memory. Inside the window this worker starts no further child for that
+component, so a released run cannot loop one. The worker logs an ERROR naming the
+memory limit, the compile mode and the fix, and counts it on
+`cleat_workflow_releases_total{check="component_compile_refused",memory_limit_mib,parallel_compilation}`:
+a rate on that check is the alert. Every *other* child failure (cannot start,
+times out, exits non-zero, writes an artifact the worker will not accept) is
+logged as a WARN and falls back to the in-process compile, **one at a time like any other compile**, and is counted on
+`cleat_component_precompile_fallbacks_total{reason}` (`timeout`, `child_exit`, `record`, `artifact`, `deserialize`, `workdir` or `other`).
+**A rate on that counter means the flag is not protecting the worker's memory**: each fallback retains what an in-process compile retains (about
+up to about 300 MiB (198 to 308 for each of the first four further components, then 44 to 76) per distinct Python component), so a child that fails systematically makes this the same as `--component-precompile=false`. The WARN
+carries the error and says where to look: a timeout means `--component-precompile-timeout` (default 5 minutes) or a loaded node, and an exit or an
+artifact error means the child could not run or write, so check that the system temp directory is writable and not full, and that the binary has not been replaced
+under the running worker (the child is the worker's own binary). A timeout is treated as an ordinary failure and not as a kill, so a merely slow child
+reaches this fallback unforced.
+
+**"The worker stays up" is measured on Docker, where `memory.oom.group` is 0**
+(an out-of-memory kill takes one process). Where it is 1, the kill takes every
+process in the container, the worker included, and nothing in the worker can
+protect it: the flag then lowers the steady state only, and the memory limit must
+hold the compile peak. Kubernetes sets it to 1 by default on cgroup v2 in recent
+versions, and the kubelet's `singleProcessOOMKill` restores per-process kills; that is from
+Kubernetes' documentation and was **not measured here**. The worker reads
+`/sys/fs/cgroup/memory.oom.group` at start-up with the flag on and warns when it is 1.
+
+**The artifact is native code.** wasmtime documents that loading one is unsafe for
+arbitrary input, so the worker loads only a file its own child just wrote, into a
+directory it created mode 0700, after checking the size and SHA-256 the child
+reported. The child runs with an empty environment (the worker's holds database
+credentials), and a worker with `--wasm-instruction-limit` set compiles the
+child's artifact with fuel to match: fuel binds the artifact, and a mismatch is
+refused, not loaded. The directory is in the system temp directory; if `TMPDIR` is memory-backed (a
+Kubernetes `emptyDir` with `medium: Memory`, for instance) the 46 MB artifact is
+in the same cgroup as the compile and counts against the limit while it exists.
+
+The child is this binary, found with `os.Executable` and resolved once at start-up.
+
+### --component-compile-min-headroom-mb
+
+| Type | Default | Description |
+|------|---------|-------------|
+| int (MB) | `800` | The most memory a container must have left for this worker to compile a Component Model component **in its own process**: the need of a Python-sized component. A smaller component needs proportionally less, down to 256 MB. Below the need the run is released, not failed. `0` turns the check off |
+
+**What it is for.** A compile in the worker costs about 500 MiB of scratch while it runs and the worker keeps up to about 300 MiB of it for good (198 to 308 for each of the first four further components, then 44 to 76), for each distinct Python component. Serialising compiles (a worker compiles one component at a time) removes the simultaneous peak and **not that retention**, so a worker that compiles in its own process runs out of memory after about six distinct Python components at a 2 GiB limit, and gets killed with every run it holds. Measured 2026-11-23 in a 2 GiB container: with the check absent, a seventh distinct component compiled in the worker sat at the limit in one run (anonymous memory 1863 of 2048 MiB) and killed the container in another.
+
+**What it does.** Before a compile in the worker (the fallback after a `--component-precompile` child failed for an ordinary reason, and every compile when `--component-precompile=false`) the worker reads the memory the container has left, from the same cgroup v2 reading as `--memory-soft-limit`: the level with the least headroom on the worker's own cgroup path. If that is below this figure it **does not compile**: the run is **released** (it stays `ready`, retried after `--component-precompile-refusal-window`, possibly on another worker), the worker logs an ERROR with the memory left and the memory needed, and counts `cleat_workflow_releases_total{check="component_compile_refused",reason="low_headroom"}` (a killed child is `reason="child_killed"`). **Components already compiled keep running**, so the worker degrades instead of being killed. **This is a degraded mode, not a full-speed one:** a worker under memory pressure that meets a new component refuses it until memory comes back or another worker takes it.
+
+**A refusal usually lasts until a restart or a larger limit.** Memory a worker compiled with in its own process stays with that process (the allocator keeps it, and wasm memory never shrinks), so the memory does not come back by waiting. A refused run is retried after the window and refused again for as long as the container is short; what ends it is restarting the worker, raising its memory limit, or another worker taking the run. Keep `--component-precompile` on, so compiles run in a child that returns its memory, and the question does not arise for the components it compiles.
+
+**What a compile is judged to need depends on the component.** Measured 2026-11-23 on a real worker (arm64 Linux), in a 2 GiB container, with `--component-precompile=false` and one compile at a time. The figures are the container's own `memory.current`: the peak is the highest value above the level before the compile, and what is retained is what was still there 4 seconds after it.
+
+| component | wasm | first compile in the process | each further distinct compile |
+|---|---|---|---|
+| C# (a small workflow, 6 variants) | 1.0 MiB | peak +118, retained +70 (includes the engine's own start-up) | peak +11 to +23, retained +9 to +23 |
+| C# (the conformance guest, 6 variants) | 2.8 MiB | peak +60, retained +60 | peak +33 to +42 (once +3), retained +33 to +41 |
+| Python | 17.6 to 19.5 MiB | peak +486 to +512 (RSS) | retained +185 to +268 (RSS); 198 to 308 for each of the first four further components and 44 to 76 after, in the 2 GiB container |
+
+So the need is the component's wasm length times 42 bytes, at least 256 MiB and at most the flag (800 by default): about 800 MiB for a 19.5 MiB Python component, 256 MiB for a small C# one (twice the largest C# peak measured, which is the first compile of a process). It is a fit through two measured languages. The C# variants are one set of code stamped with different metadata, so each is a different cache key with the same compile cost; a fleet of different C# libraries would cost more. The Python figures are the component-memory measurements and the 2 GiB run (anonymous memory after each of eight distinct compiles: 533, 836, 1034, 1277, 1585, 1661, 1716 and 1760 MiB). x86-64 is not measured.
+
+**With no cgroup v2 limit** the reading is the host's available memory (`/proc/meminfo`), which a container limited another way can exceed; the worker warns at start-up and the check then means less. If the memory cannot be read at all the check is off and the worker warns.
+
+### --component-precompile-parallel
+
+| Type | Default | Description |
+|------|---------|-------------|
+| string | `auto` | `auto`, `true` or `false`: wasmtime's `parallel_compilation` in the precompile child |
+
+`auto` is parallel unless the worker's memory limit (the cgroup limit, else the
+host's) is under 1 GiB, where it is off. Off lowers the child's peak (about 384
+MiB against about 565 MiB) and lengthens the compile. It does not change what
+the worker can load. The worker logs which it chose and why. The 1 GiB threshold is a
+judgement, not a measured boundary.
+
+### --component-precompile-refusal-window
+
+| Type | Default | Description |
+|------|---------|-------------|
+| duration | `5m` | After a precompile child is OOM-killed compiling a component, how long this worker refuses to start another child for **that component** |
+
+A run refused inside the window is released for the rest of it (it stays `ready`) and may be served by a worker with more memory; it is not failed, and the worker does not compile the component itself. A different component has its own window. One attempt per component per window means a released run cannot loop a child that was just killed.
+
+### --component-precompile-timeout
+
+| Type | Default | Description |
+|------|---------|-------------|
+| duration | `5m` | Bound on one precompile child; over it, the child is killed and the worker compiles in-process |
+
+---
+
 ### --wasm-memory-max-mb
 
 | Type | Default | Description |
 |------|---------|-------------|
-| int | `32` | Max WASM linear memory per module in MB |
+| int | `256` | Max WASM linear memory per module in MB |
 
-Corresponds to 512 WASM pages at 32 MB (64 KiB per page). Enforced by the
-wasmtime store limiter; set to `0` to use the built-in default
-(`DefaultWasmtimeMemoryLimitBytes`, `engine/wasmtime_options.go`). Increasing
-this allows workflows with larger memory requirements to execute. (This said
-"the wazero default" until 2026-09-06; wazero has not been a backend since
-#459.)
+Corresponds to 4096 WASM pages at 256 MiB (64 KiB per page). It is a **ceiling, not a reservation**: a guest may grow up to it and no
+further, and a small workflow pays nothing for a higher number. Enforced by the wasmtime store limiter; set to `0` to use the built-in
+default (`DefaultWasmtimeMemoryLimitBytes`, `engine/wasmtime_options.go`). Lowering it limits the memory one workflow can take; raising it
+allows workflows with larger memory requirements to execute.
+
+The value applies to every language as given, including a value too small for the guest. A .NET (C#) guest cannot start below 52 MiB
+(measured on a hello-world); under that it dies at startup with `.NET runtime failed to initialize`, which names neither the limit nor the cause.
+
+**Changed in cleat#4171 (owner decision, 2026-11-19): the default was 32 MiB and is now 256 MiB.** The 32 came from the old wazero default with
+no sizing rationale. Until then, a stock worker ran on 32 MiB and a per-language floor (`languageMemoryFloorBytes`) raised it to 64 MiB for
+C# only when the flag was not passed; the default now clears every runtime's minimum, so the floor, and the worker's practice of passing a
+limit only when the flag was set, were removed. A worker running many workflows at once can in the worst case use this much for each of them,
+so size `--concurrency` and the machine's memory together. `--memory-soft-limit` stops claiming new work at a fraction of memory. It sees a guest's memory when the worker reads cgroup v2 `memory.current` or `/proc/meminfo` (host-wide, so it also counts everything else on the machine), and is blind only on its last-resort Go-heap source, which macOS falls back to (cleat#4196).
 
 ---
 
@@ -1011,31 +1400,108 @@ tight loop inside one function never enters another.
 
 ---
 
-### --wasm-output-buffer-size
-
-> Corrected 2026-08-09: was documented as `1048576` (1 MiB). The actual
-> `flag.Int` default in `cmd/cleat-worker/config.go:119` is `32768` (32 KB).
+### --wasm-instance-timeout
 
 | Type | Default | Description |
 |------|---------|-------------|
-| int | `32768` (32 KB) | WASM output buffer size in bytes |
+| duration | `30s` | Max guest execution time for one WASM invocation |
 
-Controls the size of the buffer used to read output from WASM guest modules.
-Larger values support workflows that produce more output data.
+Bounds the time a guest spends *executing* (a fresh execution or one replay
+pass) before it is forcibly interrupted, via wasmtime epoch interruption, which
+stops even a tight loop that never calls the host. Time blocked in a host call
+is not charged; `--wasm-wall-clock-ceiling` bounds that. `0` (or unset)
+uses the default: **the timeout cannot be turned off**, because the engine reads a
+value of 0 or less as the default (pinned by `TestAZeroInstanceTimeoutIsTheDefaultNotDisabled`).
+
+**A value above `0` and under `250ms` is refused: the worker prints the
+reason and exits non-zero before it serves anything.** Below about 200ms the
+hard epoch trap beats the soft kill to a poll, so the defers of a workflow
+this timeout stops do not reliably run. Measured: at 100ms the soft kill
+reached the guest 0 times in 20 runs, at 150ms 18 of 20, and at 200ms and 240ms
+20 of 20 (`ABI.md`, "There is a cliff below about 200 ms"; cleat#3922). 250ms
+is the floor because it leaves headroom over that measurement. Earlier releases
+accepted any value here, so a deployment that sets this flag low must raise it
+before upgrading.
+
+A tenant's own `wasm_instance_timeout_ms` (`cleatctl set-tenant-setting
+--wasm-instance-timeout-ms`) is held to the same floor: a value above 0 and
+under 250 is refused with the same explanation, and nothing is written. A value
+a tenant already has under 250ms is not rewritten and not newly refused, it is
+used as it stands (`min(run, tenant, operator)`), so it still reaches the cliff
+until an operator raises it; it also does not block changing that tenant's other
+settings. To find them:
+
+    SELECT tenant_id, wasm_instance_timeout_ms FROM tenant_settings
+    WHERE wasm_instance_timeout_ms > 0 AND wasm_instance_timeout_ms < 250;
+
+(Run it as a role that is not subject to row-level security; on MySQL it is the
+control-plane database, on SQL Server `dbo.tenant_settings`.) The table's CHECK
+only requires the value to be positive, so a direct SQL write can still store a
+low one.
+
+A run's own `wasm_instance_timeout_ms` on the start request (`POST /api/workflows/<name>/start`) is
+held to the same floor: a value above 0 and under 250 is a `400`. See "Per-run limit overrides on a
+start request" in `docs/reference/workflow-lifecycle.md`.
+
+Not covered, and still reaching the cliff as ABI.md documents: a direct SQL write to
+`tenant_settings` or `workflow_instances`, the engine option a library user sets directly, a context
+deadline, and the epoch tick.
+
+---
+
+### --wasm-output-buffer-size
+
+| Type | Default | Description |
+|------|---------|-------------|
+| int | `1048576` (1 MiB) | WASM output buffer size in bytes |
+
+For a **core-module** guest's direct export call, the host places an input area and an output area, each this size, past the end of the guest's
+memory and grows the memory to fit (so each such call needs twice this value of headroom under `--wasm-memory-max-mb`); a result larger than the
+output area fails with `output overflow`. Python and C# components take the value and do not use it.
+
+**Changed in cleat#4171 (owner decision, 2026-11-19): the default was 32768 (32 KiB) and is now 1 MiB**, the engine's own default
+(`DefaultOutBufSize`, `engine/memory.go`) and the figure `ABI.md` states. (An earlier version of this page, until 2026-08-09, said `1048576`
+while the flag was `32768`; the flag, the engine and this page now agree, and a test fails if they stop agreeing.)
 
 ---
 
 ### --wasm-max-string-len
 
-> Corrected 2026-08-09: was documented as `1048576` (1 MiB). The actual
-> `flag.Int` default in `cmd/cleat-worker/config.go:120` is `65536` (64 KB).
+> Changed with cleat#4130: the default is now `2097152` (2 MiB), the same constant as the engine package's `DefaultMaxWasmStringLen`. It was
+> `65536` (64 KB) here and 1 MiB in the engine package, and the 64 KB one is what a running worker used. A test pins the two together.
 
 | Type | Default | Description |
 |------|---------|-------------|
-| int | `65536` (64 KB) | Maximum WASM string parameter length in bytes |
+| int | `2097152` (2 MiB) | Maximum length, in bytes, of any one string a guest hands the host |
 
-Limits the length of string parameters passed to WASM guest functions.
-Strings longer than this are truncated before reaching the guest.
+Bounds every string a workflow passes to a host call (a request, a child input, a signal or log payload, a fetch body, a side-effect value),
+for **every** guest language: Go and Rust core modules and Python and C# components alike. A call over the limit is **refused**, not truncated:
+as an error classified invalid-request for a call that can return one, and as a bad-parameter result or a trap for a call that cannot. A
+refused call runs nothing on the host and records no event. Raise the flag if a workflow legitimately sends more. The limit is a per-argument
+bound on what the host will copy out of guest memory; responses are bounded separately by `--wasm-output-buffer-size`.
+
+---
+
+### --wasm-max-response-bytes
+
+| Type | Default | Description |
+|------|---------|-------------|
+| int | `2097152` (2 MiB) | Maximum size, in bytes, of one host call's response, for component guests (Python, C#) |
+
+Added with cleat#4132. A component guest used to receive at most 64 KiB of any host call's response (a service reply, a plugin result, a fetched
+body), however large the host's was, so a Python or C# workflow could not receive an LLM reply or a document that a Go workflow could. The host now
+sizes the buffer to the response up to this ceiling, so a 200-byte reply costs 200 bytes. **Over the ceiling the call fails, visibly:** call-error
+code 7 (output truncated), with the prefix that fit as its message; the call has already run and recorded its effect, so it is not retried.
+
+The Go and Rust SDKs size their own buffers, start at 64 KiB and double on each reported truncation, and are **compiled with the same 2 MiB
+ceiling** (`_cleatOutBufCeiling` in the generated adapter, `OUT_BUF_CEILING` in `cleat-sdk`). Raising this flag above 2 MiB therefore does not
+raise what a Go or Rust workflow can receive until it is rebuilt against a larger constant: no guest-reported length is available to grow to. The
+call that truncates cannot be rescued, so the first oversize response on a Go or Rust workflow fails and the buffer is larger for the calls after
+it. The value is capped at 16 MiB - 1, which is what a durable-call result word can carry; a larger setting is rejected at startup.
+
+**One response stays small in every language:** an `await_signals` payload is carried in a 16-bit length field of its result word, so it is at most 65,535 bytes whatever this is set to.
+
+This is **not** `--wasm-output-buffer-size`, which sizes the entry-point input and result regions in the module's linear memory.
 
 ---
 
@@ -1170,6 +1636,29 @@ Every pass logs `version gc swept` with the policy it used, **including passes
 that remove nothing** — so "ran and found nothing" and "disabled" are
 distinguishable in the log.
 
+**Which tenants it reaches.** With this set, a worker run with
+`--claim-across-tenants` collects old versions of **every tenant it serves**, each
+through that tenant's own store and under that tenant's row-level security, with
+the same policy (cleat#3708). Before that only the worker's own tenant's
+definitions were collected, so every other tenant kept every old version. A
+version with a running instance is kept whichever tenant it belongs to. The
+other tenants' passes log one extra line, `version gc swept other tenants`, when
+they removed something. Three limits worth knowing:
+
+- **The definition statements behind a pass are scoped to the store's own tenant in the SQL
+  itself (cleat#3729), not only by row-level security.** The collection groups
+  definitions by workflow name, so this is what keeps two tenants' same-named workflows
+  apart on a connection the policy does not apply to (a superuser, or a role with
+  `BYPASSRLS`; an operator's `--db` DSN commonly is one). Before #3729 such a connection
+  saw every tenant's definitions in every pass, and one pass could delete another
+  tenant's versions while keeping its own: on a release that predates it, do not set
+  `--version-gc-interval` on a worker whose connection bypasses the policy. SQL Server
+  has no such principal, and already carried the predicates.
+- MySQL is single-tenant and a sharded store cannot list tenants, so for both this
+  is unchanged: the worker's own tenant only.
+- `POST /api/versions/gc` and `cleatctl versions gc` stay scoped to the tenant that
+  made the call. A request made as one tenant must not delete another's definitions.
+
 ---
 
 ### --version-gc-min-versions
@@ -1208,9 +1697,14 @@ Go duration syntax, so `720h` rather than `30d` — and a bare number is refused
 |------|---------|-------------|
 | string | `""` | Path to file with custom redaction patterns (one per line) |
 
-When set, the worker reads regex patterns from the specified file and applies
-them to redact sensitive fields in event history and logs. Each line in the
-file is a separate pattern. Leave empty to use only built-in defaults.
+When set, the worker reads patterns from the specified file and redacts the
+value of any field whose name contains one of them, in addition to the built-in
+matching. Each line is one pattern: a plain substring (not a regular
+expression), matched case-insensitively anywhere in the field name. Blank lines
+and lines starting with `#` are ignored. Unlike the built-in `token`, which is
+read as a whole word, a custom pattern matches inside any word of the key, so
+`key` redacts `monkey`; name the fragment you mean. Leave empty to use only the
+built-in defaults.
 
 ---
 
@@ -1583,6 +2077,10 @@ retired with #1926; it is not defined anywhere in `engine/`.
 |------|---------|-------------|
 | string | `""` | Path to shards JSON config for multi-shard operation |
 
+**EXPERIMENTAL in 0.6.0** (owner decision D80, 2026-11-13). Sharding is not a supported configuration of this
+release; it has known gaps (cleat#3606, cleat#3684, cleat#3724, cleat#3725), listed with the rest of its limits in
+[Database sharding](../sharding.md).
+
 JSON format:
 
 ```json
@@ -1591,6 +2089,38 @@ JSON format:
   {"name": "shard-1", "conn_str": "postgres://...", "tenants": ["tenant-b"]}
 ]
 ```
+
+**The first entry is the admin shard.** A sharded worker uses the first shard's database for plugin migrations
+and administration (`db = shardDBs[0]`, `cmd/cleat-worker/main.go`), so an entry's place in the file is not
+cosmetic. Today, on that shard:
+
+- plugin migrations run, and plugin tables (event subscriptions, webhook sources and the like) live;
+- API keys and tenants are resolved: the worker's key and tenant store is built on that database;
+- the plugin-name registry and the override records of a deploy's plugin check are read and written
+  (see [Deploying workflows](../how-to/deploy-workflows.md)).
+
+`--migrate-only` and `--migrate-on-start` migrate **every** shard's core schema (cleat#3718), and the plugin
+tables only on the admin shard. Before cleat#3718 they migrated the first shard alone and exited 0. Every
+shard's migration chain is checked before any is changed, and a shard that cannot be migrated fails the run
+naming it. `--migrate-db` names the first shard's migration connection only; the others are migrated through their
+own `conn_str`. A normal start checks **every** shard's migration chain and refuses, naming the shard, when one belongs to
+another release (the rule for the main database, cleat#3405); it verifies that the schema is not behind for the first shard
+only.
+
+Do not reorder the entries of a running deployment: the worker would start administering a different database.
+`cleatctl --db` names one database; for anything that reads the plugin registry, give it the admin shard's
+connection string.
+
+**A sharded worker answers `501` to tenant provisioning, tenant drop, suspend and resume, and to a library
+install, by design for now.** Provisioning, drop, suspend and resume go through the tenant provisioner, which
+a sharded worker does not have: the rotating claim that serves many tenants is unavailable on it, so a tenant
+created there would never run anything. A library install needs a store that can install, and a sharded store
+cannot. Serving many tenants on a sharded worker is not part of 0.6.0; cleat#3606 tracks the whole limit (suspend
+and resume, and with them the library install) and stays open for after it.
+
+What does work across shards: a workflow definition is written to every shard, and a library bundle can be
+published to every shard with `cleatctl library publish --replicate-to`
+([Publishing to a sharded deployment](../how-to/deploy-workflows.md#publishing-to-a-sharded-deployment)).
 
 ---
 

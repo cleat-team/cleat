@@ -293,15 +293,8 @@ func (c *fakeConn) queryTenantByKeyHash(args []driver.NamedValue) (driver.Rows, 
 	if err != nil {
 		return nil, err
 	}
-	hashHex := fmt.Sprintf("%x", keyHash)
-	tid, ok := c.store.apiKeys[hashHex]
-	if !ok {
-		return &fakeRows{columns: []string{"tenant_id"}}, nil
-	}
-	return &fakeRows{
-		columns: []string{"tenant_id"},
-		data:    [][]driver.Value{{tid}},
-	}, nil
+	cols, data := plugintest.APIKeyLookupRows(c.store.apiKeys, keyHash)
+	return &fakeRows{columns: cols, data: data}, nil
 }
 
 // queryConfigIDIfEnabled backs the host-function existence check -- it never

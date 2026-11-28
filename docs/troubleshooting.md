@@ -26,7 +26,10 @@ tables, and the same fix. For a single node or development, `--migrate-on-start`
 the worker migrate itself. If a `--migrate-only` run is already in progress, wait for it.
 
 The opposite case is not an error: a schema *ahead* of the binary starts, with a
-warning, so that a rolling upgrade does not wedge on the workers it is replacing.
+warning, so that a rolling upgrade does not wedge on the workers it is replacing. That is
+the schema's rule only: whether a rolling upgrade is supported is for each release's notes,
+and it is not for 0.5.0 to 0.6.0 (see
+[Upgrading](operations/upgrading.md#automatic-migration-recommended)).
 
 ## Table of Contents
 
@@ -361,9 +364,9 @@ for details of the claim pattern.
 ### Symptom: "replay divergence" errors in logs
 
 ```
-replay divergence at step 0: expected call event, got sleep.
-  actual request: { truncated }
-  expected request: { truncated }
+replay divergence at step 0: expected call, got sleep.
+  actual request: [redacted: 35 bytes, sha256=3fd491e156d686f8]
+  expected request: [redacted: 35 bytes, sha256=8434bd0ab42c6ee5]
 Run 'cleat vet' on your workflow code to check for common non-determinism issues
 ```
 
@@ -375,7 +378,15 @@ divergence error includes:
 
 - The step number where divergence was detected.
 - What the replaying workflow called compared to what the event history expects.
-- Relevant payload data (truncated with a hash for large payloads).
+- For each request or payload the call carries, **its size in bytes and the first 16 hex digits of its
+  SHA-256, never its text**. A divergence message is handed to the workflow and from there reaches the
+  run's stored error, the logs and the API, and by replay time the engine holds the *decrypted*
+  payload, so the message names a payload and does not print it. The same size and hash on the
+  `actual` and `expected` lines mean the two payloads are identical and the divergence is elsewhere;
+  different ones mean the call's payload changed. (The hash lets you compare a payload; it is not a
+  secret, so a payload with very little in it can be guessed from it.) The labels (`actual request:`,
+  `expected request:`, `actual body:`, `expected body:`, `actual input:`, `expected (cached) input:`
+  and `expected (cached) output:`) are unchanged.
 
 **Fix: How to resolve**
 
@@ -391,7 +402,8 @@ divergence error includes:
    - External input sources not going through `HostCalls`
 
 3. **Inspect the event history** for the failed workflow to compare what was
-   recorded vs what was replayed:
+   recorded vs what was replayed (the divergence message itself only gives a payload's size and
+   hash, so this is where you read what the recorded payload held):
    ```bash
    cleatctl --db "$CLEAT_DB" replay <workflow-id> --entry-point <entry-point>
    ```

@@ -20,6 +20,13 @@ import (
 // finalize_workflow_status/fn_tenant_filter/drop_tenant). If this starts
 // failing because a later migration legitimately redefines a bundled
 // routine, the fix is to update the want list here, not the derivation.
+//
+// 005_workflow_libraries.sql is the live case for the OTHER half of the rule
+// (cleat#3540): it redefines no routine, but it creates a security policy,
+// TenantFilter_LibraryInstalls, bound to dbo.fn_tenant_filter. Replaying 003
+// over a database that has it fails with error 3729, and a restore that dropped
+// the policy to get past that would leave the table without one. So it is
+// replayed after 003.
 func TestMSSQLPlainPredicateReplayFilesMatchesTheRealTree(t *testing.T) {
 	root := repoRootForMSSQLTestutil(t)
 	dir := filepath.Join(root, "migrations", "mssql")
@@ -32,6 +39,7 @@ func TestMSSQLPlainPredicateReplayFilesMatchesTheRealTree(t *testing.T) {
 	want := []string{
 		"002_defaults.sql",
 		"003_procedures.sql",
+		"005_workflow_libraries.sql",
 	}
 	if len(got) != len(want) {
 		t.Fatalf("mssqlPlainPredicateReplayFiles(%s) = %v, want %v", dir, got, want)
@@ -110,6 +118,59 @@ END;
 		t.Fatalf("mssqlPlainPredicateReplayFiles(synthetic tree) = %v, want %v\n\n"+
 			"004 touches no bundled routine, 006 mentions one only in a comment, and 007 "+
 			"redefines a routine 003 does not define -- none of the three should appear",
+			got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("mssqlPlainPredicateReplayFiles(synthetic tree)[%d] = %q, want %q (full: %v)",
+				i, got[i], want[i], got)
+		}
+	}
+}
+
+// TestMSSQLPlainPredicateReplayFilesCatchesALaterSecurityPolicy is the mechanism
+// test for the policy half of the rule: a later file that creates a security
+// policy is replayed, including one written as EXEC(N'CREATE SECURITY POLICY ...')
+// the way a guarded migration has to, and a file that only mentions the words in a
+// comment, or touches nothing, is not.
+func TestMSSQLPlainPredicateReplayFilesCatchesALaterSecurityPolicy(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name, content string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o644); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+	}
+	write("002_defaults.sql", "-- seed\n")
+	write("003_procedures.sql", "CREATE PROCEDURE admin.drop_tenant\nAS SELECT 1;\n")
+	write("004_creates_a_policy_directly.sql", `
+CREATE SECURITY POLICY dbo.TenantFilter_Direct
+    ADD FILTER PREDICATE dbo.fn_tenant_filter(tenant_id) ON dbo.t1;
+`)
+	write("005_creates_a_policy_in_exec.sql", `
+IF OBJECT_ID(N'dbo.TenantFilter_InExec', N'SP') IS NULL
+    EXEC(N'create   security   policy dbo.TenantFilter_InExec
+        ADD FILTER PREDICATE dbo.fn_tenant_filter(tenant_id) ON dbo.t2');
+`)
+	write("006_only_discusses_a_policy.sql", `
+-- CREATE SECURITY POLICY is not needed here; see 005.
+SELECT 1;
+`)
+	write("007_touches_nothing.sql", "UPDATE t SET x = 1;\n")
+
+	got, err := mssqlPlainPredicateReplayFiles(dir)
+	if err != nil {
+		t.Fatalf("mssqlPlainPredicateReplayFiles(%s): %v", dir, err)
+	}
+	want := []string{
+		"002_defaults.sql",
+		"003_procedures.sql",
+		"004_creates_a_policy_directly.sql",
+		"005_creates_a_policy_in_exec.sql",
+	}
+	if len(got) != len(want) {
+		t.Fatalf("mssqlPlainPredicateReplayFiles(synthetic tree) = %v, want %v\n\n"+
+			"006 mentions a policy only in a comment and 007 touches nothing -- neither should appear",
 			got, want)
 	}
 	for i := range want {

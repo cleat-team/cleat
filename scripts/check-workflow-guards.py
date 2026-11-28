@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Structural guards over .github/workflows/, run by the Lint job.
 
-Six checks, each catching a *class* of defect that has already cost this repo
+Ten checks, each catching a *class* of defect that has already cost this repo
 a session to find one instance of by hand:
 
   1. Every context in .github/required-checks.txt resolves to a job that
@@ -76,6 +76,17 @@ a session to find one instance of by hand:
      >> "$LINT_FAILURES_FILE"`, where `<name>` must equal that step's own
      `name:` verbatim -- a mismatched name would misattribute which guard
      failed to the next reader.
+  10. Every MySQL `services:` container declares a `--health-start-period`.  A
+     start period is the only health option that stops boot-time failures
+     counting at all; retries merely lengthen the window a boot must finish
+     inside.  `mysql:8.4` starts a server twice (initialize, then run) and took
+     55s to be ready AFTER ITS CONTAINER STARTED -- 68s from creation, which is
+     the number a job log shows first -- against a 50s budget counted from that
+     same start, which failed a required Tier-1 job in "Initialize containers"
+     with no test
+     run (cleat#3936).  The guard requires the start period and a 60s floor; it
+     does not police the retry count, because 60s plus the existing retries
+     already exceeds the measured boot.
 
 Design note, since it is the whole point of the exercise: this script FAILS on
 anything it cannot analyse rather than passing.  A matrix it cannot expand, an
@@ -84,7 +95,7 @@ guard that quietly skips the case it does not understand is the thing it was
 written to prevent.
 
 Usage:
-    scripts/check-workflow-guards.py                       # all eight guards
+    scripts/check-workflow-guards.py                       # all ten guards
     scripts/check-workflow-guards.py --verify-against-api  # needs an admin token
     scripts/check-workflow-guards.py --self-test            # known-positive/negative pairs
 """
@@ -92,6 +103,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import ast
 import glob
 import itertools
 import json
@@ -434,6 +446,130 @@ def guard_ancestor_filters_match_images(errors) -> None:
                     f"the pull reference, so the lookup will find nothing and "
                     f"`docker exec` will get an empty container ID."
                 )
+
+
+MYSQL_IMAGE = re.compile(r"(^|/)mysql(:|@|$)")
+HEALTH_START_PERIOD = re.compile(r"--health-start-period(?:=|\s+)(\S+)")
+DURATION_PART = re.compile(r"(\d+(?:\.\d+)?)(ms|s|m|h)")
+DURATION_UNITS = {"ms": 0.001, "s": 1.0, "m": 60.0, "h": 3600.0}
+# mysql:8.4's measured boot, 2026-11-16: 55s from container START to "ready for
+# connections" on a loaded runner -- 68s from creation, the number the job log
+# shows first and the wrong one to compare this against, because Docker's health
+# clock starts at container start. 60s covers the measured boot with a few
+# seconds of margin; a boot slower than that is caught by the retries, not here.
+# A start period shorter than the boot it is meant to cover is a decoration.
+MYSQL_MIN_START_PERIOD_SECONDS = 60.0
+
+
+def parse_docker_duration(text: str) -> float | None:
+    """Seconds in a Docker/Go duration such as `60s` or `1m30s`; None if unreadable."""
+    position = 0
+    total = 0.0
+    for match in DURATION_PART.finditer(text):
+        if match.start() != position:
+            return None
+        total += float(match.group(1)) * DURATION_UNITS[match.group(2)]
+        position = match.end()
+    if position != len(text) or position == 0:
+        return None
+    return total
+
+
+def mysql_services(path: str, doc: dict):
+    """(job id, service id, image, options) for every MySQL service in one workflow.
+
+    Matches on the repository name, so `mirror.gcr.io/library/mysql:8.4.11@sha256:...`
+    and `mysql:8.4` are both recognised -- the digest suffix is stripped before matching.
+    """
+    for job_id, job in (doc.get("jobs") or {}).items():
+        if not isinstance(job, dict):
+            continue
+        for service_id, service in (job.get("services") or {}).items():
+            if not isinstance(service, dict):
+                continue
+            image = service.get("image")
+            if not isinstance(image, str):
+                continue
+            if MYSQL_IMAGE.search(image.split("@", 1)[0]):
+                yield job_id, service_id, image, service.get("options")
+
+
+def mysql_health_start_period_violation(path: str, job_id: str, service_id: str,
+                                        image: str, options) -> str | None:
+    """Why this MySQL service is not protected from boot-time health failures, or None."""
+    where = f"{path}: job {job_id!r} service {service_id!r} ({image})"
+    text = options if isinstance(options, str) else ""
+    match = HEALTH_START_PERIOD.search(text)
+    if match is None:
+        return (
+            f"{where} sets no --health-start-period, so every health failure counts "
+            f"from container start. mysql:8.4 starts a server twice and took 55s to be "
+            f"ready after its container started (cleat#3936). Add "
+            f"`--health-start-period 60s` "
+            f"beside --health-retries, as multi-db-ci.yml does."
+        )
+    seconds = parse_docker_duration(match.group(1))
+    if seconds is None:
+        return (
+            f"{where} has --health-start-period {match.group(1)!r}, which this guard "
+            f"cannot read as a duration. It fails closed rather than assuming the value "
+            f"is long enough: write `60s` or `1m`."
+        )
+    if seconds < MYSQL_MIN_START_PERIOD_SECONDS:
+        return (
+            f"{where} has --health-start-period {match.group(1)!r}, under the "
+            f"{MYSQL_MIN_START_PERIOD_SECONDS:.0f}s required for mysql:8.4's two-phase "
+            f"boot (cleat#3936)."
+        )
+    return None
+
+
+def guard_mysql_health_start_period(errors) -> None:
+    """Every MySQL service must let its boot finish before health failures count.
+
+    Measured 2026-11-16 (cleat#3936). The shared block set
+    `--health-interval 10s --health-retries 5` and no start period, so the budget
+    was 50s counted from CONTAINER START. mysql:8.4's entrypoint runs
+    `mysqld --initialize-insecure`, shuts that server down, and starts a second
+    one; on a loaded runner `Tier 1 Gate -- rest shard 3/4` reached "ready for
+    connections" 55s after start and was declared unhealthy 0.34s later. The
+    job failed in "Initialize containers" and no test ran.
+
+    TWO CLOCKS, and mixing them makes these numbers look inconsistent: creation
+    to ready was 68s, start to ready was 55s, and the 50s budget is measured on
+    the second. An earlier draft of this comment anchored the budget to creation
+    and cleat-review caught it in review of #3937 -- 5 x 10s from creation would
+    have expired 18s BEFORE the server was ready, yet nothing was declared
+    unhealthy then.
+
+    Retries alone do not fix this -- they lengthen the window the boot must
+    finish inside while every failure still counts. The start period is the
+    load-bearing half: failures during it are not counted at all. That is why
+    this guard requires a start period and does not police the retry count.
+
+    Scoped to MySQL deliberately. PostgreSQL was healthy in the same window on
+    the same runner, and the SQL Server sites that gate required contexts already
+    carry a start period; a guard over every image would flag services with no
+    measured defect.
+    """
+    found = 0
+    for path in workflow_files():
+        try:
+            doc = load(path)
+        except (Unexpandable, yaml.YAMLError):
+            continue  # already reported by collect_jobs
+        for job_id, service_id, image, options in mysql_services(path, doc):
+            found += 1
+            violation = mysql_health_start_period_violation(
+                path, job_id, service_id, image, options)
+            if violation:
+                errors.append(violation)
+    if found == 0:
+        errors.append(
+            "no MySQL service container was found in .github/workflows/, so the "
+            "health-start-period guard would pass vacuously. If MySQL was really "
+            "removed, delete the guard; if not, this parser is broken."
+        )
 
 
 MSSQL_IMAGE_MARKER = "mssql/server"
@@ -819,6 +955,93 @@ def guard_publish_approval_order(errors: list[str]) -> None:
         except (Unexpandable, yaml.YAMLError):
             continue  # already reported by collect_jobs
         errors.extend(find_publish_approval_order_violations(path, doc))
+
+
+# cleat#3487: every image a workflow PUSHES (or loads, to inspect) takes its
+# OCI labels from scripts/oci_image_labels.py. v0.4.0 and v0.5.0 were published
+# with no labels at all because release.yml's build step simply had no
+# `labels:` input, which does not fail -- it yields `null`. The rc-* path had its
+# own inline copy and so did carry them. One definition, wired the same way
+# everywhere, is only a fix while nobody drops the wiring, so this checks it.
+#
+# THE BOUNDARY, since a guard's blind spot is part of what it says: this sees
+# `docker/build-push-action` steps and nothing else. A future `run:` step that
+# calls `docker push`, `docker buildx build --push` or `docker buildx bake`, or
+# a composite action wrapping the build, publishes an image this does not look
+# at. Measured 2026-10-27: none of those exists anywhere under .github/, so
+# every push path in the tree is in scope today.
+LABELS_SCRIPT = "scripts/oci_image_labels.py"
+LABELS_OUTPUT_RE = re.compile(r"\$\{\{\s*steps\.([A-Za-z0-9_-]+)\.outputs\.labels\s*\}\}")
+# Workflows that must each contain at least one examined build, so the guard
+# cannot pass vacuously because a rename took a build out of its sight.
+LABELLED_BUILD_WORKFLOWS = (
+    ".github/workflows/release.yml",
+    ".github/workflows/develop-image.yml",
+    ".github/workflows/ci.yml",
+)
+
+
+def _is_false(value: object) -> bool:
+    return str(value).strip().lower() == "false"
+
+
+def find_image_label_violations(path: str, doc: dict) -> tuple[list[str], int]:
+    """Returns (violations, number of image builds examined)."""
+    out: list[str] = []
+    examined = 0
+    for job_id, job in (doc.get("jobs") or {}).items():
+        steps = job.get("steps") if isinstance(job, dict) else None
+        for i, step in enumerate(steps or []):
+            if not isinstance(step, dict) or not str(step.get("uses", "")).startswith("docker/build-push-action@"):
+                continue
+            w = step.get("with") or {}
+            pushes = not _is_false(w.get("push", "false"))
+            loads = str(w.get("load", "false")).strip().lower() == "true"
+            if not (pushes or loads):
+                continue
+            examined += 1
+            where = f"{path}: job '{job_id}' step {step.get('name', i)!r}"
+            kind = "pushes" if pushes else "loads"
+            m = LABELS_OUTPUT_RE.search(str(w.get("labels", "")))
+            if not m:
+                out.append(
+                    f"{where} {kind} an image but its `labels:` is not "
+                    "${{ steps.<id>.outputs.labels }} from " + LABELS_SCRIPT + " emit (cleat#3487: an image built "
+                    "with no labels is `null`, not an error)"
+                )
+                continue
+            producers = [s for s in steps[:i] if isinstance(s, dict) and s.get("id") == m.group(1)]
+            if not producers or f"{LABELS_SCRIPT} emit" not in str(producers[-1].get("run", "")):
+                out.append(
+                    f"{where} takes `labels:` from step '{m.group(1)}', which is not an earlier step "
+                    f"that runs `{LABELS_SCRIPT} emit` (cleat#3487)"
+                )
+            if loads and not any(
+                isinstance(s, dict) and f"{LABELS_SCRIPT} check" in str(s.get("run", "")) for s in steps[i + 1 :]
+            ):
+                out.append(
+                    f"{where} loads an image but no later step in the job runs `{LABELS_SCRIPT} check` "
+                    "against it (cleat#3487)"
+                )
+    return out, examined
+
+
+def guard_image_labels_come_from_the_shared_script(errors: list[str]) -> None:
+    examined_by_file: dict[str, int] = {}
+    for path in workflow_files():
+        try:
+            doc = load(path)
+        except (Unexpandable, yaml.YAMLError):
+            continue  # already reported by collect_jobs
+        found, examined = find_image_label_violations(path, doc)
+        errors.extend(found)
+        examined_by_file[path] = examined
+    for path in LABELLED_BUILD_WORKFLOWS:
+        if examined_by_file.get(path, 0) == 0:
+            errors.append(
+                f"{path}: guard 9 examined no image build here, so it checked nothing -- either the build "
+                "moved (update LABELLED_BUILD_WORKFLOWS) or it lost its push/load (cleat#3487)"
+            )
 
 
 # cleat#2895/#2902: the fail-fast-safe shape #2896 gave ci.yml's `lint` job.
@@ -1529,6 +1752,139 @@ def self_test() -> int:
     if got_no_lint:
         failures.append(f"no 'lint' job present: expected [], got {got_no_lint}")
 
+    # --- guard 9: published/loaded images take their labels from the script --
+    def check_labels(label: str, yaml_text: str, want_count: int, want_substrings: list[str], want_examined: int):
+        nonlocal cases
+        cases += 1
+        got, examined = find_image_label_violations("workflow.yml", yaml.safe_load(yaml_text))
+        missing = [w for w in want_substrings if not any(w in g for g in got)]
+        if missing or len(got) != want_count or examined != want_examined:
+            failures.append(
+                f"{label}: {len(got)} problems (want {want_count}), examined {examined} (want {want_examined}); "
+                f"missing {missing}; got {got}"
+            )
+
+    def labels_job(build_with: str, extra_steps: str = "", producer: str = None) -> str:
+        producer = producer or "python3 scripts/oci_image_labels.py emit --repo r/r --ref x --sha y >> \"$GITHUB_OUTPUT\""
+        return f"""
+        jobs:
+          image:
+            runs-on: ubuntu-latest
+            steps:
+              - uses: actions/checkout@v7
+              - id: labels
+                run: {producer}
+              - uses: docker/build-push-action@v7
+                with:
+{build_with}
+{extra_steps}
+        """
+
+    GOOD_PUSH = "                  push: true\n                  labels: ${{ steps.labels.outputs.labels }}"
+    check_labels("good: push with labels from the script", labels_job(GOOD_PUSH), 0, [], 1)
+    # KNOWN-POSITIVE: release.yml as it was at v0.5.0 -- a pushing build with no labels.
+    check_labels("KNOWN-POSITIVE: push with no labels (v0.5.0)", labels_job("                  push: true"), 1,
+                 ["is not ${{ steps.<id>.outputs.labels }}"], 1)
+    # KNOWN-POSITIVE: the rc path's shape -- a copy of the labels inline.
+    check_labels("KNOWN-POSITIVE: inline copy of the labels", labels_job(
+        "                  push: true\n                  labels: |\n                    org.opencontainers.image.revision=${{ github.sha }}"),
+        1, ["is not ${{ steps.<id>.outputs.labels }}"], 1)
+    check_labels("KNOWN-POSITIVE: labels from a step that does not run emit", labels_job(GOOD_PUSH, producer="echo hi"), 1,
+                 ["not an earlier step that runs"], 1)
+    LOADED = "                  push: false\n                  load: true\n                  labels: ${{ steps.labels.outputs.labels }}"
+    check_labels("KNOWN-POSITIVE: loaded image never checked", labels_job(LOADED), 1,
+                 ["no later step in the job runs"], 1)
+    check_labels("good: loaded image checked", labels_job(
+        LOADED, "              - run: python3 scripts/oci_image_labels.py check --image i --repo r/r --ref x --sha y"), 0, [], 1)
+    # KNOWN-NEGATIVE: a build that neither pushes nor loads is out of scope.
+    check_labels("KNOWN-NEGATIVE: push false, no load", labels_job("                  push: false"), 0, [], 0)
+    # A workflow with no build at all examines nothing; the real-tree wrapper reports that.
+    check_labels("no build at all examines nothing", "jobs:\n  a:\n    runs-on: x\n    steps:\n      - run: true\n", 0, [], 0)
+
+
+    # Guard 10 -- MySQL health start period (cleat#3936). Synthetic pairs for the
+    # rule; the real tree is the known-positive that shipped without them.
+    MYSQL_DIGEST = ("mirror.gcr.io/library/mysql:8.4.11@sha256:"
+                    "b3b90af2a6552ae30c266fdb7d5dd55f3afb72404bb78d37fe8a23eb857fd3fb")
+
+    def mysql_job(options: str, service: str = "mysql", image: str = MYSQL_DIGEST) -> str:
+        body = "".join(f"          {line}\n" for line in options.split("\n") if line)
+        return ("jobs:\n  t:\n    runs-on: ubuntu-latest\n    services:\n"
+                f"      {service}:\n        image: {image}\n        options: >-\n" + body)
+
+    def check_mysql(label: str, yaml_text: str, want: int, phrase: str = ""):
+        nonlocal cases
+        cases += 1
+        doc = yaml.safe_load(yaml_text)
+        got = []
+        for job_id, service_id, image, options in mysql_services("workflow.yml", doc):
+            violation = mysql_health_start_period_violation(
+                "workflow.yml", job_id, service_id, image, options)
+            if violation:
+                got.append(violation)
+        if len(got) != want:
+            failures.append(f"{label}: got {got}, want {want} problem(s)")
+        elif phrase and phrase not in got[0]:
+            failures.append(f"{label}: got {got[0]!r}, want it to name {phrase!r}")
+
+    # KNOWN-POSITIVE: the shape that failed a required job on 2026-11-16.
+    check_mysql("KNOWN-POSITIVE: mysql with no start period",
+                mysql_job("--health-interval 10s\n--health-retries 5"), 1,
+                "sets no --health-start-period")
+    # KNOWN-NEGATIVE: the fix, exactly as multi-db-ci.yml already had it.
+    check_mysql("KNOWN-NEGATIVE: mysql with 60s start period and 15 retries",
+                mysql_job("--health-interval 10s\n--health-retries 15\n"
+                          "--health-start-period 60s"), 0)
+    # KNOWN-POSITIVE: present but shorter than the measured boot -- a decoration.
+    check_mysql("KNOWN-POSITIVE: 30s start period is under the 60s floor",
+                mysql_job("--health-retries 15\n--health-start-period 30s"), 1,
+                "under the 60s")
+    # KNOWN-NEGATIVE: the `=` form and a duration written in minutes.
+    check_mysql("KNOWN-NEGATIVE: --health-start-period=1m",
+                mysql_job("--health-start-period=1m"), 0)
+    # KNOWN-POSITIVE: a value this guard cannot read fails closed, not open.
+    check_mysql("KNOWN-POSITIVE: unreadable start period",
+                mysql_job("--health-start-period boot"), 1,
+                "cannot read as a duration")
+    # KNOWN-NEGATIVE: scope -- a postgres service with no start period is not
+    # this guard's business, and the matcher must not fire on it.
+    check_mysql("KNOWN-NEGATIVE: postgres is out of scope",
+                mysql_job("--health-interval 10s", service="postgres",
+                          image="postgres:16@sha256:" + "0" * 64), 0)
+    # KNOWN-NEGATIVE: an unprefixed image is still MySQL -- proves the matcher
+    # keys on the repository name rather than on the mirror.gcr.io prefix.
+    check_mysql("KNOWN-NEGATIVE: unprefixed mysql image with a start period",
+                mysql_job("--health-start-period 60s",
+                          image="mysql:8.4.11@sha256:" + "0" * 64), 0)
+
+    # WIRING. Every case above calls the finder helpers directly, so deleting a
+    # guard's call from main() leaves this self-test green AND the real-tree run
+    # clean with a violation planted -- "a mechanism wired to nothing reads as
+    # done", applied to the guard list itself. Measured by cleat-review on #3937:
+    # removing guard 10's call passed both checks, and removing guard 7's did
+    # too, so it is the harness's property rather than one guard's defect.
+    cases += 1
+    module = ast.parse(open(__file__, encoding="utf-8").read())
+    defined_guards = {
+        node.name for node in ast.walk(module)
+        if isinstance(node, ast.FunctionDef) and node.name.startswith("guard_")
+    }
+    main_fn = next(
+        node for node in ast.walk(module)
+        if isinstance(node, ast.FunctionDef) and node.name == "main"
+    )
+    called_from_main = {
+        node.func.id for node in ast.walk(main_fn)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+    }
+    unwired = sorted(defined_guards - called_from_main)
+    if unwired:
+        failures.append(
+            f"guards defined but never called from main(): {unwired}. A guard "
+            f"nobody calls passes every case above and reports nothing on the "
+            f"real tree."
+        )
+
     if failures:
         for f in failures:
             print(f"SELF-TEST FAILED: {f}")
@@ -1567,6 +1923,121 @@ def verify_against_api() -> int:
     return 0
 
 
+def guard_edit_gate_dependents(errors) -> None:
+    """A workflow's jobs must implement the PR-edit gate the same way twice.
+
+    cleat#3958 gave the six workflows that run on `edited` an `edit-gate` job.
+    Two shapes, and which one a job needs is decided by ONE thing: whether its
+    name is a required context.
+
+    * A NON-required job skips at job level (`needs.edit-gate.outputs.skip`).
+      Nothing evaluates its check-run, so `skipped` is fine and free.
+
+    * A REQUIRED context must **run and report success** on a body edit. It may
+      not gate at job level: measured on #3960, the same sha read CLEAN at
+      14:27 and BLOCKED at 14:28 once the edited run registered 20 required
+      contexts as `skipped` beside their `success` twins. So its steps are
+      guarded instead, with one step that runs only when the gate says skip, to
+      say so out loud.
+
+    Both shapes need a status function in the job's `if:`: a job whose `needs`
+    dependency was SKIPPED is itself skipped unless its `if` uses one --
+    measured on cleat#3959, and the bug that made Tier 1 red on #3960's first
+    run. A job using one other than `always()` must also check every non-gate
+    dependency for success, or it starts when that dependency failed.
+    """
+    status_functions = ("!cancelled()", "cancelled()", "always()", "success()", "failure()")
+    required = read_required()
+    sentinel = "ZZMATRIXZZ"
+
+    def name_regex(name):
+        s = re.sub(r"\$\{\{[^}]*\}\}", sentinel, str(name))
+        return re.compile("^" + re.escape(s).replace(sentinel, ".+") + "$")
+
+    def is_required(name):
+        rx = name_regex(name)
+        return any(rx.fullmatch(r) for r in required)
+
+    for path in workflow_files():
+        try:
+            doc = load(path)
+        except (Unexpandable, yaml.YAMLError):
+            continue  # already reported by another guard
+        jobs = doc.get("jobs") or {}
+        if "edit-gate" not in jobs:
+            continue
+        for job_id, job in jobs.items():
+            if job_id == "edit-gate" or not isinstance(job, dict):
+                continue
+            needs = job.get("needs") or []
+            if isinstance(needs, str):
+                needs = [needs]
+            # A push-only job can never be woken by a pull_request edit, so the
+            # gate has nothing to say about it: tier1-gate.yml's canary and
+            # ci.yml's benchmarks are both exempt for that reason.
+            if "github.event_name == 'push'" in str(job.get("if") or "") and "pull_request" not in str(job.get("if") or ""):
+                continue
+            if "edit-gate" not in needs:
+                errors.append(
+                    f"{path}: job {job_id!r} does not depend on `edit-gate`, so it "
+                    f"re-runs in full on every PR body edit (cleat#3958)."
+                )
+                continue
+            cond = str(job.get("if") or "")
+            if not any(fn in cond for fn in status_functions):
+                errors.append(
+                    f"{path}: job {job_id!r} has no status function in its `if:`. A "
+                    f"job whose `needs` dependency was skipped is skipped too unless "
+                    f"its `if` uses one, so this job silently skips on every event "
+                    f"(cleat#3958)."
+                )
+            if "always()" not in cond:
+                for need in needs:
+                    if need == "edit-gate":
+                        continue
+                    if f"needs.{need}.result == 'success'" not in cond:
+                        errors.append(
+                            f"{path}: job {job_id!r} depends on {need!r} and its "
+                            f"`if:` uses a status function that is not `always()`, "
+                            f"so it now runs when {need!r} FAILS -- where it used "
+                            f"to be skipped. Add `needs.{need}.result == 'success'` "
+                            f"or use `always()` deliberately (cleat#3958)."
+                        )
+            required_name = is_required(job.get("name", job_id))
+            gated_at_job = "needs.edit-gate.outputs.skip" in cond
+            if required_name:
+                if gated_at_job:
+                    errors.append(
+                        f"{path}: job {job_id!r} carries a REQUIRED context and gates "
+                        f"at job level. A `skipped` required context beside its "
+                        f"`success` twin leaves the PR un-mergeable (measured on "
+                        f"#3960). Guard its steps instead (cleat#3958)."
+                    )
+                steps = job.get("steps") or []
+                if not steps or "needs.edit-gate.outputs.skip == 'true'" not in str(steps[0].get("if") if isinstance(steps[0], dict) else ""):
+                    errors.append(
+                        f"{path}: required job {job_id!r} has no first step that runs "
+                        f"only when the gate says skip, so an edited run reads as a "
+                        f"job that mysteriously did nothing (cleat#3958)."
+                    )
+                for n, step in enumerate(steps[1:], 1):
+                    if not isinstance(step, dict):
+                        continue
+                    if "needs.edit-gate.outputs.skip != 'true'" not in str(step.get("if") or ""):
+                        errors.append(
+                            f"{path}: job {job_id!r} is a required context but step "
+                            f"{n} is not guarded on `needs.edit-gate.outputs.skip != "
+                            f"'true'`, so a body edit would run it (cleat#3958)."
+                        )
+            else:
+                if not gated_at_job:
+                    errors.append(
+                        f"{path}: job {job_id!r} is not a required context and does "
+                        f"not skip at job level, so it re-runs in full on every body "
+                        f"edit (cleat#3958)."
+                    )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -1577,7 +2048,7 @@ def main() -> int:
     parser.add_argument(
         "--self-test",
         action="store_true",
-        help="run known-positive/known-negative cases for guards 6, 7 and 8 against synthetic YAML, not the real tree",
+        help="run known-positive/known-negative cases for guards 6-10 against synthetic YAML, not the real tree",
     )
     args = parser.parse_args()
 
@@ -1613,6 +2084,9 @@ def main() -> int:
     guard_no_untrusted_expressions_in_privileged_workflows(errors)
     guard_publish_approval_order(errors)
     guard_lint_step_wrapper(errors)
+    guard_image_labels_come_from_the_shared_script(errors)
+    guard_mysql_health_start_period(errors)
+    guard_edit_gate_dependents(errors)
 
     for error in errors:
         print(f"::error title=Workflow integrity::{error}")

@@ -65,6 +65,11 @@ type createDefRequest struct {
 	WASMBase64  string            `json:"wasm_bytes_base64"`
 	EntryPoints []string          `json:"entry_points,omitempty"`
 	PluginDeps  map[string]string `json:"plugin_deps,omitempty"`
+	// AllowMissingPlugins is the explicit override of the plugin-dependency check
+	// (cleat#3600, owner D52): without it a definition naming a plugin that no worker
+	// has ever registered is refused with 422. With it the deploy proceeds and the
+	// missing names are logged at WARN. There is no such override on a library install.
+	AllowMissingPlugins bool `json:"allow_missing_plugins,omitempty"`
 }
 
 // ---- HTTP API server ----
@@ -78,7 +83,24 @@ type apiServer struct {
 	store       engine.WorkflowStore
 	worker      *Worker
 	maxBodySize int64
-	db          *sql.DB
+	// maxDefinitionBodySize is --max-definition-body-size: the ceiling on POST /api/definitions, which carries a whole workflow component as
+	// base64 inside JSON. 0 means the default, definitionMaxBodySize (cleat#4400).
+	maxDefinitionBodySize int64
+	db                    *sql.DB
+
+	// queryStateSearchWindow is how many of a tenant's most recent runs a published-state search examines
+	// on a deployment that seals query_state (cleat#3775). 0 refuses that search, naming the flag.
+	queryStateSearchWindow int
+
+	// libraryEntitlement is the one hook point for a per-tenant entitlement to install
+	// a library (cleat#3540, D45). nil allows every tenant every library.
+	libraryEntitlement libraryEntitlementCheck
+
+	// pluginReg answers which plugin names are known to the deploy route's plugin-dependency
+	// check and records an override (cleat#3600, D52). nil in production, where both use the
+	// plugin-name registry in db; it exists so a test can supply them without registering a
+	// real worker.
+	pluginReg engine.PluginRegistryAccess
 
 	// maxPriorityMagnitude mirrors --max-priority-magnitude and bounds the
 	// `priority` field of a start request in either direction. 0 means the
@@ -97,6 +119,23 @@ type apiServer struct {
 	// taskQueues is passed through to factory.OpenStore so a request-scoped
 	// store polls the same queues as the process-wide one.
 	taskQueues []string
+
+	// keys serves POST/GET /api/keys and DELETE /api/keys/{key_id}: a tenant managing its own keys.
+	// Nil answers 501. cleat#3552, B2c.
+	keys tenantKeyManager
+
+	// provisioner serves POST /api/admin/tenants and its confirm. Nil on a worker that cannot
+	// provision (MySQL, which is single-tenant, and a sharded worker), where both routes answer 501.
+	// cleat#3552.
+	provisioner tenantProvisioner
+
+	// tenantCreationGuard refuses a tenant creation on a connection that is not subject to row-level
+	// security, with 409. Nil on every dialect but PostgreSQL. cleat#3772, owner decision D82.
+	tenantCreationGuard tenantCreationGuard
+
+	// schema is the PostgreSQL schema holding this deployment's cleat tables, the worker's --schema. A
+	// drop passes it to admin.drop_tenant, which refuses an empty one rather than resolve through search_path.
+	schema string
 
 	// requireAuth mirrors --require-auth. It decides what an unauthenticated
 	// request means: with auth on, no tenant in context is a bug or a bypass
@@ -285,20 +324,115 @@ func (s *apiServer) scopedStore(w http.ResponseWriter, r *http.Request) (engine.
 			s.writeError(w, http.StatusUnauthorized, "authentication required")
 			return nil, false
 		}
-		s.writeError(w, http.StatusInternalServerError, err.Error())
+		s.writeStoreError(w, r, err)
 		return nil, false
 	}
 	return st, true
 }
 
 func (s *apiServer) writeJSON(w http.ResponseWriter, status int, v any) {
+	// THE CHOKE POINT FOR OBSERVABILITY. An event record leaves the worker only
+	// through here, so redacting its type here covers a handler nobody has
+	// written yet. The data-plane types (WorkflowInstance and friends) are
+	// deliberately NOT in this switch: a tenant reading its own workflow's status
+	// and result gets what the workflow produced (cleat#3581, D49-1a). A caller
+	// that wants those redacted asks for it, see wantsRedaction.
+	switch t := v.(type) {
+	case []engine.EventRecord:
+		v = engine.RedactEventRecordsForEgress(t)
+	case engine.EventRecord:
+		v = engine.RedactEventRecordForEgress(t)
+	case *engine.EventRecord:
+		if t != nil {
+			red := engine.RedactEventRecordForEgress(*t)
+			v = &red
+		}
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(v)
 }
 
+// wantsRedaction reports whether the caller asked for the redacted view of a
+// data-plane read, with ?redact=true. The dashboard does, because it is a place
+// people look at what happened; a programmatic caller such as a service reading
+// a workflow's result does not, and gets the data as stored.
+//
+// The flag can only ADD redaction. Absent, empty, "false" or anything but the
+// exact word "true" is the data-plane default, so no value of it can be used to
+// unredact an observability route: those do not read it at all.
+func wantsRedaction(r *http.Request) bool { return r.URL.Query().Get("redact") == "true" }
+
+// writeWorkflow writes one workflow instance, redacted when the caller asked.
+func (s *apiServer) writeWorkflow(w http.ResponseWriter, r *http.Request, wf *engine.WorkflowInstance) {
+	if wf != nil && wantsRedaction(r) {
+		red := engine.RedactWorkflowInstanceForEgress(*wf)
+		wf = &red
+	}
+	s.writeJSON(w, 200, wf)
+}
+
+// writeWorkflows is writeWorkflow for a list.
+func (s *apiServer) writeWorkflows(w http.ResponseWriter, r *http.Request, workflows []engine.WorkflowInstance) {
+	if wantsRedaction(r) {
+		out := make([]engine.WorkflowInstance, len(workflows))
+		for i := range workflows {
+			out[i] = engine.RedactWorkflowInstanceForEgress(workflows[i])
+		}
+		workflows = out
+	}
+	s.writeJSON(w, 200, workflows)
+}
+
+// queryValueFor returns a published query value, redacted when the caller asked.
+func queryValueFor(r *http.Request, value string) string {
+	if wantsRedaction(r) {
+		return engine.Redact(value)
+	}
+	return value
+}
+
 func (s *apiServer) writeError(w http.ResponseWriter, status int, msg string) {
 	s.writeJSON(w, status, map[string]string{"error": msg})
+}
+
+// signalReplyBody is the body for a signal the store ACCEPTED (cleat#4340). It says "delivered" unless the target is a run that is settled but can be reopened under the same id (failed,
+// terminated, dead_lettered: engine.IsRedrivableStatus): for those the signal is stored and the run reads it only if an operator retries or re-replays it, so claiming "delivered" would be a claim
+// about something that has not happened. Same 200 and the same `status` key, so a client that only checks the code is unaffected; a client that reads `status` is told the truth, and `run_status` names
+// the run's state.
+//
+// The lookup is ADVISORY and never an error: the store has already accepted the signal, so a failed or empty read falls back to the plain body rather than turning a stored signal into a failure. It
+// reports the run's status at the moment of the reply, which can have moved since (a retry in between makes "stored" conservative, never wrong in the other direction).
+func (s *apiServer) signalReplyBody(ctx context.Context, st engine.WorkflowStore, id string) map[string]any {
+	wf, err := st.GetWorkflowByID(ctx, id)
+	if err != nil || wf == nil || !engine.IsRedrivableStatus(wf.Status) {
+		return map[string]any{"status": "delivered"}
+	}
+	return map[string]any{
+		"status":     "stored",
+		"run_status": wf.Status,
+		"detail":     "stored; this run reads it only if it is retried or re-replayed",
+	}
+}
+
+// writeSignalNotOpen answers a signal sent to a run that is no longer open with 409 and says what the caller needs: that it is the run's STATE that refuses, which state, and, for a run that
+// continued as new, which run is the current one (cleat#4340). It reports whether err was that error.
+//
+// 409 and not 404 or 410: the run exists and the caller may see it, so "not found" would be a lie and would be indistinguishable from the foreign-tenant case that must stay one answer; the
+// request is not at fault but the target's state is, which is what Conflict means. The body keeps the `error` key every other error response carries and adds fields a client can switch on.
+// `continued_to` is omitted when the run simply finished, and is the END of the chain as of now when it continued, because a client holding the first run of a long chain would otherwise be
+// refused once per link.
+func (s *apiServer) writeSignalNotOpen(w http.ResponseWriter, err error) bool {
+	var ne *engine.WorkflowNotOpenError
+	if !errors.As(err, &ne) {
+		return false
+	}
+	body := map[string]string{"error": ne.Error(), "detail": "workflow_not_open", "status": ne.Status}
+	if ne.ContinuedTo != "" {
+		body["continued_to"] = ne.ContinuedTo
+	}
+	s.writeJSON(w, http.StatusConflict, body)
+	return true
 }
 
 // bodyTooLargeConfigured and bodyTooLargeFixed write the 413 for an oversized
@@ -330,12 +464,13 @@ type bodyLimit struct {
 	help string
 }
 
-// definitionMaxBodySize is the ceiling on a workflow definition upload.
+// definitionMaxBodySize is the DEFAULT ceiling on a workflow definition upload, moved by --max-definition-body-size (cleat#4400).
 //
-// Named because cleat#1332's message has to name the thing that sets the
-// limit, and this was an inline 10*1024*1024 with no name anywhere -- not in
-// the flags, not in the docs, and not in the 400 it used to produce.
-const definitionMaxBodySize int64 = 10 * 1024 * 1024
+// Named because cleat#1332's message has to name the thing that sets the limit, and this was an inline 10*1024*1024 with no name anywhere -- not in
+// the flags, not in the docs, and not in the 400 it used to produce. It was a fixed 10 MiB until cleat#4400: a built Python component is about
+// 19.5 MB and the body carries it as base64 inside JSON (wasm_bytes_base64, about a third larger), so a Python workflow could not be deployed through
+// POST /api/definitions at all.
+const definitionMaxBodySize int64 = 64 * 1024 * 1024
 
 // terminateMaxBodySize is the ceiling on a dead-letter terminate's reason.
 // Also previously an unnamed inline literal (int64(1<<10)).
@@ -350,8 +485,14 @@ func signalBodyLimit() bodyLimit {
 		"update endpoints and not changed by --max-body-size"}
 }
 
-func definitionBodyLimit() bodyLimit {
-	return bodyLimit{definitionMaxBodySize, "fixed for the definition upload endpoint and " +
+// definitionBodyLimit is the ceiling on a definition upload: --max-definition-body-size, or the default when it was not set (a test server, or
+// a flag of zero). It is NOT moved by --max-body-size, which is the 1 MiB ceiling of the ordinary endpoints, and the 413 says which flag does.
+func (s *apiServer) definitionBodyLimit() bodyLimit {
+	max := s.maxDefinitionBodySize
+	if max <= 0 {
+		max = definitionMaxBodySize
+	}
+	return bodyLimit{max, "set by --max-definition-body-size for the definition upload endpoint and " +
 		"not changed by --max-body-size"}
 }
 
@@ -618,6 +759,14 @@ func (s *apiServer) handleWorkflowsList(w http.ResponseWriter, r *http.Request) 
 		ConcurrencyKey: q.Get("concurrency_key"),
 	}
 
+	// cleat#3775: find a run by what it published. Refused, not ignored, when it cannot be honoured.
+	state, stateErr := queryStateFilterFromParams(q)
+	if stateErr != nil {
+		s.writeError(w, 400, stateErr.Error())
+		return
+	}
+	filter.QueryState = state
+
 	// Paging, mirroring handleGetInstanceEvents: both parameters read from the
 	// query, a server ceiling applied rather than assumed, and the total sent
 	// as a header.
@@ -666,20 +815,27 @@ func (s *apiServer) handleWorkflowsList(w http.ResponseWriter, r *http.Request) 
 	internalNames, ierr := s.internalDefinitionNames(r.Context(), st)
 	if ierr != nil {
 		// Fail closed: an unreadable definition set cannot be excluded, and an
-		// unfiltered list would show every internal run.
-		s.writeError(w, 500, ierr.Error())
+		// unfiltered list would show every internal run. 503 and a log line, as
+		// every other access check answers (cleat#3785); it was a 500 carrying
+		// the driver's text.
+		s.writeAccessCheckUnavailable(w, r, "which definitions are internal", ierr)
 		return
 	}
 	filter.ExcludeDefNames = internalNames
 
+	// cleat#3775 part 2: where query_state is ciphertext the database cannot match it, so the worker does.
+	if len(filter.QueryState) > 0 && s.searchSealedQueryState(w, r, st, filter) {
+		return
+	}
+
 	total, err := st.CountWorkflows(r.Context(), filter)
 	if err != nil {
-		s.writeError(w, 500, err.Error())
+		s.writeListWorkflowsError(w, r, err)
 		return
 	}
 	workflows, err := st.ListWorkflows(r.Context(), filter)
 	if err != nil {
-		s.writeError(w, 500, err.Error())
+		s.writeListWorkflowsError(w, r, err)
 		return
 	}
 	// cleat#1986 slice 2b, moved into the query by cleat#3009: the internal
@@ -693,7 +849,21 @@ func (s *apiServer) handleWorkflowsList(w http.ResponseWriter, r *http.Request) 
 	if workflows == nil {
 		workflows = []engine.WorkflowInstance{}
 	}
-	s.writeJSON(w, 200, workflows)
+	s.writeWorkflows(w, r, workflows)
+}
+
+// writeListWorkflowsError answers a failed listing. A published-state filter on a worker that seals
+// query_state is the caller asking for something this deployment cannot do, which is 422 and says which
+// flag (cleat#3775); a refusal as a 500 would read as a fault to retry. Everything else is the 500 it was.
+func (s *apiServer) writeListWorkflowsError(w http.ResponseWriter, r *http.Request, err error) {
+	switch {
+	case errors.Is(err, engine.ErrQueryStateFilterUnavailableUnderEncryption):
+		s.writeError(w, http.StatusUnprocessableEntity, engine.ErrQueryStateFilterUnavailableUnderEncryption.Error())
+	case errors.Is(err, engine.ErrQueryStateFilterTooManyPairs):
+		s.writeError(w, http.StatusBadRequest, err.Error())
+	default:
+		s.writeStoreError(w, r, err)
+	}
 }
 
 // handleWorkflows routes /api/workflows/* requests.
@@ -807,24 +977,24 @@ func (s *apiServer) handleGetWorkflow(w http.ResponseWriter, r *http.Request, id
 	if key := r.URL.Query().Get("key"); key != "" {
 		value, err := st.GetQueryState(r.Context(), id, key)
 		if err != nil {
-			s.writeError(w, 500, err.Error())
+			s.writeStoreError(w, r, err)
 			return
 		}
-		s.writeJSON(w, 200, map[string]string{"key": key, "value": value})
+		s.writeJSON(w, 200, map[string]string{"key": key, "value": queryValueFor(r, value)})
 		return
 	}
 
 	// Return full workflow info.
 	wf, err := st.GetWorkflowByID(r.Context(), id)
 	if err != nil {
-		s.writeError(w, 500, err.Error())
+		s.writeAccessCheckUnavailable(w, r, "the run", err) // cleat#3866: not the driver's text, and retryable
 		return
 	}
 	if wf == nil {
 		s.writeError(w, 404, "workflow not found")
 		return
 	}
-	s.writeJSON(w, 200, wf)
+	s.writeWorkflow(w, r, wf)
 }
 
 // handleGetTerminalRun serves GET /api/workflows/:id/terminal -- the last run
@@ -856,14 +1026,14 @@ func (s *apiServer) handleGetTerminalRun(w http.ResponseWriter, r *http.Request,
 	}
 	wf, err := st.GetTerminalRun(r.Context(), id)
 	if err != nil {
-		s.writeError(w, 500, err.Error())
+		s.writeStoreError(w, r, err)
 		return
 	}
 	if wf == nil {
 		s.writeError(w, 404, "workflow not found")
 		return
 	}
-	s.writeJSON(w, 200, wf)
+	s.writeWorkflow(w, r, wf)
 }
 
 func (s *apiServer) handleStartWorkflow(w http.ResponseWriter, r *http.Request, name string) {
@@ -971,24 +1141,33 @@ func (s *apiServer) handleStartWorkflow(w http.ResponseWriter, r *http.Request, 
 	//
 	// Costs one primary-key lookup on a small table per start, next to the
 	// ListVersions call below that every start already makes.
-	if susp, ok := st.(engine.TenantSuspensionReader); ok {
-		suspended, serr := susp.IsTenantSuspended(r.Context(), tenantID)
-		if serr != nil {
+	//
+	// A store that can neither answer nor declare engine.NoTenantSuspensionMarker is a 500, not a
+	// pass: the check used to be a bare type assertion, so a store that failed it was skipped without
+	// a word (cleat#3552).
+	suspended, serr := engine.TenantSuspended(r.Context(), st, tenantID)
+	if serr != nil {
+		if errors.Is(serr, engine.ErrTenantSuspensionUnanswerable) {
+			// Our own configuration error, written for the operator: it names the store type that has to
+			// implement the question. Not a store failure, so it keeps its text (cleat#3878).
+			// error-text-ok: engine.ErrTenantSuspensionUnanswerable is our own sentence, naming the store type
 			s.writeError(w, 500, serr.Error())
 			return
 		}
-		if suspended {
-			s.writeError(w, http.StatusForbidden,
-				"tenant is suspended; no new workflows may be started. "+
-					"Runs already executing finish normally, and reads are unaffected.")
-			return
-		}
+		s.writeStoreError(w, r, serr)
+		return
+	}
+	if suspended {
+		s.writeError(w, http.StatusForbidden,
+			"tenant is suspended or has been dropped; no new workflows may be started. "+
+				"Runs already executing finish normally, and reads are unaffected.")
+		return
 	}
 
 	// Find the latest version of this workflow.
 	versions, err := st.ListVersions(r.Context(), name)
 	if err != nil {
-		s.writeError(w, 500, err.Error())
+		s.writeStoreError(w, r, err)
 		return
 	}
 	if len(versions) == 0 {
@@ -1026,7 +1205,7 @@ func (s *apiServer) handleStartWorkflow(w http.ResponseWriter, r *http.Request, 
 	// API -- the request is well-formed and the state says no.
 	ok, vErr := st.ValidateVersion(r.Context(), name, targetVersion)
 	if vErr != nil {
-		s.writeError(w, 500, vErr.Error())
+		s.writeStoreError(w, r, vErr)
 		return
 	}
 	if !ok {
@@ -1085,16 +1264,14 @@ func (s *apiServer) handleStartWorkflow(w http.ResponseWriter, r *http.Request, 
 	// or not this feature exists, when determineEntryPoint runs again at
 	// execution time.
 	if def, defErr := st.GetWorkflowDef(r.Context(), name, targetVersion); defErr != nil {
-		s.writeError(w, 500, defErr.Error())
+		s.writeStoreError(w, r, defErr)
 		return
 	} else if def != nil && !def.InputValidationDisabled && len(def.EntryPointSchemas) > 0 {
 		if entryPoint, epErr := determineEntryPoint(in, def.WASMBytes); epErr == nil {
 			if schema, ok := def.EntryPointSchemas[entryPoint]; ok && len(schema.Params) > 0 {
 				violation, schemaErr := jsonschema.Validate(schema.Params, input.Input)
 				if schemaErr != nil {
-					s.writeError(w, 500, fmt.Sprintf(
-						"entry point %q of %s v%d has a stored input schema that could not be parsed: %v",
-						entryPoint, name, targetVersion, schemaErr))
+					s.writeStoreErrorDuring(w, r, fmt.Sprintf("reading the stored input schema of entry point %q of %s v%d", entryPoint, name, targetVersion), schemaErr)
 					return
 				}
 				if violation != nil {
@@ -1117,8 +1294,9 @@ func (s *apiServer) handleStartWorkflow(w http.ResponseWriter, r *http.Request, 
 
 	// Support Idempotency-Key header for exactly-once semantics.
 	idempotencyKey := r.Header.Get("Idempotency-Key")
-	// Redact sensitive fields in the input before storing.
-	in = json.RawMessage(engine.Redact(string(in)))
+	// The input is stored and delivered as sent. Redaction happens where data
+	// leaves the system, not here: rewriting it on the way in changed the values
+	// a workflow consumed while the caller got a 201 (cleat#3581).
 	// The key is recorded BY THE INSERT when the store can do it, so the run is
 	// never claimable-without-its-key even for an instant (cleat#1186). Stores
 	// that cannot fall through to the plain StartNewRun and keep the old
@@ -1134,6 +1312,15 @@ func (s *apiServer) handleStartWorkflow(w http.ResponseWriter, r *http.Request, 
 	if input.WasmInstanceTimeoutMs < 0 || input.WasmWallClockCeilingMs < 0 || input.HostRetryBudgetMs < 0 ||
 		input.MaxWorkflowDurationMs < 0 {
 		s.writeError(w, 400, "per-run limit overrides must be positive milliseconds; 0 or absent means no override")
+		return
+	}
+	// The same floor as --wasm-instance-timeout and a tenant's wasm_instance_timeout_ms (cleat#3922): a run asking to be stopped
+	// sooner than the soft kill can reach it would have its defers silently not run. Refused here, before any store work, so the
+	// caller gets a 400 that says why; the stores check it too, for library callers.
+	if err := (engine.StartOptions{RunLimits: engine.TenantSettings{
+		WasmInstanceTimeout: time.Duration(input.WasmInstanceTimeoutMs) * time.Millisecond,
+	}}).Validate(); err != nil {
+		s.writeError(w, 400, err.Error())
 		return
 	}
 	startOpts := engine.StartOptions{
@@ -1172,7 +1359,7 @@ func (s *apiServer) handleStartWorkflow(w http.ResponseWriter, r *http.Request, 
 				"detail": "idempotency_key_input_mismatch",
 			})
 		default:
-			s.writeError(w, 500, err.Error())
+			s.writeStoreError(w, r, err)
 		}
 		return
 	}
@@ -1295,7 +1482,7 @@ func (s *apiServer) handleStartWorkflow(w http.ResponseWriter, r *http.Request, 
 		ttl := 30 * time.Minute
 		acquired, err := st.AcquireConcurrencyKey(r.Context(), concurrencyKey, runID, ttl)
 		if err != nil {
-			s.writeError(w, 500, err.Error())
+			s.writeStoreError(w, r, err)
 			return
 		}
 		if !acquired {
@@ -1357,7 +1544,7 @@ func (s *apiServer) handleStartWorkflow(w http.ResponseWriter, r *http.Request, 
 				// was enforced.
 				slog.ErrorContext(r.Context(), "concurrency key conflict: could not reject the losing run, it remains runnable",
 					"run_id", runID, "concurrency_key", concurrencyKey, "error", err)
-				s.writeError(w, 500, "workflow already running with key "+concurrencyKey+", and the losing run could not be rejected: "+err.Error())
+				s.writeError(w, 500, "workflow already running with key "+concurrencyKey+", and the losing run could not be rejected; the error is in the worker log")
 				return
 			}
 			// cleat#1172: the refusal used to say only "workflow already
@@ -1432,7 +1619,6 @@ func (s *apiServer) handleSignal(w http.ResponseWriter, r *http.Request, id stri
 		return
 	}
 	payload := req.Payload
-	payload = engine.Redact(payload)
 	// Check signal authorization for HTTP API callers.
 	// External callers have no defName; they must be allowed via "*" wildcard.
 	if s.worker.requireSignalAuth != nil && *s.worker.requireSignalAuth {
@@ -1447,7 +1633,7 @@ func (s *apiServer) handleSignal(w http.ResponseWriter, r *http.Request, id stri
 				s.writeError(w, 404, "not found")
 				return
 			}
-			s.writeError(w, 500, err.Error())
+			s.writeStoreError(w, r, err)
 			return
 		}
 		if !signalCallerAllowed(callers, "*") {
@@ -1470,8 +1656,12 @@ func (s *apiServer) handleSignal(w http.ResponseWriter, r *http.Request, id stri
 	key := r.Header.Get("Idempotency-Key")
 	si, canAbsorb := st.(engine.SignalIdempotencyStore)
 	if key != "" && canAbsorb {
-		already, err := si.DeliverSignalIdempotent(r.Context(), id, req.SignalName, payload, key)
+		receipt, err := deliverSignalWithReceipt(r.Context(), st, si, id, req.SignalName, payload, key)
+		already := receipt.Replay
 		if err != nil {
+			if s.writeSignalNotOpen(w, err) {
+				return
+			}
 			// Same TOCTOU window as the auth check above: callerOwnsTarget
 			// already confirmed this id exists, so ErrWorkflowNotFound here
 			// means it was purged in between -- a genuine not-found, not a
@@ -1480,7 +1670,7 @@ func (s *apiServer) handleSignal(w http.ResponseWriter, r *http.Request, id stri
 				s.writeError(w, 404, "not found")
 				return
 			}
-			s.writeError(w, 500, err.Error())
+			s.writeStoreError(w, r, err)
 			return
 		}
 		// 200 either way, and `status` says only WHAT HAPPENED. It used to
@@ -1493,24 +1683,58 @@ func (s *apiServer) handleSignal(w http.ResponseWriter, r *http.Request, id stri
 		// This path was the CLOSEST to the policy already: right status, right
 		// shape, wrong place for the marker. start and reprocess had to change
 		// their status and their field names as well.
-		s.writeJSON(w, 200, withReplayFlag(map[string]any{"status": "delivered"}, already))
+		s.writeJSON(w, 200, withReplayFlag(s.signalReply(r.Context(), st, id, receipt), already))
 		return
 	}
 
-	if err := st.DeliverSignal(r.Context(), id, req.SignalName, payload); err != nil {
+	receipt, err := deliverSignalWithReceipt(r.Context(), st, nil, id, req.SignalName, payload, "")
+	if err != nil {
+		if s.writeSignalNotOpen(w, err) {
+			return
+		}
 		// Same TOCTOU window as above.
 		if errors.Is(err, engine.ErrWorkflowNotFound) {
 			s.writeError(w, 404, "not found")
 			return
 		}
-		s.writeError(w, 500, err.Error())
+		s.writeStoreError(w, r, err)
 		return
 	}
 	// Keyless: no token, so nothing to replay -- the caller keeps the right to
 	// send the same signal deliberately twice. The flag is still present and
 	// false, because "this is not a replay" is an answer and an absent field is
 	// not.
-	s.writeJSON(w, 200, withReplayFlag(map[string]any{"status": "delivered"}, false))
+	s.writeJSON(w, 200, withReplayFlag(s.signalReply(r.Context(), st, id, receipt), false))
+}
+
+// deliverSignalWithReceipt delivers a signal and says where it went (cleat#4340): to the run it was addressed to, or, when that run had continued as new, to the END of its chain. A store that
+// cannot say (a test double, an older store) is asked the old way and reports the addressed run, which is what it did. si is the store's idempotency interface when the caller already holds it,
+// and may be nil for an unkeyed delivery.
+func deliverSignalWithReceipt(ctx context.Context, st engine.WorkflowStore, si engine.SignalIdempotencyStore, id, name, payload, key string) (engine.SignalReceipt, error) {
+	if rs, ok := st.(engine.SignalReceiptStore); ok {
+		return rs.DeliverSignalReceipt(ctx, id, name, payload, key)
+	}
+	if key != "" && si != nil {
+		already, err := si.DeliverSignalIdempotent(ctx, id, name, payload, key)
+		return engine.SignalReceipt{DeliveredTo: id, Replay: already}, err
+	}
+	return engine.SignalReceipt{DeliveredTo: id}, st.DeliverSignal(ctx, id, name, payload)
+}
+
+// signalReply is the 200 body for a signal the store ACCEPTED. It is signalReplyBody for the run that now holds the signal, plus, when the signal was forwarded, WHICH run that is
+// (`workflow_id`) and which run the caller addressed (`forwarded_from`), so a client holding the first id of a long chain learns where its signals go. Both keys are absent for a signal that went
+// where it was addressed, so a client that does not read them sees exactly what it saw before.
+func (s *apiServer) signalReply(ctx context.Context, st engine.WorkflowStore, addressed string, r engine.SignalReceipt) map[string]any {
+	target := addressed
+	if r.Forwarded && r.DeliveredTo != "" {
+		target = r.DeliveredTo
+	}
+	body := s.signalReplyBody(ctx, st, target)
+	if r.Forwarded && r.DeliveredTo != "" {
+		body["workflow_id"] = r.DeliveredTo
+		body["forwarded_from"] = addressed
+	}
+	return body
 }
 
 func (s *apiServer) handleCancel(w http.ResponseWriter, r *http.Request, id string) {
@@ -1553,7 +1777,10 @@ func (s *apiServer) handleCancel(w http.ResponseWriter, r *http.Request, id stri
 	}
 
 	if req.Preemptive {
-		if err := st.CancelWorkflow(r.Context(), id, req.Reason); err != nil {
+		rec, err := settleWithReceipt(st, func(rs engine.SettleReceiptStore) (engine.SettleReceipt, error) {
+			return rs.CancelWorkflowReceipt(r.Context(), id, req.Reason)
+		}, func() error { return st.CancelWorkflow(r.Context(), id, req.Reason) }, id)
+		if err != nil {
 			// Same shape as terminate: callerOwnsTarget has already answered
 			// 404 for an id this tenant does not own, so reaching here means
 			// the row went away in between.
@@ -1564,7 +1791,7 @@ func (s *apiServer) handleCancel(w http.ResponseWriter, r *http.Request, id stri
 			// cleat#1975 (D3): a pre-emptive cancel on a settled row now comes
 			// back as engine.ErrAdminStateConflict -> 409, via the same
 			// mapping re-replay and force-fail/force-complete use.
-			s.handleAdminOpError(w, err)
+			s.handleAdminOpError(w, r, err)
 			return
 		}
 		// Names the OUTCOME, not the current state, which is what terminate
@@ -1574,15 +1801,41 @@ func (s *apiServer) handleCancel(w http.ResponseWriter, r *http.Request, id stri
 		// the same promise: this is what the run will end as. A caller that
 		// needs to know it has finished polls the status, as tiers.yaml's
 		// decision D6 already requires for terminate.
-		s.writeJSON(w, 200, map[string]string{"status": "cancelled"})
+		s.writeJSON(w, 200, settleReply("cancelled", id, rec))
 		return
 	}
 
-	if err := st.RequestCancellation(r.Context(), id, req.Reason); err != nil {
-		s.writeError(w, 500, err.Error())
+	rec, err := settleWithReceipt(st, func(rs engine.SettleReceiptStore) (engine.SettleReceipt, error) {
+		return rs.RequestCancellationReceipt(r.Context(), id, req.Reason)
+	}, func() error { return st.RequestCancellation(r.Context(), id, req.Reason) }, id)
+	if err != nil {
+		// A cancellation request to a chain whose current run is done or cancelled is refused as the pre-emptive verbs are (409 state_conflict), as a signal to it is (cleat#4340).
+		// Every other error is what writeStoreError did with it before.
+		s.handleAdminOpError(w, r, err)
 		return
 	}
-	s.writeJSON(w, 200, map[string]string{"status": "cancellation_requested"})
+	s.writeJSON(w, 200, settleReply("cancellation_requested", id, rec))
+}
+
+// settleWithReceipt runs a cancel or a terminate through the store's receipt form when it has one, and through the plain verb when it does not (a test double, an older store), whose
+// receipt says the addressed run was acted on, which is what it did (cleat#4340).
+func settleWithReceipt(st engine.WorkflowStore, withReceipt func(engine.SettleReceiptStore) (engine.SettleReceipt, error), plain func() error, addressed string) (engine.SettleReceipt, error) {
+	if rs, ok := st.(engine.SettleReceiptStore); ok {
+		return withReceipt(rs)
+	}
+	return engine.SettleReceipt{SettledRun: addressed}, plain()
+}
+
+// settleReply is the 200 body for a cancel or a terminate the store ACCEPTED: {"status": ...}, plus, when the verb was forwarded, WHICH run it acted on (`workflow_id`) and which run
+// the caller addressed (`forwarded_from`), as a forwarded signal's reply does. Both keys are absent when it acted where it was addressed, so a client that does not read them sees
+// exactly what it saw before.
+func settleReply(status, addressed string, r engine.SettleReceipt) map[string]string {
+	body := map[string]string{"status": status}
+	if r.Forwarded && r.SettledRun != "" {
+		body["workflow_id"] = r.SettledRun
+		body["forwarded_from"] = addressed
+	}
+	return body
 }
 
 // runExists reports whether id names a workflow the caller can see, writing the
@@ -1628,7 +1881,9 @@ func (s *apiServer) handleCancel(w http.ResponseWriter, r *http.Request, id stri
 func (s *apiServer) runExists(w http.ResponseWriter, r *http.Request, st engine.WorkflowStore, id string) bool {
 	wf, err := st.GetWorkflowByID(r.Context(), id)
 	if err != nil {
-		s.writeError(w, 500, err.Error())
+		// A run that cannot be READ is not a run that does not exist, and the driver's text is not for the client
+		// (cleat#3866, as cleat#3799 did for the guard).
+		s.writeAccessCheckUnavailable(w, r, "the run", err)
 		return false
 	}
 	if wf == nil {
@@ -1684,7 +1939,9 @@ func (s *apiServer) runExists(w http.ResponseWriter, r *http.Request, st engine.
 func (s *apiServer) defExists(w http.ResponseWriter, r *http.Request, st engine.WorkflowStore, name string) bool {
 	defs, err := st.ListWorkflowDefs(r.Context(), name)
 	if err != nil {
-		s.writeError(w, 500, err.Error())
+		// Fails closed, as before, but answers what every other access check answers when it cannot
+		// read: 503 and a log line, not a 500 carrying the driver's text (cleat#3785).
+		s.writeAccessCheckUnavailable(w, r, "the definition's versions", err)
 		return false
 	}
 	if len(defs) == 0 {
@@ -1735,7 +1992,7 @@ func (s *apiServer) handleListRoutingRules(w http.ResponseWriter, r *http.Reques
 	}
 	rules, err := st.GetRoutingRules(r.Context(), name)
 	if err != nil {
-		s.writeError(w, 500, err.Error())
+		s.writeStoreError(w, r, err)
 		return
 	}
 	// A list, never null: an empty routing table is the normal state, and a
@@ -1792,7 +2049,7 @@ func (s *apiServer) handleSetRoutingRule(w http.ResponseWriter, r *http.Request,
 	// deprecated is precisely the mistake worth refusing.
 	valid, vErr := st.ValidateVersion(r.Context(), name, req.TargetVersion)
 	if vErr != nil {
-		s.writeError(w, 500, vErr.Error())
+		s.writeStoreError(w, r, vErr)
 		return
 	}
 	if !valid {
@@ -1803,7 +2060,7 @@ func (s *apiServer) handleSetRoutingRule(w http.ResponseWriter, r *http.Request,
 	}
 
 	if err := st.SetRoutingRule(r.Context(), name, req.TargetVersion, weight); err != nil {
-		s.writeError(w, 500, err.Error())
+		s.writeStoreError(w, r, err)
 		return
 	}
 	s.writeJSON(w, 201, map[string]any{
@@ -1837,7 +2094,7 @@ func (s *apiServer) handleRemoveRoutingRule(w http.ResponseWriter, r *http.Reque
 			s.writeError(w, 404, "routing rule not found: "+ruleID)
 			return
 		}
-		s.writeError(w, 500, err.Error())
+		s.writeStoreError(w, r, err)
 		return
 	}
 	s.writeJSON(w, 200, map[string]string{"status": "removed"})
@@ -1884,7 +2141,7 @@ func (s *apiServer) handleListWorkflowTags(w http.ResponseWriter, r *http.Reques
 	}
 	tags, err := st.GetWorkflowTags(r.Context(), name)
 	if err != nil {
-		s.writeError(w, 500, err.Error())
+		s.writeStoreError(w, r, err)
 		return
 	}
 	// An object, never null: no tags is the normal state for most definitions.
@@ -1948,7 +2205,7 @@ func (s *apiServer) handleSetWorkflowTag(w http.ResponseWriter, r *http.Request,
 	// policy that spreads it.
 	valid, vErr := st.ValidateVersion(r.Context(), name, req.Version)
 	if vErr != nil {
-		s.writeError(w, 500, vErr.Error())
+		s.writeStoreError(w, r, vErr)
 		return
 	}
 	if !valid {
@@ -1962,7 +2219,7 @@ func (s *apiServer) handleSetWorkflowTag(w http.ResponseWriter, r *http.Request,
 	// that already exists MOVES it rather than creating a second one. The store
 	// upserts; the verb should say so.
 	if err := st.SetWorkflowTag(r.Context(), name, req.Version, req.Tag); err != nil {
-		s.writeError(w, 500, err.Error())
+		s.writeStoreError(w, r, err)
 		return
 	}
 	s.writeJSON(w, 200, map[string]any{
@@ -1981,7 +2238,7 @@ func (s *apiServer) handleRemoveWorkflowTag(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	if err := st.RemoveWorkflowTag(r.Context(), name, tag); err != nil {
-		s.writeError(w, 500, err.Error())
+		s.writeStoreError(w, r, err)
 		return
 	}
 	s.writeJSON(w, 200, map[string]string{"status": "removed"})
@@ -2009,13 +2266,13 @@ func (s *apiServer) handleGetHistory(w http.ResponseWriter, r *http.Request, id 
 
 	total, err := st.CountEventHistory(r.Context(), id)
 	if err != nil {
-		s.writeError(w, 500, err.Error())
+		s.writeStoreError(w, r, err)
 		return
 	}
 
 	history, err := st.LoadEventHistoryPaginated(r.Context(), id, offset, limit)
 	if err != nil {
-		s.writeError(w, 500, err.Error())
+		s.writeStoreError(w, r, err)
 		return
 	}
 	if history == nil {
@@ -2157,8 +2414,15 @@ func (s *apiServer) handleGetQueryState(w http.ResponseWriter, r *http.Request, 
 	if !r.URL.Query().Has("key") {
 		all, err := st.ListQueryState(r.Context(), id)
 		if err != nil {
-			s.writeError(w, 500, err.Error())
+			s.writeStoreError(w, r, err)
 			return
+		}
+		if wantsRedaction(r) {
+			red := make(map[string]string, len(all))
+			for k, v := range all {
+				red[k] = engine.Redact(v)
+			}
+			all = red
 		}
 		s.writeJSON(w, 200, map[string]any{"state": all})
 		return
@@ -2166,10 +2430,10 @@ func (s *apiServer) handleGetQueryState(w http.ResponseWriter, r *http.Request, 
 	key := r.URL.Query().Get("key")
 	value, err := st.GetQueryState(r.Context(), id, key)
 	if err != nil {
-		s.writeError(w, 500, err.Error())
+		s.writeStoreError(w, r, err)
 		return
 	}
-	s.writeJSON(w, 200, map[string]string{"key": key, "value": value})
+	s.writeJSON(w, 200, map[string]string{"key": key, "value": queryValueFor(r, value)})
 }
 
 func (s *apiServer) handleGetDAG(w http.ResponseWriter, r *http.Request, id string) {
@@ -2183,7 +2447,7 @@ func (s *apiServer) handleGetDAG(w http.ResponseWriter, r *http.Request, id stri
 	// Look up the workflow instance to get def_name and def_version.
 	wf, err := st.GetWorkflowByID(r.Context(), id)
 	if err != nil {
-		s.writeError(w, 500, err.Error())
+		s.writeAccessCheckUnavailable(w, r, "the run", err) // cleat#3866: not the driver's text, and retryable
 		return
 	}
 	if wf == nil {
@@ -2214,7 +2478,7 @@ func (s *apiServer) handleGetDAG(w http.ResponseWriter, r *http.Request, id stri
 	// the other twelve handlers already did. Found by WS-3 sweeping the shape.
 	spec, err := st.LoadDAGSpec(r.Context(), wf.DefName, wf.DefVersion)
 	if err != nil {
-		s.writeError(w, 500, err.Error())
+		s.writeStoreError(w, r, err)
 		return
 	}
 	if spec == nil {
@@ -2225,7 +2489,7 @@ func (s *apiServer) handleGetDAG(w http.ResponseWriter, r *http.Request, id stri
 	// Parse the spec so we can add workflow_id metadata.
 	var dagData map[string]any
 	if err := json.Unmarshal(spec, &dagData); err != nil {
-		s.writeError(w, 500, "invalid dag_spec JSON: "+err.Error())
+		s.writeStoreErrorDuring(w, r, "reading the stored DAG specification", err)
 		return
 	}
 
@@ -2261,7 +2525,7 @@ func (s *apiServer) handleGetAllowedSignals(w http.ResponseWriter, r *http.Reque
 			s.writeError(w, 404, "workflow not found")
 			return
 		}
-		s.writeError(w, 500, err.Error())
+		s.writeStoreError(w, r, err)
 		return
 	}
 	if callers == nil {
@@ -2307,7 +2571,7 @@ func (s *apiServer) handleSetAllowedSignals(w http.ResponseWriter, r *http.Reque
 			s.writeError(w, 404, "workflow not found")
 			return
 		}
-		s.writeError(w, 500, err.Error())
+		s.writeStoreError(w, r, err)
 		return
 	}
 	s.writeJSON(w, 200, map[string]any{"allowed_signals": req.AllowedSignals})
@@ -2324,7 +2588,7 @@ func (s *apiServer) handleListPromises(w http.ResponseWriter, r *http.Request, i
 	}
 	promises, err := st.ListPromises(r.Context(), id)
 	if err != nil {
-		s.writeError(w, 500, err.Error())
+		s.writeStoreError(w, r, err)
 		return
 	}
 	if promises == nil {
@@ -2360,7 +2624,7 @@ func (s *apiServer) handleResolvePromise(w http.ResponseWriter, r *http.Request,
 		return
 	}
 	if err := st.ResolvePromise(r.Context(), promiseID, req.Result); err != nil {
-		s.writeError(w, 500, err.Error())
+		s.writeStoreError(w, r, err)
 		return
 	}
 	s.writeJSON(w, 200, map[string]string{"status": "resolved"})
@@ -2388,7 +2652,7 @@ func (s *apiServer) handleRejectPromise(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 	if err := st.RejectPromise(r.Context(), promiseID, req.Reason); err != nil {
-		s.writeError(w, 500, err.Error())
+		s.writeStoreError(w, r, err)
 		return
 	}
 	s.writeJSON(w, 200, map[string]string{"status": "rejected"})
@@ -2434,7 +2698,7 @@ func (s *apiServer) handleWorkflowUpdate(w http.ResponseWriter, r *http.Request,
 	// Verify the workflow exists.
 	wf, err := st.GetWorkflowByID(r.Context(), id)
 	if err != nil {
-		s.writeError(w, 500, err.Error())
+		s.writeAccessCheckUnavailable(w, r, "the run", err) // cleat#3866: not the driver's text, and retryable
 		return
 	}
 	if wf == nil {
@@ -2488,13 +2752,11 @@ func (s *apiServer) handleWorkflowUpdate(w http.ResponseWriter, r *http.Request,
 	if payload == "" {
 		payload = "{}"
 	}
-	// Redact sensitive fields from the payload before persisting.
-	payload = engine.Redact(payload)
 
 	// Check if there's already a pending update with the same name.
 	pending, pErr := st.GetPendingUpdateRequests(r.Context(), id)
 	if pErr != nil {
-		s.writeError(w, 500, pErr.Error())
+		s.writeStoreError(w, r, pErr)
 		return
 	}
 	for _, p := range pending {
@@ -2539,7 +2801,7 @@ func (s *apiServer) handleWorkflowUpdate(w http.ResponseWriter, r *http.Request,
 	// Generate a promise ID so the caller can track the update outcome.
 	promiseID, err := generateUpdatePromiseID()
 	if err != nil {
-		s.writeError(w, 500, "failed to generate promise ID: "+err.Error())
+		s.writeStoreErrorDuring(w, r, "generating the update's promise id", err)
 		return
 	}
 
@@ -2558,7 +2820,7 @@ func (s *apiServer) handleWorkflowUpdate(w http.ResponseWriter, r *http.Request,
 	// concurrency control: one request per name may be in flight, and the next
 	// one is accepted the moment that one is answered.
 	if err := st.CreateUpdateRequest(r.Context(), id, updateName, payload, promiseID); err != nil {
-		s.writeError(w, 500, err.Error())
+		s.writeStoreError(w, r, err)
 		return
 	}
 
@@ -2590,7 +2852,7 @@ func (s *apiServer) handleSchedulesList(w http.ResponseWriter, r *http.Request) 
 	}
 	schedules, err := st.ListSchedules(r.Context())
 	if err != nil {
-		s.writeError(w, 500, err.Error())
+		s.writeStoreError(w, r, err)
 		return
 	}
 	if schedules == nil {
@@ -2605,8 +2867,8 @@ func (s *apiServer) handleSchedulesList(w http.ResponseWriter, r *http.Request) 
 		internalNames, ierr := s.internalDefinitionNames(r.Context(), st)
 		if ierr != nil {
 			// Fail closed, as the run list does: an unreadable set would blank
-			// nothing and disclose every internal name in the list.
-			s.writeError(w, 500, ierr.Error())
+			// nothing and disclose every internal name in the list. 503, as there.
+			s.writeAccessCheckUnavailable(w, r, "which definitions are internal", ierr)
 			return
 		}
 		hideInternalScheduleTargets(internalNames, schedules)
@@ -2834,7 +3096,7 @@ func (s *apiServer) handleDefinitions(w http.ResponseWriter, r *http.Request) {
 
 	defs, err := st.ListWorkflowDefs(r.Context(), "")
 	if err != nil {
-		s.writeError(w, 500, err.Error())
+		s.writeStoreError(w, r, err)
 		return
 	}
 
@@ -2907,7 +3169,7 @@ func (s *apiServer) handleCreateDefinition(w http.ResponseWriter, r *http.Reques
 	// contradicting each other in a single response, on the WASM upload, which
 	// is the most legitimate 413 in the API. cleat#1338.
 	var req createDefRequest
-	if !s.decodeJSONBody(w, r, definitionBodyLimit(), &req) {
+	if !s.decodeJSONBody(w, r, s.definitionBodyLimit(), &req) {
 		return
 	}
 
@@ -2928,9 +3190,35 @@ func (s *apiServer) handleCreateDefinition(w http.ResponseWriter, r *http.Reques
 
 	ctx := r.Context()
 
-	// Auto-increment version if not specified
+	// The version of a definition is the version its binary is stamped with
+	// (cleat#3513). The worker's pre-flight returns a run to the queue when the
+	// binary's stamp differs from its row's version, so a row numbered anything but
+	// the stamp is a version that can never run. This handler used to take the next
+	// free number when "version" was left out and store the binary untouched, which
+	// for a default build (stamp 1) uploaded twice made row 2 with a binary that says
+	// 1; and a stamp of 0, which `cleat build` and `cleat deploy` refuse, was stored
+	// as row 1 and never ran either. Measured, with a real worker, on cleat#3513.
+	//
+	// ReadMetadata does not validate, so a stamp that is not positive reaches here and
+	// is refused here. A binary with no metadata at all keeps the old behaviour (the
+	// next free number): the worker skips its pre-flight when it cannot read a stamp.
+	meta, metaErr := wasm.ReadMetadata(wasmBytes)
 	version := req.Version
-	if version <= 0 {
+	if metaErr == nil {
+		stamp := meta.WorkflowVersion
+		if stamp <= 0 {
+			s.writeJSON(w, http.StatusBadRequest, map[string]string{"error": fmt.Sprintf(
+				"the binary is stamped version %d, and a version must be positive; rebuild it with --version N, N >= 1", stamp)})
+			return
+		}
+		if req.Version > 0 && req.Version != stamp {
+			s.writeJSON(w, http.StatusBadRequest, map[string]string{"error": fmt.Sprintf(
+				"version %d was requested but the binary is stamped version %d, and a worker only runs a binary under the version it is stamped with; "+
+					"leave \"version\" out to deploy it as version %d, or rebuild it with --version %d", req.Version, stamp, stamp, req.Version)})
+			return
+		}
+		version = stamp
+	} else if version <= 0 {
 		defs, err := st.ListWorkflowDefs(ctx, req.Name)
 		if err == nil {
 			for _, d := range defs {
@@ -2953,7 +3241,7 @@ func (s *apiServer) handleCreateDefinition(w http.ResponseWriter, r *http.Reques
 	// request field would be a decision about this API's surface, not a
 	// consequence of the rule, so it is deliberately not made here.
 	declared := engine.ExposureClass("")
-	if meta, metaErr := wasm.ReadMetadata(wasmBytes); metaErr == nil {
+	if metaErr == nil {
 		declared = engine.ExposureClass(meta.Exposure)
 	}
 
@@ -2975,7 +3263,7 @@ func (s *apiServer) handleCreateDefinition(w http.ResponseWriter, r *http.Reques
 	if reader, ok := st.(engine.TenantExposurePolicyReader); ok && tid != "" {
 		allowed, aerr := reader.AllowsPublicExposure(r.Context(), tid)
 		if aerr != nil {
-			s.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "checking public exposure opt-in: " + aerr.Error()})
+			s.writeStoreErrorDuring(w, r, "checking the tenant's public exposure opt-in", aerr)
 			return
 		}
 		tenantAllowsPublic = allowed
@@ -2986,6 +3274,11 @@ func (s *apiServer) handleCreateDefinition(w http.ResponseWriter, r *http.Reques
 		// 400 rather than 500: this is the caller's artifact that cannot be
 		// stored, and the message names which class and why.
 		s.writeJSON(w, http.StatusBadRequest, map[string]string{"error": expErr.Error()})
+		return
+	}
+
+	// cleat#3600. Before anything is written: a refusal leaves no row.
+	if s.refusePluginDeps(w, r, req.Name, version, engine.BinaryPluginDeps(wasmBytes), req.PluginDeps, req.AllowMissingPlugins) {
 		return
 	}
 
@@ -3004,8 +3297,48 @@ func (s *apiServer) handleCreateDefinition(w http.ResponseWriter, r *http.Reques
 		// because each tenant has its own (tenant_id, name, version) row and a
 		// deploy simply creates or updates the caller's own. IMPROVEMENT-PLAN
 		// 3.77 / D7.
+		// cleat#3497: an explicit version whose bytes differ, with runs still open on
+		// it, is refused (engine/workflow_def_replacement.go). A conflict with the
+		// state of the definition, not a server fault. The way out is a build with a
+		// higher --version: the version of an upload is the binary's stamp, so a new
+		// version needs a new stamp, and leaving "version" out would only name the same
+		// version again. (Until cleat#3513 this handler took the next free number when
+		// "version" was left out and never read the stamp, which made a row no worker
+		// would run; the hint then said the opposite of this.) There is no force field
+		// on this API on purpose -- see the note above on not widening its surface;
+		// a deliberate hot-fix goes through `cleat deploy --force`.
+		if errors.Is(err, engine.ErrWorkflowDefInUse) {
+			slog.Warn("deploy workflow def refused: open runs on that version", "name", def.Name, "version", def.Version, "error", err)
+			s.writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error() + `; build the new bytes with a higher --version and upload them with that same "version", so the open runs keep the code they started on`})
+			return
+		}
+		// cleat#3547: another deploy of this name and version holds the cross-shard deploy lock and
+		// did not finish within the bound. A conflict with a deploy in flight, not a server fault;
+		// the error says nothing was written and to run it again.
+		if errors.Is(err, engine.ErrWorkflowDefDeployInProgress) {
+			slog.Warn("deploy workflow def refused: another deploy of that version is in progress", "name", def.Name, "version", def.Version, "error", err)
+			s.writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
+			return
+		}
+		// cleat#3540: the tenant's row for this name and version was installed from
+		// a library, so it holds no bytes and cannot be given any. A conflict with
+		// the state of the definition, like the open-runs refusal above, and the
+		// error says what to do (install a newer library version), so it needs no
+		// hint appended.
+		if errors.Is(err, engine.ErrWorkflowDefIsLibraryMember) {
+			slog.Warn("deploy workflow def refused: installed from a library", "name", def.Name, "version", def.Version, "error", err)
+			s.writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
+			return
+		}
+		// cleat#3629 (owner decision D59): the name starts with a published library's prefix.
+		// A conflict with what is published, like the refusal above; the error says what to do.
+		if errors.Is(err, engine.ErrWorkflowNameUnderLibraryPrefix) {
+			slog.Warn("deploy workflow def refused: under a published library's prefix", "name", def.Name, "version", def.Version, "error", err)
+			s.writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
+			return
+		}
 		slog.Error("deploy workflow def failed", "error", err)
-		s.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to deploy: " + err.Error()})
+		s.writeStoreErrorDuring(w, r, "deploying the workflow definition", err)
 		return
 	}
 

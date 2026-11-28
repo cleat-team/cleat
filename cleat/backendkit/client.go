@@ -185,11 +185,15 @@ func (c *Client) doRequest(req *http.Request) (*http.Response, error) {
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		defer resp.Body.Close()
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, doRequestErrorBodyLimit))
 		return nil, classifyError(resp.StatusCode, body)
 	}
 	return resp, nil
 }
+
+// doRequestErrorBodyLimit is how much of a refusal's body doRequest keeps. A caller that
+// decodes a refusal's JSON has to expect it cut here (see UnmetLibraryPluginsError.Truncated).
+const doRequestErrorBodyLimit = 4096
 
 // UpstreamStatusError carries the HTTP status the Cleat worker actually
 // returned, recoverable with errors.As.
@@ -209,7 +213,7 @@ func (c *Client) doRequest(req *http.Request) (*http.Response, error) {
 type UpstreamStatusError struct {
 	// Status is the HTTP status code the worker returned.
 	Status int
-	// Body is the raw response body, truncated to 4096 bytes by doRequest.
+	// Body is the raw response body, truncated to doRequestErrorBodyLimit (4096) bytes by doRequest.
 	Body []byte
 }
 
@@ -746,7 +750,13 @@ func (c *Client) PluginRoute(ctx context.Context, method, path string, body, out
 			"client's base URL, and a relative path would be resolved against the wrong "+
 			"base", path, "/")
 	}
+	return c.doJSON(ctx, "plugin route", method, path, body, out)
+}
 
+// doJSON sends one JSON request and decodes a 2xx JSON reply into out (or drains it when out is nil). what
+// names the call in an error, so a failed tenant create does not read as a failed plugin route; the error
+// underneath is unchanged, so errors.As still finds the *UpstreamStatusError.
+func (c *Client) doJSON(ctx context.Context, what, method, path string, body, out any) error {
 	var reqBody io.Reader
 	if body != nil {
 		b, err := json.Marshal(body)
@@ -766,7 +776,7 @@ func (c *Client) PluginRoute(ctx context.Context, method, path string, body, out
 
 	resp, err := c.doRequest(req)
 	if err != nil {
-		return fmt.Errorf("plugin route %s %s: %w", method, path, err)
+		return fmt.Errorf("%s %s %s: %w", what, method, path, err)
 	}
 	defer resp.Body.Close()
 

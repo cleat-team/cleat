@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime/pprof"
 	"strings"
 	"sync"
 	"testing"
@@ -862,7 +863,14 @@ func waitForBgBackups(t *testing.T, p *Plugin) {
 	select {
 	case <-done:
 	case <-time.After(5 * time.Second):
-		t.Fatal("timed out waiting for dispatched backup to finish")
+		// Every goroutine, not just the message: a stall here is something
+		// blocked, and the only evidence of WHICH is what the blocked goroutines
+		// were waiting on. cleat#3622 timed out once in CI with nothing else to
+		// go on (the cleat#982 probe said no other client was attached), and was
+		// not reproduced on 30 local runs.
+		var stacks bytes.Buffer
+		_ = pprof.Lookup("goroutine").WriteTo(&stacks, 2)
+		t.Fatalf("timed out waiting for dispatched backup to finish; goroutines at the timeout:\n%s", stacks.String())
 	}
 }
 

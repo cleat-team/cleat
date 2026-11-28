@@ -86,6 +86,19 @@ type Operator struct {
 	// chose, it is not unique, and nothing may be authorised by comparing it.
 	Description string
 
+	// Scopes is what the key may reach, as the space-separated text stored in
+	// admin.operator_api_keys.scopes (see operator_scope.go). TEXT AND NOT A
+	// SLICE so Operator stays comparable: callers test `op == (Operator{})`. Read
+	// it through MayReach, not by splitting it. Empty means NO
+	// routes, never all of them; a key resolved from the database always has at
+	// least "admin" because the column defaults to it.
+	Scopes string
+
+	// Principal names who the key was issued to (cleat#3552), "" when it was
+	// issued to no one in particular. A name an operator chose, not an
+	// authenticator: nothing may be authorised by comparing it, only attributed.
+	Principal string
+
 	// Disabled and ExpiresAt are the credential's STATE rather than its
 	// identity, and only ListOperatorKeys fills them: a credential that
 	// authenticated a request is live by definition, so

@@ -1,8 +1,51 @@
 // Memory helpers for WASM linear memory.
 // Matches the ABI from internal/host/memory.go.
 
-/// Output buffer size constant (matches Go's outBufSize = 65536).
+/// The response buffer a call STARTS with (matches Go's _cleatOutBufFloor = 65536). It grows, see [`out_buf_cap`]. This constant is also the
+/// layout unit of the scratch region below, which does not move.
 pub const OUT_BUF_SIZE: u32 = 65536;
+
+/// The largest response buffer the SDK will offer, 2 MiB: the host's default ceiling on one response (`--wasm-max-response-bytes`, cleat#4132),
+/// and the same number as the Go adapter's `_cleatOutBufCeiling`. A host configured higher is not reachable from here: this is compiled into
+/// the guest.
+pub const OUT_BUF_CEILING: u32 = 2 * 1024 * 1024;
+
+static OUT_BUF_CAP: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(OUT_BUF_SIZE);
+
+/// The response buffer size the next call offers. Starts at [`OUT_BUF_SIZE`] and doubles, up to [`OUT_BUF_CEILING`], each time the host reports
+/// that a response did not fit. Not allocated at the ceiling up front, for the reason the Go adapter gives: a guest that has just exhausted its
+/// memory still has to run its defers.
+///
+/// What this does NOT do is rescue the call that truncated: that call has already run and recorded its effect, and fails with the prefix. The
+/// buffer is larger for the calls after it. (Same as the Go adapter.)
+pub fn out_buf_cap() -> u32 {
+    OUT_BUF_CAP.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Double the response buffer for subsequent calls, up to [`OUT_BUF_CEILING`]. Returns whether it grew.
+pub fn grow_out_buf() -> bool {
+    use std::sync::atomic::Ordering::Relaxed;
+    let cur = OUT_BUF_CAP.load(Relaxed);
+    match next_out_buf_cap(cur) {
+        Some(next) => {
+            OUT_BUF_CAP.store(next, Relaxed);
+            true
+        }
+        None => false,
+    }
+}
+
+/// The pure step of [`grow_out_buf`]: double, capped at [`OUT_BUF_CEILING`]; `None` when already there.
+pub fn next_out_buf_cap(cur: u32) -> Option<u32> {
+    if cur >= OUT_BUF_CEILING {
+        None
+    } else {
+        Some(cur.saturating_mul(2).min(OUT_BUF_CEILING))
+    }
+}
+
+/// callErrorOutputTruncated / the simple-result errCode for "the response did not fit" (engine/callerrors.go).
+pub const ERR_OUTPUT_TRUNCATED: u8 = 7;
 
 /// Scratch region base offset in linear memory (10 MiB).
 pub const SCRATCH_BASE: u32 = 10 * 1024 * 1024; // 0xA00000
@@ -170,6 +213,9 @@ pub fn decode_cleat_call_result(result: i64) -> (u32, u32, u8) {
     let response_len = ((r >> 40) & 0xFF_FFFF) as u32;
     let call_error_code = ((r >> 8) & 0xFFFF_FFFF) as u32;
     let err_code = (r & 0xFF) as u8;
+    if call_error_code == ERR_OUTPUT_TRUNCATED as u32 || err_code == ERR_OUTPUT_TRUNCATED {
+        grow_out_buf();
+    }
     (response_len, call_error_code, err_code)
 }
 
@@ -179,6 +225,9 @@ pub fn decode_simple_result(result: i64) -> (u32, u8) {
     let r = result as u64;
     let extra = (r >> 32) as u32;
     let err_code = (r & 0xFF) as u8;
+    if err_code == ERR_OUTPUT_TRUNCATED {
+        grow_out_buf();
+    }
     (extra, err_code)
 }
 
@@ -219,6 +268,9 @@ pub fn decode_await_promise_result(result: i64) -> (u32, bool, u16) {
     let result_len = ((r >> 32) & 0xFFFF_FFFF) as u32;
     let timed_out = ((r >> 16) & 0xFF) != 0;
     let err_code = (r & 0xFFFF) as u16;
+    if err_code == ERR_OUTPUT_TRUNCATED as u16 {
+        grow_out_buf();
+    }
     (result_len, timed_out, err_code)
 }
 
@@ -505,5 +557,39 @@ mod tests {
         let mut buf = vec![0u8; 64];
         buf[..5].copy_from_slice(b"hello");
         assert_eq!(read_result(&buf, 5), "hello");
+    }
+
+    /// The growth step doubles from the floor to the ceiling and stops there. Tested on the pure function: the static it drives is shared by every
+    /// test in the process, so asserting on it directly would depend on test order.
+    #[test]
+    fn the_response_buffer_doubles_from_the_floor_to_the_ceiling_and_stops() {
+        let mut cap = OUT_BUF_SIZE;
+        let mut seen = vec![cap];
+        while let Some(next) = next_out_buf_cap(cap) {
+            assert!(next > cap && next <= OUT_BUF_CEILING, "{cap} -> {next}");
+            cap = next;
+            seen.push(cap);
+        }
+        assert_eq!(seen, vec![65536, 131072, 262144, 524288, 1048576, 2097152], "the sequence a 64 KiB start takes");
+        assert_eq!(next_out_buf_cap(OUT_BUF_CEILING), None);
+        assert_eq!(next_out_buf_cap(u32::MAX), None, "no overflow past the ceiling");
+    }
+
+    /// A truncation reported in either layout grows the live buffer (never shrinks it), and a clean result does not touch it.
+    #[test]
+    fn a_reported_truncation_grows_the_live_buffer_in_both_layouts() {
+        grow_out_buf(); // ensure there is headroom regardless of what other tests did
+        let before = out_buf_cap();
+        let _ = decode_simple_result(7); // simple layout, errCode 7
+        let after_simple = out_buf_cap();
+        assert!(after_simple >= before, "never shrinks");
+        let _ = decode_cleat_call_result((7u64 << 8) as i64); // durable-call layout, call error code 7
+        assert!(out_buf_cap() >= after_simple);
+        // The await_promise layout reports it in the low 16 bits of its own word (cleat#4155 review: it was the one that did not grow).
+        let before_promise = out_buf_cap();
+        let _ = decode_await_promise_result(7);
+        assert!(out_buf_cap() > before_promise || before_promise == OUT_BUF_CEILING, "await_promise errCode 7 did not grow the buffer: {before_promise}");
+        // Growth happened for at least one of the two unless the ceiling was already reached.
+        assert!(out_buf_cap() > before || before == OUT_BUF_CEILING, "no growth from two truncations: before={before}");
     }
 }

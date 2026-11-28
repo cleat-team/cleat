@@ -107,11 +107,25 @@ func TestRedactChangesOnlyTheRedactedSpan(t *testing.T) {
 	}
 }
 
+// formerBuiltinFragments is the list the built-in matcher was written from. It
+// lives here because nothing in production reads it any more (the matcher reads
+// a key as words, see isSensitiveField); it stays as the set of spellings the
+// test below holds Redact to.
+var formerBuiltinFragments = []string{
+	"token",
+	"secret",
+	"password",
+	"credential",
+	"api_key",
+	"authorization",
+	"api-key",
+}
+
 // TestRedactStillHidesEverythingItUsedTo runs the built-in pattern list through
 // the new implementation, so "preserves bytes" cannot be achieved by redacting
 // less than before.
 func TestRedactStillHidesEverythingItUsedTo(t *testing.T) {
-	for _, p := range sensitivePatterns {
+	for _, p := range formerBuiltinFragments {
 		in := `{"x":1,"my_` + p + `_field":"s3cret","y":2}`
 		got := Redact(in)
 		if strings.Contains(got, "s3cret") {

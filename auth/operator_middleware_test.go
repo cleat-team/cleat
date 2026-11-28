@@ -43,7 +43,7 @@ func runOperatorChain(t *testing.T, store OperatorResolver, method, path, key st
 		req.Header.Set("Authorization", "Bearer "+key)
 	}
 	rec := httptest.NewRecorder()
-	OperatorMiddleware(store)(inner).ServeHTTP(rec, req)
+	OperatorMiddleware(store, inner)(inner).ServeHTTP(rec, req)
 
 	got.status = rec.Code
 	return got
@@ -52,7 +52,7 @@ func runOperatorChain(t *testing.T, store OperatorResolver, method, path, key st
 // TestAnOperatorKeyReachesTheAdminSurface is the positive case: without it every
 // refusal below would pass against a middleware that refused everything.
 func TestAnOperatorKeyReachesTheAdminSurface(t *testing.T) {
-	want := Operator{KeyID: "6f5c1e9a-2b1f-4a3c-9d0e-77c8b5a4e012", Description: "on-call laptop"}
+	want := Operator{KeyID: "6f5c1e9a-2b1f-4a3c-9d0e-77c8b5a4e012", Description: "on-call laptop", Scopes: ScopeAdmin}
 	got := runOperatorChain(t, &fakeOperatorResolver{op: want}, http.MethodPost, "/api/admin/drain", GenerateOperatorKey())
 
 	if got.status != http.StatusOK {
@@ -82,7 +82,7 @@ func TestAnOperatorKeyIsRefusedOnATenantRoute(t *testing.T) {
 		"/api/instances/abc",
 		"/api/openapi.json",
 	} {
-		got := runOperatorChain(t, &fakeOperatorResolver{op: Operator{KeyID: "x"}}, http.MethodGet, path, GenerateOperatorKey())
+		got := runOperatorChain(t, &fakeOperatorResolver{op: Operator{KeyID: "x", Scopes: ScopeAdmin}}, http.MethodGet, path, GenerateOperatorKey())
 
 		if got.status != http.StatusForbidden {
 			t.Errorf("an operator key on %s got %d, want 403 (a valid credential on a route it may not use)", path, got.status)
@@ -99,7 +99,7 @@ func TestAnOperatorKeyIsRefusedOnATenantRoute(t *testing.T) {
 // operator key that made those worse than no key would be a trap, not a policy.
 func TestAnOperatorKeyOutsideTheAPIIsPassedThrough(t *testing.T) {
 	for _, path := range []string{"/livez", "/metrics", "/healthz", "/readyz"} {
-		got := runOperatorChain(t, &fakeOperatorResolver{op: Operator{KeyID: "x"}}, http.MethodGet, path, GenerateOperatorKey())
+		got := runOperatorChain(t, &fakeOperatorResolver{op: Operator{KeyID: "x", Scopes: ScopeAdmin}}, http.MethodGet, path, GenerateOperatorKey())
 
 		if got.status != http.StatusOK || !got.reached {
 			t.Errorf("%s with an operator key got %d (reached=%v); it is answered without a credential and must stay that way",
@@ -143,7 +143,7 @@ func TestATenantKeyAndAKeylessRequestAreUntouched(t *testing.T) {
 		{"no key at all", ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			store := &fakeOperatorResolver{op: Operator{KeyID: "should-not-be-used"}}
+			store := &fakeOperatorResolver{op: Operator{KeyID: "should-not-be-used", Scopes: ScopeAdmin}}
 			// Deliberately on an admin path: even there, a request this
 			// middleware does not own must be passed through rather than
 			// answered, because the chain below is what decides.
@@ -159,5 +159,39 @@ func TestATenantKeyAndAKeylessRequestAreUntouched(t *testing.T) {
 				t.Errorf("%s caused %d operator lookup(s); only an operator-shaped key should", tc.name, store.calls)
 			}
 		})
+	}
+}
+
+// cleat#3559. The audit log records the request context's subject as user_id, and an operator
+// request has no tenant to attribute it to, so the subject is the only thing that says who acted.
+// It is set for a request served as an operator and for no other.
+func TestAnOperatorRequestCarriesItsKeyAsTheSubject(t *testing.T) {
+	op := Operator{KeyID: "6f5c1e9a-2b1f-4a3c-9d0e-77c8b5a4e012", Scopes: ScopeAdmin}
+	store := &fakeOperatorResolver{op: op}
+
+	var subject string
+	var hasSubject bool
+	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		subject, hasSubject = SubjectFromContext(r.Context())
+	})
+
+	for _, tc := range []struct {
+		name, path string
+		want       bool
+	}{
+		{"an admin route", "/api/admin/drain", true},
+		// Passed down the tenant chain, not served as an operator action.
+		{"a path outside /api/", "/livez", false},
+	} {
+		subject, hasSubject = "", false
+		req := httptest.NewRequest(http.MethodGet, tc.path, nil)
+		req.Header.Set("Authorization", "Bearer "+GenerateOperatorKey())
+		OperatorMiddleware(store, inner)(inner).ServeHTTP(httptest.NewRecorder(), req)
+		if hasSubject != tc.want {
+			t.Errorf("%s: subject present = %v, want %v", tc.name, hasSubject, tc.want)
+		}
+		if tc.want && subject != op.String() {
+			t.Errorf("%s: subject = %q, want %q", tc.name, subject, op.String())
+		}
 	}
 }

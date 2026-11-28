@@ -554,7 +554,7 @@ func (s *MySQLStore) GetCompactionCandidates(ctx context.Context, threshold int,
 		SELECT w.id
 		FROM workflow_instances w
 		JOIN (
-			SELECT workflow_id, COUNT(*) AS cnt
+			SELECT workflow_id, COUNT(*) AS cnt, MIN(step) AS min_step
 			FROM event_history
 			GROUP BY workflow_id
 		) e ON w.id = e.workflow_id
@@ -565,12 +565,18 @@ func (s *MySQLStore) GetCompactionCandidates(ctx context.Context, threshold int,
 		       ON d.name = w.def_name AND d.version = w.def_version
 		      AND d.tenant_id = w.tenant_id
 		WHERE e.cnt > COALESCE(NULLIF(d.max_history_length, 0), ?)
-		  AND (w.compaction_step IS NULL
-		       OR w.compaction_step < e.cnt - COALESCE(NULLIF(d.max_history_length, 0), ?))
+		  -- A run is a candidate if it was never compacted, or if its recorded
+		  -- boundary is the first row it still has. compaction_step is the first
+		  -- retained STEP, so on a consistent run it equals the smallest step left.
+		  -- A run where it does not (the old second compaction wrote an index there
+		  -- and deleted by step) is refused by CompactWorkflowHistory every time;
+		  -- left in, enough of them fill the batch and no other run is compacted
+		  -- (cleat#3838, found by cleat-review).
+		  AND (w.compaction_step IS NULL OR w.compaction_step = e.min_step)
 		  AND w.tenant_id = ?
 		ORDER BY e.cnt DESC
 		LIMIT ?
-	`, threshold, threshold, s.tenantID, limit)
+	`, threshold, s.tenantID, limit)
 	if err != nil {
 		return nil, fmt.Errorf("GetCompactionCandidates: %w", err)
 	}
@@ -668,6 +674,23 @@ func (s *MySQLStore) CompactHistory(ctx context.Context, workflowID string, comp
 		return fmt.Errorf("CompactHistory: fence: %w", err)
 	}
 
+	// cleat#3837: the first row this leaves behind chains its checksum from the
+	// last one it deletes, so that checksum goes into the state, read in the
+	// same transaction and before the delete. Without it nothing can verify the
+	// retained history from its first row, and the run fails on resume.
+	var boundary sql.NullString
+	err = tx.QueryRowContext(ctx, `
+		SELECT checksum FROM event_history
+		WHERE workflow_id = ? AND tenant_id = ? AND step < ?
+		ORDER BY step DESC LIMIT 1
+	`, workflowID, s.tenantID, keepStep).Scan(&boundary)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("CompactHistory: read boundary checksum: %w", err)
+	}
+	if compactionState, err = withBoundaryChecksum(compactionState, boundary.String); err != nil {
+		return fmt.Errorf("CompactHistory: %w", err)
+	}
+
 	_, err = tx.ExecContext(ctx, `
 		DELETE FROM event_history WHERE workflow_id = ? AND step < ? AND tenant_id = ?
 	`, workflowID, keepStep, s.tenantID)
@@ -693,6 +716,9 @@ func (s *MySQLStore) CompactHistory(ctx context.Context, workflowID string, comp
 
 // ListWorkflows returns workflow instances filtered by the given filter parameters.
 func (s *MySQLStore) ListWorkflows(ctx context.Context, filter WorkflowFilter) ([]WorkflowInstance, error) {
+	if err := queryStateFilterError(filter); err != nil {
+		return nil, err
+	}
 	d := s.dialect
 	qb := NewQueryBuilder(d,
 		"SELECT "+d.workflowInstanceColumns()+" FROM workflow_instances WHERE tenant_id = ?",
@@ -837,7 +863,7 @@ func (s *MySQLStore) LoadWorkflowConfig(ctx context.Context, defName string, def
 		SELECT max_history_length FROM workflow_defs WHERE name = ? AND version = ? AND tenant_id = ?
 	`, defName, defVersion, s.tenantID).Scan(&maxHistoryLength)
 	if errors.Is(err, sql.ErrNoRows) {
-		return 0, fmt.Errorf("workflow def not found: %s v%d", defName, defVersion)
+		return 0, fmt.Errorf("%w: %s v%d", ErrWorkflowDefNotFound, defName, defVersion)
 	}
 	if err != nil {
 		return 0, fmt.Errorf("LoadWorkflowConfig: %w", err)
@@ -852,7 +878,7 @@ func (s *MySQLStore) LoadDAGSpec(ctx context.Context, defName string, defVersion
 		SELECT dag_spec FROM workflow_defs WHERE name = ? AND version = ? AND tenant_id = ?
 	`, defName, defVersion, s.tenantID).Scan(&raw)
 	if errors.Is(err, sql.ErrNoRows) {
-		return nil, fmt.Errorf("workflow def not found: %s v%d", defName, defVersion)
+		return nil, fmt.Errorf("%w: %s v%d", ErrWorkflowDefNotFound, defName, defVersion)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("LoadDAGSpec: %w", err)
@@ -903,22 +929,33 @@ func (s *MySQLStore) DeployWorkflowDef(ctx context.Context, def *WorkflowDef) er
 		}
 	}
 
-	// Refuse to deploy over a definition owned by another tenant.
+	// Another tenant's definition of the same name is a different row: the
+	// primary key is (tenant_id, name, version) (migrations/mysql/001_schema.sql),
+	// so ON DUPLICATE KEY UPDATE below can only collide with this tenant's own
+	// row. A comment here once said the key had no tenant in it and that this
+	// code was the only thing between a deploy and another tenant's bytes
+	// (IMPROVEMENT-PLAN 3.12); IMPROVEMENT-PLAN 3.77 moved the tenant into the key.
 	//
-	// MySQL has no row-level security, so this check is the only thing between
-	// a deploy and another tenant's WASM bytes: the primary key is (name,
-	// version) with no tenant in it, and ON DUPLICATE KEY UPDATE turns the
-	// collision into an overwrite. IMPROVEMENT-PLAN 3.12.
+	// Read and write in one transaction, with an existing row locked.
 	//
-	// Read and write in one transaction, with the row locked. SELECT ... FOR
-	// UPDATE also takes a gap lock on the unique index when the row does not
-	// exist, so a concurrent deploy of the same new name blocks here rather
-	// than slipping between the read and the insert.
-	tx, err := s.beginTx(ctx)
+	// READ COMMITTED, and not the default REPEATABLE READ, on purpose
+	// (cleat#3509). Under REPEATABLE READ a SELECT ... FOR UPDATE on a key that
+	// does not exist yet takes a gap lock, two overlapping first deploys of one
+	// version both hold it, and each INSERT then waits on the other: one died
+	// with error 1213, identical bytes included, so a client retrying a deploy
+	// still in flight failed. READ COMMITTED takes no gap lock on an absent key;
+	// the second INSERT waits for the first to commit and then updates. An
+	// EXISTING row is still locked, which is what serialises two replacements.
+	tx, err := s.beginTxReadCommitted(ctx)
 	if err != nil {
 		return fmt.Errorf("DeployWorkflowDef: begin: %w", err)
 	}
 	defer tx.Rollback()
+
+	// cleat#3497: see engine/workflow_def_replacement.go.
+	if err := s.checkWorkflowDefReplacement(ctx, tx, def); err != nil {
+		return err
+	}
 
 	// No ownership check: under (tenant_id, name, version) another tenant's
 	// definition of the same name is a different row. IMPROVEMENT-PLAN 3.77.
@@ -1053,13 +1090,14 @@ func (s *MySQLStore) PurgeWorkflowDef(ctx context.Context, name string, version 
 	return nil
 }
 
-// CountActiveInstances returns the number of running/ready instances for a version.
+// CountActiveInstances returns the number of instances of a version that are not settled:
+// ready, running or terminating (cleat#3506).
 func (s *MySQLStore) CountActiveInstances(ctx context.Context, name string, version int) (int, error) {
 	var count int
 	err := s.db.QueryRowContext(ctx, `
 		SELECT COUNT(*) FROM workflow_instances
 		WHERE def_name = ? AND def_version = ?
-		  AND status IN ('ready', 'running')
+		  AND status NOT IN ('done', 'failed', 'dead_lettered', 'terminated', 'cancelled')
 		  AND tenant_id = ?
 	`, name, version, s.tenantID).Scan(&count)
 	if err != nil {
@@ -1103,7 +1141,7 @@ func (s *MySQLStore) GetActiveInstanceCountsByVersion(ctx context.Context) (map[
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT def_name, def_version, COUNT(*) as cnt
 		FROM workflow_instances
-		WHERE status IN ('ready', 'running')
+		WHERE status NOT IN ('done', 'failed', 'dead_lettered', 'terminated', 'cancelled')
 		  AND tenant_id = ?
 		GROUP BY def_name, def_version
 	`, s.tenantID)
@@ -1541,11 +1579,55 @@ func (s *MySQLStore) CancelWorkflow(ctx context.Context, workflowID, reason stri
 }
 
 func (s *MySQLStore) preemptivelySettle(ctx context.Context, workflowID, reason, finalStatus string) error {
+	return s.preemptivelySettleTo(ctx, workflowID, reason, finalStatus, nil)
+}
+
+// preemptivelySettleTo is preemptivelySettle that also says which run it acted on, through settled when it is not nil: a cancel or a terminate addressed to a run that has continued
+// as new acts on the END of its chain (cleat#4340). See PostgresStore.preemptivelySettleTo.
+func (s *MySQLStore) preemptivelySettleTo(ctx context.Context, workflowID, reason, finalStatus string, settled *string) error {
+	return s.retryingLockConflict(finalStatus+" workflow", func() error {
+		return s.preemptivelySettleOnceTo(ctx, workflowID, reason, finalStatus, settled)
+	})
+}
+
+// retryingLockConflict runs one whole transaction again when InnoDB refuses it as a deadlock victim (1213) or a lock wait timeout (1205), up to 8 attempts and with no sleep, as
+// startNewRunUnderIdempotencyKey does and for the same reasons (see its doc comment): the server rolled the victim back entirely, so running it again is safe, and the lock it needed is
+// already released. A cancel or a terminate addressed to a continued run reads the successor row, which a racing continue-as-new has inserted and not committed, while that continue
+// waits for the old run's row this verb holds (cleat#4340): a cycle, and InnoDB picks a victim. Measured: one of four racing cancels was chosen once in six runs of the race test.
+func (s *MySQLStore) retryingLockConflict(what string, once func() error) error {
+	const maxAttempts = 8
+	var lastErr error
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		err := once()
+		if err == nil || (!isDeadlockError(err) && !isLockWaitTimeout(err)) {
+			return err
+		}
+		lastErr = err
+		if s.lockConflictRetries != nil {
+			s.lockConflictRetries.Add(1)
+		}
+	}
+	return fmt.Errorf("%s: %d attempts all lost a lock conflict: %w", what, maxAttempts, lastErr)
+}
+
+func (s *MySQLStore) preemptivelySettleOnceTo(ctx context.Context, workflowID, reason, finalStatus string, settled *string) error {
+	hint, err := latestRunInChain(ctx, workflowID, s.successorOfRun)
+	if err != nil {
+		return fmt.Errorf("%s workflow: resolve the chain: %w", finalStatus, err)
+	}
 	tx, err := s.beginTx(ctx)
 	if err != nil {
 		return fmt.Errorf("%s workflow: begin: %w", finalStatus, err)
 	}
 	defer tx.Rollback()
+	addressed := workflowID
+	workflowID, err = s.lockChainEndTx(ctx, tx, addressed, hint)
+	if err != nil {
+		return fmt.Errorf("%s workflow: lock: %w", finalStatus, err)
+	}
+	if settled != nil {
+		*settled = workflowID
+	}
 
 	// Does this workflow owe a defer phase? See deferPhaseOwed. FOR UPDATE
 	// holds the row for the UPDATE that follows, so the status this reads is
@@ -1576,9 +1658,7 @@ func (s *MySQLStore) preemptivelySettle(ctx context.Context, workflowID, reason,
 	// cleat#1975 (D3): settled is final. See PostgresStore's twin for the
 	// dead-letter exception.
 	if isSettledStatus(curStatus) && !(finalStatus == statusTerminated && curStatus == statusDeadLettered) {
-		return adminErrorf(ErrAdminStateConflict,
-			"workflow %s: already settled (status=%s); refusing to write %s over it",
-			workflowID, curStatus, finalStatus)
+		return settledRefusal(addressed, workflowID, curStatus, finalStatus)
 	}
 
 	if deferPhaseOwed(curStatus, hasDefers, compacted) {
@@ -2048,4 +2128,41 @@ func (s *MySQLStore) ClaimDueSchedule(ctx context.Context, name string, expected
 		return false, fmt.Errorf("ClaimDueSchedule: rows affected: %w", err)
 	}
 	return n == 1, nil
+}
+
+// lockChainEndTx locks the END of addressed's continue-as-new chain in tx and returns its id, walking from hint (cleat#4340). See PostgresStore.lockChainEndTx.
+func (s *MySQLStore) lockChainEndTx(ctx context.Context, tx *sql.Tx, addressed, hint string) (string, error) {
+	return lockChainEnd(addressed, hint,
+		func(run string) (string, bool, error) {
+			var status string
+			switch err := tx.QueryRowContext(ctx, `SELECT status FROM workflow_instances WHERE id = ? AND tenant_id = ? FOR UPDATE`, run, s.tenantID).Scan(&status); {
+			case errors.Is(err, sql.ErrNoRows):
+				return "", false, nil
+			case err != nil:
+				return "", false, err
+			}
+			return status, true, nil
+		},
+		func(run string) (string, error) {
+			return successorScan(tx.QueryRowContext(ctx, `SELECT id FROM workflow_instances WHERE continued_from = ? AND tenant_id = ? FOR SHARE`, run, s.tenantID))
+		})
+}
+
+// CancelWorkflowReceipt, TerminateWorkflowReceipt and RequestCancellationReceipt implement SettleReceiptStore: the same verbs, saying which run they acted on (cleat#4340).
+func (s *MySQLStore) CancelWorkflowReceipt(ctx context.Context, workflowID, reason string) (SettleReceipt, error) {
+	var acted string
+	err := s.preemptivelySettleTo(ctx, workflowID, reason, statusCancelled, &acted)
+	return settleReceiptFor(workflowID, acted), err
+}
+
+func (s *MySQLStore) TerminateWorkflowReceipt(ctx context.Context, workflowID, reason string) (SettleReceipt, error) {
+	var acted string
+	err := s.preemptivelySettleTo(ctx, workflowID, reason, statusTerminated, &acted)
+	return settleReceiptFor(workflowID, acted), err
+}
+
+func (s *MySQLStore) RequestCancellationReceipt(ctx context.Context, workflowID, reason string) (SettleReceipt, error) {
+	var acted string
+	err := s.requestCancellationTo(ctx, workflowID, reason, &acted)
+	return settleReceiptFor(workflowID, acted), err
 }

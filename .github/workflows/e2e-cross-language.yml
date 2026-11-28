@@ -3,17 +3,17 @@
 #
 # Workstream 2 — Cross-cutting CI (Task C2)
 #
-# Compiles workflow examples in Rust, Python, AssemblyScript, and Java to
+# Compiles workflow examples in Rust, Python and Java to
 # WASM, then runs them through the Go host runtime to verify the full
 # compilation-to-execution pipeline for each non-Go language.
 #
 # Key design decisions:
-#   - All four are first-class: build/execute failures block the CI. Java and
-#     AssemblyScript joined Rust and Python on 2026-08-06. This job had always
-#     installed Node, Java 17 and Gradle and always ran their tests -- but both
-#     Go tests degraded every failure into a skip, so "best-effort" described
-#     the tests' behaviour rather than any property of the SDKs. With the skips
-#     removed, both pass.
+#   - All three are first-class: build/execute failures block the CI. Java
+#     joined Rust and Python on 2026-08-06 (so did AssemblyScript, which cleat#4023
+#     removed). This job had always installed Java 17 and Gradle and always ran their
+#     tests -- but the Go tests degraded every failure into a skip, so "best-effort"
+#     described the tests' behaviour rather than any property of the SDKs. With the
+#     skips removed, they pass.
 #   - Each Go test handles its own WASM compilation; the CI only provides
 #     the toolchains and dependencies, avoiding redundant double-builds.
 #   - The push trigger covers main and develop only. It carried "feature/**"
@@ -21,6 +21,15 @@
 #     a feature branch that already had a PR open -- the pull_request trigger
 #     covers those. `Cross-Language WASM E2E` became a required check on
 #     2026-08-06, so the duplicate was the more expensive of the two.
+#
+# SHARDED, 2026-11-15, because this job was one of the two longest on the
+# merge-group critical path and the queue is what limits merges per day. The
+# single job measured 698s wall on e6cf2185: 527s in one `go test` and 111s
+# compiling wasm-tools from source. It now runs as four matrix legs that
+# partition the same selector and are measured at roughly 90-180s of tests
+# each, plus an aggregate job that carries the required context's name --
+# see the comment on that job, because a matrix renames the check and a
+# required context is a plain string match.
 # ---------------------------------------------------------------------------
 name: Cross-Language E2E
 
@@ -32,7 +41,18 @@ run-name: >-
 
 on:
   push:
-    branches: [main, develop]
+    # develop is NOT here (cleat#3958): every job in this workflow ran,
+    # and passed, in a merge_group run on the same commit before it landed
+    # -- the queue's merge commit IS the develop commit, so the develop
+    # push was a second full pass over an identical tree (905/339/190/142
+    # runner-minutes a day across the four workflows).
+    #
+    # main stays: it has no merge queue behind it, so a push there is the
+    # only run that tree will get. tier1-gate.yml's
+    # `develop-push-was-queued` job asserts the merge_group run actually
+    # exists for every develop commit and fails the Tier 1 run when it
+    # does not.
+    branches: [main]
   pull_request:
     # cleat#2483: `branches` filters on the PR's BASE branch, and a
     # release branch was absent -- so every PR targeting one ran none of
@@ -71,8 +91,8 @@ concurrency:
   # 5 of 24 `Tier 1 Gate` push runs were cancelled -- every one with **zero
   # jobs**, killed within seconds of the next merge landing.
   #
-  # The job count separates the two mechanisms, and does it cleanly. Of the 22
-  # cancelled gate runs that day, the 17 before #634 have jobs=1 (killed
+  # The job count separates the two mechanisms, and it does it cleanly. Of the
+  # 22 cancelled gate runs that day, the 17 before #634 have jobs=1 (killed
   # mid-run) with a single jobs=0 exception, and all 5 after it have jobs=0:
   #
   #   gh run view <cancelled-id> --json jobs --jq '.jobs | length'   # 0
@@ -123,25 +143,151 @@ env:
   # which is exactly how DURABLE_TEST_DB was renamed with nothing noticing
   # (IMPROVEMENT-PLAN.md 2.9). A CLEAT_REQUIRE_* variable reads as
   # load-bearing and greps to its consumers.
-  # java and assemblyscript joined rust and python on 2026-08-06, and for the
-  # same reason in both cases. This job has installed Java 17, Gradle and Node
-  # since it was written, and runs TestJava* and TestAssemblyScript* in the -run
-  # regex below -- so it was already paying for both toolchains. But
-  # engine/java_workflow_e2e_test.go and engine/as_workflow_e2e_test.go each
-  # skipped on a missing one unconditionally, and that skip is invisible here:
-  # this step's output is -v text, not the -json a skip budget reads. So in this
-  # job a missing JDK or a missing Node is a failed setup step, not an absent
-  # prerequisite, and must read as a failure.
-  CLEAT_REQUIRE_TOOLCHAINS: "rust,python,java,assemblyscript"
+  # java joined rust and python on 2026-08-06 (as did assemblyscript, removed by
+  # cleat#4023), and for the same reason. This job has installed Java 17 and Gradle
+  # since it was written, and runs TestJava* in the -run regex below -- so it was
+  # already paying for the toolchain. But engine/java_workflow_e2e_test.go skipped on
+  # a missing one unconditionally, and that skip is invisible here: this step's output
+  # is -v text, not the -json a skip budget reads. So in this job a missing JDK is a
+  # failed setup step, not an absent prerequisite, and must read as a failure.
+  CLEAT_REQUIRE_TOOLCHAINS: "rust,python,java"
+
+  # THE ONE PLACE THE E2E TEST SELECTOR IS WRITTEN.
+  #
+  # -short=false overrides any default -short so WASM integration tests are
+  # not skipped; -count=1 bypasses Go's test cache. The shards below split
+  # this string at run time, so a name added here is run by exactly one shard
+  # with no other edit -- see "Select this shard's tests".
+  #
+  # It is longer than it looks like it should be, and the extra alternatives
+  # are not decoration. This job is the ONLY one that installs Rust,
+  # a JDK and Gradle, so a toolchain-building test this regex does not match
+  # runs nowhere at all -- it skips in every other job, silently, because a
+  # skip and a pass print the same thing.
+  #
+  # `TestRust|TestPython|TestJava` selects by language
+  # PREFIX, and ten tests build a toolchain while being named for what they
+  # do instead. Three of them -- TestARustGuestSuspendsCleanly,
+  # TestARustGuestReachesTheHostRetryLoop and
+  # TestARustLongRetryPolicySuspendsInsteadOfHoldingTheWorker -- were
+  # already excluded from the tier-1 gate as tier 2, so on 2026-09-03 they
+  # were running in NO job. "TestARust" does not contain "TestRust".
+  #
+  # Do not prune this by hand.
+  # engine/tier2_toolchain_tests_placement_test.go derives the required set
+  # from the source and fails if an alternative is missing -- it reads THIS
+  # variable, and it also fails if the variable stops being what the shard
+  # split is computed from (IMPROVEMENT-PLAN 3.109).
+  E2E_SELECTOR: "TestRust|TestARust|TestPython|TestJava|TestTheHostRunsDefersOfAKilled"
 
 permissions:
   contents: read
+  # The PR-edit gate below reads this workflow's own runs and jobs for the head
+  # to decide whether they already passed.
+  actions: read
 
 jobs:
-  e2e-cross-language:
-    name: Cross-Language WASM E2E
+  # ---------------------------------------------------------------------------
+  # A title/body edit re-runs every required context on a head this workflow
+  # has already tested. cleat#3958's inventory found exactly one job in the
+  # repository that reads `pull_request.body` (closing-reference-check.yml) and
+  # none that reads `.title` for anything but a display name, so a body-edit run
+  # here measures a tree that has not changed.
+  #
+  # `edit-gate` decides whether skipping is SAFE, which is not the same question
+  # as whether it is cheap. A skipped job reports as Success and does not block
+  # a required check (GitHub docs, "Using conditions to control job execution"),
+  # so skipping unconditionally would launder a RED head into a green one: edit
+  # the body of a failing PR and its red check-runs become green skips. The gate
+  # therefore says `skip=true` only when every job's latest NON-skipped
+  # conclusion on this head is `success` -- see scripts/pr-edit-already-green.py,
+  # whose --self-test covers the failure-then-skip sequence by name.
+  #
+  # It runs ONLY for an `edited` whose base did not change. Every other event
+  # leaves it skipped, and `needs.edit-gate.outputs.skip` is then the empty
+  # string, which is not 'true', so every job below runs exactly as before.
+  # That is why their conditions carry `!cancelled()` or `always()`: a job whose
+  # `needs` dependency was skipped is itself skipped unless its `if` uses a
+  # status function. Measured on cleat#3959 -- the plain `needs.*` form stayed
+  # skipped, the `!cancelled()` form ran.
+  # ---------------------------------------------------------------------------
+  edit-gate:
+    name: PR edit gate
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 5
+    if: github.event_name == 'pull_request' && github.event.action == 'edited' && !github.event.changes.base
+    outputs:
+      skip: ${{ steps.gate.outputs.skip }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          sparse-checkout: scripts
+      - name: Has this head already passed this workflow?
+        id: gate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          # Passed through the environment, never interpolated into the script:
+          # a branch name is attacker-controlled and can carry `$(...)`, which
+          # the runner would execute. actionlint's `expression` rule flags the
+          # inline form, correctly.
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+        run: |
+          set -uo pipefail
+          # `-e` is on: GitHub runs this as `bash -e {0}` and `set -u` below does not
+          # clear it, so a bare `out=$(...)` exits the step the moment the script
+          # exits 2 -- before `rc=$?` -- leaving the job RED with an empty output.
+          # The output still fails open (nothing publishes skip=true), but a red
+          # gate check holds the PR un-CLEAN until the next push (cleat-review).
+          rc=0
+          out=$(python3 scripts/pr-edit-already-green.py \
+                  --repo "$GITHUB_REPOSITORY" \
+                  --workflow e2e-cross-language.yml \
+                  --sha "${{ github.event.pull_request.head.sha }}" \
+                  --branch "$HEAD_REF" \
+                  --exclude-run "${{ github.run_id }}") || rc=$?
+          echo "$out"
+          if [ "$rc" -ne 0 ]; then
+            # UNMEASURED: a gate that could not look must not skip.
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          case "$out" in
+            skip=true*) echo "skip=true" >> "$GITHUB_OUTPUT" ;;
+            *)          echo "skip=false" >> "$GITHUB_OUTPUT" ;;
+          esac
+  e2e-cross-language:
+    name: Cross-Language WASM E2E shard ${{ matrix.shard }}
+    if: ${{ !cancelled() && needs.edit-gate.outputs.skip != 'true' }}
+    needs: [edit-gate]
+    runs-on: ubuntu-latest
+    # 25, not the 35 the single job carried: one shard's test step is bounded
+    # by its own -timeout=15m below, so 25 is that plus the ~2m of toolchain
+    # setup and the selector enumeration, with a margin. Lower is the point --
+    # a shard that hangs should not hold a queue slot for 35 minutes -- but
+    # this value is arithmetic, not a measurement; replace it with one when
+    # there are a few weeks of shard runs to read.
+    timeout-minutes: 25
+    strategy:
+      # One shard's failure must not cancel its siblings. The aggregate job
+      # below names which dependency was not a success, and a sibling killed
+      # by `fail-fast` reads as "cancelled" -- not a success, but with nothing
+      # saying why, and it hides whether THAT shard passed.
+      fail-fast: false
+      matrix:
+        # THE LIST IS BOTH THE SHARD VALUES AND THE SHARD COUNT. Selection
+        # uses strategy.job-total for the count, so adding a fifth entry here
+        # is the whole edit a re-shard needs -- and there is no second number
+        # to leave behind, which is the failure that would silently drop a
+        # fifth of the tests.
+        #
+        # The stripes are only as even as the durations allow. Measured
+        # 2026-11-15 against the e6cf2185 run, the four shards carry
+        # 91s / 90s / 179s / 111s of test time (59 tests, 471s total); shard 3
+        # is the long pole because TestPythonComponentExecutionFence alone is
+        # 94s of it, and no split of the selector changes that. A fifth shard
+        # would move the maximum from 179s to 153s, which is not worth a fifth
+        # runner's setup. Re-measure rather than assume if this list changes.
+        shard: [1, 2, 3, 4]
 
     steps:
       - uses: actions/checkout@v7
@@ -153,6 +299,66 @@ jobs:
         uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
+
+      # This shard's slice of E2E_SELECTOR, before the toolchains are paid
+      # for: a broken selector should fail in ten seconds, not after four
+      # minutes of setup on four runners.
+      #
+      # THE SPLIT IS DERIVED, NOT LISTED. Four hand-written -run patterns
+      # would be four lists someone maintains, and the failure mode is the one
+      # the selector comment above has been warning about since 2026-09-03: a
+      # test that matches the selector but is named in no shard runs NOWHERE,
+      # and every job stays green. `go test -list` prints exactly what the
+      # selector matches and (NR-1) % n assigns each name to exactly one
+      # shard, so the union IS the selector -- the only way a test can stop
+      # running is by leaving E2E_SELECTOR itself, which the placement test
+      # and the comment above guard.
+      #
+      # Both ends of the split are asserted, because neither is visible on a
+      # green run: `-run` that matches nothing is a PASS with no --- lines,
+      # which is how three tier-2 Rust tests ran nowhere for months. An empty
+      # enumeration means the selector is broken; an empty slice means the
+      # arithmetic or the matrix is.
+      - name: Select this shard's tests
+        id: shard
+        env:
+          SHARD: ${{ matrix.shard }}
+          SHARDS: ${{ strategy.job-total }}
+        run: |
+          set -euo pipefail
+          if [ "$SHARD" -lt 1 ] || [ "$SHARD" -gt "$SHARDS" ]; then
+            echo "matrix.shard=$SHARD is outside 1..$SHARDS" >&2
+            exit 1
+          fi
+          # A build error must fail here and say so, rather than arriving as
+          # an empty list below.
+          listed=$(go test -list "$E2E_SELECTOR" ./engine/...)
+          # LC_ALL=C because every shard has to sort identically: if two
+          # runners ordered the list differently, the stripes would differ and
+          # tests would be dropped by two shards at once -- silently, the exact
+          # failure this step exists to prevent.
+          names=$(printf '%s\n' "$listed" \
+            | grep -E '^[A-Za-z_][A-Za-z0-9_]*$' \
+            | LC_ALL=C sort -u || true)
+          total=$(printf '%s\n' "$names" | grep -c . || true)
+          total=${total:-0}
+          if [ "$total" -eq 0 ]; then
+            echo "E2E_SELECTOR matched no tests: the selector is broken, not this shard" >&2
+            exit 1
+          fi
+          mine=$(printf '%s\n' "$names" | awk -v n="$SHARDS" -v s="$SHARD" '(NR - 1) % n == s - 1')
+          count=$(printf '%s\n' "$mine" | grep -c . || true)
+          count=${count:-0}
+          if [ "$count" -eq 0 ]; then
+            echo "shard $SHARD of $SHARDS was assigned none of the $total selected tests" >&2
+            exit 1
+          fi
+          {
+            echo "pattern=^($(printf '%s\n' "$mine" | paste -sd'|' -))$"
+            echo "count=$count"
+          } >> "$GITHUB_OUTPUT"
+          echo "shard $SHARD/$SHARDS: $count of $total selected tests"
+          printf '%s\n' "$mine"
 
       # Both targets, and wasm32-unknown-unknown is the one that matters:
       # `cleat build --target rust` produces that cdylib (cmd/cleat/build_rust.go),
@@ -176,11 +382,6 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Setup Node
-        uses: actions/setup-node@v7
-        with:
-          node-version: "20"
-
       - name: Setup Java
         uses: actions/setup-java@v6
         with:
@@ -194,43 +395,76 @@ jobs:
       # Python WASM toolchain
       # ------------------------------------------------------------------
       - name: Install Python WASM toolchain
+        env:
+          WASM_TOOLS_VERSION: "1.263.0"
+          WASM_TOOLS_SHA256: "21c036c1740a0552124c79c6e2170cb61c5b016005671a6d5bc06cf642165431"
         run: |
           pip install --upgrade pip
-          pip install componentize-py
-          cargo install wasm-tools
+          bash scripts/install-componentize-py.sh
+
+          # The prebuilt release binary, not `cargo install wasm-tools`.
+          #
+          # Measured on this job (e6cf2185): the step was 111s, almost all of
+          # it compiling wasm-tools from source. The release tarball is a
+          # download. Fetched by scripts/fetch-wasm-tools.sh, the same script
+          # and the same offline digest check as tier1-gate.yml's "Fetch
+          # wasm-tools", and to a file rather than a pipe.
+          #
+          # cleat#4346: this step was `curl --retry 5 --retry-delay 2`, a
+          # window of about ten seconds. On 2026-11-22 (merge-group run
+          # 44983148824, #4344) shard 2 got six 403s from the release host
+          # inside it and the step ended, taking an approved PR out of the
+          # merge queue while the other three shards passed. The script keeps
+          # retrying any HTTP error, 403 and 429 included, with a backoff and
+          # jitter, for about four minutes. Its header has the bound, and its
+          # --self-test (run by ci.yml's Lint job) refuses the first N requests
+          # with 403, 429 and 504 to measure it.
+          #
+          # NOT cached, unlike tier1-gate.yml, on purpose: this workflow does
+          # not run on a develop push, so no run would save an entry that a
+          # later merge group could restore (a cache is scoped to its ref).
+          #
+          # PINNED, and 1.263.0 is the version `cargo install wasm-tools`
+          # resolved on 2026-11-15. Unpinned, every shard recompiles whatever
+          # crates.io served that morning; pinned, a version bump is a
+          # reviewable edit and four shards cannot disagree about which
+          # toolchain they tested. tier1-gate.yml and
+          # scripts/docker/python-toolchain.Dockerfile pin 1.255.0 -- unifying
+          # the three sites is a separate change, deliberately not folded in
+          # here where it would move the toolchain version of a required check
+          # and a shard at the same time.
+          #
+          # Provenance: verified 2026-11-15 against the SLSA attestation for
+          # wasm-tools-1.263.0-x86_64-linux.tar.gz with
+          #
+          #   gh attestation verify wasm-tools-1.263.0-x86_64-linux.tar.gz \
+          #     --repo bytecodealliance/wasm-tools
+          #
+          # builder .../bytecodealliance/wasm-tools/.github/workflows/publish.yml@refs/heads/main,
+          # subject sha256 21c036c1...5431. CI then enforces it offline: a
+          # required check has already been failed once by a transient 503
+          # from this fetch (tier1-gate.yml records it), and a repeat network
+          # call would be a new way to flake. The script checks the digest on
+          # the downloaded file and refuses a mismatch without retrying it.
+          bash scripts/fetch-wasm-tools.sh "${RUNNER_TEMP}/wasm-tools.tar.gz"
+          tar xzf "${RUNNER_TEMP}/wasm-tools.tar.gz" -C "${RUNNER_TEMP}"
+          sudo mv "${RUNNER_TEMP}"/wasm-tools-*/wasm-tools /usr/local/bin/wasm-tools
+          wasm-tools --version
 
       - name: Install Python SDK
         working-directory: python-sdk
         run: pip install -e .
 
       # ------------------------------------------------------------------
-      # Run cross-language E2E tests
-      #
-      # -short=false overrides any default -short so WASM integration tests
-      #   are not skipped; -count=1 bypasses Go's test cache.
-      # The -run regex matches only cross-language E2E tests.
-      #
-      # It is longer than it looks like it should be, and the extra alternatives
-      # are not decoration. This job is the ONLY one that installs Rust, Node,
-      # a JDK and Gradle, so a toolchain-building test this regex does not
-      # match runs nowhere at all -- it skips in every other job, silently,
-      # because a skip and a pass print the same thing.
-      #
-      # `TestRust|TestPython|TestAssemblyScript|TestJava` selects by language
-      # PREFIX, and ten tests build a toolchain while being named for what they
-      # do instead. Three of them -- TestARustGuestSuspendsCleanly,
-      # TestARustGuestReachesTheHostRetryLoop and
-      # TestARustLongRetryPolicySuspendsInsteadOfHoldingTheWorker -- were
-      # already excluded from the tier-1 gate as tier 2, so on 2026-09-03 they
-      # were running in NO job. "TestARust" does not contain "TestRust".
-      #
-      # Do not prune this by hand.
-      # engine/tier2_toolchain_tests_placement_test.go derives the required set
-      # from the source and fails if an alternative is missing (IMPROVEMENT-PLAN
-      # 3.109).
+      # Run this shard's cross-language E2E tests
       # ------------------------------------------------------------------
       - name: Run cross-language E2E tests
         shell: bash
+        env:
+          # Through env rather than spliced into the run text, which is this
+          # repo's rule for anything derived from the workflow itself.
+          SHARD_PATTERN: ${{ steps.shard.outputs.pattern }}
+          SHARD_COUNT: ${{ steps.shard.outputs.count }}
         run: |
           # pipefail, for the same reason the step below it already has it:
           # without it `tee` supplies the exit status and a failing `go test`
@@ -241,11 +475,42 @@ jobs:
           # failing on develop while this workflow reported success. It is the
           # only job that installs componentize-py, so it is the only place
           # that failure could ever have shown up.
+          #
+          # The status is captured rather than left as the step's, because a
+          # check now follows it: without the capture, a failing `go test`
+          # would be masked by that check succeeding -- the same shape as the
+          # tee defect above, one step later.
           set -o pipefail
-          go test -count=1 -short=false -timeout=10m \
+          status=0
+          go test -count=1 -short=false -timeout=15m \
             -v \
-            -run "TestRust|TestARust|TestPython|TestAssemblyScript|TestJava|TestADeferBody|TestAMissingDeferExport|TestTheBackendLogsToTheConfiguredLogger|TestTheHostRunsDefersOfAKilled|TestTheWazeroPathRunsDefers" \
-            ./engine/... 2>&1 | tee e2e-report.txt
+            -run "$SHARD_PATTERN" \
+            ./engine/... 2>&1 | tee e2e-report.txt || status=$?
+          if [ "$status" -ne 0 ]; then
+            # The test failure is the report. Naming a count shortfall here
+            # too would blame the split for a test that simply failed.
+            exit "$status"
+          fi
+          # EVERY ASSIGNED TEST RAN. `go test` exits 0 when -run matches
+          # nothing, and `=== RUN` is the only line that records a test being
+          # entered -- so this is what distinguishes "the shard ran its slice"
+          # from "the shard ran, green, and did nothing". A subtests' `=== RUN
+          # Parent/sub` line is excluded by the anchor, so the count is
+          # top-level tests only, which is what was assigned.
+          ran=$(grep -cE '^=== RUN   [A-Za-z0-9_]+$' e2e-report.txt || true)
+          ran=${ran:-0}
+          # ...and an EMPTY assigned count fails rather than passing vacuously.
+          # `[ "$ran" -ne "" ]` is an integer-expression error, which bash
+          # reports on stderr and then treats as false -- so the `if` above
+          # would take its else branch and exit 0 with no tests counted
+          # against anything. Unreachable while the selection step exits 1 on
+          # count=0, but the assertion should not depend on that step staying
+          # the only writer of this value.
+          SHARD_COUNT=${SHARD_COUNT:-0}
+          if [ "$ran" -ne "$SHARD_COUNT" ]; then
+            echo "::error::this shard entered $ran tests but was assigned $SHARD_COUNT" >&2
+            exit 1
+          fi
 
       # tests/cross-language was in UNWIRED_SUITES: seven tests covering
       # Rust<->Go cross-replay -- executing under one runtime and replaying the
@@ -253,7 +518,12 @@ jobs:
       # boundary. No job referenced it, so none of them had ever run. They pass
       # as written; this job is the only one that installs the toolchain they
       # need.
+      #
+      # ON ONE SHARD, not all four. It is 15s of tests and its own report feeds
+      # the skip budget below, so splitting it would mean four reports and a
+      # budget check that covers a quarter of the suite each.
       - name: Run the cross-language suite
+        if: matrix.shard == 1
         shell: bash
         # tests/cross-language is its own Go module since the root<->cleat/
         # module cycle was broken (it imports cleat/wasmtest; the root module
@@ -269,21 +539,70 @@ jobs:
           set -o pipefail
           # ../../: the report lands at the repo root, because the Skip budget
           # step below runs scripts/check-skip-budget.sh from there.
-          go test -count=1 -short=false -timeout=10m -json \
+          go test -count=1 -short=false -timeout=15m -json \
             ./... 2>&1 | tee ../../cross-language-report.json
 
       # 0, and the number is the point: every test in that suite needs cargo and
       # the wasm32-wasip1 target, which this job installs above. A skip here
       # means the toolchain setup stopped working and the suite quietly went
       # back to testing nothing.
+      #
+      # Shard 1 only, because it reads the single report the step above writes.
+      # `always()` is unchanged: it runs after a failed test step so the skip
+      # budget can still report, and a missing report is itself the failure.
       - name: Skip budget
-        if: always()
+        if: always() && matrix.shard == 1
         run: scripts/check-skip-budget.sh e2e-cross-language cross-language-report.json
 
       - name: Upload test report
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: e2e-test-report-${{ github.sha }}-${{ github.run_attempt }}
+          # The shard is in the name because four uploads of one name would
+          # collide; the merge-group run's artifacts are read by whoever is
+          # working out which shard went red.
+          name: e2e-test-report-${{ github.sha }}-${{ github.run_attempt }}-shard${{ matrix.shard }}
           path: e2e-report.txt
           retention-days: 30
+
+  # THE REQUIRED STATUS CONTEXT. `Cross-Language WASM E2E` is in
+  # .github/required-checks.txt and tiers.yaml's required_contexts, and a
+  # required context is a plain string matched against a check's name.
+  #
+  # This job exists because of that, not because anything needs summarising. A
+  # matrix job reports one check per leg under a DIFFERENT name, so sharding
+  # the job above would stop anything reporting "Cross-Language WASM E2E" --
+  # and a required context nothing reports blocks every pull request while
+  # looking exactly like a check that is merely slow. required-checks.txt's own
+  # header describes that failure; scripts/check-workflow-guards.py guard 1
+  # fails the Lint job when a context resolves to no job, which is the cheap
+  # way to find out. Same shape as tier1-gate.yml's `tier1` job.
+  #
+  # `if: always()` plus an explicit result check, rather than leaving this job
+  # to be skipped when a shard fails: a SKIPPED job does not read as "success",
+  # but spelling out the check costs five lines and removes any reliance on
+  # GitHub's semantics for a required check -- which is the assumption the
+  # `tier1` job's comment refuses to make for the same reason.
+  e2e-cross-language-summary:
+    name: Cross-Language WASM E2E
+    needs: [e2e-cross-language, edit-gate]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      # A required context must still report SUCCESS on a body edit: a
+      # `skipped` one beside its `success` twin leaves the PR un-mergeable
+      # (cleat#3958, measured on #3960). So the job runs and does nothing.
+      - name: Nothing to do -- this head already passed
+        if: ${{ needs.edit-gate.outputs.skip == 'true' }}
+        run: echo "the PR head already passed this workflow; nothing to re-run"
+      - name: Aggregate shard results
+        if: ${{ needs.edit-gate.outputs.skip != 'true' }}
+        env:
+          SHARDS_RESULT: ${{ needs.e2e-cross-language.result }}
+        run: |
+          echo "e2e-cross-language (all shards): $SHARDS_RESULT"
+          if [ "$SHARDS_RESULT" != "success" ]; then
+            echo "::error::Cross-Language WASM E2E: at least one shard did not succeed" >&2
+            exit 1
+          fi

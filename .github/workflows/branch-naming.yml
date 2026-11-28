@@ -32,6 +32,7 @@ jobs:
   branch-name:
     name: Validate branch name
     runs-on: ubuntu-latest
+    timeout-minutes: 10  # max 0.2m over 38 successful runs (develop push + pull_request samples), 2026-10-27; cleat#3479
     steps:
       # In the merge queue this check is both impossible and pointless.
       #

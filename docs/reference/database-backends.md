@@ -52,7 +52,7 @@ type StoreFactory interface {
 | PostgreSQL | 16 | 16 | RLS, `SKIP LOCKED`, `gen_random_uuid()`, and `JSONB` all available since 9.5+, and nothing in the codebase checks `server_version`. `tiers.yaml` (DECIDED 2026-08-08) states the claim as 16+ because that is what CI has ever actually tested, not because anything below it is known to fail — see `tiers.yaml`'s `dialect_versions` comment for the full reasoning. |
 | MySQL | 8.0 | 8.4 | `SKIP LOCKED` requires 8.0+. `NOW(6)` for microsecond precision. |
 | MariaDB | 10.6 | 11.x | Tested alongside MySQL 8.4. Supports `SKIP LOCKED`. Does not support RLS. |
-| SQL Server | 2022 | 2022 | `ISJSON(x, VALUE)` — used by the payload CHECK constraints so a JSON scalar is accepted, as PostgreSQL and MySQL do — requires 2022. Azure SQL Database fully supported. See IMPROVEMENT-PLAN §3.18. |
+| SQL Server | 2022 | 2022 | `ISJSON(x, VALUE)` — used by the payload CHECK constraints and, since `019_a_json_scalar_result_is_stored.sql`, the three `result` ones, so a JSON scalar is accepted, as PostgreSQL and MySQL do — requires 2022. Azure SQL Database fully supported. See IMPROVEMENT-PLAN §3.18. |
 
 ---
 
@@ -511,6 +511,7 @@ the target dialect's syntax.
 | **No RETURNING** | SQL Server uses `UPDATE ... OUTPUT INSERTED.*` instead. This is a single-statement pattern — arguably cleaner than PostgreSQL's approach. |
 | **RLS maps cleanly** | `set_config()` becomes `sp_set_session_context()`; `CREATE POLICY` becomes `CREATE SECURITY POLICY` with inline TVF. Same isolation model. |
 | **LIKE is case-insensitive** | SQL Server's `LIKE` is case-insensitive by default with default collation, matching PostgreSQL's `ILIKE` behavior. |
+| **Workflow names compare exactly** | Every workflow-definition name column is `Latin1_General_100_BIN2` (migration `011`, cleat#3635), so `Acme.checkout` and `acme.checkout` are two workflows, as on PostgreSQL. The database default collation, which is case-insensitive, still applies to every other string column, including the names plugins store (cleat#3641). MySQL compares them exactly too since migration `012` (cleat#3640, `utf8mb4_0900_bin`). |
 | **OFFSET/LIMIT becomes OFFSET/FETCH** | Use `ORDER BY ... OFFSET 0 ROWS FETCH NEXT N ROWS ONLY`. |
 | **ON CONFLICT becomes MERGE** | SQL Server uses `MERGE` for upsert. For idempotent insert, use `INSERT ... SELECT ... WHERE NOT EXISTS`. |
 | **JSONB becomes NVARCHAR(MAX)** | JSON stored as Unicode text. Use `JSON_VALUE` / `JSON_QUERY` for extraction. |
@@ -707,12 +708,14 @@ So the contract is:
   |---|---|
   | `blob_index.tags` | queried with `JSON_CONTAINS`, so it cannot be text without rewriting the read — degraded, like `workflow_instances.query_state` |
   | `webhook_config.events`, `webhook_events.headers` | `[]string` and `map[string]string`; they cannot carry a number |
-  | `audit_events.metadata` | only ever `{}`: the chained insert writes it explicitly so the hash covers the stored value |
+  | `audit_events.metadata` | **Not only `{}`:** this row said so until cleat#3873, but `record_event` (a workflow's `details`) and `auth.NoteAuditMetadata` both fill it. It is still `JSON` on MySQL, so a number outside MySQL's exact range in a workflow's details is rewritten; the chain still verifies, because it hashes the stored value (cleat#3884) |
 
-  One column is beyond a migration's reach: `ingested_events.event_data`
-  arrives through `map[string]any`, and Go's decoder turns a JSON number into a
-  `float64` before any column type has a say. Converting it would measure clean
-  and change nothing. That is cleat#1641.
+  One column was beyond a migration's reach until cleat#1641: `ingested_events.event_data`
+  arrived through `map[string]any`, and Go's decoder turns a JSON number into a
+  `float64` before any column type has a say, so converting it would have measured
+  clean and changed nothing. cleat#1641 removed that decode; the eventtriggers
+  plugin's step 13 (cleat#3873) then converted the column on MySQL, with the same
+  `JSON_VALID` check as the others.
 
 **No backend is "the strict one", which is the whole reason this is written
 down.** A NUL escape passes on MySQL and SQL Server and fails on PostgreSQL;

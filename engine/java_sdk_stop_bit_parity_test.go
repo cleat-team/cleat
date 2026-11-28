@@ -79,11 +79,18 @@ func TestTheJavaSDKAgreesOnTheStopBit(t *testing.T) {
 var javaCallsTheHostCanRefuse = []sdkRefusableCall{
 	{"pollUpdate", "DurablePollUpdate"},
 	{"completeUpdate", "DurableCompleteUpdate"},
+	// The plain call goes through step, so its refusal is the dispatcher's and the host method is the site (cleat#4152, G3).
 	{"cleatCall", "DurableCall"},
+	// sideEffect(Supplier) asks cleat_side_effect_recorded first (cleat#4113); a fresh lookup in a stopped workflow is refused.
+	{"sideEffectOnce", "SideEffectRecorded"},
 	{"cleatCallWithRetry", "DurableCallWithRetry"},
+	// The same host function from inside its attempt loop (cleat#4210): one SDK method, two host sites, one sentinel.
+	{"cleatCallWithRetry", "freshCallWithRetry"},
+	// The heartbeat call goes through step, so its refusal is the dispatcher's and the host method is the site (cleat#4152, G3).
 	{"cleatCallHeartbeat", "DurableCallWithHeartbeat"},
 	{"childWorkflow", "childWorkflowWithVersion"},
 	{"childWorkflowWithOptions", "childWorkflowWithVersion"},
+	// plugin_call goes through step, so its refusal is the dispatcher's and the host method is the site (cleat#4152, G3).
 	{"pluginCall", "PluginCall"},
 	// A second caller of the same import, so two entries share one host site.
 	{"pluginCallOutcome", "PluginCall"},
@@ -97,6 +104,26 @@ var javaCallsTheHostCanRefuse = []sdkRefusableCall{
 	// lives in the _ms form -- the same shape as awaitSignalsMs above.
 	{"waitForEventMs", "WaitForEvent"},
 	{"acquireLockMs", "AcquireLock"},
+	// deleteCron joined in cleat#4083: a terminated workflow's defer segment
+	// could delete a schedule the workflow never reached. The refusal reads as
+	// errCode 0 in the simple layout, which is a successful delete.
+	{"deleteCron", "DeleteCron"},
+	// continueAsNew and continueAsNewVersioned joined in cleat#4159: a terminated workflow's defer segment recorded the body's continuation
+	// in the history of a workflow being terminated, and a guest that read the refusal as an error code (the simple layout reads a stop as
+	// errCode 0, a success) went on into its own defer drain, where the cleanup's call was refused and the defer table consumed.
+	{"continueAsNew", "ContinueAsNew"},
+	{"continueAsNewVersioned", "ContinueAsNewWithVersion"},
+	// createPromise and setScope joined in the cleat#4079 audit: a terminated
+	// workflow's defer segment created a promise row and took a 24-hour scope key
+	// from a real store. Both layouts read a refusal as errCode 0, a success.
+	{"createPromise", "CreatePromise"},
+	// The host site is SetScope, which goes through step (cleat#4211): the dispatcher holds the check for taking a scope. Clearing a scope
+	// (SetScope with both names empty) is not a step and is never refused.
+	{"setScope", "SetScope"},
+	// resolvePromise and rejectPromise joined in cleat#4079, for the same reason: the simple layout reads a stop as error code 0,
+	// which is a successful settlement. replyToSignal is a composite over resolvePromise and needs no entry of its own.
+	{"resolvePromise", "ResolvePromise"},
+	{"rejectPromise", "RejectPromise"},
 	{"signalWorkflow", "SignalWorkflow"},
 	{"cleatSend", "DurableSend"},
 	{"scheduleInvokeMs", "DurableScheduleInvoke"},
@@ -226,6 +253,16 @@ func TestTheRequiredJavaGuardsCoverEveryHostStopSite(t *testing.T) {
 	}
 	stopSites := 0
 	call := regexp.MustCompile(`(?m)^\s*if s\.stopBeforeNewWork\(\) \{`)
+	// A host call that goes through the dispatcher (cleat#4152) has no `if s.stopBeforeNewWork() {` of its own: step applies it to every
+	// effectEffect step. Each such call is still one stop site a guest must check, so it counts here, and the count of the calls moved
+	// onto step is the same as before they were. Matched at the start of a code line so a comment quoting the call is not counted; a
+	// call written any other way is missed, which makes the count LOWER and fails this test, the safe direction.
+	//
+	// A call whose spec says `Refuse: neverRefuse` (ReleaseLock, cleat#4211) is NOT a stop site: step never refuses it, so there is no refusal for
+	// an SDK to check. Counting every `return s.step(` line gave 29 when the true number was 28, and the constant below was one edit from
+	// recording the wrong one. The spec is read from the call, as stop_correspondence_guard_test.go's neverRefusedSpecs reads the declaration.
+	viaStep := regexp.MustCompile(`(?m)^\s*return s\.step\(\s*[^,()]+,\s*[^,()]+,\s*&(\w+)`)
+	unrefused := neverRefusedSpecs(t)
 	for _, e := range entries {
 		if e.IsDir() || !strings.HasSuffix(e.Name(), ".go") || strings.HasSuffix(e.Name(), "_test.go") {
 			continue
@@ -235,6 +272,13 @@ func TestTheRequiredJavaGuardsCoverEveryHostStopSite(t *testing.T) {
 			t.Fatalf("reading %s: %v", e.Name(), err)
 		}
 		stopSites += len(call.FindAll(b, -1))
+		if e.Name() != "step_dispatcher.go" {
+			for _, m := range viaStep.FindAllSubmatch(b, -1) {
+				if !unrefused[string(m[1])] {
+					stopSites++
+				}
+			}
+		}
 	}
 	if stopSites == 0 {
 		t.Fatal("found no `if s.stopBeforeNewWork() {` sites in engine/, so this test is " +
@@ -307,7 +351,49 @@ func TestTheRequiredJavaGuardsCoverEveryHostStopSite(t *testing.T) {
 	// already declares and already guards -- javaCallsTheHostCanRefuse covers
 	// the CALL, not the site. A count of sites and a list of methods are
 	// different things, and this is the case that separates them.
-	const stopSitesOn20260904 = 18
+	//
+	// 19 since cleat#4083 (DeleteCron), then 21 since the cleat#4079 audit (CreatePromise and
+	// SetScope), each measured against a real store. Both sides were checked rather than assumed,
+	// and both needed code. DeleteCron: Java's deleteCron went straight to
+	// Memory.decodeSimpleErrCode, where a stop reads as errCode 0, a SUCCESSFUL delete. The audit's
+	// createPromise and setScope decoded straight through the same way. Each got a list entry above
+	// AND a Memory.throwIfStopped guard in HostCalls.java, not only this number, and so did Rust and
+	// the Go adapters. Python and TypeScript need nothing in code: durable-delete-cron has no return
+	// value, and the audit's two WIT functions return a plain string, so a component guest cannot
+	// receive the refusal (the refused call has no effect); see reasonWitReturnsNothing and
+	// reasonWitReturnsAPlainString.
+	//
+	// 23 since cleat#4079 (this change): ResolvePromise and RejectPromise consult it, because a defer segment's body settling a promise is an
+	// effect another run may be waiting on. Checked on the other side as for DeleteCron: Java's resolvePromise and rejectPromise went
+	// straight to Memory.decodeSimpleErrCode, where a stop reads as errCode 0, a SUCCESSFUL settlement, so both list entries above
+	// and the Memory.throwIfStopped guards in HostCalls.java were added. Rust got the matching stop_requested guards. Python,
+	// TypeScript and the Go adapters already decode bit 31 (_check_host_result, withSuspendCheck).
+	//
+	// 24 since cleat#4113 (SideEffectRecorded): a fresh lookup in a stopped workflow is refused so a guest's side-effect function never runs.
+	// Java covers it with sideEffectOnce (cleat#4113), which asks first and checks the stop bit on the lookup; the exemption the engine PR added
+	// for Java is deleted by the Java PR.
+	//
+	// 25 since cleat#4143 (SideEffectRecorded, a SECOND site): the lookup is refused at the replay frontier of a defer segment too, because
+	// a segment over a run with history starts in replay and an SDK that asks first runs its function between the lookup and the record.
+	// Both sides were checked rather than assumed. Java needs NO new method for the second site: it is the same host call, and sideEffectOnce's
+	// stop check on the lookup covers the refusal at either site, the fresh one and the replay-frontier one. A count of sites and a list of methods are
+	// different things, as at 18.
+	// 26 since cleat#4152 (DurableCallWithRetry, a further site, counted after cleat#4143's second): the replay-frontier block refuses a defer segment inside the block, so that
+	// the refusal sits in the branch that spells the frontier predicate. Same host call as the sites already counted, so Java needs no
+	// new method; a count of sites and a list of methods are different things, as at 18.
+	//
+	// 28 since cleat#4159 (ContinueAsNew and ContinueAsNewWithVersion): a defer segment's body must not continue as new. Both sides were
+	// checked rather than assumed, and both needed code: Java's continueAsNew and continueAsNewVersioned went straight to
+	// Memory.decodeSimpleErrCode, where a stop reads as errCode 0, a SUCCESS, so both list entries above and Memory.throwIfStopped guards
+	// in HostCalls.java were added. Rust got the matching stop_requested guards, Go's adapters withSuspendCheck. Python decodes bit 31
+	// (_check_host_result) and C# tests the sentinel first (Packed.CheckHostResult); neither needed code.
+	// 26 since cleat#4152 G3 (DurableCallWithRetry moved onto the dispatcher): the call had THREE `if s.stopBeforeNewWork() {` sites of its own (the replay frontier,
+	// the resume of a policy a crash interrupted, and the fresh path: the 18 and the 26 above) and now has ONE, step's, counted through `return s.step(`: 28 - 3 + 1.
+	// Both sides were checked rather than assumed. It is the same host call, cleat_call_retry, which the Java SDK already declares and already guards
+	// (javaCallsTheHostCanRefuse covers the CALL, not the site), so a site REMOVED from the engine drops no Java method and needs no code: the number of
+	// methods stays 30. A count of sites and a list of methods are different things, as at 18. (The retry loop's own check between attempts is not an
+	// `if s.stopBeforeNewWork() {` line, and is not counted here or before.)
+	const stopSitesOn20260904 = 26
 	if stopSites != stopSitesOn20260904 {
 		t.Errorf("the engine has %d `if s.stopBeforeNewWork() {` sites; this test was written "+
 			"against %d.\n\nIf a site was ADDED, the Java SDK has a call the host can now "+

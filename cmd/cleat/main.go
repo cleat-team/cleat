@@ -15,9 +15,11 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"go/token"
+	"log/slog"
 	"time"
 
 	"os"
@@ -61,7 +63,7 @@ func main() {
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage: cleat <build|vet|deploy|versions|rollback|dev|schedule|run|dag|plugin|lock|init|version> [flags] <args>\n")
 		fmt.Fprintf(os.Stderr, "  cleat build [-o <dir>] [--target <target>] <package>\n")
-		fmt.Fprintf(os.Stderr, "  cleat vet [--lang go|rust|java|as|python] [--json] [--ci] <package>\n")
+		fmt.Fprintf(os.Stderr, "  cleat vet [--lang go|rust|java|as|python] [--json] [--ci] [--channel <channel>] <package>\n")
 		fmt.Fprintf(os.Stderr, "  cleat deploy [--db <conn>] [--name <name>] [--task-queue <queue>] <wasm-file>\n")
 		fmt.Fprintf(os.Stderr, "  cleat versions <workflow-name>\n")
 		fmt.Fprintf(os.Stderr, "  cleat rollback <workflow-name> <version>\n")
@@ -111,6 +113,10 @@ func main() {
 
 	command := args[0]
 	pattern := args[1]
+	// The subcommands below parse args[1:], not os.Args[2:]. args is flag.Args(),
+	// so it starts after the global flags; os.Args[2:] still held a leading
+	// `--db <dsn>` or `--tenant <uuid>` and its value, and the value was read as
+	// the package (cleat#3519).
 
 	switch command {
 	case "build":
@@ -124,23 +130,29 @@ func main() {
 		var runtime string
 		var buildChannel string
 		var workflowVersion int
+		var allowUnmeasuredComponentizePy bool
 		fs.StringVar(&outDir, "o", "", "output directory for generated files")
 
 		fs.IntVar(&workflowVersion, "version", 1, "workflow version number embedded in WASM metadata")
-		fs.StringVar(&target, "target", "go", "compilation target: go (standard Go, default), rust, java, assemblyscript, python")
-		fs.StringVar(&entry, "entry", "", "entry point in 'file.py:func_name' format (for Python target)")
-		fs.StringVar(&runtime, "runtime", "", "WASM runtime: wasmtime, wazero (default: produce both)")
+		fs.StringVar(&target, "target", "go", "compilation target: go (standard Go, default), rust, java, python, ts or csharp (tier 2: see tiers.yaml for what is claimed). csharp builds a project directory or .csproj in a pinned linux docker container (amd64, or arm64 natively on an arm64 host)")
+		fs.StringVar(&entry, "entry", "", "entry point in 'file.py:func_name' format (for Python target) or 'file.ts:entry_name[,entry_name]' (for the ts target)")
+		fs.StringVar(&runtime, "runtime", "", "WASM runtime: wasmtime, wazero (default: the component, as for wasmtime)")
 		fs.StringVar(&buildChannel, "channel", "", "child version resolution channel: stable, latest, canary, or custom tag name")
+		fs.BoolVar(&allowUnmeasuredComponentizePy, "allow-unmeasured-componentize-py", false, "python target only: build even when the installed componentize-py is not 0.25.1, the version the Python SDK was measured on (a build with another version is refused, because a standard-library module can be missing only when the workflow runs); CLEAT_ALLOW_UNMEASURED_COMPONENTIZE_PY=1 does the same")
 		fs.BoolVar(&jsonOut, "json", false, "output diagnostics as JSON")
 		fs.BoolVar(&diffOut, "diff", false, "output unified diff of each file before and after transformation")
 		fs.BoolVar(&sizeReport, "size-report", false, "output WASM binary size breakdown by package")
-		fs.Parse(os.Args[2:])
+		fs.Parse(args[1:])
 		if target == "tinygo" {
 			fmt.Fprintf(os.Stderr, "Error: TinyGo support was removed; use the default Go/wasip1 target (--target go, or omit --target).\n")
 			os.Exit(1)
 		}
 		if !isValidTarget(target) {
-			fmt.Fprintf(os.Stderr, "Error: unknown target %q. Valid targets: go, rust, java, assemblyscript, python\n", target)
+			fmt.Fprintf(os.Stderr, "Error: unknown target %q. Valid targets: go, rust, java, python, ts, csharp\n", target)
+			os.Exit(1)
+		}
+		if err := applyAllowUnmeasuredComponentizePy(allowUnmeasuredComponentizePy, target); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
 		}
 		// Default channel: when --db is provided, default to "stable".
@@ -157,6 +169,11 @@ func main() {
 		if len(remainder) > 0 {
 			pattern = remainder[0]
 		}
+		if target == "csharp" && entry != "" {
+			// --entry would silently REPLACE the project path below (it doubles as the Python build's pattern), so refuse it.
+			fmt.Fprintf(os.Stderr, "Error: --entry does not apply to the csharp target: the entry points are the [CleatEntry] methods the project declares.\n")
+			os.Exit(1)
+		}
 		if entry != "" {
 			// Use --entry as the pattern for Python builds.
 			runBuild(entry, outDir, target, runtime, buildChannel, jsonOut, diffOut, sizeReport, workflowVersion)
@@ -165,10 +182,11 @@ func main() {
 		}
 	case "vet":
 		fs := flag.NewFlagSet("vet", flag.ExitOnError)
-		vetLang := fs.String("lang", "", "language target: go, rust, java, as, python (auto-detected if empty)")
+		vetLang := fs.String("lang", "", "language target: go, rust, java, csharp, python (auto-detected if empty)")
 		vetJSON := fs.Bool("json", false, "output results as JSON")
 		vetCI := fs.Bool("ci", false, "output in GitHub Actions annotation format (takes precedence over --json)")
-		fs.Parse(os.Args[2:])
+		vetChannel := fs.String("channel", "", "child version resolution channel, as for build: only frozen changes the verdict (Go)")
+		fs.Parse(args[1:])
 		remainder := fs.Args()
 		refuseTrailingFlags("vet", remainder)
 		if len(remainder) > 0 {
@@ -188,17 +206,17 @@ func main() {
 		var code int
 		switch lang {
 		case "go":
-			code = runVet(pattern, useJSON, *vetCI)
+			code = runVet(pattern, useJSON, *vetCI, *vetChannel)
 		case "rust":
 			code = runVetRust(pattern)
 		case "java":
 			code = runVetJava(pattern)
+		case "csharp":
+			code = runVetCSharp(pattern, useJSON, os.Stdout, os.Stderr)
 		case "python":
 			code = runVetPython(pattern, useJSON)
-		case "as":
-			code = runVetAS(pattern)
 		default:
-			fmt.Fprintf(os.Stderr, "Error: unknown vet language %q. Valid: go, rust, java, as, python\n", lang)
+			fmt.Fprintf(os.Stderr, "Error: unknown vet language %q. Valid: go, rust, java, csharp, python\n", lang)
 			os.Exit(1)
 		}
 		os.Exit(code)
@@ -246,25 +264,33 @@ func main() {
 	}
 }
 
+// ensureOutDir creates the -o directory for the targets that write their .wasm
+// into it themselves. The Go build creates what it needs; the Java, Rust
+// and Python builds compiled for minutes and then failed at the
+// last step with `open <dir>/<name>.wasm: no such file or directory`, after the
+// Python build had printed `Build SUCCESS` (cleat#3792). Making it first also
+// means a directory that cannot be created fails before the compile, not after.
+func ensureOutDir(outDir string) {
+	if err := os.MkdirAll(outDir, 0o755); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: could not create the output directory %s: %v\n", outDir, err)
+		os.Exit(1)
+	}
+}
+
 func runBuild(pattern, outDir, target, runtime, channel string, jsonOut bool, diffOut bool, sizeReport bool, workflowVersion int) {
 	if target == "java" {
 		if outDir == "" {
 			outDir = "."
 		}
+		ensureOutDir(outDir)
 		runBuildJava(pattern, outDir, channel, workflowVersion)
-		return
-	}
-	if target == "assemblyscript" {
-		if outDir == "" {
-			outDir = "."
-		}
-		runBuildAssemblyScript(pattern, outDir, channel, workflowVersion)
 		return
 	}
 	if target == "rust" {
 		if outDir == "" {
 			outDir = "."
 		}
+		ensureOutDir(outDir)
 		runBuildRust(pattern, outDir, channel, workflowVersion)
 		return
 	}
@@ -272,21 +298,46 @@ func runBuild(pattern, outDir, target, runtime, channel string, jsonOut bool, di
 		if outDir == "" {
 			outDir = "."
 		}
+		ensureOutDir(outDir)
 		runBuildPython(pattern, outDir, runtime, channel, workflowVersion)
+		return
+	}
+	if target == "ts" {
+		if outDir == "" {
+			outDir = "."
+		}
+		ensureOutDir(outDir)
+		runBuildTS(pattern, outDir, channel, workflowVersion)
+		return
+	}
+	if target == "csharp" {
+		if outDir == "" {
+			outDir = "."
+		}
+		ensureOutDir(outDir)
+		runBuildCSharp(pattern, outDir, workflowVersion)
 		return
 	}
 	result, cg, cr, threadingErrs, usage, tr := analyze(pattern)
 	_ = cg
 
+	// cleat#3500, cleat#1986 slice 2c, cleat#3524: the refusals that read the
+	// usage scan, taken from the one place `cleat vet` takes them from. All of
+	// them are decided before anything is compiled, so a build that cannot keep
+	// what it was asked for does not leave an artifact behind. The exposure one
+	// used to sit after the compile and left a .wasm without its metadata.
+	refusals := analysisRefusals(usage, channel)
+
 	if jsonOut {
 		vo := vetJSONOutput(result, cr, threadingErrs)
+		addRefusals(&vo, refusals)
 		jsonBytes, jErr := json.Marshal(vo)
 		if jErr != nil {
 			fmt.Fprintf(os.Stderr, "Error building JSON diagnostics: %v\n", jErr)
 			os.Exit(1)
 		}
 		fmt.Println(string(jsonBytes))
-		if len(threadingErrs) > 0 || cr.NumErrors() > 0 {
+		if len(threadingErrs) > 0 || cr.NumErrors() > 0 || len(refusals) > 0 {
 			os.Exit(1)
 		}
 	} else {
@@ -297,20 +348,8 @@ func runBuild(pattern, outDir, target, runtime, channel string, jsonOut bool, di
 		fmt.Fprintf(os.Stderr, "  Found %d functions, %d entry point(s), %d in cleat closure.\n",
 			result.NumFuncs, len(result.EntryPoints), leafCount+closureCount)
 		fmt.Fprintf(os.Stderr, "  Durable leaves: %s\n", formatDurableLeaves(result, cr))
-		// VerifyThreading reports the PRE-TRANSFORM state, deliberately -- see
-		// TestVerifyThreadingAutothreadReportsPassThroughErrors, whose comment
-		// says pass-through functions in a global-h package "are correctly
-		// reported as unthreaded BEFORE the transform runs. After the transform
-		// they get h added as a parameter."
-		//
-		// So an error naming a function the transform auto-threaded is not a
-		// build failure; it is a stale reading of a state that no longer
-		// exists. Failing on it made `cleat build` reject packages the very
-		// next stage was designed to fix -- examples/fooddash, where the error
-		// told the author to declare a package-level var h that order.go:36
-		// already declares. IMPROVEMENT-PLAN 3.229.
-		threadingErrs = dropAutoThreaded(threadingErrs, tr)
-
+		// threadingErrs is already filtered by analyze (see there): an error naming
+		// a function the transform auto-threaded is not reported.
 		fmt.Fprintf(os.Stderr, "  Verifying HostCalls threading... %s\n", formatThreadingStatus(threadingErrs))
 
 		if len(threadingErrs) > 0 {
@@ -341,13 +380,16 @@ func runBuild(pattern, outDir, target, runtime, channel string, jsonOut bool, di
 		}
 
 		errCount := cr.NumErrors()
-		if errCount > 0 {
+		if errCount > 0 || len(refusals) > 0 {
 			fmt.Fprintln(os.Stderr)
 			for _, e := range cr.SortedErrors() {
 				fmt.Fprintf(os.Stderr, "  %s: %s: %s\n", e.Code, funcLoc(e.FuncName, e.Line, e.Column), e.Message)
 				if e.Suggestion != "" {
 					fmt.Fprintf(os.Stderr, "    → %s\n", e.Suggestion)
 				}
+			}
+			for _, msg := range refusals {
+				fmt.Fprintf(os.Stderr, "  Error: %s\n", msg)
 			}
 			os.Exit(1)
 		}
@@ -477,7 +519,20 @@ func runBuild(pattern, outDir, target, runtime, channel string, jsonOut bool, di
 
 	// Standard Go wasip1 compilation.
 	logBuildProgress("  Compiling WASM module (go/wasip1)...\n")
+	//
+	// -trimpath (cleat#3501): the module is compiled inside outDir, so without
+	// it the toolchain records that directory in the binary and one source
+	// tree built to two -o paths gave two different sha256s -- which a guard
+	// comparing deployed bytes (cleat#3497) would read as a changed workflow.
+	//
+	// -buildvcs=false is the same fix for the second leak: with -o inside a git
+	// checkout (clew builds to -o dist), the default -buildvcs=auto stamps
+	// vcs.revision, vcs.time and vcs.modified, so the bytes changed on every
+	// commit, including one touching an unrelated file. Nothing in guest code
+	// reads the stamp.
 	buildCmd := exec.Command("go", "build",
+		"-trimpath",
+		"-buildvcs=false",
 		"-o", wasmPath,
 		".",
 	)
@@ -508,7 +563,13 @@ func runBuild(pattern, outDir, target, runtime, channel string, jsonOut bool, di
 	}
 	// Resolve child workflow versions from lock file or database.
 	var childVersions map[string]int
-	if len(usage.Children) > 0 {
+	// A frozen build resolves even when the scan found no child (cleat#3500).
+	// The scan reads only the workflow's own package, so a child started from an
+	// imported package is invisible to it; the lock is what names it. Resolving
+	// only when the scan found something pinned the WHOLE lock in that case and
+	// nothing otherwise, so a helper package's children were pinned exactly when
+	// the workflow's own package also started a nameable one.
+	if len(usage.Children) > 0 || channel == "frozen" {
 		childVersions = resolveBuildChildVersions(usage.Children, channel, jsonOut)
 	}
 
@@ -521,13 +582,8 @@ func runBuild(pattern, outDir, target, runtime, channel string, jsonOut bool, di
 	// `cleat init` project printed `Would deploy workflow "my-workflow.wasm"`.
 	workflowName := workflowLogicalName(result)
 
-	// cleat#1986 slice 2c: the source's exposure declaration, validated here.
-	// The refusal itself is exposureDeclarationError, which is a function rather
-	// than straight-line code so that it can be tested; see its doc comment.
-	if msg := exposureDeclarationError(usage); msg != "" {
-		fmt.Fprintf(os.Stderr, "Error: %s\n", msg)
-		os.Exit(1)
-	}
+	// The source's exposure declaration is validated with the other refusals,
+	// before the compile (analysisRefusals above), not here.
 
 	meta := &wasm.Metadata{
 		WorkflowName:         workflowName,
@@ -722,10 +778,10 @@ func pctOf(part, whole int64) float64 {
 	return float64(part) * 100 / float64(whole)
 }
 
-func runVet(pattern string, jsonOut bool, ciOut bool) int {
-	result, _, cr, threadingErrs, usage, tr := analyze(pattern)
-	_ = usage
-	_ = tr
+func runVet(pattern string, jsonOut bool, ciOut bool, channel string) int {
+	result, _, cr, threadingErrs, usage, _ := analyze(pattern)
+	// The same refusals `cleat build` takes, from the same call (cleat#3524).
+	refusals := analysisRefusals(usage, channel)
 
 	if ciOut {
 		// GitHub Actions annotation format.
@@ -750,6 +806,11 @@ func runVet(pattern string, jsonOut bool, ciOut bool) int {
 			}
 			exitCode = 1
 		}
+		for _, msg := range refusals {
+			// A workflow command's data is one line: newlines travel as %0A.
+			fmt.Printf("::error title=Refusal::%s\n", strings.ReplaceAll(msg, "\n", "%0A"))
+			exitCode = 1
+		}
 		for _, w := range cr.SortedWarnings() {
 			f := lookupFile(result, w.FuncName)
 			if f == "" {
@@ -762,13 +823,14 @@ func runVet(pattern string, jsonOut bool, ciOut bool) int {
 
 	if jsonOut {
 		vo := vetJSONOutput(result, cr, threadingErrs)
+		addRefusals(&vo, refusals)
 		jsonBytes, jErr := json.Marshal(vo)
 		if jErr != nil {
 			fmt.Fprintf(os.Stderr, "Error building JSON output: %v\n", jErr)
 			return 1
 		}
 		fmt.Println(string(jsonBytes))
-		if len(threadingErrs) > 0 || cr.NumErrors() > 0 {
+		if len(threadingErrs) > 0 || cr.NumErrors() > 0 || len(refusals) > 0 {
 			return 1
 		}
 		return 0
@@ -795,6 +857,10 @@ func runVet(pattern string, jsonOut bool, ciOut bool) int {
 		if e.Suggestion != "" {
 			fmt.Printf("    → %s\n", e.Suggestion)
 		}
+		exitCode = 1
+	}
+	for _, msg := range refusals {
+		fmt.Printf("  Error: %s\n", msg)
 		exitCode = 1
 	}
 	for _, w := range cr.SortedWarnings() {
@@ -836,6 +902,11 @@ func detectVetLang(dir string) (string, error) {
 		return "java", nil
 	}
 
+	// Check for a C# project: exactly one .csproj, as `cleat build --target csharp` requires.
+	if m, _ := filepath.Glob(filepath.Join(dir, "*.csproj")); len(m) == 1 {
+		return "csharp", nil
+	}
+
 	// Check for Python files.
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -850,11 +921,6 @@ func detectVetLang(dir string) (string, error) {
 	}
 	if hasPy {
 		return "python", nil
-	}
-
-	// Check for AssemblyScript (package.json).
-	if _, err := os.Stat(filepath.Join(dir, "package.json")); err == nil {
-		return "as", nil
 	}
 
 	// Fallback: check source file extensions.
@@ -1025,91 +1091,6 @@ func runVetPython(dir string, jsonOut bool) int {
 	return exitCode
 }
 
-// runVetAS performs a basic vet check on AssemblyScript source files.
-// AssemblyScript vetting is currently limited; full AST analysis is planned.
-// runVetAS vets an AssemblyScript workflow by compiling it with the cleat
-// transform and no code generation.
-//
-// It used to vet nothing. It walked the tree counting .as/.ts files, resolved
-// node and the transform path, discarded both (`_ = nodePath`, and a
-// `transformFile` candidate search whose result was never read), printed
-// "Scanned N file(s)" and returned 0 -- on every path, for every input. A
-// workflow calling Math.random() inside a durable function passed vet, and so
-// did one with no AssemblyScript in it at all. See IMPROVEMENT-PLAN.md 2.43.
-//
-// What makes vetting possible now is 2.42: the transform's E001-E005
-// determinism checks used to be console.error() and nothing else, so even
-// `cleat build` exited 0 on a violation. They throw from afterParse now, which
-// is what makes asc fail. Running asc with --noEmit gets the whole check --
-// parse, transform, diagnostics -- without writing a .wasm.
-//
-// A missing toolchain is an error rather than a pass. `cleat build` already
-// exits 1 when npx is absent, and a vet that returns 0 because it could not
-// look is the exact defect being fixed here.
-func runVetAS(dir string) int {
-	if dir == "" {
-		dir = "."
-	}
-
-	if _, err := os.Stat(filepath.Join(dir, "package.json")); os.IsNotExist(err) {
-		fmt.Fprintf(os.Stderr, "Error: no package.json found in %s\n", dir)
-		fmt.Fprintf(os.Stderr, "AssemblyScript workflows are npm projects; run 'cleat vet' from the project root or pass its path.\n")
-		return 1
-	}
-
-	entry := filepath.Join(dir, "assembly", "index.ts")
-	if _, err := os.Stat(entry); os.IsNotExist(err) {
-		fmt.Fprintf(os.Stderr, "Error: no assembly/index.ts found in %s\n", dir)
-		fmt.Fprintf(os.Stderr, "This is the entry point 'cleat build --target assemblyscript' compiles; vet checks the same one.\n")
-		return 1
-	}
-
-	if _, err := exec.LookPath("npx"); err != nil {
-		fmt.Fprintf(os.Stderr, "Error: npx not found, so the AssemblyScript vet cannot run. Install Node.js: https://nodejs.org\n")
-		fmt.Fprintf(os.Stderr, "Reporting this rather than passing: a vet that cannot run its checks has not vetted anything.\n")
-		return 1
-	}
-
-	// Mirrors runBuildAssemblyScript: the transform is resolved from
-	// node_modules as @cleat/transform, so it has to be installed to run.
-	if _, err := os.Stat(filepath.Join(dir, "node_modules")); os.IsNotExist(err) {
-		fmt.Fprintf(os.Stderr, "Installing npm dependencies...\n")
-		cmd := exec.Command("npm", "install")
-		cmd.Dir = dir
-		cmd.Stdout = os.Stderr
-		cmd.Stderr = os.Stderr
-		if err := cmd.Run(); err != nil {
-			fmt.Fprintf(os.Stderr, "Error: npm install failed: %v\n", err)
-			return 1
-		}
-	}
-
-	fmt.Fprintf(os.Stderr, "Vetting AssemblyScript project in %s...\n", dir)
-
-	// --noEmit runs parse and the transform, including the E001-E005
-	// determinism diagnostics, without producing a .wasm. Everything else
-	// matches the build invocation so vet and build agree about what compiles.
-	cmd := exec.Command("npx", //nolint:gosec // G204: fixed binary, arguments passed as an array, no shell. The variable part is a project path the developer just typed.
-		"asc", filepath.Join("assembly", "index.ts"),
-		"--runtime", "stub",
-		"--transform", "@cleat/transform",
-		"--noEmit",
-	)
-	cmd.Dir = dir
-	cmd.Stdout = os.Stderr
-	cmd.Stderr = os.Stderr
-	cmd.Env = os.Environ()
-
-	if err := cmd.Run(); err != nil {
-		fmt.Fprintf(os.Stderr, "\nAssemblyScript vet failed: %v\n", err)
-		fmt.Fprintf(os.Stderr, "Determinism violations are reported above as E001-E005.\n")
-		return 1
-	}
-
-	fmt.Fprintf(os.Stderr, "AssemblyScript vet passed.\n")
-	return 0
-}
-
 // runDeploy deploys a compiled WASM workflow to the database.
 // Usage: cleat deploy [--db <conn>] [--name <name>] [--task-queue <queue>] <wasm-file>
 func runDeploy(args []string) {
@@ -1139,11 +1120,17 @@ func runDeploy(args []string) {
 	// `--dry-run` gives a real, opt-in way to preview without a database --
 	// the same flag name and behavior as `cleat plugin install --dry-run`.
 	dryRunFlag := fs.Bool("dry-run", false, "print what would be deployed without connecting to a database")
+	// cleat#3497. Without it, redeploying different bytes onto a version that
+	// still has open runs is refused: they replay their history under whatever
+	// bytes the version holds, so replacing them under a live run can diverge it.
+	// cleat#3600 (owner D52): the explicit override of the plugin-dependency check.
+	allowMissingPlugins := fs.Bool("allow-missing-plugins", false, "deploy even though a plugin this binary depends on has never been registered by any worker (logged; a run that needs it is released until a worker carrying it registers)")
+	forceFlag := fs.Bool("force", false, "replace the WASM of a version that has open runs and different bytes (a deliberate hot-fix: those runs will replay their history under the new code, and a running worker can keep the previous bytes for up to about 5 seconds after a replacement of the same length)")
 	fs.Parse(args)
 
 	remainder := fs.Args()
 	if len(remainder) < 1 {
-		fmt.Fprintf(os.Stderr, "Usage: cleat deploy [--db <conn>] [--name <name>] [--task-queue <queue>] [--max-history-length <n>] [--dry-run] <wasm-file>\n")
+		fmt.Fprintf(os.Stderr, "Usage: cleat deploy [--db <conn>] [--name <name>] [--task-queue <queue>] [--max-history-length <n>] [--force] [--dry-run] <wasm-file>\n")
 		os.Exit(1)
 	}
 	wasmPath := remainder[0]
@@ -1275,6 +1262,30 @@ func runDeploy(args []string) {
 	// tenant-scoped statement in it. (The role that owns migrations bypasses
 	// RLS, so this only bites the app role -- which is the one deploy is
 	// supposed to work under.)
+	// cleat#3600. Before the transaction, so a refusal writes nothing. This path writes
+	// the binary's plugin_deps to the row, so the two declarations are the same map.
+	var declaredDeps map[string]string
+	pluginDepVersion := 0 // 0: the next free number, which is not known until the transaction below
+	if metaErr == nil {
+		declaredDeps = meta.PluginDeps
+		if meta.WorkflowVersion > 0 {
+			pluginDepVersion = meta.WorkflowVersion
+		}
+	}
+	pluginReg := &engine.PluginNameRegistry{DB: db, Dialect: engine.DialectPostgres}
+	if perr := engine.EnforcePluginDeps(context.Background(), pluginReg, declaredDeps, declaredDeps, engine.EnforceOptions{
+		AllowMissing: *allowMissingPlugins,
+		Log:          slog.Default(),
+		Recorder:     pluginReg,
+		Override:     engine.PluginDepOverride{TenantID: deployTenantID, Definition: name, Version: pluginDepVersion, Via: "cleat-deploy", Actor: engine.CommandLineActor()},
+	}); perr != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", perr)
+		if errors.Is(perr, engine.ErrUnmetPluginDeps) {
+			fmt.Fprintln(os.Stderr, engine.UnmetPluginDepsCLIAdvice)
+		}
+		os.Exit(1)
+	}
+
 	tx, err := db.Begin()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error starting deploy transaction: %v\n", err)
@@ -1287,8 +1298,10 @@ func runDeploy(args []string) {
 	}
 
 	// Use the version embedded in WASM metadata if available; otherwise
-	// auto-increment.  Deploying the same version multiple times updates
-	// the existing row (idempotent).
+	// auto-increment. Deploying the same version again is idempotent only when the
+	// bytes are identical: different bytes on a version that still has open runs
+	// are refused below unless --force is given (cleat#3497), because `cleat build`
+	// stamps version 1 by default and this used to replace v1's WASM under them.
 	version := 1
 	if metaErr == nil && meta.WorkflowVersion > 0 {
 		version = meta.WorkflowVersion
@@ -1299,6 +1312,17 @@ func runDeploy(args []string) {
 			fmt.Fprintf(os.Stderr, "Error querying max version: %v\n", err)
 			os.Exit(1)
 		}
+	}
+
+	// The same rule PostgresStore.DeployWorkflowDef applies, from the same function,
+	// so `cleat deploy` and every store-backed deploy path refuse the same thing.
+	if cerr := engine.CheckWorkflowDefReplacementPostgres(context.Background(), tx, deployTenantID, name, version, wasmBytes, *forceFlag); cerr != nil {
+		_ = tx.Rollback()
+		fmt.Fprintf(os.Stderr, "Error: %v\n", cerr)
+		if errors.Is(cerr, engine.ErrWorkflowDefInUse) {
+			fmt.Fprintln(os.Stderr, engine.WorkflowDefInUseCLIAdvice)
+		}
+		os.Exit(1)
 	}
 
 	_, err = tx.Exec(
@@ -1413,6 +1437,26 @@ func analyze(pattern string) (*analyzer.AnalysisResult, *callgraph.Graph, *closu
 		fmt.Fprintf(os.Stderr, "Error in AST transformation: %v\n", err)
 		os.Exit(1)
 	}
+
+	// VerifyThreading reports the PRE-TRANSFORM state, deliberately -- see
+	// TestVerifyThreadingAutothreadReportsPassThroughErrors, whose comment
+	// says pass-through functions in a global-h package "are correctly
+	// reported as unthreaded BEFORE the transform runs. After the transform
+	// they get h added as a parameter."
+	//
+	// So an error naming a function the transform auto-threaded is not a
+	// failure; it is a stale reading of a state that no longer exists. Failing
+	// on it made `cleat build` reject packages the very next stage was designed
+	// to fix -- examples/fooddash, where the error told the author to declare a
+	// package-level var h that order.go:36 already declares. IMPROVEMENT-PLAN
+	// 3.229.
+	//
+	// FILTERED HERE, NOT IN runBuild, because the filter was applied only in
+	// runBuild's plain path. `cleat vet` and `cleat build --json` read the
+	// unfiltered list and exited 1 on a package that `cleat build` accepts
+	// (testdata/autothread: build exit 0, vet exit 1, build --json exit 1,
+	// cleat#3524). Every caller of analyze now gets the same answer.
+	threadingErrs = dropAutoThreaded(threadingErrs, tr)
 
 	return result, cg, cr, threadingErrs, usage, tr
 }
@@ -1613,6 +1657,94 @@ func exposureDeclarationError(usage *wasm.UsageInfo) string {
 			engine.ExposureAuth, engine.ExposurePublic, engine.ExposureInternal, usage.Exposure)
 	}
 	return ""
+}
+
+// frozenChildBindingError is the refusal for `cleat build --channel frozen` when
+// the source starts a child whose name is not a compile-time constant
+// (cleat#3500).
+//
+// "frozen" promises exactly-this-version children. The pin is a map from child
+// name to version, built from names the scan can read; a child it cannot name
+// gets no entry, resolves to MAX(version) at runtime, and the build still said
+// `child_binding_policy: "frozen"` and exited 0. A user who chose frozen to
+// get a fixed set got a mix, and nothing said so -- clew's ctolap named its
+// children through Go constants and hit exactly this.
+//
+// Only "frozen" refuses. The other channels (stable, latest, a tag) resolve a
+// name at the point of use by design, so an unpinned child is not a broken
+// promise there; changing that is a behaviour change nobody asked for.
+//
+// Empty means nothing to refuse.
+func frozenChildBindingError(usage *wasm.UsageInfo, channel string) string {
+	if usage == nil || channel != "frozen" || len(usage.UnresolvedChildren) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "--channel frozen cannot pin %d child workflow start(s) whose name is not a compile-time constant:\n", len(usage.UnresolvedChildren))
+	for _, u := range usage.UnresolvedChildren {
+		fmt.Fprintf(&b, "  %s: %s(%s)\n", u.Pos, u.Method, u.Expr)
+	}
+	b.WriteString("An unpinned child would resolve to the highest deployed version at runtime. " +
+		"Name each child with a string literal or a const, or build with a channel that resolves at the point of use (stable, latest).")
+	return b.String()
+}
+
+// analysisRefusals is every refusal that follows from the analysis but is not
+// one of its own diagnostics (closure errors, threading errors): the checks
+// that read wasm.UsageInfo. `cleat build` and `cleat vet` both call it, so a
+// package one refuses the other refuses.
+//
+// They did not, until cleat#3524. exposureDeclarationError and
+// frozenChildBindingError were called from runBuild alone, so `cleat vet` printed
+// OK on a package whose build then exited 1 -- the exposure one only after the
+// WASM had been compiled and written. A function that two commands must agree on
+// belongs behind one call, because a third check added beside the first two in
+// runBuild would reopen the gap without any test noticing.
+//
+// channel is the --channel value; only "frozen" refuses (see
+// frozenChildBindingError), so an empty channel, vet's default, is the same
+// verdict as any of build's defaults.
+func analysisRefusals(usage *wasm.UsageInfo, channel string) []string {
+	var out []string
+	if msg := exposureDeclarationError(usage); msg != "" {
+		out = append(out, msg)
+	}
+	if msg := frozenChildBindingError(usage, channel); msg != "" {
+		out = append(out, msg)
+	}
+	if msg := opaqueHostCallError(usage); msg != "" {
+		out = append(out, msg)
+	}
+	return out
+}
+
+// opaqueHostCallError is the refusal for a workflow that reaches a function from another package which hands the
+// host-call runtime to code the build cannot read (cleat#3803).
+//
+// The build links a host function only for a call it can see. It sees a function's own body, and it follows the
+// calls inside a dependency's body, but a call through an INTERFACE method that is passed the runtime could run
+// anything. Reporting "this reaches no host call" for it would build a module that fails at run time with "the
+// HostCalls runtime was not initialized" -- a message that names the entry point and points away from the cause --
+// so the build says it cannot tell instead. The repair is on the workflow's side: call the host through h
+// directly where the build can see it, or declare what the dependency needs with //cleat:require.
+func opaqueHostCallError(usage *wasm.UsageInfo) string {
+	if usage == nil || len(usage.OpaqueHostCalls) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "cannot tell which host calls %d dependency call(s) make, so the module could fail at run time with \"the HostCalls runtime was not initialized\":\n", len(usage.OpaqueHostCalls))
+	for _, o := range usage.OpaqueHostCalls {
+		fmt.Fprintf(&b, "  %s: %s reaches %s, where %s -- %s\n", o.Pos, o.Callee, o.Inside, o.Call, o.Why)
+	}
+	b.WriteString("Call the host through h where the build can see it, or name what the dependency needs with //cleat:require <HostCallsMethod>[,...] in its package.")
+	return b.String()
+}
+
+// addRefusals puts analysisRefusals into the JSON diagnostics as errors.
+func addRefusals(vo *VetOutput, refusals []string) {
+	for _, msg := range refusals {
+		vo.Errors = append(vo.Errors, VetResult{Message: msg})
+	}
 }
 
 // workflowLogicalName returns the workflow's declared or derived name, with
@@ -1867,6 +1999,9 @@ func checkEntryPointsAgainstManifest(srcDir string, exported []string) {
 	fmt.Fprintf(os.Stderr,
 		"Error: cleat.yaml's entry_points: (%s) does not match what cleat build "+
 			"actually found (%s).\n"+
+			"The Go build names an entry point by its exported function in snake case "+
+			"(SigEcho is sig_echo); a `// @cleatEntry(name=...)` comment is not read, so "+
+			"changing its name= does not rename anything.\n"+
 			"Update cleat.yaml, or the entry point's exported Go function, so they "+
 			"agree -- a caller starting a run by the manifest's stale name would "+
 			"otherwise fail at start time, after the run id has already been handed "+
@@ -2370,7 +2505,9 @@ func runSchedule(args []string) {
 func isValidTarget(t string) bool {
 	valid := map[string]bool{
 		"go": true, "rust": true,
-		"java": true, "assemblyscript": true, "python": true,
+		"java": true, "python": true,
+		"ts":     true, // tier 2, in development, not supported: see cmd/cleat/build_ts.go and tiers.yaml
+		"csharp": true, // tier 2 (owner decision 2026-11-19): see cmd/cleat/build_csharp.go and tiers.yaml (cleat#4080)
 	}
 	return valid[t]
 }
@@ -2412,7 +2549,10 @@ func resolveBuildChildVersions(children map[string]bool, channel string, jsonOut
 		tenantID = engine.DefaultTenantUUID
 	}
 
-	if connStr != "" {
+	// With nothing to resolve (a frozen build whose own package starts no
+	// child) the database branch would write an EMPTY lock over the one the
+	// imported packages' children are pinned by. Fall through to read it.
+	if connStr != "" && len(children) > 0 {
 		db, err := openPostgresDB(connStr)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error: cannot connect to database: %v\n", err)
@@ -2433,9 +2573,25 @@ func resolveBuildChildVersions(children map[string]bool, channel string, jsonOut
 		}
 
 		// Write lock file for reproducible builds without DB access.
-		entries := make(map[string]wasm.LockEntry, len(resolved))
-		for name, v := range resolved {
-			entries[name] = wasm.LockEntry{Version: v}
+		//
+		// MERGED INTO THE LOCK THAT IS THERE, NOT WRITTEN FROM THE SCAN ALONE
+		// (cleat#3508). The scan reads only this workflow's own package, so a
+		// child started from an imported package is in the lock only because
+		// someone added it by hand. Writing the lock from the scan dropped that
+		// entry whenever the own package had a nameable child, and dropped it
+		// from the build's pins as well, which under --channel frozen is the
+		// child silently resolving to MAX(version) at run time.
+		var existing *wasm.LockFile
+		if lf, err := wasm.ReadLockFile("."); err == nil && (lf.Version == wasm.LockFileVersion || lf.Version == 1) {
+			existing = lf
+		}
+		entries, kept := mergeLockEntries(existing, resolved)
+		if len(kept) > 0 {
+			logBuildProgress("  Kept %d %s entr%s the scan did not find: %s\n",
+				len(kept), wasm.LockFileName, map[bool]string{true: "y", false: "ies"}[len(kept) == 1], strings.Join(kept, ", "))
+			for _, name := range kept {
+				resolved[name] = entries[name].Version
+			}
 		}
 		lf := &wasm.LockFile{
 			Version: wasm.LockFileVersion,
@@ -2462,8 +2618,42 @@ func resolveBuildChildVersions(children map[string]bool, channel string, jsonOut
 		return result
 	}
 
+	if len(children) == 0 {
+		// Only a frozen build gets here with nothing found. Say what the scan
+		// cannot see rather than imply it found children it could not pin.
+		logBuildProgress("  Warning: --channel frozen found no child workflow in this package and there is no %s. "+
+			"A child started from an imported package is not visible to the build and will NOT be pinned.\n", wasm.LockFileName)
+		return nil
+	}
 	logBuildProgress("  Warning: no %s and no --db flag. Child workflow versions will be resolved dynamically at runtime.\n", wasm.LockFileName)
 	return nil
+}
+
+// mergeLockEntries returns the lock entries to write: every resolved child, at
+// its resolved version, plus every entry of the existing lock whose name the
+// scan did not resolve, unchanged. kept names the latter, sorted.
+//
+// An existing entry for a name the scan DID resolve is replaced, because
+// re-resolving it is what --db is for. One for a name the scan did not find is
+// indistinguishable from a child that is no longer called and from one started
+// by an imported package, and dropping the second is the worse mistake: this
+// keeps both. Remove a stale entry from cleat.lock by hand: `cleat lock` does
+// not prune either (cleat#3521).
+func mergeLockEntries(existing *wasm.LockFile, resolved map[string]int) (entries map[string]wasm.LockEntry, kept []string) {
+	entries = make(map[string]wasm.LockEntry, len(resolved))
+	if existing != nil {
+		for name, e := range existing.Entries {
+			if _, found := resolved[name]; !found {
+				entries[name] = e
+				kept = append(kept, name)
+			}
+		}
+	}
+	sort.Strings(kept)
+	for name, v := range resolved {
+		entries[name] = wasm.LockEntry{Version: v}
+	}
+	return entries, kept
 }
 
 // resolveChildVersionsFromStore resolves child workflow versions using the
@@ -2499,7 +2689,7 @@ func resolveChildVersionsFromStore(ctx context.Context, store engine.WorkflowSto
 func runLock(args []string) {
 	fs := flag.NewFlagSet("lock", flag.ExitOnError)
 	lockDB := fs.String("db", "", "PostgreSQL connection string (or set CLEAT_DATABASE_URL)")
-	lockUpdate := fs.Bool("update", false, "re-resolve all child versions from database")
+	lockUpdate := fs.Bool("update", false, "re-resolve every child named in cleat.lock from the database, replacing a version chosen by hand and printing each version it moves (with a <package>, only the children it finds; other entries are kept)")
 	lockChannel := fs.String("channel", "stable", "channel for version resolution: stable, latest, canary, or custom tag")
 	lockTenant := fs.String("tenant", "", "tenant UUID for scoped resolution (default: zero UUID)")
 	fs.Parse(args)
@@ -2521,16 +2711,22 @@ func runLock(args []string) {
 		tenantID = engine.DefaultTenantUUID
 	}
 
+	var existing *wasm.LockFile
+	if lf, err := wasm.ReadLockFile("."); err == nil && (lf.Version == wasm.LockFileVersion || lf.Version == 1) {
+		existing = lf
+	}
+
 	var children map[string]bool
-	if *lockUpdate {
-		// Re-read existing lock file to find child names.
-		lf, err := wasm.ReadLockFile(".")
-		if err != nil {
+	if *lockUpdate && len(fs.Args()) == 0 {
+		// Re-resolve every name the lock holds. This is the documented meaning of
+		// --update, and it replaces a version someone chose by hand, so each
+		// version it moves is reported below (cleat#3521).
+		if existing == nil {
 			fmt.Fprintf(os.Stderr, "Error: no %s found (required with --update)\n", wasm.LockFileName)
 			os.Exit(1)
 		}
-		children = make(map[string]bool, len(lf.Entries))
-		for name := range lf.Entries {
+		children = make(map[string]bool, len(existing.Entries))
+		for name := range existing.Entries {
 			children[name] = true
 		}
 	} else {
@@ -2543,6 +2739,12 @@ func runLock(args []string) {
 		pattern := remainder[0]
 		_, _, _, _, usage, _ := analyze(pattern)
 		children = usage.Children
+		// cleat#3500: the lock is the pin source, so a child the scan cannot
+		// name is a child the lock silently omits.
+		for _, u := range usage.UnresolvedChildren {
+			fmt.Fprintf(os.Stderr, "Warning: %s: %s(%s) -- the child name is not a compile-time constant, so it is NOT in the lock.\n",
+				u.Pos, u.Method, u.Expr)
+		}
 	}
 
 	if len(children) == 0 {
@@ -2562,27 +2764,72 @@ func runLock(args []string) {
 
 	// Use the tenant-scoped store so all queries are isolated.
 	store := engine.NewPostgresStore(db).WithTenant(tenantID)
-	resolved, err := resolveChildVersionsFromStore(ctx, store, children, *lockChannel)
+	lf, resolved, kept, changed, err := lockFileFor(ctx, store, existing, children, *lockChannel)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: resolving child workflow versions: %v\n", err)
 		os.Exit(1)
 	}
-
-	entries := make(map[string]wasm.LockEntry, len(resolved))
-	for name, v := range resolved {
-		entries[name] = wasm.LockEntry{Version: v}
-	}
-	lf := &wasm.LockFile{
-		Version: wasm.LockFileVersion,
-		Policy:  *lockChannel,
-		Entries: entries,
-	}
+	entries := lf.Entries
 	if err := wasm.WriteLockFile(".", lf); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: writing %s: %v\n", wasm.LockFileName, err)
 		os.Exit(1)
 	}
 	fmt.Printf("Wrote %s with %d child workflow version(s)\n", wasm.LockFileName, len(entries))
-	for name, v := range resolved {
-		fmt.Printf("  %s: v%d\n", name, v)
+	names := make([]string, 0, len(resolved))
+	for name := range resolved {
+		names = append(names, name)
 	}
+	sort.Strings(names)
+	for _, name := range names {
+		fmt.Printf("  %s: v%d\n", name, resolved[name])
+	}
+	for _, c := range changed {
+		fmt.Printf("  Changed %s: v%d -> v%d\n", c.Name, c.From, c.To)
+	}
+	if len(kept) > 0 {
+		fmt.Printf("  Kept %d entr%s this run did not resolve: %s\n",
+			len(kept), map[bool]string{true: "y", false: "ies"}[len(kept) == 1], strings.Join(kept, ", "))
+	}
+}
+
+// lockFileFor resolves children against the store and returns the lock to write,
+// merged into the existing one (see lockEntriesFor), the resolved versions, the
+// names kept and the versions changed. It is runLock without the database
+// connection and the file write, so a test can drive it with a stub store.
+func lockFileFor(ctx context.Context, store engine.WorkflowStore, existing *wasm.LockFile, children map[string]bool, channel string) (lf *wasm.LockFile, resolved map[string]int, kept []string, changed []lockChange, err error) {
+	resolved, err = resolveChildVersionsFromStore(ctx, store, children, channel)
+	if err != nil {
+		return nil, nil, nil, nil, err
+	}
+	entries, kept, changed := lockEntriesFor(existing, resolved)
+	return &wasm.LockFile{Version: wasm.LockFileVersion, Policy: channel, Entries: entries}, resolved, kept, changed, nil
+}
+
+// lockChange is an entry whose version a lock run moved.
+type lockChange struct {
+	Name     string
+	From, To int
+}
+
+// lockEntriesFor is what `cleat lock` writes: the resolved children, merged into
+// the existing lock so that every entry it did not resolve stays as it was
+// (cleat#3521). kept names those, sorted; changed lists each resolved child whose
+// version differs from the existing entry, sorted by name, so a version that was
+// chosen by hand and is replaced is reported rather than lost silently.
+//
+// `cleat lock <package>` resolves only the children the scan finds, so a child
+// started from an imported package, which is in the lock only because someone
+// listed it, survives. `cleat lock --update` resolves every name in the lock, so
+// nothing is kept and every moved version is in changed.
+func lockEntriesFor(existing *wasm.LockFile, resolved map[string]int) (entries map[string]wasm.LockEntry, kept []string, changed []lockChange) {
+	entries, kept = mergeLockEntries(existing, resolved)
+	if existing != nil {
+		for name, v := range resolved {
+			if old, ok := existing.Entries[name]; ok && old.Version != v {
+				changed = append(changed, lockChange{Name: name, From: old.Version, To: v})
+			}
+		}
+		sort.Slice(changed, func(i, j int) bool { return changed[i].Name < changed[j].Name })
+	}
+	return entries, kept, changed
 }

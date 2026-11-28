@@ -72,6 +72,40 @@ def register_defer(defer_id: str, fn: Callable[[], None]) -> None:
     _DEFERS.append((defer_id, fn))
 
 
+def reserve_defer(fn: Callable[[], None]) -> tuple[str, Callable[[], None]]:
+    """Put a defer body in the table BEFORE the host call that registers it.
+
+    ``durable-defer`` can answer ``err(suspended)`` (cleat#4079): the engine
+    stopped a run that was killed mid-flight, and the registration the stop
+    landed on is already in its history. The guest unwinds and the drain runs
+    next, so the body has to be in the table by then, and a stop carries no id to
+    store it under. The entry is therefore reserved first, under an empty id, and
+    given the host's id by :func:`commit_defer` when the host answers ``ok``.
+
+    Returns the entry, which is the handle for :func:`commit_defer` and
+    :func:`discard_defer`; entries are matched by identity.
+    """
+    entry = ("", fn)
+    _DEFERS.append(entry)
+    return entry
+
+
+def commit_defer(entry: tuple[str, Callable[[], None]], defer_id: str) -> None:
+    """Give a reserved entry the id the host minted. Order in the table is unchanged."""
+    for i, held in enumerate(_DEFERS):
+        if held is entry:
+            _DEFERS[i] = (defer_id, entry[1])
+            return
+
+
+def discard_defer(entry: tuple[str, Callable[[], None]]) -> None:
+    """Remove a reserved entry the host refused with a FAILURE (not a stop)."""
+    for i, held in enumerate(_DEFERS):
+        if held is entry:
+            del _DEFERS[i]
+            return
+
+
 def run_deferred(*, propagate_suspend: bool = True) -> int:
     """Run registered defer bodies in LIFO order; return how many ran.
 

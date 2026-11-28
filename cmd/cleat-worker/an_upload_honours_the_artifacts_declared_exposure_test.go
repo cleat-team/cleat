@@ -32,7 +32,10 @@ func TestTheUploadRouteHonoursTheArtifactsDeclaredExposure(t *testing.T) {
 	upload := func(t *testing.T, declared string) (int, string, *engine.WorkflowDef) {
 		t.Helper()
 
-		body, err := wasm.WriteMetadata([]byte("\x00asm\x01\x00\x00\x00"), &wasm.Metadata{Exposure: declared})
+		// Stamped like a real build: an artifact with no positive version stamp is
+		// refused at upload (cleat#3513), and `cleat build` cannot produce one.
+		body, err := wasm.WriteMetadata([]byte("\x00asm\x01\x00\x00\x00"),
+			&wasm.Metadata{WorkflowName: "uploaded", WorkflowVersion: 1, ABIVersion: 1, MinCompatibleVersion: 1, Exposure: declared})
 		if err != nil {
 			t.Fatalf("WriteMetadata(exposure=%q): %v", declared, err)
 		}

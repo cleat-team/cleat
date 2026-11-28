@@ -129,9 +129,23 @@ interface durable-version {
 
 /// Workflow lifecycle operations (defer, compaction, cancellation).
 interface durable-lifecycle {
+    use outcomes.{call-failure};
+
     /// Register a deferred cleanup action to run on workflow exit.
-    /// Returns the generated defer ID.
-    durable-defer: func(desc: string) -> string;
+    ///
+    /// ``ok`` carries the generated defer ID. ``err`` is a stop or a failure --
+    /// see ``outcomes``. The stop is how a run that was killed mid-flight is cut
+    /// short so its defers can run (cleat#4079): the host consumes the
+    /// registration, answers ``err(suspended)``, and the guest must unwind
+    /// without making another call. A guest must store its closure BEFORE
+    /// calling this, because the stop arrives after the host has recorded the
+    /// registration and the cleanup is what the segment exists to run.
+    ///
+    /// This returned a bare ``string`` until cleat#4079: a lifted string has no
+    /// bits to carry a stop, so there was nowhere to say "stop here" at a
+    /// registration. A component built against the old signature is refused on
+    /// its first call, before the host runs.
+    durable-defer: func(desc: string) -> result<string, call-failure>;
 
     /// Report that the guest has started (true) or finished (false) draining
     /// its defer table.
@@ -158,16 +172,40 @@ interface durable-lifecycle {
 interface durable-signals {
     use outcomes.{call-failure};
 
+    /// A signal a wait received: the name it was sent under, and its payload.
+    record signal {
+        name: string,
+        payload: string,
+    }
+
+    /// How a wait for signals ended.
+    ///
+    /// This import used to take four pointers into the guest's linear memory
+    /// and return a packed ``u64`` of lengths (cleat#3786). A component host
+    /// cannot dereference a guest pointer, so the dispatcher wrote the name and
+    /// payload into a buffer of its own and returned only the lengths: the
+    /// guest read the right number of bytes from the wrong place and was handed
+    /// NULs -- a signal that arrived, with its name and payload erased, in a
+    /// tier-1 language. Measured on a real worker: signal ``go`` with payload
+    /// ``{"approved":true}`` reached the guest as 2 + 17 bytes of ``0x00``.
+    variant signal-outcome {
+        /// A signal arrived. The payload may be empty.
+        received(signal),
+        /// The timeout elapsed first. Nothing was received.
+        timed-out,
+    }
+
     /// Wait for one or more external signals, with a timeout.
-    /// Output buffers kept for multi-return (name + payload).
+    ///
+    /// ``err(call-failure.suspended)`` is the engine stopping the workflow: no
+    /// signal has arrived, the wait has been recorded, and the guest must
+    /// unwind. ``err(call-failure.failed)`` is a host error -- for example a
+    /// delivered signal whose name or payload is larger than the 65,535 bytes
+    /// the host can hand over -- not an outcome of the wait.
     durable-await-signals: func(
         names: string,
         timeout-ms: u64,
-        sig-name-ptr: u32,
-        sig-name-max-len: u32,
-        payload-ptr: u32,
-        payload-max-len: u32,
-    ) -> u64;
+    ) -> result<signal-outcome, call-failure>;
 
     /// Poll for a specific pending signal (non-blocking).
     /// Returns the signal payload, or empty string if none.
@@ -378,14 +416,27 @@ interface durable-scope {
         inst-key: string,
     ) -> string;
 
+    /// The virtual object scope a workflow is running under.
+    ///
+    /// Both fields are empty when no scope has been set.
+    record scope {
+        object-type: string,
+        instance-key: string,
+    }
+
     /// Get the current virtual object scope.
-    /// Output buffers kept for multi-return (obj-type + inst-key).
-    get-scope: func(
-        obj-type-ptr: u32,
-        obj-type-max-len: u32,
-        inst-key-ptr: u32,
-        inst-key-max-len: u32,
-    ) -> u64;
+    ///
+    /// This took four output pointers and returned a packed ``u64`` of lengths,
+    /// which a component host cannot honour for the reason given on
+    /// ``signal-outcome`` (cleat#3786). Measured on a real worker, after
+    /// ``set_scope("order", "o-1")``: ``get_scope()`` raised
+    /// ``CallErrorNotFound (code 3)`` -- the length of ``"o-1"``, read by the
+    /// SDK as an error code -- so no Python workflow could read its own scope.
+    ///
+    /// Not a ``result``: it reads session state, cannot be stopped and cannot
+    /// fail, and a ``call-failure`` in the signature would promise a refusal the
+    /// host never produces (engine/stop_correspondence_guard_test.go).
+    get-scope: func() -> scope;
 
     /// Generate a deterministic UUID from a seed.
     /// Returns the generated UUID string.
@@ -405,7 +456,26 @@ interface durable-extended-lifecycle {
 
     /// Record non-deterministic computation result in event history.
     /// Returns the previously recorded result on replay.
+    ///
+    /// On replay the host returns the RECORDED value whatever `value` is
+    /// (cleat#4113, owner decision: a side effect freezes a value). A guest
+    /// that wants the function not to run at all on replay asks
+    /// `side-effect-recorded` first.
     side-effect: func(value: string) -> result<string, call-failure>;
+
+    /// Whether the history already holds the value of the side effect at this
+    /// step (cleat#4113).
+    ///
+    /// `recorded(v)`: it does, the step is consumed, and the guest must NOT run
+    /// its function or call `side-effect`. `not-recorded`: nothing is recorded
+    /// and nothing changes; the guest computes the value and calls
+    /// `side-effect`, which records it. The function must make no host call
+    /// between the two, because a host call consumes a step.
+    variant side-effect-lookup {
+        recorded(string),
+        not-recorded,
+    }
+    side-effect-recorded: func() -> result<side-effect-lookup, call-failure>;
 
     /// Start a workflow that outlives this one (fire-and-forget).
     ///

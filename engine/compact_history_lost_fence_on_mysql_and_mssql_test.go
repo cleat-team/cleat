@@ -54,6 +54,24 @@ func pollUntil(t *testing.T, what string, probe func() (bool, error)) {
 	t.Fatalf("%s: nothing became blocked on the holder within 20s: CompactHistory never waited on the row the holder locked", what)
 }
 
+// mysqlWaitersOn counts lock requests that are waiting on the session whose
+// CONNECTION_ID() is connID.
+//
+// performance_schema.data_lock_waits has a row for every lock request that is
+// waiting; BLOCKING_THREAD_ID names the thread holding what it waits for, and
+// performance_schema.threads maps that to the processlist id CONNECTION_ID()
+// returns. information_schema.innodb_trx is NOT used: measured on MySQL 8.4
+// while writing cleat#3450, it listed only the holder while the compactor's
+// FOR UPDATE sat in the processlist in state "statistics", so it never reported
+// the wait.
+func mysqlWaitersOn(db *sql.DB, connID int64) (int, error) {
+	var n int
+	err := db.QueryRow(`SELECT COUNT(*) FROM performance_schema.data_lock_waits
+		WHERE BLOCKING_THREAD_ID IN (
+			SELECT THREAD_ID FROM performance_schema.threads WHERE PROCESSLIST_ID = ?)`, connID).Scan(&n)
+	return n, err
+}
+
 // compactDialects lists the arms by NAME so a subtest has one before it opens
 // (opening skips the test when the DSN is not set).
 var compactDialects = []struct {
@@ -77,15 +95,17 @@ var compactDialects = []struct {
 			lock:  `SELECT id FROM workflow_instances WHERE id = ? FOR UPDATE`,
 			count: `SELECT COUNT(*) FROM event_history WHERE workflow_id = ?`,
 			step:  `SELECT compaction_step FROM workflow_instances WHERE id = ?`,
-			// data_lock_waits has a row for every lock request that is waiting.
-			// information_schema.innodb_trx is NOT used: measured here, it listed
-			// only the holder while the compactor's FOR UPDATE sat in the
-			// processlist in state "statistics", so it never reported the wait.
-			// Not specific to the holder; the test database has no other writers.
-			waitBlocked: func(t *testing.T, _ *sql.Tx) {
+			// Scoped to the holder, as the SQL Server arm is by @@SPID and
+			// PostgreSQL's would be by pg_blocking_pids: a lock wait between two
+			// OTHER sessions on this instance must not release the holder early
+			// (cleat#3455). See mysqlWaitersOn for the query and why it is this one.
+			waitBlocked: func(t *testing.T, holder *sql.Tx) {
+				var connID int64
+				if err := holder.QueryRow(`SELECT CONNECTION_ID()`).Scan(&connID); err != nil {
+					t.Fatalf("mysql: holder connection id: %v", err)
+				}
 				pollUntil(t, "mysql", func() (bool, error) {
-					var n int
-					err := ms.db.QueryRow(`SELECT COUNT(*) FROM performance_schema.data_lock_waits`).Scan(&n)
+					n, err := mysqlWaitersOn(ms.db, connID)
 					return n > 0, err
 				})
 			},
@@ -348,4 +368,97 @@ func TestCompactHistoryAndFinalizeTakeTheirLocksInTheSameOrderOnMySQLAndMSSQL(t 
 // or SQL Server 1205.
 func isCompactDeadlock(err error) bool {
 	return err != nil && (isDeadlockError(err) || isMSSQLDeadlock(err))
+}
+
+// The MySQL probe is scoped to the holder (cleat#3455): a lock wait between two
+// OTHER sessions must not satisfy it. Without this, the scoping is a claim the
+// race tests cannot check, since they only ever run with one wait in flight.
+//
+// Three sessions on two rows. bystander holds row Y and waiter blocks on it;
+// holder holds row X and nothing waits on it. The instance-wide count the probe
+// used to be sees the bystander's wait; the scoped probe reports none for the
+// holder and one for the bystander.
+func TestMySQLLockWaitProbeIgnoresAWaitOnAnotherSessionsLock(t *testing.T) {
+	d, teardown := compactDialects[0].open(t)
+	defer teardown()
+	ctx := context.Background()
+	db := d.store.(*MySQLStore).db
+	x := d.seed(t, "probe-holder-"+d.name)
+	y := d.seed(t, "probe-bystander-"+d.name)
+
+	connID := func(tx *sql.Tx) int64 {
+		t.Helper()
+		var id int64
+		if err := tx.QueryRow(`SELECT CONNECTION_ID()`).Scan(&id); err != nil {
+			t.Fatalf("connection id: %v", err)
+		}
+		return id
+	}
+	begin := func(id string) *sql.Tx {
+		t.Helper()
+		tx, err := d.begin(ctx)
+		if err != nil {
+			t.Fatalf("begin: %v", err)
+		}
+		if _, err := tx.ExecContext(ctx, d.lock, id); err != nil {
+			t.Fatalf("lock %s: %v", id, err)
+		}
+		return tx
+	}
+	// The waiter's deferred Rollback is registered BEFORE the bystander's:
+	// defers run last-in first-out, and the waiter's Rollback waits on its own
+	// in-flight Exec, which only returns once the bystander has let go. The other
+	// order made any Fatalf below stall for innodb_lock_wait_timeout (50 s).
+	waiter, err := d.begin(ctx)
+	if err != nil {
+		t.Fatalf("begin waiter: %v", err)
+	}
+	defer waiter.Rollback()
+	holder := begin(x)
+	defer holder.Rollback()
+	bystander := begin(y)
+	defer bystander.Rollback()
+
+	waiterDone := make(chan error, 1)
+	go func() {
+		_, err := waiter.ExecContext(ctx, d.lock, y)
+		waiterDone <- err
+	}()
+
+	bystanderID, holderID := connID(bystander), connID(holder)
+	for deadline := time.Now().Add(20 * time.Second); ; time.Sleep(5 * time.Millisecond) {
+		n, err := mysqlWaitersOn(db, bystanderID)
+		if err != nil {
+			t.Fatalf("probe the bystander: %v", err)
+		}
+		if n > 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the waiter never blocked on the bystander's row within 20s: the setup of this test is wrong, not the probe")
+		}
+	}
+
+	var anyWait int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM performance_schema.data_lock_waits`).Scan(&anyWait); err != nil {
+		t.Fatalf("instance-wide count: %v", err)
+	}
+	if anyWait == 0 {
+		t.Fatalf("the instance-wide count saw no wait although the waiter is blocked on the bystander: this test would pass against the old unscoped probe")
+	}
+	if n, err := mysqlWaitersOn(db, holderID); err != nil || n != 0 {
+		t.Fatalf("mysqlWaitersOn(holder) = %d, %v; want 0: nothing waits on the holder's row, the wait is on the bystander's", n, err)
+	}
+
+	if err := bystander.Rollback(); err != nil {
+		t.Fatalf("release bystander: %v", err)
+	}
+	select {
+	case err := <-waiterDone:
+		if err != nil {
+			t.Fatalf("waiter: %v", err)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatalf("waiter still blocked 30s after the bystander released")
+	}
 }

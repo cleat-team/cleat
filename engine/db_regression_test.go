@@ -244,7 +244,7 @@ func TestPostgresStore_LoadEventHistoryPaginated_Empty(t *testing.T) {
 	db := newNoopDB(t)
 	defer db.Close()
 
-	store := NewPostgresStore(db).WithReadRedactionDisabled(true)
+	store := NewPostgresStore(db)
 	history, err := store.LoadEventHistoryPaginated(testCtx, "wf-1", 0, 100)
 	if err != nil {
 		t.Fatalf("LoadEventHistoryPaginated: %v", err)
@@ -270,7 +270,7 @@ func TestPostgresStore_LoadEventHistoryPaginated_FirstPage(t *testing.T) {
 	}, nil)
 	defer db.Close()
 
-	store := NewPostgresStore(db).WithReadRedactionDisabled(true)
+	store := NewPostgresStore(db)
 	history, err := store.LoadEventHistoryPaginated(testCtx, "wf-1", 0, 2)
 	if err != nil {
 		t.Fatalf("LoadEventHistoryPaginated: %v", err)
@@ -303,7 +303,7 @@ func TestPostgresStore_LoadEventHistoryPaginated_SecondPage(t *testing.T) {
 	}, nil)
 	defer db.Close()
 
-	store := NewPostgresStore(db).WithReadRedactionDisabled(true)
+	store := NewPostgresStore(db)
 	history, err := store.LoadEventHistoryPaginated(testCtx, "wf-1", 1, 1)
 	if err != nil {
 		t.Fatalf("LoadEventHistoryPaginated: %v", err)

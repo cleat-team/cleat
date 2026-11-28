@@ -60,6 +60,7 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 10  # max 0.3m over 6 successful runs (tag-push samples), 2026-10-31; cleat#3493
     steps:
       - uses: actions/checkout@v7
 
@@ -139,6 +140,7 @@ jobs:
   publish:
     needs: build
     runs-on: ubuntu-latest
+    timeout-minutes: 10  # max 0.4m over 5 successful runs (tag-push samples), 2026-10-31; cleat#3493
     # The gate. Required reviewers on this environment pause the run HERE, with
     # the built distributions already available from the `build` job above.
     environment: pypi

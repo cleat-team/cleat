@@ -96,20 +96,6 @@ func (s *MSSQLStore) LoadEventHistory(ctx context.Context, workflowID string) ([
 		rec.PromiseResult = promiseResult.String
 		rec.PromiseError = promiseError.String
 
-		// Retroactive redaction on read path.
-		if !s.disableReadRedaction {
-			rec.Request = RedactOnRead(rec.Request)
-			rec.Response = RedactOnRead(rec.Response)
-			rec.Err = RedactOnRead(rec.Err)
-			rec.SignalPayload = RedactOnRead(rec.SignalPayload)
-			rec.ChildInput = RedactOnRead(rec.ChildInput)
-			rec.NewInput = RedactOnRead(rec.NewInput)
-			rec.PluginInput = RedactOnRead(rec.PluginInput)
-			rec.PluginOutput = RedactOnRead(rec.PluginOutput)
-			rec.PromiseResult = RedactOnRead(rec.PromiseResult)
-			rec.PromiseError = RedactOnRead(rec.PromiseError)
-		}
-
 		if payload.Valid {
 			populateFromPayload(&rec, []byte(payload.String))
 		}
@@ -230,7 +216,6 @@ func (s *MSSQLStore) StreamEventHistory(ctx context.Context, workflowID string, 
 				rec.PromiseResult = promiseResult.String
 				rec.PromiseError = promiseError.String
 
-				// Decryption must happen BEFORE redaction: redacting ciphertext is meaningless.
 				// The fields below are encrypted by flushEvent when encryption is enabled.
 				// NOTE: On MSSQL this block is a forward-compatibility guard only --
 				// encryption is not yet supported and will never be true.
@@ -259,23 +244,6 @@ func (s *MSSQLStore) StreamEventHistory(ctx context.Context, workflowID string, 
 					if decrypted, err := s.encryption.DecryptString(tenantForAAD(s.tenantID), rec.PluginOutput); err == nil {
 						rec.PluginOutput = decrypted
 					}
-				}
-
-				// Retroactive redaction on read path: ensure sensitive fields are
-				// redacted even if they were stored before redaction was mandatory.
-				// Redaction runs AFTER decryption (see block above) since redacting
-				// ciphertext would yield meaningless "[REDACTED]" placeholders.
-				if !s.disableReadRedaction {
-					rec.Request = RedactOnRead(rec.Request)
-					rec.Response = RedactOnRead(rec.Response)
-					rec.Err = RedactOnRead(rec.Err)
-					rec.SignalPayload = RedactOnRead(rec.SignalPayload)
-					rec.ChildInput = RedactOnRead(rec.ChildInput)
-					rec.NewInput = RedactOnRead(rec.NewInput)
-					rec.PluginInput = RedactOnRead(rec.PluginInput)
-					rec.PluginOutput = RedactOnRead(rec.PluginOutput)
-					rec.PromiseResult = RedactOnRead(rec.PromiseResult)
-					rec.PromiseError = RedactOnRead(rec.PromiseError)
 				}
 
 				if payload.Valid {
@@ -413,20 +381,6 @@ func (s *MSSQLStore) LoadEventHistoryPaginated(ctx context.Context, workflowID s
 		rec.PromiseID = promiseID.String
 		rec.PromiseResult = promiseResult.String
 		rec.PromiseError = promiseError.String
-
-		// Retroactive redaction on read path.
-		if !s.disableReadRedaction {
-			rec.Request = RedactOnRead(rec.Request)
-			rec.Response = RedactOnRead(rec.Response)
-			rec.Err = RedactOnRead(rec.Err)
-			rec.SignalPayload = RedactOnRead(rec.SignalPayload)
-			rec.ChildInput = RedactOnRead(rec.ChildInput)
-			rec.NewInput = RedactOnRead(rec.NewInput)
-			rec.PluginInput = RedactOnRead(rec.PluginInput)
-			rec.PluginOutput = RedactOnRead(rec.PluginOutput)
-			rec.PromiseResult = RedactOnRead(rec.PromiseResult)
-			rec.PromiseError = RedactOnRead(rec.PromiseError)
-		}
 
 		if payload.Valid {
 			populateFromPayload(&rec, []byte(payload.String))
@@ -649,7 +603,7 @@ func (s *MSSQLStore) appendEventsInTxOpts(ctx context.Context, tx *sql.Tx, workf
 			     AND target.response IS NULL AND target.error IS NULL
 			     AND target.promise_result IS NULL AND target.promise_error IS NULL THEN UPDATE SET
 				response = @p7, error = @p8, promise_result = @p27, promise_error = @p28,
-				checksum = @p31, payload = @p29, payload_encoding = @p33, event_type = @p3;
+				checksum = @p31, payload = @p29, payload_encoding = @p33, event_type = @p3, created_at = @p30;
 		`, workflowID, rec.Step, rec.EventType,
 			nullStr(rec.Service), nullStr(rec.Op), nullStr(base64.StdEncoding.EncodeToString([]byte(rec.Request))), nullStr(base64.StdEncoding.EncodeToString([]byte(rec.Response))), nullStr(rec.Err),
 			nullInt64(rec.DurationMs), nullStr(rec.SignalNames), nullInt64(rec.TimeoutMs),
@@ -667,25 +621,34 @@ func (s *MSSQLStore) appendEventsInTxOpts(ctx context.Context, tx *sql.Tx, workf
 			return fmt.Errorf("append events in tx: exec step %d: %w", rec.Step, err)
 		}
 	}
-	// Increment event_count on workflow_instances so GetEventCount and quota
-	// enforcement work correctly on MSSQL.
+	// Set event_count on workflow_instances so GetEventCount and quota enforcement
+	// work correctly on MSSQL: the highest step plus one, not "+ len(recs)" (see
+	// eventCountAfter, cleat#3779).
 	if incrementCount {
 		if _, err := tx.ExecContext(ctx, `
-			UPDATE workflow_instances SET event_count = event_count + @p1 WHERE id = @p2
-		`, len(recs), workflowID); err != nil {
-			return fmt.Errorf("append events in tx: increment event_count: %w", err)
+			UPDATE workflow_instances SET event_count = @p1 WHERE id = @p2
+		`, eventCountAfter(recs), workflowID); err != nil {
+			return fmt.Errorf("append events in tx: set event_count: %w", err)
 		}
 	}
 	return nil
 }
 
 // VerifyWorkflowEvents loads all events for a workflow, recomputes their
-// SHA-256 checksums, and verifies integrity against stored checksums.
+// xxHash64 checksums, and verifies integrity against stored checksums.
 func (s *MSSQLStore) VerifyWorkflowEvents(ctx context.Context, workflowID string) error {
 	// Load the full event history for the workflow.
 	events, err := s.LoadEventHistory(ctx, workflowID)
 	if err != nil {
 		return fmt.Errorf("verify events: load: %w", err)
+	}
+
+	// The compaction state is read before the transaction below opens: it is
+	// loaded on its own connection, and holding two per verification is how a
+	// small pool is exhausted.
+	cs, err := s.LoadCompactionState(ctx, workflowID)
+	if err != nil {
+		return fmt.Errorf("verify events: load compaction state: %w", err)
 	}
 
 	// beginTxWithContext, not bare s.db -- cleat#2210/cleat#3281: a WithTenant
@@ -730,20 +693,10 @@ func (s *MSSQLStore) VerifyWorkflowEvents(ctx context.Context, workflowID string
 		return nil
 	}
 
-	// Recompute and compare checksums with chaining.
-	var prevChecksum string
-	for _, ev := range events {
-		expected, ok := storedChecksums[ev.Step]
-		if !ok || expected == "" {
-			prevChecksum = "" // Missing event breaks the chain
-			continue
-		}
-		actual := computeEventChecksum(ev, prevChecksum)
-		if actual != expected {
-			return fmt.Errorf("verify events: workflow %s step %d: checksum mismatch (expected %s, got %s)",
-				workflowID, ev.Step, expected, actual)
-		}
-		prevChecksum = expected
+	// Recompute and compare checksums with chaining, starting from the
+	// compaction boundary when the run has been compacted (cleat#3837).
+	if err := verifyEventChain(workflowID, events, storedChecksums, cs); err != nil {
+		return err
 	}
 	return nil
 }

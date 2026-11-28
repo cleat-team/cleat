@@ -53,6 +53,27 @@ either -- it need not match the artifact's filename at all.
 
 ## Step 2: Deploy the WASM binary
 
+### On MySQL or SQL Server, use `deploy-workflow` (or `cleatctl deploy workflow`)
+
+The `cleat deploy` command on this page is **PostgreSQL-only**, and it says so rather than failing
+partway through. If your database is MySQL or SQL Server, deploy with one of these instead — both
+accept `--driver postgres|mysql|mssql` and apply the same version and plugin checks:
+
+```bash
+# Standalone command; works on all three dialects.
+deploy-workflow --driver mysql --db "$CLEAT_DATABASE_URL" place_order ./out/place_order.wasm
+
+# cleatctl: 'deploy workflow' and 'versions' work on all three; 'deploy plugin' is still
+# PostgreSQL-only and refuses with a message saying so.
+cleatctl -driver mssql -db "$CLEAT_DATABASE_URL" deploy workflow place_order ./out/place_order.wasm
+```
+
+`cleatctl deploy workflow` and `cleatctl versions` were ported to MySQL and SQL Server in cleat#3994
+and measured there; `cleatctl deploy plugin` was not, because the plugin loader's statements are
+still PostgreSQL-shaped.
+
+### Deploying with `cleat deploy`
+
 Use `cleat deploy` to insert the built WASM binary into the `workflow_defs` database table:
 
 ```bash
@@ -166,7 +187,7 @@ curl -X POST http://localhost:8080/api/definitions \
   }"
 ```
 
-There is no `namespace` or `task_queue` field: neither is a concept this endpoint knows about. The response is a `201` with the assigned version:
+There is no `namespace` or `task_queue` field: neither is a concept this endpoint knows about. The version is the one the binary is stamped with (`cleat build --version N`, default `1`); leave `version` out and that stamp is used. A `version` that disagrees with the stamp is refused with a `400` naming both numbers, and so is a binary stamped `0`, because a worker only runs a binary under the version it is stamped with: a row numbered anything else is a version that never runs. A binary that carries no version stamp at all is given the next free number. The response is a `201` with the version:
 
 ```json
 {
@@ -176,6 +197,63 @@ There is no `namespace` or `task_queue` field: neither is a concept this endpoin
   "plugin_deps": null
 }
 ```
+
+## Plugin dependencies are checked at deploy
+
+A definition can declare the plugins it needs (`plugin_deps`: plugin name to version constraint). A deploy
+**refuses** one that names a plugin no worker has ever registered, with `422` on the REST API and a
+non-zero exit from the commands, naming **every** missing plugin and which declaration named it (the WASM
+binary's embedded `plugin_deps`, the definition's own, or both). Nothing is written when it refuses
+(cleat#3600).
+
+"Registered" means a worker recorded a plugin of that **name** when it started. That record is kept
+(nothing deletes from it), so a deploy does not fail across a rolling restart or a maintenance window, and
+it catches a typo or a plugin that was never installed anywhere. It does not check versions, and it does not
+check that a worker carrying the plugin is up now: a worker still checks its own loaded plugins and their
+versions when it claims a run, and releases a run it cannot serve. So a deploy that passes is not a promise
+that a run will start.
+
+Because the record is written by workers, a **first** deploy that names a plugin must come after a worker
+carrying that plugin has started once, or must say it is deliberate:
+
+    cleatctl deploy workflow <name> <wasm> --allow-missing-plugins
+    deploy-workflow --allow-missing-plugins ...
+    cleat deploy --allow-missing-plugins ...
+    POST /api/definitions   {..., "allow_missing_plugins": true}
+
+An override changes **only the deploy that carries it**, and it is **recorded, not just logged**: before the
+definition is written, one row goes into `admin.plugin_dep_overrides` (the tenant, the definition and version,
+who asked, which path took it, and each missing plugin with its constraint and which declaration named it), and
+it is also logged at `WARN`. That table is append-only for the application role on PostgreSQL and SQL Server. It is kept after the tenant is dropped, as an audit record is. If
+the row cannot be written the deploy is **refused**: there is no override without a record of it. The row says the
+check was bypassed, not that the deploy then succeeded. An override covers a missing plugin only: it does not turn
+"the registry could not be read" into "allowed". **A library install has no override**: it refuses a bundle whose
+members name an unregistered plugin (`422`, naming each plugin and the member that declared it) and writes
+nothing, because an install goes into a running system.
+
+`cleatctl deploy` carries the previous version's `plugin_deps` forward, so a redeploy is refused when one of
+those plugin names has not been registered by any worker **since migration `008` was applied to that
+database**; a plugin that registered once stays registered, even after it is retired. A definition that
+declares no plugin dependencies is not affected. Nothing the repository ships declares any.
+
+**Sharded deployments.** The registry, and the override record, live in the worker's own database, which for a
+sharded worker is the **first shard's**: the same database worker registration writes and where the schema's
+other administrative tables are. A deploy asks that one registry once, before the first shard is written, then
+writes every shard or none: a refusal leaves nothing on any shard. A name registered only in another shard's
+registry does not count. A command-line deploy (`cleatctl`, `cleat deploy`, `deploy-workflow`) reads the registry of the
+database it is given, so **a CLI run against a non-first shard's DSN reads that shard's (empty) registry** and refuses
+every declared plugin; point it at the first shard's DSN, or use `--allow-missing-plugins`, which is recorded. Library
+install is not available on a sharded store yet.
+
+**Upgrading.** The registry starts empty, and only a worker running a version that carries it writes to it: an
+older worker writes nothing, and the worker table has no plugin column to fill it from. So from the moment
+migration `008` runs until the first upgraded worker starts, every deploy or install that declares
+`plugin_deps` is refused. **Upgrade at least one worker before deploying definitions that declare
+`plugin_deps`, or pass `--allow-missing-plugins`** (deploy only; an install has no override, so install after
+an upgraded worker has started). During a rolling upgrade (supported only where that release's notes say so, and not for
+0.5.0 to 0.6.0: see [Upgrading](../operations/upgrading.md#automatic-migration-recommended))
+an older worker still claims and releases runs exactly as before: the check a worker makes against its own loaded plugins when it claims a run is unchanged,
+and the registry plays no part in it.
 
 ## Locking child workflow versions
 
@@ -197,6 +275,137 @@ This generates a `cleat.lock` file that pins each child workflow to a specific v
 > database), so nothing here is manual -- and the wording implied a lock file a
 > reader maintains by hand, which is the shape this audit looks for: a step
 > justified by a limitation the tool does not have.
+
+## Installing a workflow library
+
+A **workflow library** is a set of immutable, versioned workflows the cleat operator publishes once,
+and a tenant installs by reference instead of deploying the same code itself (cleat#3540). It is
+PostgreSQL and SQL Server only; MySQL answers `501`.
+
+    POST /api/libraries/{library}/install
+    {"bundle_version": "1.2.0"}
+
+It is called with the tenant's **own** API key and writes only that tenant's definitions: one row per
+member of the bundle, naming the member it came from and holding no bytes of its own. What it does:
+
+- **One transaction for the whole bundle.** Every member is installed and the install is recorded, or
+  nothing is written. A half-installed upgrade cannot exist.
+- **An upgrade is the same call with a different `bundle_version`.** It refreshes the tenant's
+  definitions from their members, records the new bundle, and rewrites when. It does not delete a version
+  an earlier bundle installed, because that version's runs replay it. Installing the bundle you already
+  hold changes nothing, and does not re-enable a version you disabled.
+- **It never replaces your own code.** If the tenant already deployed a definition under a name and version
+  the bundle installs, or holds one from a different library, the install stops with `409` and writes nothing.
+- **Exposure is resolved as a deploy resolves it.** A member that declares `public` is refused (`400`) for a
+  tenant the operator has not opted in.
+
+Every published library is installable by every tenant. A `404` means that library has no such bundle.
+
+> A **sharded** deployment answers `501` to an install: serving many tenants on a sharded worker is not
+> supported yet. A library can still be **published to every shard**, ready for when it is; see
+> [Publishing to a sharded deployment](#publishing-to-a-sharded-deployment).
+
+### Seeing what you hold, and what you could install
+
+Two read-only routes answer from the tenant's own API key, so a service that has no database handle can ask
+(cleat#3627). Both answer `501` on a sharded deployment and on MySQL, like the install.
+
+    GET /api/library-installs
+    {"installs":[{"library":"acme-flows","bundle_version":"1.2.0","installed_at":"2026-10-31T12:00:00Z","installed_by":"key-of-tenant-a"}]}
+
+    GET /api/libraries            (optionally ?library=acme-flows)
+    {"bundles":[{"library":"acme-flows","bundle_version":"1.2.0","published_at":"2026-10-31T12:00:00Z","members":[{"name":"acme-flows.order","version":3,"wasm_sha256":"ab12","wasm_length":7,"exposure":"auth"}]}]}
+
+- **`/api/library-installs` is your own and no other tenant's.** It lists the bundle of each library your
+  tenant holds, ordered by library, and `[]` when it holds none.
+- **`/api/libraries` is the same for every tenant.** Any tenant may install any published library, so this is
+  the catalogue of what is published, newest first within a library, each member with its digest and size and
+  never its bytes. It does not say who published a bundle. If the operator has configured an entitlement check
+  that refuses your tenant a library, that library is left out of this list too, so the list never offers what
+  the install would refuse. `exposure: "public"` on a member tells you the install will be refused (`400`)
+  unless the operator has opted your tenant in.
+- `backendkit` has one method for each: `Client.InstalledLibraries` and `Client.PublishedLibraries`.
+
+## Publishing a workflow library
+
+Publishing is the **operator's** act, and the database makes that true: only a login that holds the
+`cleat_library_publisher` role can write the library schema (and that role can insert and read but never
+update). Connect with such a login; the superuser login works too, and the application role does not.
+PostgreSQL and SQL Server only.
+
+    cleatctl --db "$PUBLISHER_DSN" library publish acme 1.2.0 checkout.wasm pay.wasm
+    cleatctl --db "$PUBLISHER_DSN" library list acme
+
+- **A member is named by its own stamp.** Each binary's `cleat.metadata` carries its `workflow_name` and
+  `workflow_version`; publish reads them from the file and lets nothing on the command line rename or
+  renumber it. A binary with no readable stamp, or a `<file>.schema.json` that is not valid JSON, is refused.
+- **A member's name starts with its library's name and a dot.** In the example above the stamps must say
+  `acme.checkout` and `acme.pay`, and publish refuses a member named `checkout`, `acme.` (nothing after the
+  dot), `Acme.checkout` (the prefix is case-sensitive) or `other.checkout` (another library's prefix). The
+  refusal names the prefix and a name that would pass; set the workflow's name in its stamp and rebuild. The
+  prefix is what keeps a library's workflows and a tenant's own apart (owner decision D59, cleat#3629), so a
+  **library name cannot contain a dot** either: it would make two libraries' prefixes overlap.
+- **A published prefix is reserved, in both directions.** Once a library is published, a tenant's own deploy of
+  any name that starts with `<library>.` is refused (`409` on `POST /api/definitions`, a non-zero exit from
+  `cleat deploy` and `cleatctl deploy workflow`), at any version, whether or not the library holds that name.
+  An install is refused (`409`) when the tenant already holds workflows of its own under the prefix, and the
+  error names them. Both are what stop a tenant's `acme.checkout` version 2 from silently shadowing an installed
+  `acme.checkout` version 1, because a start without a version runs the highest one whatever its origin. A row
+  a tenant already holds under a prefix (possible only for a library published before this rule) is not
+  touched: it keeps running, and only a later deploy or install is refused until it is renamed or removed. The
+  comparison is the database's own, and on PostgreSQL and SQL Server it is exact: `ACME.checkout` is a different
+  name from `acme.checkout` and is not under the `acme.` prefix. (SQL Server compared names
+  case-insensitively until migration `011`, cleat#3635, owner decision D60.)
+- **A publish is refused while a tenant holds names under the prefix.** Before it writes anything, publish asks
+  which tenants already hold workflow names that start with `<library>.` and refuses if any do, listing each
+  tenant and name with its versions; rename or remove them, then publish again. This is the other half of the
+  reserved prefix above: a tenant cannot deploy under a published prefix, and a library cannot be published over
+  names a tenant already has. On a sharded deployment every shard is asked before any is written. The check
+  reads tenants through a function the publisher may call and nothing else (migration `010`), and it sees
+  the tenants listed in `admin.tenants` plus the default tenant. A tenant with workflow rows and no
+  `admin.tenants` row is not seen on SQL Server, and is not seen on PostgreSQL either when the reader function's
+  owner does not bypass row-level security (a superuser or `BYPASSRLS` owner reads every tenant directly).
+- **A bundle is a consistent set.** Every `child_versions` pin in a member's stamp must name another member
+  of the *same* bundle at that exact version, so a tenant that installs the bundle can never resolve a child it
+  does not contain. A name appears once per bundle.
+- **Members and bundles are immutable.** Publishing a `(library, name, version)` that already exists with the
+  same bytes and the same entry-point schemas (the `.schema.json` beside the binary, which the bytes do not
+  carry) is a no-op; with different bytes it is refused, naming both digests, and with the same bytes and
+  different schemas it is refused saying so (publish the changed build under a new version). Publishing a bundle version that exists with exactly the same members is a no-op, which
+  is how a publish that stopped partway is repaired; with a different member set it is refused and says what
+  differs.
+- **One transaction.** The members, the bundle and its listing are all written, or none are.
+- **`library list [<library>] [--json]`** shows each bundle, who published it and when, and its members with
+  their digest and size. It never prints the bytes.
+- A plugin a member declares in `plugin_deps` is not checked at publish: it is checked, against the registry of
+  plugins workers have registered, when a tenant installs.
+
+### Publishing to a sharded deployment
+
+A sharded worker keeps a library's members in the same database as the tenant rows that reference them, so a
+bundle has to be published to **every shard**. Give `--db` the **admin shard** (the first entry in the worker's
+`--shards-file`, see [`--shards-file`](../reference/worker-config.md#--shards-file)) and each other shard once
+with `--replicate-to`, in the worker's order, each with **that shard's own publisher login**. The role is granted
+per database, and the worker's own connection strings are not publisher logins:
+
+    cleatctl --db "$SHARD1_PUBLISHER_DSN" library publish acme 1.2.0 checkout.wasm pay.wasm \
+      --replicate-to "$SHARD2_PUBLISHER_DSN" --replicate-to "$SHARD3_PUBLISHER_DSN"
+
+- **Every shard is opened and pinged before the first write**, so a mistyped or unreachable DSN, or a shard that
+  is another kind of database, is found with nothing changed.
+- **The admin shard is written first**, and a failure there changes nothing anywhere.
+- **Every other shard is then written**, and one failing does not stop the rest. There is no transaction across
+  databases, so a publish can reach some shards and not others. The error names the shards written, the ones
+  that failed and the ones not tried, and **running the same command again completes it**: a shard that already
+  holds the bundle is left as it is.
+- **A conflict is not repaired by running it again.** A shard that already holds *different* content under the
+  same member or bundle key refuses it, because published content is immutable. The error says so; publish the
+  changed build under a new version.
+- Shards are called `shard-1`, `shard-2`, ... in every message, with the host and database each one means printed
+  beside an error. A connection string's user and password are never printed.
+- `cleatctl` cannot check that `--db` really is the admin shard or that the shards are in the worker's order:
+  the shards file is the authority. `library list` reads the one database `--db` names, so run it against each
+  shard's publisher DSN to see what that shard holds.
 
 ## Production deployment checklist
 

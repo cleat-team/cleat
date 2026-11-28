@@ -275,7 +275,7 @@ func TestGap_GetChildCount_Error(t *testing.T) {
 
 func TestGap_GetWASMLength(t *testing.T) {
 	db := newMockDBForPostgres(t, []mockRowsResult{
-		{match: "length(wasm_bytes)", data: [][]driver.Value{{int64(1024)}}},
+		{match: "length(wasm_bytes)", data: [][]driver.Value{{int64(1024), nil}}}, // length, library (NULL)
 	}, nil)
 	defer db.Close()
 
@@ -400,7 +400,7 @@ func TestGap_MoveToDeadLetterQueue_BeginError(t *testing.T) {
 
 func TestGap_ResolveTenantFromAPIKey(t *testing.T) {
 	db := newMockDBForPostgres(t, []mockRowsResult{
-		{match: "tenant_api_keys", data: [][]driver.Value{{"550e8400-e29b-41d4-a716-446655440000"}}},
+		{match: "tenant_api_keys", data: [][]driver.Value{{"550e8400-e29b-41d4-a716-446655440000", "7c9e6679-7425-40de-944b-e07fc1f90ae7"}}},
 	}, nil)
 	defer db.Close()
 

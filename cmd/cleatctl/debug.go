@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/signal"
@@ -30,6 +31,27 @@ func runDebug(ctx context.Context, store engine.WorkflowStore, db *sql.DB, d dia
 	}
 
 	if flags.watch {
+		// cleat#3766: watch the events of the run's own tenant. The lookup is best
+		// effort: watching never needed the instance row, and a connection that
+		// cannot read it (row-level security) must keep watching the default
+		// tenant's runs as it did, so a failed lookup says so and falls back.
+		if db != nil {
+			inst, lerr := loadWorkflowInstance(ctx, db, d, flags.workflowID)
+			switch {
+			case lerr == nil:
+				st, release, serr := storeForInstance(ctx, store, d, inst)
+				if serr != nil {
+					fmt.Fprintf(os.Stderr, "error: %v\n", serr)
+					osExit(1)
+				}
+				defer release()
+				store = st
+			case errors.Is(lerr, sql.ErrNoRows):
+				// Not found: as before, the default tenant's store answers (with 0 events).
+			default:
+				fmt.Fprintf(os.Stderr, "note: could not read which tenant owns %q (%v); watching through the default tenant's store\n", flags.workflowID, lerr)
+			}
+		}
 		if err := runDebugWatch(ctx, store, flags.workflowID); err != nil {
 			fmt.Fprintf(os.Stderr, "debug watch failed: %v\n", err)
 			osExit(1)
@@ -58,6 +80,8 @@ func parseDebugFlags(args []string) *debugFlags {
 			f.entryPoint = args[i]
 		case "--watch":
 			f.watch = true
+		case "--no-redact":
+			printRaw = true
 		default:
 			positional = append(positional, arg)
 		}
@@ -81,7 +105,7 @@ func parseDebugFlags(args []string) *debugFlags {
 
 // printDebugUsage prints the help text for the debug command.
 func printDebugUsage() {
-	fmt.Fprintf(os.Stderr, `Usage: cleatctl [--db <dsn>] debug <workflow-id> --entry-point <name> [--watch]
+	fmt.Fprintf(os.Stderr, `Usage: cleatctl [--db <dsn>] debug <workflow-id> --entry-point <name> [--watch] [--no-redact]
 
 Step-through or watch a workflow's event history for debugging.
 
@@ -92,6 +116,8 @@ Flags:
   --entry-point <name>  WASM export name to invoke (required for step-through,
                         optional with --watch)
   --watch               Watch mode: tail new events as they arrive
+  --no-redact           Print stored values as they are. By default what is printed
+                        is redacted (the engine is always given the raw history)
 
 Interactive commands (step-through mode):
   next (n)              Advance one event and display step info
@@ -133,12 +159,21 @@ type debugStepInfo struct {
 func runDebugStep(ctx context.Context, store engine.WorkflowStore, db *sql.DB, d dialect, workflowID, entryPoint string) {
 	inst, err := loadWorkflowInstance(ctx, db, d, workflowID)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error loading workflow instance %q: %v\n", workflowID, err)
+		fmt.Fprintln(os.Stderr, describeInstanceLoadError(workflowID, err))
 		osExit(1)
 	}
 
+	// cleat#3766: the run's own tenant's store, as in replay.
+	store, release, err := storeForInstance(ctx, store, d, inst)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		osExit(1)
+	}
+	defer release()
+
 	fmt.Printf("Workflow: %s\n", workflowID)
 	fmt.Printf("  Definition: %s (v%d)\n", inst.DefName, inst.DefVersion)
+	noteTenantOnStdout(inst)
 	fmt.Printf("  Status: %s\n", inst.Status)
 	fmt.Printf("  Entry point: %s\n", entryPoint)
 
@@ -291,21 +326,22 @@ func (d *debugState) displayStep(info debugStepInfo) {
 	fmt.Println()
 
 	if ev != nil {
-		if ev.Request != "" {
-			fmt.Printf("  request:   %s\n", ev.Request)
+		shown := printable(*ev)
+		if shown.Request != "" {
+			fmt.Printf("  request:   %s\n", shown.Request)
 		}
-		if ev.Response != "" {
-			fmt.Printf("  response:  %s\n", ev.Response)
+		if shown.Response != "" {
+			fmt.Printf("  response:  %s\n", shown.Response)
 		}
-		if ev.Err != "" {
-			fmt.Printf("  error:     %s\n", ev.Err)
+		if shown.Err != "" {
+			fmt.Printf("  error:     %s\n", shown.Err)
 		}
-		if ev.SignalPayload != "" {
-			fmt.Printf("  payload:   %s\n", ev.SignalPayload)
+		if shown.SignalPayload != "" {
+			fmt.Printf("  payload:   %s\n", shown.SignalPayload)
 		}
 	}
 
-	fmt.Printf("  query_state: %s\n", formatQueryState(info.qs))
+	fmt.Printf("  query_state: %s\n", formatQueryState(printableMap(info.qs)))
 }
 
 // readCommand reads a command from stdin and dispatches it.
@@ -333,7 +369,7 @@ func (d *debugState) readCommand() {
 			if d.lastQS != nil {
 				fmt.Println("query_state:")
 				for k, v := range d.lastQS {
-					fmt.Printf("  %s = %s\n", k, v)
+					fmt.Printf("  %s = %s\n", k, printableValue(v))
 				}
 			} else if d.lastEvent != nil {
 				fmt.Println("query_state: {}")
@@ -476,6 +512,7 @@ func formatRemainingEvents(events []engine.EventRecord, fromStep int) string {
 
 // formatEvent returns a one-line summary of an EventRecord.
 func formatEvent(ev engine.EventRecord) string {
+	ev = printable(ev)
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "type=%s", ev.EventType)
 	if ev.Service != "" {

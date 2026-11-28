@@ -1,6 +1,7 @@
 package wasm
 
 import (
+	"errors"
 	"fmt"
 	"go/ast"
 	"go/parser"
@@ -607,27 +608,21 @@ func AbsoluteEntryPath(entry string) string {
 // the output format based on targetRuntime:
 //   - "wasmtime" — Component Model binary (skip decomposition)
 //   - "wazero"   — decomposed core WASM module
-//   - ""         — both formats (default)
+//   - ""         — the component, as for "wasmtime" (default; it used to mean both formats and
+//     warned about wasm-tools on every build, cleat#3818)
 //
-// FindRepoRoot BELOW MEANS THIS ONLY WORKS INSIDE A CLEAT CHECKOUT (cleat#1971):
-// it finds build_wasm.py by walking up from the project directory to a
-// cleat repo root and then into python-sdk/scripts/, so a project scaffolded
-// outside this repo -- which is every real user's, once cleat-sdk is
-// installable from PyPI -- has no repo root to find. Parked on #1779
-// (publishing cleat-sdk, targeted for the 0.3.0 release): once the SDK is a
-// package rather than a subdirectory, this needs to find build_wasm.py
-// relative to the INSTALLED package instead of a repo root.
+// WHERE build_wasm.py COMES FROM. Until cleat#3793 this found it only by walking
+// up from the project directory to a cleat repo root and into
+// python-sdk/scripts/ (cleat#1971), so a project outside a checkout -- every
+// real user's, once cleat-sdk was on PyPI -- failed with "finding repo root:
+// go.mod not found". findPythonBuildScript tries the checkout first, so a build
+// inside the repository behaves as it always did, and then the cleat-sdk
+// package installed for the python3 on PATH, which ships the script and the WIT
+// beside it (python-sdk/setup.py).
 func BuildPythonWasmWithRuntime(entry, output, targetRuntime string, verbose bool) error {
-	repoRoot, err := FindRepoRoot(".")
+	buildScript, workDir, err := findPythonBuildScript()
 	if err != nil {
-		return fmt.Errorf("finding repo root: %w", err)
-	}
-
-	sdkRoot := filepath.Join(repoRoot, "python-sdk")
-	buildScript := filepath.Join(sdkRoot, "scripts", "build_wasm.py")
-
-	if _, err := os.Stat(buildScript); err != nil {
-		return fmt.Errorf("build script not found at %s: %w", buildScript, err)
+		return err
 	}
 
 	// THE ENTRY PATH IS MADE ABSOLUTE HERE, and the reason is cmd.Dir below.
@@ -657,9 +652,115 @@ func BuildPythonWasmWithRuntime(entry, output, targetRuntime string, verbose boo
 	cmd := exec.Command("python3", args...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	cmd.Dir = sdkRoot
+	cmd.Dir = workDir
 
 	return cmd.Run()
+}
+
+// PythonBuildExitUnmeasuredComponentizePy is the exit status build_wasm.py gives a build it REFUSED because the installed componentize-py is not the
+// version the SDK was measured on (cleat#4383), as opposed to 1, a build that ran and failed. It must equal EXIT_UNMEASURED_COMPONENTIZE_PY in
+// python-sdk/scripts/build_wasm.py; TestPythonBuildExitStatusMatchesTheScript holds the two together.
+const PythonBuildExitUnmeasuredComponentizePy = 3
+
+// AllowUnmeasuredComponentizePyEnv is the variable that lets such a build go on. `cleat build --allow-unmeasured-componentize-py` sets it for the script it
+// runs, and the script reads the same name, so a CI job or a container can set it without a flag.
+const AllowUnmeasuredComponentizePyEnv = "CLEAT_ALLOW_UNMEASURED_COMPONENTIZE_PY"
+
+// IsPythonComponentizeVersionRefused reports whether err is the build script refusing an unmeasured componentize-py. The script has already said so on
+// stderr, with the fix and the override; the CLI's own advice ("check that the file has a @cleat_entry function") is about a compile that failed, and
+// printed after this it would send the reader to their source for a problem in their environment.
+func IsPythonComponentizeVersionRefused(err error) bool {
+	var ee *exec.ExitError
+	return errors.As(err, &ee) && ee.ExitCode() == PythonBuildExitUnmeasuredComponentizePy
+}
+
+// pythonBuildScriptError is returned when no build_wasm.py can be found, as
+// opposed to one that was found and failed. The two need different messages:
+// the CLI's "check that the file has a @cleat_entry function" advice is about a
+// failed compile, and printed after "cleat-sdk is not installed" it sends the
+// reader to their own source for a problem that is in their environment.
+type pythonBuildScriptError struct{ msg string }
+
+func (e *pythonBuildScriptError) Error() string { return e.msg }
+
+// IsPythonBuildScriptNotFound reports whether err means no build script could be
+// located, in a checkout or in an installed cleat-sdk.
+func IsPythonBuildScriptNotFound(err error) bool {
+	var e *pythonBuildScriptError
+	return errors.As(err, &e)
+}
+
+// pythonBuildScriptRel is where build_wasm.py sits inside the cleat-sdk package
+// once installed; python-sdk/setup.py puts it there.
+var pythonBuildScriptRel = filepath.Join("_build", "build_wasm.py")
+
+// findPythonBuildScript returns the build script to run and the directory to
+// run it in. It prefers a checkout, then the installed package.
+//
+// workDir is the SDK root for a checkout, because the script has always run
+// there, and "" for an installed package, which leaves the process working
+// directory alone: every path build_wasm.py receives is absolute, and an
+// installed SDK has no root of its own to stand in.
+func findPythonBuildScript() (script, workDir string, err error) {
+	return locatePythonBuildScript(FindRepoRoot, installedPythonSDKDir)
+}
+
+// locatePythonBuildScript is findPythonBuildScript with its two lookups passed
+// in, so the order and the messages can be tested without a Python toolchain.
+func locatePythonBuildScript(
+	repoRoot func(from string) (string, error),
+	installedDir func() (string, error),
+) (script, workDir string, err error) {
+	var checkoutNote string
+	if root, rerr := repoRoot("."); rerr != nil {
+		checkoutNote = fmt.Sprintf("not inside a cleat checkout (%v)", rerr)
+	} else {
+		sdkRoot := filepath.Join(root, "python-sdk")
+		candidate := filepath.Join(sdkRoot, "scripts", "build_wasm.py")
+		if _, serr := os.Stat(candidate); serr == nil {
+			return candidate, sdkRoot, nil
+		}
+		// A go.mod was found, but it is some other project's: the nearest
+		// go.mod of any kind is FindRepoRoot's documented fallback.
+		checkoutNote = fmt.Sprintf("no %s", candidate)
+	}
+
+	pkg, ierr := installedDir()
+	if ierr != nil {
+		return "", "", &pythonBuildScriptError{fmt.Sprintf("cannot build a Python workflow: %s, and the cleat-sdk "+
+			"package is not installed for the python3 on PATH (%v).\n"+
+			"Install it in the environment you build from, for example:\n"+
+			"    python3 -m venv .venv && . .venv/bin/activate\n"+
+			"    pip install cleat-sdk componentize-py==0.25.1", checkoutNote, ierr)}
+	}
+	candidate := filepath.Join(pkg, pythonBuildScriptRel)
+	if _, serr := os.Stat(candidate); serr != nil {
+		return "", "", &pythonBuildScriptError{fmt.Sprintf("cannot build a Python workflow: %s, and the cleat-sdk installed at %s "+
+			"has no build script (%s). That package predates the build tooling it should ship: "+
+			"upgrade it with `pip install --upgrade cleat-sdk`, or build from a cleat checkout",
+			checkoutNote, pkg, pythonBuildScriptRel)}
+	}
+	return candidate, "", nil
+}
+
+// installedPythonSDKDir asks the python3 on PATH where cleat_sdk is installed.
+// importlib's find_spec does not import the package, so a package whose own
+// import fails still reports where it is; and it prints nothing for a package
+// that is not installed, which is how "not installed" is told from "python3
+// is missing".
+func installedPythonSDKDir() (string, error) {
+	out, err := exec.Command("python3", "-c",
+		"import importlib.util as u\n"+
+			"s = u.find_spec('cleat_sdk')\n"+
+			"print(list(s.submodule_search_locations)[0] if s and s.submodule_search_locations else '')").Output()
+	if err != nil {
+		return "", fmt.Errorf("running python3: %w", err)
+	}
+	dir := strings.TrimSpace(string(out))
+	if dir == "" {
+		return "", errors.New("import cleat_sdk finds nothing")
+	}
+	return dir, nil
 }
 
 // rewritePackageToMain replaces the first "package <name>" declaration with

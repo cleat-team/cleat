@@ -59,7 +59,6 @@ Builds from the cleat test suite:
 | `testdata/basic/order.go` (basic order workflow) | 5.2 MB |
 | `testdata/vet-checks/go` | 4.8 MB |
 | Rust workflow (`examples/rust-workflow`) | 1.2 MB (wasm) |
-| AssemblyScript workflow (`examples/as-workflow`) | 13 KB |
 
 ---
 
@@ -185,7 +184,6 @@ resource.
 |---------|-------------|------------------|-------|
 | cleat (Go, wasip1) | ~4 MB | 6-10 MB | Bundles Go runtime |
 | cleat (Rust) | ~1-2 MB | 2-4 MB | Rust std is smaller |
-| cleat (AssemblyScript) | ~5 KB | 10-50 KB | Minimal overhead |
 
 ---
 

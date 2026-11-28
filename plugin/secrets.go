@@ -17,6 +17,31 @@ import (
 // all and returned the same "oauth config not found" for both).
 var ErrSecretNotFound = errors.New("plugin: secret not found")
 
+// ErrNoSecretMasterKey is returned by Secrets.Put when the worker has no secret
+// master key configured, so there is nothing to seal the value with. It is
+// engine.ErrNoSecretMasterKey's counterpart at the plugin boundary, translated
+// by engine's adapter for the same reason ErrSecretNotFound is: plugin code
+// cannot import engine. cleat#3789.
+var ErrNoSecretMasterKey = errors.New("no secret master key is configured")
+
+// StoreFailureMessage is what an HTTP handler should tell its caller when
+// Secrets.Put failed.
+//
+// It exists because the first webhook source anyone creates on a worker started
+// the way the quick-start starts it returned `500 {"error":"failed to store
+// secret"}` and nothing else: the cause (no master key) was in the worker's log
+// only, and CLEAT_SECRET_MASTER_KEY is named in no quick-start. A missing key is
+// the one cause a caller can act on, so it is named; any other error is not
+// echoed, because it can carry a driver or store detail the caller has no use
+// for and the log already has.
+func StoreFailureMessage(err error) string {
+	if errors.Is(err, ErrNoSecretMasterKey) {
+		return "failed to store secret: this worker has no secret master key configured; " +
+			"set CLEAT_SECRET_MASTER_KEY (a base64-encoded 32-byte key) on the worker and restart it"
+	}
+	return "failed to store secret"
+}
+
 // Secrets gives a plugin access to its own tenant's secrets (cleat#1992).
 // engine.SecretStore is the implementation; this interface exists so plugin
 // code, which cannot import engine, can reach it.

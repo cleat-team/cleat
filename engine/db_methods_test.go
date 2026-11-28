@@ -337,7 +337,7 @@ func TestPostgresStore_ReapExpiredConcurrencyKeys_Zero(t *testing.T) {
 func TestPostgresStore_LoadWASM_Success(t *testing.T) {
 	expected := []byte("some-wasm-bytes")
 	db := newMockDBForPostgres(t, []mockRowsResult{
-		{match: "SELECT wasm_bytes", data: [][]driver.Value{{expected}}},
+		{match: "SELECT wasm_bytes", data: [][]driver.Value{{expected, nil}}}, // wasm_bytes, library (NULL: an ordinary definition)
 	}, nil)
 	defer db.Close()
 
@@ -585,6 +585,7 @@ func TestPostgresStore_GetWorkflowDef_Success(t *testing.T) {
 				"test-wf",             // name
 				int64(2),              // version
 				[]byte("wasm-data"),   // wasm_bytes
+				nil,                   // library (NULL: an ordinary definition)
 				int64(1),              // abi_version
 				int64(0),              // min_version
 				[]byte(`{"p":"1.0"}`), // plugin_deps
@@ -627,6 +628,7 @@ func TestPostgresStore_GetWorkflowDef_NilPluginDeps(t *testing.T) {
 				"test-wf",   // name
 				int64(1),    // version
 				[]byte(nil), // wasm_bytes
+				nil,         // library (NULL: an ordinary definition)
 				int64(1),    // abi_version
 				int64(0),    // min_version
 				[]byte(nil), // plugin_deps (NULL)
@@ -740,7 +742,7 @@ func TestPostgresStore_GetWorkflowByID_Success(t *testing.T) {
 func TestPostgresStore_GetPromise_Resolved(t *testing.T) {
 	db := newMockDBForPostgres(t, []mockRowsResult{
 		{
-			match: "SELECT status, result #>> '{}'",
+			match: "SELECT status, result::text",
 			data:  [][]driver.Value{{"resolved", `{"ok":true}`, ""}},
 		},
 	}, nil)
@@ -753,6 +755,28 @@ func TestPostgresStore_GetPromise_Resolved(t *testing.T) {
 	}
 	if status != "resolved" || result != `{"ok":true}` || errMsg != "" {
 		t.Errorf("unexpected: status=%q result=%q errMsg=%q", status, result, errMsg)
+	}
+}
+
+// cleat#3807: the exact JSON text (`result::text`) is what a typed Await unmarshals; a string keeps its quotes and
+// escapes and JSON null stays null. Only a pending promise's result is empty.
+func TestPostgresStore_GetPromise_StringAndNullResultsKeepTheirJSON(t *testing.T) {
+	for _, c := range []struct{ name, raw, want string }{
+		{"a string", `"yes"`, `"yes"`},
+		{"an escaped string", `"a\"b"`, `"a\"b"`},
+		{"an empty string", `""`, `""`},
+		{"json null", "null", "null"},
+		{"an object", `{"by": "alice"}`, `{"by":"alice"}`},
+	} {
+		db := newMockDBForPostgres(t, []mockRowsResult{
+			{match: "SELECT status, result::text", data: [][]driver.Value{{"resolved", c.raw, ""}}},
+		}, nil)
+		store := NewPostgresStore(db)
+		_, got, _, err := store.GetPromise(testCtx, "wf-1", "promise-1")
+		db.Close()
+		if err != nil || got != c.want {
+			t.Errorf("%s: GetPromise result = %q, %v; want %q", c.name, got, err, c.want)
+		}
 	}
 }
 
@@ -996,7 +1020,10 @@ func TestPostgresStore_ListVersions_QueryError(t *testing.T) {
 }
 
 func TestPostgresStore_DeployWorkflowDef_QueryError(t *testing.T) {
-	db := newMockDBForPostgres(t, nil, []mockExecResult{
+	db := newMockDBForPostgres(t, []mockRowsResult{
+		// The D59 prefix check (cleat#3629) asks first; NULL is "no published library owns this name".
+		{match: "library_owning_prefix", data: [][]driver.Value{{nil}}},
+	}, []mockExecResult{
 		{
 			match: "INSERT INTO workflow_defs",
 			err:   fmt.Errorf("simulated exec error"),
@@ -1012,6 +1039,41 @@ func TestPostgresStore_DeployWorkflowDef_QueryError(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "deploy workflow def") {
 		t.Errorf("expected error to contain 'deploy workflow def', got: %v", err)
+	}
+}
+
+// The prefix check fails CLOSED: a lookup that errors stops the deploy with the error, and is not read
+// as "no library owns the name". The INSERT is set to succeed, so a check that swallowed the error
+// would let the deploy through and this would see nil. (cleat#3629)
+func TestPostgresStore_DeployWorkflowDef_FailsClosedWhenThePrefixCheckErrors(t *testing.T) {
+	db := newMockDBForPostgres(t, []mockRowsResult{
+		{match: "library_owning_prefix", err: fmt.Errorf("simulated lookup error")},
+	}, []mockExecResult{{match: "INSERT INTO workflow_defs", affected: 1}})
+	defer db.Close()
+
+	err := NewPostgresStore(db).DeployWorkflowDef(testCtx, &WorkflowDef{Name: "wf", Version: 1, WASMBytes: []byte("wasm"), ABIVersion: 1})
+	if err == nil {
+		t.Fatal("the deploy went through although the prefix check errored")
+	}
+	if !strings.Contains(err.Error(), "published libraries' prefixes") || !strings.Contains(err.Error(), "simulated lookup error") {
+		t.Errorf("the error does not say the prefix check failed: %v", err)
+	}
+	if errors.Is(err, ErrWorkflowNameUnderLibraryPrefix) {
+		t.Errorf("a lookup error was reported as a prefix refusal: %v", err)
+	}
+}
+
+// A library name from the lookup is the refusal, with that library named.
+func TestPostgresStore_DeployWorkflowDef_RefusesAnOwnedName(t *testing.T) {
+	db := newMockDBForPostgres(t, []mockRowsResult{
+		{match: "library_owning_prefix", data: [][]driver.Value{{"acme"}}},
+	}, []mockExecResult{{match: "INSERT INTO workflow_defs", affected: 1}})
+	defer db.Close()
+
+	err := NewPostgresStore(db).DeployWorkflowDef(testCtx, &WorkflowDef{Name: "acme.checkout", Version: 1, WASMBytes: []byte("wasm"), ABIVersion: 1})
+	var pe *WorkflowNameUnderLibraryPrefixError
+	if !errors.Is(err, ErrWorkflowNameUnderLibraryPrefix) || !errors.As(err, &pe) || pe.Library != "acme" || pe.Name != "acme.checkout" {
+		t.Fatalf("got %v, want a refusal naming library acme and workflow acme.checkout", err)
 	}
 }
 
@@ -1324,7 +1386,7 @@ func TestPostgresStore_ListPromises(t *testing.T) {
 		{
 			match: "SELECT promise_id, promise_name",
 			data: [][]driver.Value{
-				{"p-1", "promise-a", "resolved", "ok", "", createdAt, resolvedAt},
+				{"p-1", "promise-a", "resolved", `"ok"`, "", createdAt, resolvedAt},
 				{"p-2", "promise-b", "pending", "", "", createdAt, nil},
 			},
 		},
@@ -1347,6 +1409,13 @@ func TestPostgresStore_ListPromises(t *testing.T) {
 	}
 	if promises[1].ResolvedAt != nil {
 		t.Error("expected nil ResolvedAt for pending promise")
+	}
+	// cleat#3807: the stored JSON string "ok" is what the caller needs back, quotes included.
+	if promises[0].Result != `"ok"` {
+		t.Errorf("a string result lost its quotes: %q, want %q", promises[0].Result, `"ok"`)
+	}
+	if promises[1].Result != "" {
+		t.Errorf("a pending promise's result = %q, want empty", promises[1].Result)
 	}
 }
 
@@ -2517,7 +2586,7 @@ func TestPostgresStore_ReapExpiredConcurrencyKeys_BeginError(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// decryptField and decryptAndRedactEventRecord tests
+// decryptField and decryptEventRecord tests
 // ---------------------------------------------------------------------------
 
 func TestPostgresStore_DecryptField_DecryptError(t *testing.T) {
@@ -2548,7 +2617,6 @@ func TestPostgresStore_DecryptField_DecryptError(t *testing.T) {
 func TestPostgresStore_DecryptField_NilKey(t *testing.T) {
 	store := NewPostgresStore(nil)
 	store.encryptSensitivePayloads = true
-	store.disableReadRedaction = true
 
 	rec := &EventRecord{
 		Step:      0,
@@ -2556,7 +2624,7 @@ func TestPostgresStore_DecryptField_NilKey(t *testing.T) {
 		Request:   `{"hello":"world"}`,
 		Response:  `{"ok":true}`,
 	}
-	store.decryptAndRedactEventRecord(rec, "wf-1")
+	store.decryptEventRecord(rec, "wf-1")
 	if rec.Request != `{"hello":"world"}` {
 		t.Errorf("expected original request, got %q", rec.Request)
 	}
@@ -2603,7 +2671,7 @@ func TestPostgresStore_AppendEventsInTx_ExecError(t *testing.T) {
 func TestPostgresStore_AppendEventsInTx_EventCountError(t *testing.T) {
 	db := newMockDBForPostgres(t, nil, []mockExecResult{
 		{match: "INSERT INTO event_history", affected: 1},
-		{match: "event_count = event_count", err: errors.New("event count update failed")},
+		{match: "SET event_count = ", err: errors.New("event count update failed")},
 	})
 	defer db.Close()
 
@@ -2619,7 +2687,7 @@ func TestPostgresStore_AppendEventsInTx_EventCountError(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
-	if !strings.Contains(err.Error(), "append events in tx: increment event_count") {
+	if !strings.Contains(err.Error(), "append events in tx: set event_count") {
 		t.Errorf("expected event_count error, got: %v", err)
 	}
 }
@@ -3997,8 +4065,10 @@ func TestPostgresStore_RequestCancellation_BeginError(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error from begin failure")
 	}
-	if !strings.Contains(err.Error(), "request cancellation: begin") {
-		t.Errorf("expected 'request cancellation: begin' error, got: %v", err)
+	// The first database access is now the chain lookup (cleat#4340: the flag goes on the END of a continue-as-new chain), which opens its own transaction, so the injected begin
+	// failure meets it first. What this test protects is unchanged: a failure to begin is reported with the verb's name and the cause, not swallowed.
+	if !strings.Contains(err.Error(), "request cancellation:") || !strings.Contains(err.Error(), "begin failed") {
+		t.Errorf("expected a 'request cancellation: ...' error carrying the begin failure, got: %v", err)
 	}
 }
 
@@ -4615,8 +4685,10 @@ func TestPostgresStore_DeliverSignal_BeginError(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error from begin failure")
 	}
-	if !strings.Contains(err.Error(), "deliver signal: begin") {
-		t.Errorf("expected 'deliver signal: begin' error, got: %v", err)
+	// The chain's end is read before the delivery's own transaction is opened (cleat#4340), and that read opens a transaction too, so a database that cannot begin one fails there first.
+	// What the caller is owed is unchanged: an error that names the delivery and carries the driver's own "begin failed".
+	if !strings.Contains(err.Error(), "deliver signal") || !strings.Contains(err.Error(), "begin failed") {
+		t.Errorf("expected a 'deliver signal' error carrying 'begin failed', got: %v", err)
 	}
 }
 
@@ -4744,26 +4816,26 @@ func newTestPayloadEncryption(t *testing.T) *PayloadEncryption {
 }
 
 // ---------------------------------------------------------------------------
-// decryptAndRedactEventRecord tests
+// decryptEventRecord tests
 // ---------------------------------------------------------------------------
 
-func TestDecryptAndRedactEventRecord_NoEncryption(t *testing.T) {
+func TestDecryptEventRecord_NoEncryption(t *testing.T) {
 	store := NewPostgresStore(nil)
 	rec := &EventRecord{Step: 0, Request: "hello", Response: "world"}
-	store.decryptAndRedactEventRecord(rec, "wf-1")
+	store.decryptEventRecord(rec, "wf-1")
 	if rec.Request == "" {
 		t.Error("expected Request to be preserved (redacted or not)")
 	}
 }
 
-func TestDecryptAndRedactEventRecord_InvalidEncryptedData(t *testing.T) {
+func TestDecryptEventRecord_InvalidEncryptedData(t *testing.T) {
 	enc := newTestPayloadEncryption(t)
 	store := NewPostgresStore(nil).WithEncryption(enc, true)
 	rec := &EventRecord{
 		Step: 0, Request: garbageSealedRaw(), Response: garbageSealedRaw(),
 		Err: garbageSealedString(),
 	}
-	store.decryptAndRedactEventRecord(rec, "wf-1")
+	store.decryptEventRecord(rec, "wf-1")
 	if rec.Request != "[DECRYPTION_FAILED]" {
 		t.Errorf("expected [DECRYPTION_FAILED] for Request, got %q", rec.Request)
 	}
@@ -4954,12 +5026,18 @@ func TestClaimWorkflowImpl_ReturnsNil(t *testing.T) {
 // Encryption edge cases
 // ---------------------------------------------------------------------------
 
-func TestDecryptAndRedactEventRecord_WithRedactionDisabled(t *testing.T) {
-	store := NewPostgresStore(nil).WithReadRedactionDisabled(true)
-	rec := &EventRecord{Step: 0, Request: "sensitive-data"}
-	store.decryptAndRedactEventRecord(rec, "wf-1")
-	if rec.Request != "sensitive-data" {
-		t.Errorf("expected original data when redaction disabled, got %q", rec.Request)
+// A store hands back what it stored (cleat#3581): replay acts on this read, and a
+// redacted copy would be a different value from the one the workflow was given.
+func TestDecryptEventRecord_DoesNotRedact(t *testing.T) {
+	store := NewPostgresStore(nil)
+	const secretBody = `{"api_key":"sk-live-SECRET123","version":"1.2.3"}`
+	rec := &EventRecord{Step: 0, Request: secretBody, Response: secretBody}
+	if got := Redact(secretBody); got == secretBody {
+		t.Fatalf("CONTROL: Redact does not rewrite %s", secretBody)
+	}
+	store.decryptEventRecord(rec, "wf-1")
+	if rec.Request != secretBody || rec.Response != secretBody {
+		t.Errorf("the store redacted what it read: request=%q response=%q", rec.Request, rec.Response)
 	}
 }
 
@@ -5269,6 +5347,10 @@ func TestPostgresStore_LoadDAGSpec_NotFound(t *testing.T) {
 	if !strings.Contains(err.Error(), "workflow def not found") {
 		t.Errorf("expected 'workflow def not found' error, got: %v", err)
 	}
+	// cleat#3883: matchable, so the HTTP layer can answer 404 and not a 500 carrying the sentence.
+	if !errors.Is(err, ErrWorkflowDefNotFound) {
+		t.Errorf("the not-found is not ErrWorkflowDefNotFound: %v", err)
+	}
 }
 
 // TestPostgresStore_LoadDAGSpec_NullSpec is the case that was missing, and the
@@ -5412,12 +5494,12 @@ func TestPostgresStore_ClaimWorkflows_ScanError(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// decryptAndRedactEventRecord — successful decryption of all fields
+// decryptEventRecord — successful decryption of all fields
 // ---------------------------------------------------------------------------
 
-func TestDecryptAndRedactEventRecord_SuccessfulDecryption(t *testing.T) {
+func TestDecryptEventRecord_SuccessfulDecryption(t *testing.T) {
 	enc := newTestPayloadEncryption(t)
-	store := NewPostgresStore(nil).WithEncryption(enc, true).WithReadRedactionDisabled(true)
+	store := NewPostgresStore(nil).WithEncryption(enc, true)
 
 	// Request and Response are stored as raw ciphertext bytes (already
 	// base64-decoded by tryDecodeBase64), so decryptField uses
@@ -5447,7 +5529,7 @@ func TestDecryptAndRedactEventRecord_SuccessfulDecryption(t *testing.T) {
 		Response: string(rawResp),
 		Err:      encodedErr,
 	}
-	store.decryptAndRedactEventRecord(rec, "wf-1")
+	store.decryptEventRecord(rec, "wf-1")
 
 	if rec.Request != plainReq {
 		t.Errorf("expected Request=%q, got %q", plainReq, rec.Request)

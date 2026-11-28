@@ -59,13 +59,13 @@ func (s *apiServer) handleGetInstanceEvents(w http.ResponseWriter, r *http.Reque
 
 	total, err := st.CountEventHistory(r.Context(), id)
 	if err != nil {
-		s.writeError(w, 500, err.Error())
+		s.writeStoreError(w, r, err)
 		return
 	}
 
 	history, err := st.LoadEventHistoryPaginated(r.Context(), id, offset, limit)
 	if err != nil {
-		s.writeError(w, 500, err.Error())
+		s.writeStoreError(w, r, err)
 		return
 	}
 	if history == nil {
@@ -84,7 +84,7 @@ func (s *apiServer) handleGetInstanceState(w http.ResponseWriter, r *http.Reques
 	}
 	wf, err := st.GetWorkflowByID(r.Context(), id)
 	if err != nil {
-		s.writeError(w, 500, err.Error())
+		s.writeAccessCheckUnavailable(w, r, "the run", err) // cleat#3866: not the driver's text, and retryable
 		return
 	}
 	if wf == nil {
@@ -97,5 +97,5 @@ func (s *apiServer) handleGetInstanceState(w http.ResponseWriter, r *http.Reques
 	if s.refuseIfInternalRunLoaded(w, r, st, wf, "workflow not found") {
 		return
 	}
-	s.writeJSON(w, 200, wf)
+	s.writeWorkflow(w, r, wf)
 }

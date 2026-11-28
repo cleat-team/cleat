@@ -140,6 +140,31 @@ Anything else resolving authorship from merged history needs the same treatment.
 An empty parse there reports a formatting limitation, not an unattributed commit
 — and those two lead to opposite conclusions about who did the work.
 
+**A commit already under a release tag, or already on `develop`, is reported, not failed.** A squash onto a
+`release/**` branch can leave the trailer outside the message's final paragraph
+(`Claude-Stream: …`, a blank line, then GitHub's appended `Signed-off-by` /
+`Co-authored-by`), and it does so at *merge*, after the pull request's own check
+has already passed. It surfaces at the next `main` → `develop` back-merge, whose
+range contains those commits — by then published, so the repair above would mean
+rewriting a release. Measured on cleat#3486 (`739dffed`, from #3464). When a
+finding is on a commit reachable from a `vX.Y.Z` tag, `Stream Trailer Check`
+prints it as a `::notice::` naming the commit and the tag, and does not fail on
+it; a prerelease tag does not count, and every other commit still fails.
+
+A release pull request to `main` runs before its tag exists, so the tag alone
+classifies none of its range. Most of that range is `develop`'s own squashes,
+which GitHub assembles with the trailer mid-body (above) and which nobody can
+amend, so a finding on a commit reachable from `origin/develop` is reported the
+same way. Measured on #3466 with `v0.5.0` removed: 184 findings, 183 of them
+already on `develop` and one not (cleat#3496). **This cannot loosen a pull
+request into `develop`:** that range is `base..head`, which excludes everything
+`develop` contains. It does not cover a squash made directly on `release/**`
+and not yet back-merged, which is why such a PR is merged with a **merge
+commit** (`docs/project/release-process.md`).
+
+`scripts/test-stream-trailer-check.sh` runs the workflow's own step text against
+fixture repositories to hold those lines (cleat#3488, cleat#3496).
+
 The same setting enables `.githooks/pre-commit`, which refuses a commit that
 adds an `IMPROVEMENT-PLAN.md` section outside your sandbox's allocated block.
 CI cannot check that — it asserts uniqueness and block membership, both of
@@ -164,9 +189,19 @@ To build and test cleat you will need:
 **Minimum (write and run Go workflows):**
 | Tool | Version | Required | Notes |
 |------|---------|----------|-------|
-| Go | 1.27+ | Yes | Standard Go toolchain (go.mod pins `toolchain go1.27.1`; with `GOTOOLCHAIN=auto`, the default, Go downloads it for you) |
+| Go | 1.27.0 to 1.27.3 | Yes | Standard Go toolchain (go.mod pins `toolchain go1.27.3`; with `GOTOOLCHAIN=auto`, the default, Go downloads it for you **only if yours is older**, see the note below) |
 | PostgreSQL | 14+ (16 recommended) | Yes | Or MySQL 8.0+, or SQL Server 2017+ |
 | Docker | Latest | No | Only if using Docker for the database |
+
+> **Go 1.27.4 and newer cannot build cleat yet.** Its cgo refuses the `libwasmtime.a`
+> that wasmtime-go ships (`disallowed LTO section ".llvmbc" in #cgo LDFLAGS` on
+> Linux, `disallowed LTO section __LLVM,__bitcode in #cgo LDFLAGS` on macOS;
+> upstream bytecodealliance/wasmtime-go#299). The `toolchain` line in `go.mod` is a
+> minimum, so a machine that already has Go 1.27.4 or newer keeps it and fails; on
+> such a machine run `GOTOOLCHAIN=go1.27.3 go build ./...` (or `export` it). The
+> repository stays on 1.27.3 until go1.27.5 or a wasmtime-go fix lands, which is the
+> govulncheck waiver (D69) and the owner's decision to wait for the upstream fix
+> (D78), both tracked on cleat#3701.
 
 **Full (develop cleat itself):**
 | Tool | Version | Required | Notes |
@@ -175,7 +210,7 @@ To build and test cleat you will need:
 | Rust toolchain | Stable | No | For `cleat-macro` / `cleat-sdk` crates and Rust workflows |
 | Python 3 | 3.10+ | No | For Python SDK |
 | Java | 17+ | No | For Java SDK |
-| Node.js | 20+ | No | For Svelte web UI and AssemblyScript SDK |
+| Node.js | 20+ | No | For the Svelte web UI |
 | MySQL | 8.0+ (Docker) | No | For MySQL backend integration tests |
 | SQL Server | 2017+ (Docker) | No | For MSSQL backend integration tests |
 | Docker | Latest | No | For cluster integration tests |
@@ -262,6 +297,24 @@ for the full model.
    be merged. This includes DCO, semantic PR title, branch naming, CLA check
    (for first-time contributors), and the AI review gates.
 
+### Dependabot bumps of `web/` are rebuilt by hand
+
+`.github/dependabot.yml` has an npm entry that covers `/web`, and the required
+`Web Dashboard` check fails when the committed bundle in `cmd/cleat-worker/web/dist/`
+differs from a fresh build of `web/`. A bump that changes the bundle (a new `vite`
+or `svelte` changes the hashed asset names even when no source file moved) therefore
+opens red and stays red until the bundle is rebuilt. **The person enqueueing that PR
+does the rebuild**: check out the dependabot branch, run `npm ci && npm run build` in
+`web/` inside a container, and commit `cmd/cleat-worker/web/dist/` with `-s`. The exact
+commands are in "The committed bundle must match its source" in `web/README.md`.
+
+**It is manual on purpose** (cleat#3470). The obvious automation is a workflow that
+rebuilds and pushes, but a push made with the repository's own `GITHUB_TOKEN` starts
+no workflows, so the pushed head would carry none of the required checks and could
+never merge. A token whose pushes do start them would be a bot credential, which this
+project does not use, and the build must not hold one anyway: it runs code from the
+bumped packages.
+
 ## Quick setup
 
 For a one-command toolchain check:
@@ -289,9 +342,6 @@ go build ./cmd/...
 # Build Rust crates (optional, for Rust workflow support)
 cd crates/cleat-macro && cargo build && cd ../..
 cd crates/cleat-sdk && cargo build && cd ../..
-
-# Build AssemblyScript SDK (optional)
-cd packages/cleat-as && npm ci && npm run build && cd ../..
 
 # Build the Svelte web UI (optional, embeds into cleat-worker)
 cd web && npm ci && npm run build && cd ..
@@ -371,9 +421,6 @@ CLEAT_TEST_MSSQL=sqlserver://sa:CleatTest123!@localhost:1433?database=master \
 # Rust crates
 cd crates/cleat-macro && cargo test
 cd crates/cleat-sdk && cargo test
-
-# AssemblyScript SDK
-cd packages/cleat-as && npm test
 ```
 
 > **Note:** The `CLEAT_TEST_DB` environment variable is used by cluster
@@ -595,7 +642,7 @@ CI runs automatically on every push. The following checks must all pass:
 | Branch naming | Branch name follows `feature/`, `bugfix/`, `fix/`, `docs/`, `release/`, or `hotfix/` prefix convention |
 | CLA Assistant | The author has signed the ICLA, recorded in `signatures/version1/cla.json` on the `cla-signatures` branch |
 | Lint | `go vet`, `golangci-lint`, `ruff`, `shellcheck`, `clippy` |
-| Test | Go (1.22/1.23/1.24 matrix), Python (3.10–3.12), Java, Rust, AssemblyScript |
+| Test | Go (1.22/1.23/1.24 matrix), Python (3.10–3.12), Java, Rust |
 | Vulncheck | `govulncheck` for known vulnerabilities |
 | CodeQL | CodeQL static analysis |
 | Fuzz | Fuzz tests on the WASM runtime |
@@ -687,7 +734,6 @@ repo tag, and only one more has a publisher at all:
 | Python (`cleat-sdk`) | `0.3.0` | `python-sdk/pyproject.toml` | `.github/workflows/publish-pypi.yml` |
 | Rust (`cleat-sdk`, `cleat-macro`, `cleat-test`) | `0.3.0` | `crates/*/Cargo.toml` | **none** |
 | Java | `0.3.0` | `crates/cleat-java/build.gradle.kts` | **none** |
-| AssemblyScript | `0.3.0` | `packages/cleat-as/package.json` | **none** |
 
 The chart takes the same number (`charts/cleat/Chart.yaml`), and the number lives
 in more places than the manifests. Each SDK stamps its own version into the
@@ -695,8 +741,7 @@ metadata of every workflow it compiles, so a bump that stops at the manifest
 leaves the stamp behind — cleat#2452 moved
 `python-sdk/cleat_sdk/version.py`, `python-sdk/scripts/stamp_metadata.py`,
 `crates/cleat-sdk/src/bin/inject_metadata.rs`,
-`crates/cleat-java/scripts/inject-metadata.sh` and
-`packages/cleat-as/scripts/inject-metadata.js`. The Go module is the same story
+and `crates/cleat-java/scripts/inject-metadata.sh`. The Go module is the same story
 from the other side: five modules in this repo consume it, so each pins the
 version in its own `go.mod` — `cleat/`, `cleat/backendkit/`, `examples/`,
 `tests/cross-language/` and `tests/plugin-harness/` — and those move with the
@@ -714,8 +759,8 @@ number for the whole repo, so uniformity is worth more than an unclaimed first
 release. The cost is accepted rather than denied — **if crate or npm publishing is
 wired up later, its first release is numbered above `0.3.0`.**
 
-Until cleat#2452 the values on disk were Python `0.2.0`, and Rust, Java and
-AssemblyScript `0.1.0`.
+Until cleat#2452 the values on disk were Python `0.2.0`, and Rust and Java
+`0.1.0`.
 
 The Python number is different: it *is* load-bearing, because a publisher reads
 it. Historically it did not track the repo tag — `python-sdk` went `0.1.0` →
@@ -747,7 +792,7 @@ exercise it for the first time.
 
 ## Areas that need help
 
-- **Non-Go SDKs.** The AssemblyScript and Java SDKs have known issues (see
+- **Non-Go SDKs.** The Java SDK has known issues (see
   `prompts/fork_open_projects_issues.md`). Fixes are welcome.
 - **Examples.** Real-world examples that demonstrate cleat's capabilities.
 - **Documentation.** Clear, tested documentation for the Go SDK, WASM toolchain,

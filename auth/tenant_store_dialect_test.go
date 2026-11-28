@@ -110,8 +110,15 @@ func TestCreateTenantAndRevokeAPIKeyRefuseNonPostgres(t *testing.T) {
 		if err != nil {
 			t.Fatalf("NewTenantStoreForDialect(%q): %v", d, err)
 		}
-		if _, err := s.CreateTenant(t.Context(), "n", "d", uuid.MustParse(DefaultOrgUUID)); err == nil {
-			t.Errorf("CreateTenant on %s did not refuse", d)
+		// CreateTenant refuses MySQL only. It used to refuse SQL Server as well, for a
+		// reason that was only the statement shape (cleat#3552): SQL Server's creation is
+		// covered against a real database in
+		// a_tenant_and_org_are_created_on_postgres_and_sql_server_test.go. The store here
+		// has no database, so asserting it on SQL Server would dereference nil.
+		if d == DialectMySQL {
+			if _, err := s.CreateTenant(t.Context(), "n", "d", uuid.MustParse(DefaultOrgUUID)); err == nil {
+				t.Errorf("CreateTenant on %s did not refuse", d)
+			}
 		}
 		if err := s.RevokeAPIKey(t.Context(), [16]byte{}); err == nil {
 			t.Errorf("RevokeAPIKey on %s did not refuse", d)

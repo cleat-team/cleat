@@ -38,7 +38,14 @@ func registerRoutes(mux *http.ServeMux, api *apiServer) *http.ServeMux {
 	// TestEveryAdminRouteIsAbsentUntilTheAdminAPIIsEnabled, which reads this file for the registrations and
 	// fails on one that is not gated.
 	mux.HandleFunc("/api/admin/drain", api.adminAPIOnly(api.handleDrain))
+	// Tenant provisioning (cleat#3552): create is the collection, confirm is under the tenant
+	// subtree registered further down. Both need an OPERATOR credential, not merely a key.
+	mux.HandleFunc("/api/admin/tenants", api.adminAPIOnly(api.handleProvisionTenant))
 	mux.HandleFunc("/api/admin/retention/sweep", api.adminAPIOnly(api.handleRetentionSweep))
+	// A tenant managing its OWN keys (cleat#3552, B2c). Tenant plane: an operator credential cannot reach
+	// these, and they refuse when authentication is off.
+	mux.HandleFunc("/api/keys", api.handleKeys)
+	mux.HandleFunc("/api/keys/", api.handleKeyByID)
 	// Schedule routes before workflow routes so /api/schedules is not caught
 	// by /api/workflows/.
 	mux.HandleFunc("/api/schedules/", api.handleSchedules)
@@ -72,6 +79,15 @@ func registerRoutes(mux *http.ServeMux, api *apiServer) *http.ServeMux {
 	// Workflow definitions.
 	mux.HandleFunc("GET /api/definitions", api.handleDefinitions)
 	mux.HandleFunc("POST /api/definitions", api.handleCreateDefinition)
+
+	// Install a published workflow library bundle for the caller's own tenant
+	// (cleat#3540). Callable with the tenant's own key; publishing is not a route.
+	mux.HandleFunc("POST /api/libraries/{library}/install", api.handleInstallLibrary)
+
+	// What the caller's tenant holds, and what is published (cleat#3627). Read-only, callable
+	// with the tenant's own key. Two paths so no library name can collide with a reserved word.
+	mux.HandleFunc("GET /api/library-installs", api.handleListLibraryInstalls)
+	mux.HandleFunc("GET /api/libraries", api.handleListLibraries)
 
 	// The per-tenant OpenAPI document (cleat#2913). A metadata read like
 	// GET /api/definitions above -- assembled from workflow_defs, not a read
@@ -223,12 +239,12 @@ func (s *apiServer) handleDeadLettersList(w http.ResponseWriter, r *http.Request
 
 	total, err := st.CountWorkflows(r.Context(), filter)
 	if err != nil {
-		s.writeError(w, 500, err.Error())
+		s.writeStoreError(w, r, err)
 		return
 	}
 	workflows, err := st.ListWorkflows(r.Context(), filter)
 	if err != nil {
-		s.writeError(w, 500, err.Error())
+		s.writeStoreError(w, r, err)
 		return
 	}
 
@@ -238,7 +254,7 @@ func (s *apiServer) handleDeadLettersList(w http.ResponseWriter, r *http.Request
 	if workflows == nil {
 		workflows = []engine.WorkflowInstance{}
 	}
-	s.writeJSON(w, 200, workflows)
+	s.writeWorkflows(w, r, workflows)
 }
 
 func (s *apiServer) handleDeadLetters(w http.ResponseWriter, r *http.Request) {
@@ -273,7 +289,7 @@ func (s *apiServer) handleDeadLetterReprocess(w http.ResponseWriter, r *http.Req
 	// Fetch the dead-lettered workflow instance.
 	wf, err := st.GetWorkflowByID(r.Context(), id)
 	if err != nil {
-		s.writeError(w, 500, err.Error())
+		s.writeAccessCheckUnavailable(w, r, "the run", err) // cleat#3866: not the driver's text, and retryable
 		return
 	}
 	if wf == nil {
@@ -288,7 +304,7 @@ func (s *apiServer) handleDeadLetterReprocess(w http.ResponseWriter, r *http.Req
 	// Create a new run from the dead-lettered workflow's definition and input.
 	versions, verr := st.ListVersions(r.Context(), wf.DefName)
 	if verr != nil {
-		s.writeError(w, 500, verr.Error())
+		s.writeStoreError(w, r, verr)
 		return
 	}
 	if len(versions) == 0 {
@@ -315,7 +331,7 @@ func (s *apiServer) handleDeadLetterReprocess(w http.ResponseWriter, r *http.Req
 	idempotencyKey := r.Header.Get("Idempotency-Key")
 	runID, alreadyExisted, serr := st.StartNewRun(r.Context(), "", wf.DefName, versions[0], wf.Input, idempotencyKey, s.tenantFor(r), 0)
 	if serr != nil {
-		s.writeError(w, 500, serr.Error())
+		s.writeStoreError(w, r, serr)
 		return
 	}
 	// The original response plus the flag, same as start -- cleat#1169. These
@@ -374,7 +390,10 @@ func (s *apiServer) handleDeadLetterTerminate(w http.ResponseWriter, r *http.Req
 			return
 		}
 	}
-	if err := st.TerminateWorkflow(r.Context(), id, req.Reason); err != nil {
+	rec, err := settleWithReceipt(st, func(rs engine.SettleReceiptStore) (engine.SettleReceipt, error) {
+		return rs.TerminateWorkflowReceipt(r.Context(), id, req.Reason)
+	}, func() error { return st.TerminateWorkflow(r.Context(), id, req.Reason) }, id)
+	if err != nil {
 		// 3.92: the store now reports a terminate that matched nothing rather
 		// than returning nil. callerOwnsTarget above has already answered 404
 		// for an id this tenant does not own, so reaching here means the row
@@ -388,10 +407,10 @@ func (s *apiServer) handleDeadLetterTerminate(w http.ResponseWriter, r *http.Req
 		// dead_lettered -> terminated transition this route exists to do --
 		// now comes back as engine.ErrAdminStateConflict. handleAdminOpError
 		// is the one place that maps it to 409, the same class re-replay uses.
-		s.handleAdminOpError(w, err)
+		s.handleAdminOpError(w, r, err)
 		return
 	}
-	s.writeJSON(w, 200, map[string]string{"status": "terminated"})
+	s.writeJSON(w, 200, settleReply("terminated", id, rec))
 }
 
 func (s *apiServer) handleWorkflowRetry(w http.ResponseWriter, r *http.Request, id string) {
@@ -408,7 +427,7 @@ func (s *apiServer) handleWorkflowRetry(w http.ResponseWriter, r *http.Request, 
 	}
 	wf, err := st.GetWorkflowByID(r.Context(), id)
 	if err != nil {
-		s.writeError(w, 500, err.Error())
+		s.writeAccessCheckUnavailable(w, r, "the run", err) // cleat#3866: not the driver's text, and retryable
 		return
 	}
 	if wf == nil {
@@ -425,7 +444,7 @@ func (s *apiServer) handleWorkflowRetry(w http.ResponseWriter, r *http.Request, 
 	// handleAdminOpError maps its ErrAdminStateConflict to 409, the same class
 	// terminate and re-replay use above.
 	if err := engine.RetryWorkflow(r.Context(), st, id); err != nil {
-		s.handleAdminOpError(w, err)
+		s.handleAdminOpError(w, r, err)
 		return
 	}
 	s.writeJSON(w, 200, map[string]string{"id": id, "status": "retried"})

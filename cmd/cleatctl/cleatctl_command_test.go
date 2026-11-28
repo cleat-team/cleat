@@ -549,6 +549,11 @@ func (m *mockStore) FinalizeWorkflowSegment(ctx context.Context, runID, workerID
 	}
 	return nil
 }
+
+// PublishQueryState: the test double writes nothing and reports no fence loss (cleat#4162); a test that needs otherwise overrides it on its own type.
+func (m *mockStore) PublishQueryState(ctx context.Context, runID, workerID string, generation int64, queryState map[string]string) error {
+	return nil
+}
 func (m *mockStore) DeleteExpiredEvents(ctx context.Context, olderThan time.Time) (int64, error) {
 	if m.deleteExpiredEventsFn != nil {
 		return m.deleteExpiredEventsFn(ctx, olderThan)
@@ -1476,6 +1481,12 @@ func TestDeployWorkflow_WithExistingVersions(t *testing.T) {
 			return nil
 		},
 	}
+
+	// The previous version declares plugin p1 and a deploy carries that over, so under the
+	// plugin-dependency check (cleat#3600) p1 must be a registered plugin for this to deploy.
+	prevSource := deployPluginSource
+	deployPluginSource = func(*sql.DB) engine.PluginRegistryAccess { return knownPlugins{"p1": true} }
+	t.Cleanup(func() { deployPluginSource = prevSource })
 
 	stdout := captureStdout(t, func() {
 		deployWorkflow(context.Background(), store, nil, []string{"existing-wf", path})

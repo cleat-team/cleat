@@ -146,7 +146,7 @@ func (s *pluginSecrets) Put(ctx context.Context, name, value string) error {
 	if err != nil {
 		return err
 	}
-	return s.store.PutSecret(ctx, tid.String(), name, value)
+	return translateSecretPutErr(s.store.PutSecret(ctx, tid.String(), name, value))
 }
 
 func (s *pluginSecrets) Retire(ctx context.Context, name string) (int64, error) {
@@ -202,7 +202,18 @@ func (s *pluginTenantSecrets) Put(ctx context.Context, name, value string) error
 	if err := checkNotCrossTenant(ctx, "Secrets.ForTenant"); err != nil {
 		return err
 	}
-	return s.store.PutSecret(s.ctx(ctx), s.tenantID.String(), name, value)
+	return translateSecretPutErr(s.store.PutSecret(s.ctx(ctx), s.tenantID.String(), name, value))
+}
+
+// translateSecretPutErr maps engine.ErrNoSecretMasterKey to the plugin
+// package's sentinel, so a plugin can tell "this worker has no master key" from
+// any other store failure with errors.Is (plugin code cannot import engine).
+// cleat#3789. Every other error passes through unchanged.
+func translateSecretPutErr(err error) error {
+	if errors.Is(err, ErrNoSecretMasterKey) {
+		return plugin.ErrNoSecretMasterKey
+	}
+	return err
 }
 
 func (s *pluginTenantSecrets) Retire(ctx context.Context, name string) (int64, error) {

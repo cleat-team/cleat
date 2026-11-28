@@ -196,7 +196,7 @@ func (r *queueRig) run(t *testing.T) (stop func()) {
 }
 
 func (r *queueRig) send(tenant uuid.UUID, i int) {
-	r.p.enqueueAudit(tenant, "u", "GET", fmt.Sprintf("/q/%d", i), 200, "10.0.0.1", "agent", time.Millisecond)
+	r.p.enqueue(newQueuedEvent(tenant, "u", "GET", fmt.Sprintf("/q/%d", i), 200, "10.0.0.1", "agent", time.Millisecond))
 }
 
 // settle waits until every sent event is recorded or counted lost, AND the host

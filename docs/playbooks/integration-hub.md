@@ -361,6 +361,20 @@ payloads; see `CHANGELOG.md`'s breaking-changes entry for the migration note. `n
 outbound `send_webhook` delivery got the same requirement the same PR: `POST /webhooks` also
 rejects a missing secret, and `PUT /webhooks/{id}` can rotate one but can no longer clear it.
 
+**A webhook can have a name, so an app can find its own again.** `POST /webhooks` and `PUT
+/webhooks/{id}` take an optional `name`, `GET /webhooks` and `GET /webhooks/{id}` return it (`null`
+for a webhook that has none), and `GET /webhooks?name=<name>` answers a list of that one webhook or
+none. A name is 1 to 128 characters of `a-z`, `0-9`, `.`, `_` and `-`, starting with a letter or
+digit; anything else is a 400, because MySQL and SQL Server compare text case-insensitively and
+PostgreSQL does not, and a name that differs only by case would be unique on one and a duplicate on
+another. Names are unique **per tenant among webhooks that have not been deleted**: a second webhook
+with a taken name is a 409 and nothing is written, the same name in two tenants is fine, and deleting
+a webhook releases its name. Any number of webhooks can have no name. A name can be set or changed
+but not cleared (an update that leaves `name` out leaves it alone, and `""` is a 400). From Go,
+`backendkit.Client.WebhookByName` does the lookup and returns `backendkit.ErrWebhookNotFound` for none.
+Before this existed the only things to find a webhook by were its URL, which changes, and its
+`events`, which mean something else (cleat#3538).
+
 **The event type is a second header, and the body's `event_type` is ignored for routing.** `POST
 /ingest/{source_id}` takes the event's name from `X-Github-Event`, then `X-Event-Type`, and falls
 back to the literal `"webhook"` when neither is present (`plugins/webhookingest/routes.go`). A JSON

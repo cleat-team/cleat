@@ -50,21 +50,24 @@ lint-sh:
 # ---- test ------------------------------------------------------------------
 
 .PHONY: test
-test: test-go test-python test-java test-as test-plugin-harness
+test: test-go test-python test-java test-plugin-harness
 
 .PHONY: test-go
 test-go:
 	go test -race -count=1 $(GO_PACKAGES)
 
+# All three dialects in ONE invocation, with all three DSNs required: an unset
+# DSN skips its dialect and the suite still prints ok, so the script exits 2
+# ("unmeasured") rather than run. It reports test failures, package failures,
+# build failures, timeouts and skip names, not only an exit status. See
+# scripts/test-all-dbs.sh for the environment and for what it deliberately does
+# not run. This target ran `go test ./internal/host/...` three times until
+# cleat#3457: that path became engine/ in 3eeb74e, so every leg failed with "no
+# such file or directory", and `scripts/test-all-dbs.sh --self-test` (run by the
+# lint-go job) now fails if a package pattern stops resolving.
 .PHONY: test-all-dbs
 test-all-dbs:
-	@echo "=== Testing PostgreSQL ==="
-	@CLEAT_TEST_DB="postgres://localhost:5432/cleat?sslmode=disable" go test -count=1 -timeout=300s ./internal/host/...
-	@echo "=== Testing MySQL ==="
-	@CLEAT_TEST_MYSQL="root:cleat@tcp(127.0.0.1:3306)/cleat" go test -count=1 -timeout=300s ./internal/host/...
-	@echo "=== Testing SQL Server ==="
-	@CLEAT_TEST_MSSQL="sqlserver://sa:CleatTest123!@127.0.0.1:1433?database=master" go test -count=1 -timeout=300s ./internal/host/...
-	@echo "All multi-database tests complete."
+	@scripts/test-all-dbs.sh
 
 .PHONY: test-python
 test-python:
@@ -73,10 +76,6 @@ test-python:
 .PHONY: test-java
 test-java:
 	cd crates/cleat-java && if [ -x gradlew ]; then ./gradlew test; else gradle test; fi
-
-.PHONY: test-as
-test-as:
-	cd packages/cleat-as && npm test
 
 # ./engine/... , not ./internal/host/... : commit 3eeb74e moved internal/host/
 # to engine/, so this target has been running `go test` against a path that
@@ -252,6 +251,12 @@ coverage-check: coverage-go
 	    cnt[path]++; \
 	} \
 	END { \
+	    if (length(cov) == 0) { \
+	        printf "\033[31mCoverage check FAILED: no package coverage was measured at all\033[0m\n"; \
+	        printf "  coverage.out parsed to zero packages. A run that measured NOTHING must not report PASSED --\n"; \
+	        printf "  this said \"Coverage check PASSED\" and exited 0 on a header-only profile (cleat#4009).\n"; \
+	        exit 1; \
+	    } \
 	    for (p in cov) { \
 	        avg = cov[p] / cnt[p]; \
 	        printf "%-40s %7.2f%%\n", p, avg; \
@@ -352,7 +357,7 @@ bench-save:
 # ---- build -----------------------------------------------------------------
 
 .PHONY: build
-build: build-go build-python build-java build-as
+build: build-go build-python build-java
 
 .PHONY: build-go
 build-go:
@@ -365,10 +370,6 @@ build-python:
 .PHONY: build-java
 build-java:
 	cd crates/cleat-java && if [ -x gradlew ]; then ./gradlew build; else gradle build; fi
-
-.PHONY: build-as
-build-as:
-	cd packages/cleat-as && npm ci && npm run build
 
 # ---- cluster ---------------------------------------------------------------
 
@@ -426,8 +427,18 @@ clew:
 # ---- tools ------------------------------------------------------------------
 
 GO_MIN_VERSION := 1.27
+# The first Go release whose cgo refuses wasmtime-go's libwasmtime.a ("disallowed
+# LTO section .llvmbc in #cgo LDFLAGS", bytecodealliance/wasmtime-go#299). Every
+# Go from here up fails to link cleat-worker and cleat; go.mod stays on 1.27.3
+# for the same reason (D78, cleat#3701). `make setup` says so instead of printing
+# [OK] and letting step 1 fail (cleat#3787).
+#
+# WHEN THE HOLD IS LIFTED, change or delete this and the check in tools-go below.
+# cmd/cleat-worker/a_makefile_does_not_reject_the_toolchain_gomod_pins_test.go
+# fails the moment go.mod's toolchain reaches this version, which is the reminder.
+GO_CGO_BROKEN_FROM := 1.27.4
 .PHONY: tools
-tools: tools-go tools-rust tools-python tools-java tools-as
+tools: tools-go tools-rust tools-python tools-java
 	@echo "=== All toolchains checked ==="
 
 .PHONY: tools-go
@@ -439,13 +450,24 @@ tools-go:
 		MIN_MAJOR=$$(echo $(GO_MIN_VERSION) | cut -d. -f1); \
 		MIN_MINOR=$$(echo $(GO_MIN_VERSION) | cut -d. -f2); \
 		if [ "$$MAJOR" -gt "$$MIN_MAJOR" ] || ([ "$$MAJOR" -eq "$$MIN_MAJOR" ] && [ "$$MINOR" -ge "$$MIN_MINOR" ]); then \
+			PATCH=$$(go version | sed -nE 's/^go version go[0-9]+\.[0-9]+\.([0-9]+).*/\1/p'); PATCH=$${PATCH:-0}; \
+			BMAJOR=$$(echo $(GO_CGO_BROKEN_FROM) | cut -d. -f1); BMINOR=$$(echo $(GO_CGO_BROKEN_FROM) | cut -d. -f2); BPATCH=$$(echo $(GO_CGO_BROKEN_FROM) | cut -d. -f3); \
+			if [ "$$MAJOR" -gt "$$BMAJOR" ] || ([ "$$MAJOR" -eq "$$BMAJOR" ] && [ "$$MINOR" -gt "$$BMINOR" ]) || ([ "$$MAJOR" -eq "$$BMAJOR" ] && [ "$$MINOR" -eq "$$BMINOR" ] && [ "$$PATCH" -ge "$$BPATCH" ]); then \
+				echo "[BROKEN] Go $$(go version | head -1) cannot build cleat yet: its cgo refuses the wasmtime library"; \
+				echo "  (disallowed LTO section .llvmbc in #cgo LDFLAGS; cleat#3787, cleat#3701). Go $(GO_CGO_BROKEN_FROM) and newer fail the same way."; \
+				echo "  Use Go 1.27.3 (a worker built with it carries GO-2026-6859, fixed in 1.27.4; see cleat#3701):"; \
+				echo "      export GOTOOLCHAIN=go1.27.3   # Go downloads it on first use; then run make setup again"; \
+				echo "  Or skip building: the release assets (cleat-worker .deb, cleat tarball) need no Go and no compiler:"; \
+				echo "      https://github.com/cleat-team/cleat/releases"; \
+				exit 1; \
+			fi; \
 			echo "[OK] Go $$(go version | head -1)"; \
 		else \
 			echo "[OLD] Go $$(go version | head -1) — need $(GO_MIN_VERSION)+. Install from https://go.dev/dl/"; \
 		fi; \
 	else \
 		echo "[MISSING] Go $(GO_MIN_VERSION)+ — install from https://go.dev/dl/"; \
-		echo "  Linux:   wget https://go.dev/dl/go1.27.1.linux-amd64.tar.gz && sudo rm -rf /usr/local/go && sudo tar -C /usr/local -xzf go1.27.1.linux-amd64.tar.gz"; \
+		echo "  Linux:   wget https://go.dev/dl/go1.27.3.linux-amd64.tar.gz && sudo rm -rf /usr/local/go && sudo tar -C /usr/local -xzf go1.27.3.linux-amd64.tar.gz"; \
 		echo "  macOS:   brew install go"; \
 	fi
 
@@ -471,7 +493,7 @@ tools-python:
 	@if python3 -c "import componentize" 2>/dev/null; then \
 		echo "[OK] componentize-py"; \
 	else \
-		echo "[MISSING] componentize-py — install with: pip install componentize-py"; \
+		echo "[MISSING] componentize-py — install with: pip install componentize-py==0.25.1"; \
 	fi
 	@cd python-sdk && python3 -c "import cleat_sdk" 2>/dev/null && echo "[OK] cleat_sdk (editable)" || \
 		echo "[MISSING] cleat_sdk — install with: cd python-sdk && pip install -e ."
@@ -491,19 +513,6 @@ tools-java:
 		echo "[MISSING] JDK 11+ — install from https://adoptium.net"; \
 	fi
 
-.PHONY: tools-as
-tools-as:
-	@if command -v npm >/dev/null 2>&1; then \
-		echo "[OK] npm $$(npm --version)"; \
-	else \
-		echo "[MISSING] Node.js/npm — install from https://nodejs.org"; \
-	fi
-	@if command -v npx >/dev/null 2>&1 && npx --yes asc --version >/dev/null 2>&1; then \
-		echo "[OK] AssemblyScript compiler (asc)"; \
-	else \
-		echo "[MISSING] asc — install with: npm install -g assemblyscript"; \
-	fi
-
 .PHONY: tools-check
 tools-check:
 	@echo "=== WASM Compilation Toolchains ==="
@@ -513,8 +522,6 @@ tools-check:
 	@$(MAKE) --no-print-directory tools-python
 	@echo ""
 	@$(MAKE) --no-print-directory tools-java
-	@echo ""
-	@$(MAKE) --no-print-directory tools-as
 	@echo ""
 	@echo "=== Done ==="
 

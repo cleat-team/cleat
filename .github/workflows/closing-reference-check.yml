@@ -98,9 +98,12 @@ on:
 
 permissions:
   contents: read
-  # Read-only, for `gh pr view --json closingIssuesReferences,commits` in the
-  # negated-reference step below. contents:read alone does not reach the
-  # Pulls API.
+  # Read-only, for `gh pr view --json closingIssuesReferences` and the PR's
+  # commit count in the negated-reference step below. contents:read alone does
+  # not reach the Pulls API. The commit MESSAGES come from git, fetched by ref
+  # (refs/pull/N/head) with the same token, which needs only contents:read:
+  # the API returns at most 100 (`pr view`) or 250 (REST, GraphQL) of a PR's
+  # commits and a re-cut has 350 (cleat#4456).
   pull-requests: read
   # cleat#2696: to POST/update the classic commit status this job now posts
   # explicitly for the required "Closing References" context -- the
@@ -115,6 +118,7 @@ jobs:
     # Actions' own per-run check-run, left informational on purpose.
     name: Closing References Runner
     runs-on: ubuntu-latest
+    timeout-minutes: 10  # max 0.3m over 56 successful runs (develop push + pull_request samples), 2026-10-27; cleat#3479
 
     steps:
       # cleat#2696. One target SHA, computed once, for both event shapes:
@@ -252,6 +256,7 @@ jobs:
   closing-reference-declared:
     name: Closing Reference Declared
     runs-on: ubuntu-latest
+    timeout-minutes: 10  # max 0.3m over 38 successful runs (develop push + pull_request samples), 2026-10-27; cleat#3479
 
     # cleat#1962. ADVISORY ONLY -- deliberately NOT in .github/required-checks.txt.
     # A separate job (see the header comment above) so this check-run cannot ride

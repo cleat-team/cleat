@@ -68,7 +68,7 @@ func Build(result *analyzer.AnalysisResult) (*Graph, error) {
 
 	// Identify cleat leaves (functions calling HostCalls methods).
 	for _, fd := range result.Funcs {
-		if hasHostCallsCall(fd) {
+		if hasHostCallsCall(result, fd) {
 			fqname := fd.FullyQualifiedName()
 			fd.IsDurableLeaf = true
 			fd.DurabilityTag = "DurableLeaf"
@@ -144,7 +144,7 @@ func resolveCallee(call *ast.CallExpr, info *types.Info) string {
 
 // hasHostCallsCall checks if a function's body contains any call to
 // a method on a HostCalls value.
-func hasHostCallsCall(fd *analyzer.FuncDecl) bool {
+func hasHostCallsCall(result *analyzer.AnalysisResult, fd *analyzer.FuncDecl) bool {
 	if fd.Ast.Body == nil || fd.Pkg.Info == nil {
 		return false
 	}
@@ -169,13 +169,19 @@ func hasHostCallsCall(fd *analyzer.FuncDecl) bool {
 		if !ok {
 			return true
 		}
-		if analyzer.HostCallsMethod(sel) || analyzer.PluginCallerMethod(sel) || analyzer.SDKDurableHelper(sel) {
+		if analyzer.HostCallsMethod(sel) || analyzer.PluginCallerMethod(sel) {
 			found = true
 			return false
 		}
 		return true
 	})
-	return found
+	if found {
+		return true
+	}
+	// A call into a function from another package that makes host calls on this one's behalf
+	// (cleat#3803, cleat#3805). The body above names none, so without this the function is not a durable
+	// leaf, is not in the cleat closure, is not handed `h`, and a run through it dies on a nil adapter.
+	return len(result.DepReferences(fd)) > 0
 }
 
 // NumEdges returns the total number of edges in the call graph.

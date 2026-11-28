@@ -415,12 +415,19 @@ func (c *fakeConn) queryTenantLookup(args []driver.NamedValue) (driver.Rows, err
 	hashHex := fmt.Sprintf("%x", keyHash)
 	tid, ok := c.store.apiKeys[hashHex]
 	if !ok {
-		return &fakeRows{columns: []string{"tenant_id"}}, nil
+		return &fakeRows{columns: []string{"tenant_id", "key_id"}}, nil
 	}
 	return &fakeRows{
-		columns: []string{"tenant_id"},
-		data:    [][]driver.Value{{tid}},
+		columns: []string{"tenant_id", "key_id"},
+		data:    [][]driver.Value{{tid, fakeKeyID(hashHex).String()}},
 	}, nil
+}
+
+// fakeKeyID is the key id this fake serves for a key hash (cleat#3623): stable, a valid uuid, and a
+// function of the hash alone, so the tests that populate apiKeys need not also name an id and a test
+// that wants the subject a key will be recorded under can compute it from the same hash.
+func fakeKeyID(keyHashHex string) uuid.UUID {
+	return uuid.NewSHA1(uuid.NameSpaceOID, []byte(keyHashHex))
 }
 
 func (c *fakeConn) buildEventRows(events []auditEventRow) (driver.Rows, error) {

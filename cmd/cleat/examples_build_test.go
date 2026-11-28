@@ -21,7 +21,7 @@ import (
 // None of it was visible to CI, and the reason is worth stating: the examples
 // are VALID GO. `cd examples && go build ./... && go vet ./...` is clean, so
 // every Go job passed. The only CI reference to examples/ was
-// examples/as-workflow, which is AssemblyScript. The one command the examples
+// examples/as-workflow, which was AssemblyScript. The one command the examples
 // document -- `cleat build -o /tmp/out ./examples/<name>/` -- was the one
 // nobody ran.
 //

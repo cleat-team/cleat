@@ -53,10 +53,13 @@ type quota struct {
 //
 // # Failing open
 //
-// A quota that cannot be read does not refuse. The fallback direction matches
-// what engine.tenantSettings does with an unreadable settings row: an
-// infrastructure problem in the metering path should not take down the ability
-// to start workflows. It is recorded, not silent.
+// A quota that cannot be read does not refuse: an infrastructure problem in the
+// metering path should not take down the ability to start workflows. It is
+// recorded, not silent. (The engine made the same choice for an unreadable
+// settings row until cleat#3565 and no longer does: there the fallback was
+// wider than the limit a tenant had set, and an execution that cannot read its
+// limits now does not run. A quota is a count of starts a tenant is allowed,
+// not a bound on a guest already running, which is why the two differ.)
 func (p *Plugin) Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !isWorkflowStart(r) {

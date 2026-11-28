@@ -259,7 +259,8 @@ This matters for what the core tables guarantee a plugin. A plugin reading
 connection is subject to RLS -- a superuser bypasses it unconditionally, and
 the table's owner bypasses it unless the table is `FORCE`d. `engine.CheckRLSEnforced`
 exists to detect exactly that, and the worker refuses to start on a bypassing
-connection when `-rls-check` is left at its default.
+connection when `-rls-check` is left at its default, and, whatever it says, on any bypassing
+connection once the database holds more than one tenant (cleat#3772).
 
 ### What `DatabaseAccessReadOnly` guarantees, and what it does not
 
@@ -385,8 +386,8 @@ in `admin.plugin_tables`, and `admin.drop_tenant` deletes from each of them.
 
 So a dropped tenant's `kv_store`, `audit_events`, `oauth_sessions`,
 `webhook_events` and `blob_index` rows go with it, along with nine core tables
-and the admin rows that name the tenant. `cmd/cleatctl/droptenant.go`'s
-`dropTenantTables` is the maintained list of what an operator sees counted
+and the admin rows that name the tenant. `internal/tenantdrop`'s
+`PostgresTables` (which `cmd/cleatctl`'s `dropTenantTables` is built from) is the maintained list of what an operator sees counted
 before confirming, and its own comment explains why it is **not** derived from
 the function's `DELETE` statements: several entries go by foreign-key cascade,
 and reading only the `DELETE`s is how `tenant_settings` came to be missing from

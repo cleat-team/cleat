@@ -76,6 +76,30 @@ var mysqlBaselineCollationExceptions = map[string]string{
 	// Opaque external identifier: case-insensitive comparison would let two
 	// distinct Slack workspaces collide on the primary key.
 	"slack_workspace.team_id": "utf8mb4_bin",
+	// A plugin name is matched EXACTLY by the worker's own claim-time check, so the
+	// deploy-time check against this registry has to match the same way (cleat#3600):
+	// under the default case-insensitive collation a deploy needing "slack-notify" would
+	// be accepted on the strength of a worker that registered only "Slack-Notify", and
+	// then be refused at claim time. Measured: the default collation returned a row for
+	// the wrong-case name on MySQL and SQL Server.
+	"registered_plugins.plugin_name": "utf8mb4_bin",
+
+	// A workflow-definition NAME is compared exactly on every dialect (cleat#3640, owner
+	// decision D60-b; PostgreSQL and, since migration 011, SQL Server do), so migration 012
+	// gave these ten columns utf8mb4_0900_bin: NO PAD byte comparison, the one MySQL collation
+	// that matched PostgreSQL on all six measured probes. `utf8mb4_bin` is PAD SPACE and would
+	// equate 'x' with 'x '. The list is the SQL Server migration's, column for column
+	// (migration/workflow_names_become_exact_on_mysql_test.go derives it independently).
+	"workflow_defs.name":                   "utf8mb4_0900_bin",
+	"workflow_instances.def_name":          "utf8mb4_0900_bin",
+	"workflow_routing.workflow_name":       "utf8mb4_0900_bin",
+	"workflow_tags.workflow_name":          "utf8mb4_0900_bin",
+	"workflow_schedules.def_name":          "utf8mb4_0900_bin",
+	"idempotency_keys.def_name":            "utf8mb4_0900_bin",
+	"workflow_memory_samples.def_name":     "utf8mb4_0900_bin",
+	"workflow_memory_stats.def_name":       "utf8mb4_0900_bin",
+	"event_history.child_name":             "utf8mb4_0900_bin",
+	"plugin_dep_overrides.definition_name": "utf8mb4_0900_bin",
 }
 
 func TestTheMySQLBaselineKeepsWhatCatalogdiffCannotSee(t *testing.T) {

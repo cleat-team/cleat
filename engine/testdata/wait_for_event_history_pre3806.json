@@ -1,0 +1,150 @@
+{
+  "_comment": [
+    "A WaitForEvent history recorded by engine/wait_for_event.go as it stood on develop 75ffb2b3b,",
+    "before cleat#3806 changed the re-check schedule. Produced by driveWaitForEvent",
+    "(engine/wait_for_event_backoff_test.go) against that code: a 24 h wait, found=false for seven",
+    "segments, found=true on the eighth. Timestamps are virtual. Every await_signals carries TimeoutMs 6000,",
+    "which is the point: a replay must use the RECORDED value, not the schedule the code computes now."
+  ],
+  "claimed": "{\"found\":true,\"payload\":\"PAID\"}",
+  "history": [
+    {
+      "step": 0,
+      "type": "plugin_call",
+      "timestamp_ms": 1794624263222,
+      "created_at": "0001-01-01T00:00:00Z",
+      "plugin_name": "webhook-ingest",
+      "plugin_func": "await_webhook",
+      "plugin_input": "{}",
+      "plugin_output": "{\"found\":false}"
+    },
+    {
+      "step": 1,
+      "type": "await_signals",
+      "timestamp_ms": 1794624263222,
+      "created_at": "0001-01-01T00:00:00Z",
+      "signal_names": "[\"__evt:payment\"]",
+      "timeout_ms": 6000
+    },
+    {
+      "step": 2,
+      "type": "plugin_call",
+      "timestamp_ms": 1794624269223,
+      "created_at": "0001-01-01T00:00:00Z",
+      "plugin_name": "webhook-ingest",
+      "plugin_func": "await_webhook",
+      "plugin_input": "{}",
+      "plugin_output": "{\"found\":false}"
+    },
+    {
+      "step": 3,
+      "type": "await_signals",
+      "timestamp_ms": 1794624269223,
+      "created_at": "0001-01-01T00:00:00Z",
+      "signal_names": "[\"__evt:payment\"]",
+      "timeout_ms": 6000
+    },
+    {
+      "step": 4,
+      "type": "plugin_call",
+      "timestamp_ms": 1794624275224,
+      "created_at": "0001-01-01T00:00:00Z",
+      "plugin_name": "webhook-ingest",
+      "plugin_func": "await_webhook",
+      "plugin_input": "{}",
+      "plugin_output": "{\"found\":false}"
+    },
+    {
+      "step": 5,
+      "type": "await_signals",
+      "timestamp_ms": 1794624275224,
+      "created_at": "0001-01-01T00:00:00Z",
+      "signal_names": "[\"__evt:payment\"]",
+      "timeout_ms": 6000
+    },
+    {
+      "step": 6,
+      "type": "plugin_call",
+      "timestamp_ms": 1794624281225,
+      "created_at": "0001-01-01T00:00:00Z",
+      "plugin_name": "webhook-ingest",
+      "plugin_func": "await_webhook",
+      "plugin_input": "{}",
+      "plugin_output": "{\"found\":false}"
+    },
+    {
+      "step": 7,
+      "type": "await_signals",
+      "timestamp_ms": 1794624281225,
+      "created_at": "0001-01-01T00:00:00Z",
+      "signal_names": "[\"__evt:payment\"]",
+      "timeout_ms": 6000
+    },
+    {
+      "step": 8,
+      "type": "plugin_call",
+      "timestamp_ms": 1794624287226,
+      "created_at": "0001-01-01T00:00:00Z",
+      "plugin_name": "webhook-ingest",
+      "plugin_func": "await_webhook",
+      "plugin_input": "{}",
+      "plugin_output": "{\"found\":false}"
+    },
+    {
+      "step": 9,
+      "type": "await_signals",
+      "timestamp_ms": 1794624287226,
+      "created_at": "0001-01-01T00:00:00Z",
+      "signal_names": "[\"__evt:payment\"]",
+      "timeout_ms": 6000
+    },
+    {
+      "step": 10,
+      "type": "plugin_call",
+      "timestamp_ms": 1794624293227,
+      "created_at": "0001-01-01T00:00:00Z",
+      "plugin_name": "webhook-ingest",
+      "plugin_func": "await_webhook",
+      "plugin_input": "{}",
+      "plugin_output": "{\"found\":false}"
+    },
+    {
+      "step": 11,
+      "type": "await_signals",
+      "timestamp_ms": 1794624293227,
+      "created_at": "0001-01-01T00:00:00Z",
+      "signal_names": "[\"__evt:payment\"]",
+      "timeout_ms": 6000
+    },
+    {
+      "step": 12,
+      "type": "plugin_call",
+      "timestamp_ms": 1794624299228,
+      "created_at": "0001-01-01T00:00:00Z",
+      "plugin_name": "webhook-ingest",
+      "plugin_func": "await_webhook",
+      "plugin_input": "{}",
+      "plugin_output": "{\"found\":false}"
+    },
+    {
+      "step": 13,
+      "type": "await_signals",
+      "timestamp_ms": 1794624299228,
+      "created_at": "0001-01-01T00:00:00Z",
+      "signal_names": "[\"__evt:payment\"]",
+      "timeout_ms": 6000
+    },
+    {
+      "step": 14,
+      "type": "plugin_call",
+      "timestamp_ms": 1794624305229,
+      "created_at": "0001-01-01T00:00:00Z",
+      "plugin_name": "webhook-ingest",
+      "plugin_func": "await_webhook",
+      "plugin_input": "{}",
+      "plugin_output": "{\"found\":true,\"payload\":\"PAID\"}"
+    }
+  ],
+  "segments": 8,
+  "timeout_ms": 86400000
+}

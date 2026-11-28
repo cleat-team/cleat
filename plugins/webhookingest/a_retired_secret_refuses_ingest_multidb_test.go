@@ -50,6 +50,7 @@ func TestARetiredSecretRefusesIngest(t *testing.T) {
 		be := be
 		t.Run(be.Name, func(t *testing.T) {
 			defer be.Cleanup()
+			defer removeLeakedSourceSecrets(t, be)
 
 			ctx := context.Background()
 			dialect := plugin.Dialect(string(be.Dialect))
@@ -204,6 +205,7 @@ func TestTenantBCannotReadTenantAsWebhookIngestSecretThroughTheRoute(t *testing.
 		be := be
 		t.Run(be.Name, func(t *testing.T) {
 			defer be.Cleanup()
+			defer removeLeakedSourceSecrets(t, be)
 
 			ctx := context.Background()
 			dialect := plugin.Dialect(string(be.Dialect))

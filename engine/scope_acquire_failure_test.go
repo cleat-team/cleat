@@ -12,7 +12,7 @@ import (
 // it as `_err_code`, AssemblyScript reads only `decoded.extra`, Java ignores
 // the result entirely and returns its own `_scopePrefix`, Python's import is a
 // stub, and Go discards it to match Rust. So the store-failure branch of
-// freshSetScope returned errCode 1 into five discards and the guest ran on
+// freshSetScope (still the name of the method that arms the suspension) returned errCode 1 into five discards and the guest ran on
 // believing it held the concurrency key -- the mutual-exclusion violation of
 // the guarantee scope exists to provide.
 //
@@ -21,9 +21,10 @@ import (
 // and -- via the two controls -- that it refuses only when it should.
 
 // The two stores these tests need already exist in locking_test.go, which is
-// the point: freshAcquireLock and freshSetScope are the only two callers of
-// AcquireConcurrencyKey, and they were given opposite treatments of the same
-// two outcomes.
+// the point: AcquireLock (its step, acquireLockStep in locking.go) and SetScope (attemptScope in scope.go) are the only two engine host calls that reach
+// AcquireConcurrencyKey, and they were given opposite treatments of the same two outcomes. (sharded_store.go only delegates, and the
+// worker's HTTP route at cmd/cleat-worker/server.go calls it too, but neither is a host call. Re-derive:
+// grep -rn --include='*.go' '\.AcquireConcurrencyKey(' . | grep -v _test.go)
 //
 //	acquireErrorStore        -> (false, "store error")  the store is broken
 //	acquireNotAcquiredStore  -> (false, nil)            somebody else holds it
@@ -118,10 +119,11 @@ func TestSetScopeSuccessDoesNotSuspend(t *testing.T) {
 
 // The retry the suspension exists to reach.
 //
-// replaySetScope's `rec.Err != ""` branch declines to set the scope fields and
-// re-enters freshSetScope, commented "switch to fresh to retry acquisition".
-// Before cleat#1062 nothing produced the suspension that leads to a replay, so
-// that branch was reachable only by accident. This walks the whole path: a
+// The replay of a recorded failed attempt declined to set the scope fields and
+// went fresh to retry the acquisition (replaySetScope's `rec.Err != ""` branch,
+// which is setScopeStep's run of prefix records since cleat#4211). Before
+// cleat#1062 nothing produced the suspension that leads to a replay, so that
+// branch was reachable only by accident. This walks the whole path: a
 // recorded failure, replayed against a store that now works, acquires.
 func TestSetScopeReplayOfRecordedFailureRetriesAcquisition(t *testing.T) {
 	s := newTestExecSession()

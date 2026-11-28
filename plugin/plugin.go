@@ -75,6 +75,14 @@ var ErrNotConfigured = errors.New("plugin not configured")
 // marking the plugin unhealthy and continuing.
 var ErrFatalMisconfiguration = errors.New("plugin: fatal misconfiguration")
 
+// ErrSignalNotAllowed is returned by Environment.SignalWorkflow when the worker
+// runs with --require-signal-auth and the target workflow's allowed_signals does
+// not name the calling plugin. It is a refusal, not a delivery failure: asking
+// again, with nothing changed, gets the same answer, so a caller must not retry it
+// at the pace it retries a transient error. cleat#3835: the event-triggers
+// reconciler did, because the refusal was a plain error.
+var ErrSignalNotAllowed = errors.New("plugin: signal not allowed")
+
 // ErrWorkflowNotFound is returned by Environment.SignalWorkflow when the
 // target workflowID is not visible under the caller's own tenant --
 // because it belongs to another tenant, or because no such workflow ever

@@ -526,5 +526,255 @@ func (p *Plugin) Migrations() []plugin.Migration {
 					FOREIGN KEY (webhook_id) REFERENCES webhook_config(id);
 			`,
 		},
+		{
+			// webhook_config.name: an optional, caller-set name, unique per tenant
+			// among rows that have not been deleted. cleat#3538.
+			//
+			// WHY. A webhook row had no identity a caller could choose. The only
+			// attributes to find one by were `url`, which changes, and `events`, which
+			// means something else. clew (clew#317) found its row by URL, so a changed
+			// URL created a SECOND row and left runs that already held the first row's
+			// id delivering to the old URL under the old secret. A name lets an app
+			// find its own webhook, and move it, by a stable key.
+			//
+			// NULLABLE, AND NULL IS NOT A NAME. Existing rows get NULL, and any number
+			// of rows may have no name: uniqueness applies only to rows that have one.
+			// Each dialect gets there differently.
+			//
+			//   postgres  a partial unique index. (tenant_id, name) already treats NULLs
+			//             as distinct, and the predicate also drops deleted rows.
+			//   mssql     a FILTERED unique index with the same predicate. SQL Server
+			//             treats two NULLs as EQUAL in a unique index, so an unfiltered one
+			//             would allow a single unnamed row per tenant -- the same reason
+			//             plugins/auditlog's idx_audit_events_tenant_seq is filtered.
+			//   mysql     no partial indexes. A virtual generated column, name_live, is the
+			//             name while the row is live and NULL once deleted_at is set, and
+			//             the unique index is on (tenant_id, name_live). NULLs are distinct
+			//             there, so unnamed and deleted rows never collide.
+			//
+			// DELETED ROWS RELEASE THEIR NAME. handleDeleteWebhook soft-deletes (v6), so a
+			// plain unique index on (tenant_id, name) would hold a deleted webhook's name
+			// forever and the next create of that name would be refused by a row nobody can
+			// list. The predicate (or name_live) makes uniqueness a property of live rows.
+			//
+			// CASE. The API accepts only [a-z0-9._-] names (validWebhookName), so no
+			// collation comparison can ever make two names equal that this index sees as
+			// different, or the reverse: MySQL and SQL Server compare case-insensitively
+			// by default and PostgreSQL does not.
+			//
+			// A NEW VERSION, NEVER AN EDIT TO v1, for the same reason v6 and v7 are.
+			Version: 8,
+			Up: `
+				ALTER TABLE webhook_config ADD COLUMN IF NOT EXISTS name TEXT;
+				CREATE UNIQUE INDEX IF NOT EXISTS uq_webhook_config_tenant_name
+					ON webhook_config (tenant_id, name) WHERE name IS NOT NULL AND deleted_at IS NULL;
+			`,
+			// MySQL has no ADD COLUMN IF NOT EXISTS and no CREATE INDEX IF NOT EXISTS, and its
+			// DDL is not transactional, so every step is guarded like v6 and v7: a crash
+			// between two of them must leave a migration that finishes on the next boot, not
+			// one that fails forever on ERROR 1060 / 1061.
+			UpMySQL: `
+				SET @col := (
+					SELECT COUNT(*) FROM information_schema.columns
+					WHERE table_schema = DATABASE() AND table_name = 'webhook_config' AND column_name = 'name'
+				);
+				SET @ddl := IF(@col = 0,
+					'ALTER TABLE webhook_config ADD COLUMN name VARCHAR(128) NULL',
+					'DO 0');
+				PREPARE stmt FROM @ddl;
+				EXECUTE stmt;
+				DEALLOCATE PREPARE stmt;
+
+				SET @col := (
+					SELECT COUNT(*) FROM information_schema.columns
+					WHERE table_schema = DATABASE() AND table_name = 'webhook_config' AND column_name = 'name_live'
+				);
+				SET @ddl := IF(@col = 0,
+					'ALTER TABLE webhook_config ADD COLUMN name_live VARCHAR(128) GENERATED ALWAYS AS (IF(deleted_at IS NULL, name, NULL)) VIRTUAL',
+					'DO 0');
+				PREPARE stmt FROM @ddl;
+				EXECUTE stmt;
+				DEALLOCATE PREPARE stmt;
+
+				SET @idx := (
+					SELECT COUNT(*) FROM information_schema.statistics
+					WHERE table_schema = DATABASE() AND table_name = 'webhook_config' AND index_name = 'uq_webhook_config_tenant_name'
+				);
+				SET @ddl := IF(@idx = 0,
+					'CREATE UNIQUE INDEX uq_webhook_config_tenant_name ON webhook_config (tenant_id, name_live)',
+					'DO 0');
+				PREPARE stmt FROM @ddl;
+				EXECUTE stmt;
+				DEALLOCATE PREPARE stmt;
+			`,
+			// The index is created through EXEC so its text is compiled after the column
+			// exists: a batch that adds a column and then names it in a CREATE INDEX is
+			// resolved before either runs. plugin.splitStatements already separates the
+			// statements, and the EXEC keeps the dependency out of the parser's reach, the
+			// way plugins/eventtriggers creates uq_event_awaiters_registration.
+			UpMSSQL: `
+				IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('webhook_config') AND name = 'name')
+				ALTER TABLE webhook_config ADD name NVARCHAR(128) NULL;
+
+				IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE object_id = OBJECT_ID('webhook_config') AND name = 'uq_webhook_config_tenant_name')
+				EXEC('CREATE UNIQUE INDEX uq_webhook_config_tenant_name ON webhook_config (tenant_id, name) WHERE name IS NOT NULL AND deleted_at IS NULL');
+			`,
+			Down: `
+				DROP INDEX IF EXISTS uq_webhook_config_tenant_name;
+				ALTER TABLE webhook_config DROP COLUMN IF EXISTS name;
+			`,
+			DownMySQL: `
+				SET @idx := (
+					SELECT COUNT(*) FROM information_schema.statistics
+					WHERE table_schema = DATABASE() AND table_name = 'webhook_config' AND index_name = 'uq_webhook_config_tenant_name'
+				);
+				SET @ddl := IF(@idx > 0, 'DROP INDEX uq_webhook_config_tenant_name ON webhook_config', 'DO 0');
+				PREPARE stmt FROM @ddl;
+				EXECUTE stmt;
+				DEALLOCATE PREPARE stmt;
+
+				SET @col := (
+					SELECT COUNT(*) FROM information_schema.columns
+					WHERE table_schema = DATABASE() AND table_name = 'webhook_config' AND column_name = 'name_live'
+				);
+				SET @ddl := IF(@col > 0, 'ALTER TABLE webhook_config DROP COLUMN name_live', 'DO 0');
+				PREPARE stmt FROM @ddl;
+				EXECUTE stmt;
+				DEALLOCATE PREPARE stmt;
+
+				SET @col := (
+					SELECT COUNT(*) FROM information_schema.columns
+					WHERE table_schema = DATABASE() AND table_name = 'webhook_config' AND column_name = 'name'
+				);
+				SET @ddl := IF(@col > 0, 'ALTER TABLE webhook_config DROP COLUMN name', 'DO 0');
+				PREPARE stmt FROM @ddl;
+				EXECUTE stmt;
+				DEALLOCATE PREPARE stmt;
+			`,
+			DownMSSQL: `
+				IF EXISTS (SELECT 1 FROM sys.indexes WHERE object_id = OBJECT_ID('webhook_config') AND name = 'uq_webhook_config_tenant_name')
+				DROP INDEX uq_webhook_config_tenant_name ON webhook_config;
+
+				IF EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('webhook_config') AND name = 'name')
+				ALTER TABLE webhook_config DROP COLUMN name;
+			`,
+		},
+		{
+			// A resend of a failed delivery is recorded on the delivery it resent (cleat#3612).
+			// A delivery that ends `failed` was lost to the operator until a route could put it
+			// back; that route resets status, attempt_count and next_attempt_at, which would
+			// erase the only evidence that anyone had. These three columns keep it:
+			// redelivery_count says it happened and how often, last_redelivered_at when (the
+			// database clock, like every other timestamp in this table), and
+			// last_redelivered_by who asked, as auth.SubjectFromContext resolved the request.
+			// last_redelivered_by is NULL when nothing resolved one: recording that the identity
+			// was not captured is the honest value, and refusing the resend over it would be the
+			// wrong one. (Until cleat#3623 that was the usual case for an API-key caller, which
+			// now records "key:<key id>".)
+			//
+			// A NEW VERSION, NEVER AN EDIT TO v1, for the same reason v6, v7 and v8 are. MySQL has
+			// no ADD COLUMN IF NOT EXISTS and its DDL is not transactional, so every step is
+			// guarded and a crash between two of them finishes on the next boot.
+			Version: 9,
+			Up: `
+				ALTER TABLE webhook_delivery ADD COLUMN IF NOT EXISTS redelivery_count INTEGER NOT NULL DEFAULT 0;
+				ALTER TABLE webhook_delivery ADD COLUMN IF NOT EXISTS last_redelivered_at TIMESTAMPTZ;
+				ALTER TABLE webhook_delivery ADD COLUMN IF NOT EXISTS last_redelivered_by TEXT;
+			`,
+			UpMySQL: `
+				SET @col := (
+					SELECT COUNT(*) FROM information_schema.columns
+					WHERE table_schema = DATABASE() AND table_name = 'webhook_delivery' AND column_name = 'redelivery_count'
+				);
+				SET @ddl := IF(@col = 0,
+					'ALTER TABLE webhook_delivery ADD COLUMN redelivery_count INT NOT NULL DEFAULT 0',
+					'DO 0');
+				PREPARE stmt FROM @ddl;
+				EXECUTE stmt;
+				DEALLOCATE PREPARE stmt;
+
+				SET @col := (
+					SELECT COUNT(*) FROM information_schema.columns
+					WHERE table_schema = DATABASE() AND table_name = 'webhook_delivery' AND column_name = 'last_redelivered_at'
+				);
+				SET @ddl := IF(@col = 0,
+					'ALTER TABLE webhook_delivery ADD COLUMN last_redelivered_at TIMESTAMP(6) NULL',
+					'DO 0');
+				PREPARE stmt FROM @ddl;
+				EXECUTE stmt;
+				DEALLOCATE PREPARE stmt;
+
+				SET @col := (
+					SELECT COUNT(*) FROM information_schema.columns
+					WHERE table_schema = DATABASE() AND table_name = 'webhook_delivery' AND column_name = 'last_redelivered_by'
+				);
+				SET @ddl := IF(@col = 0,
+					'ALTER TABLE webhook_delivery ADD COLUMN last_redelivered_by VARCHAR(512) NULL',
+					'DO 0');
+				PREPARE stmt FROM @ddl;
+				EXECUTE stmt;
+				DEALLOCATE PREPARE stmt;
+			`,
+			UpMSSQL: `
+				IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('webhook_delivery') AND name = 'redelivery_count')
+				ALTER TABLE webhook_delivery ADD redelivery_count INT NOT NULL DEFAULT 0;
+
+				IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('webhook_delivery') AND name = 'last_redelivered_at')
+				ALTER TABLE webhook_delivery ADD last_redelivered_at DATETIMEOFFSET NULL;
+
+				IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('webhook_delivery') AND name = 'last_redelivered_by')
+				ALTER TABLE webhook_delivery ADD last_redelivered_by NVARCHAR(512) NULL;
+			`,
+			Down: `
+				ALTER TABLE webhook_delivery DROP COLUMN IF EXISTS last_redelivered_by;
+				ALTER TABLE webhook_delivery DROP COLUMN IF EXISTS last_redelivered_at;
+				ALTER TABLE webhook_delivery DROP COLUMN IF EXISTS redelivery_count;
+			`,
+			DownMySQL: `
+				SET @col := (
+					SELECT COUNT(*) FROM information_schema.columns
+					WHERE table_schema = DATABASE() AND table_name = 'webhook_delivery' AND column_name = 'last_redelivered_by'
+				);
+				SET @ddl := IF(@col > 0, 'ALTER TABLE webhook_delivery DROP COLUMN last_redelivered_by', 'DO 0');
+				PREPARE stmt FROM @ddl;
+				EXECUTE stmt;
+				DEALLOCATE PREPARE stmt;
+
+				SET @col := (
+					SELECT COUNT(*) FROM information_schema.columns
+					WHERE table_schema = DATABASE() AND table_name = 'webhook_delivery' AND column_name = 'last_redelivered_at'
+				);
+				SET @ddl := IF(@col > 0, 'ALTER TABLE webhook_delivery DROP COLUMN last_redelivered_at', 'DO 0');
+				PREPARE stmt FROM @ddl;
+				EXECUTE stmt;
+				DEALLOCATE PREPARE stmt;
+
+				SET @col := (
+					SELECT COUNT(*) FROM information_schema.columns
+					WHERE table_schema = DATABASE() AND table_name = 'webhook_delivery' AND column_name = 'redelivery_count'
+				);
+				SET @ddl := IF(@col > 0, 'ALTER TABLE webhook_delivery DROP COLUMN redelivery_count', 'DO 0');
+				PREPARE stmt FROM @ddl;
+				EXECUTE stmt;
+				DEALLOCATE PREPARE stmt;
+			`,
+			DownMSSQL: `
+				IF EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('webhook_delivery') AND name = 'last_redelivered_by')
+				ALTER TABLE webhook_delivery DROP COLUMN last_redelivered_by;
+
+				IF EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('webhook_delivery') AND name = 'last_redelivered_at')
+				ALTER TABLE webhook_delivery DROP COLUMN last_redelivered_at;
+
+				DECLARE @dfname sysname
+				SELECT @dfname = dc.name
+					FROM sys.default_constraints dc
+					JOIN sys.columns c ON c.object_id = dc.parent_object_id AND c.column_id = dc.parent_column_id
+					WHERE dc.parent_object_id = OBJECT_ID('webhook_delivery') AND c.name = 'redelivery_count'
+				IF @dfname IS NOT NULL EXEC('ALTER TABLE webhook_delivery DROP CONSTRAINT [' + @dfname + ']');
+
+				IF EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('webhook_delivery') AND name = 'redelivery_count')
+				ALTER TABLE webhook_delivery DROP COLUMN redelivery_count;
+			`,
+		},
 	}
 }

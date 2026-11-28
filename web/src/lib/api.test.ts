@@ -1,6 +1,8 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import {
+  listDeadLetters,
   listWorkflows,
+  listWorkflowsDetailed,
   getWorkflow,
   startWorkflow,
   signalWorkflow,
@@ -95,11 +97,15 @@ describe('API Client', () => {
   // -- listWorkflows --------------------------------------------------------
 
   describe('listWorkflows', () => {
-    it('calls /api/workflows without query when no status filter', async () => {
+    // Every data-bearing call the dashboard makes asks for the redacted view
+    // (cleat#3581): the dashboard is somewhere people look at what happened. The
+    // flag can only add redaction, and dropping it from a call is what these
+    // expectations exist to catch.
+    it('calls /api/workflows asking for the redacted view when no status filter', async () => {
       mockFetchOk([mockWorkflowInstance]);
       const result = await listWorkflows();
       expect(globalThis.fetch).toHaveBeenCalledWith(
-        '/api/workflows',
+        '/api/workflows?redact=true',
         undefined,
       );
       expect(result).toEqual([mockWorkflowInstance]);
@@ -109,7 +115,7 @@ describe('API Client', () => {
       mockFetchOk([mockWorkflowInstance]);
       await listWorkflows('running');
       expect(globalThis.fetch).toHaveBeenCalledWith(
-        '/api/workflows?status=running',
+        '/api/workflows?status=running&redact=true',
         undefined,
       );
     });
@@ -118,9 +124,62 @@ describe('API Client', () => {
       mockFetchOk([]);
       await listWorkflows('dead letter');
       expect(globalThis.fetch).toHaveBeenCalledWith(
-        '/api/workflows?status=dead%20letter',
+        '/api/workflows?status=dead%20letter&redact=true',
         undefined,
       );
+    });
+
+    // cleat#3775: find a run by what it published.
+    it('sends a published-state filter as state.<key>=<value>, before redact', async () => {
+      mockFetchOk([mockWorkflowInstance]);
+      await listWorkflows(undefined, { order_id: '123' });
+      expect(globalThis.fetch).toHaveBeenCalledWith(
+        '/api/workflows?state.order_id=123&redact=true',
+        undefined,
+      );
+    });
+
+    it('composes a state filter with a status filter', async () => {
+      mockFetchOk([]);
+      await listWorkflows('ready', { order_id: '123' });
+      expect(globalThis.fetch).toHaveBeenCalledWith(
+        '/api/workflows?status=ready&state.order_id=123&redact=true',
+        undefined,
+      );
+    });
+
+    it('encodes the state key and value, so neither can add a parameter', async () => {
+      mockFetchOk([]);
+      await listWorkflows(undefined, { 'a b': 'x&state.evil=1' });
+      expect(globalThis.fetch).toHaveBeenCalledWith(
+        '/api/workflows?state.a%20b=x%26state.evil%3D1&redact=true',
+        undefined,
+      );
+    });
+
+    it('sends an empty value, which is a value', async () => {
+      mockFetchOk([]);
+      await listWorkflows(undefined, { status: '' });
+      expect(globalThis.fetch).toHaveBeenCalledWith(
+        '/api/workflows?state.status=&redact=true',
+        undefined,
+      );
+    });
+
+    it('an empty state object is no filter', async () => {
+      mockFetchOk([]);
+      await listWorkflows(undefined, {});
+      expect(globalThis.fetch).toHaveBeenCalledWith('/api/workflows?redact=true', undefined);
+    });
+
+    it('surfaces the server message when the deployment cannot search by state', async () => {
+      globalThis.fetch = vi.fn().mockResolvedValue({
+        ok: false,
+        status: 422,
+        statusText: 'Unprocessable Entity',
+        json: () => Promise.resolve({ error: 'sealed: see --encrypt-sensitive-payloads' }),
+      });
+      await expect(listWorkflows(undefined, { order_id: '1' })).rejects.toThrow('--encrypt-sensitive-payloads');
     });
 
     it('throws on network error', async () => {
@@ -144,14 +203,79 @@ describe('API Client', () => {
     });
   });
 
+  // -- listWorkflowsDetailed ------------------------------------------------
+
+  describe('listWorkflowsDetailed', () => {
+    // cleat#3775, part 2: on a deployment that seals query_state the worker searches a WINDOW of recent
+    // runs and says how much it covered in headers. Without them an exact answer and a window that ran
+    // out would look the same.
+    function mockFetchWithHeaders(body: any, headers: Record<string, string>) {
+      globalThis.fetch = vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: vi.fn().mockResolvedValue(body),
+        headers: { get: (k: string) => (k in headers ? headers[k] : null) },
+      });
+    }
+
+    it('asks for the same URL as listWorkflows', async () => {
+      mockFetchOk([]);
+      await listWorkflowsDetailed('ready', { order_id: '123' });
+      expect(globalThis.fetch).toHaveBeenCalledWith(
+        '/api/workflows?status=ready&state.order_id=123&redact=true',
+        undefined,
+      );
+    });
+
+    it('reads the window the worker reports', async () => {
+      mockFetchWithHeaders([mockWorkflowInstance], {
+        'X-Query-State-Window': '5000',
+        'X-Query-State-Scanned': '5000',
+        'X-Query-State-Window-Exhausted': 'true',
+        'X-Query-State-Unreadable': '2',
+      });
+      const r = await listWorkflowsDetailed(undefined, { order_id: '123' });
+      expect(r.workflows).toEqual([mockWorkflowInstance]);
+      expect(r.window).toEqual({ size: 5000, scanned: 5000, exhausted: true, unreadable: 2 });
+    });
+
+    it('reads "false" as not exhausted, so a complete window is not shown as a limit', async () => {
+      mockFetchWithHeaders([], {
+        'X-Query-State-Window': '5000',
+        'X-Query-State-Scanned': '40',
+        'X-Query-State-Window-Exhausted': 'false',
+        'X-Query-State-Unreadable': '0',
+      });
+      const r = await listWorkflowsDetailed(undefined, { order_id: '1' });
+      expect(r.window?.exhausted).toBe(false);
+    });
+
+    it('an answer without the window headers is an exact one, and has no window', async () => {
+      mockFetchWithHeaders([mockWorkflowInstance], {});
+      expect((await listWorkflowsDetailed(undefined, { order_id: '1' })).window).toBeUndefined();
+      mockFetchOk([mockWorkflowInstance]); // a response object with no headers at all
+      expect((await listWorkflowsDetailed()).window).toBeUndefined();
+    });
+
+    it('surfaces the server message on a refusal', async () => {
+      globalThis.fetch = vi.fn().mockResolvedValue({
+        ok: false,
+        status: 422,
+        statusText: 'Unprocessable Entity',
+        json: () => Promise.resolve({ error: 'start with --query-state-search-window' }),
+      });
+      await expect(listWorkflowsDetailed(undefined, { a: '1' })).rejects.toThrow('--query-state-search-window');
+    });
+  });
+
   // -- getWorkflow ----------------------------------------------------------
 
   describe('getWorkflow', () => {
-    it('calls /api/workflows/:id', async () => {
+    it('calls /api/workflows/:id asking for the redacted view', async () => {
       mockFetchOk(mockWorkflowInstance);
       const result = await getWorkflow('wf-abc123');
       expect(globalThis.fetch).toHaveBeenCalledWith(
-        '/api/workflows/wf-abc123',
+        '/api/workflows/wf-abc123?redact=true',
         undefined,
       );
       expect(result).toEqual(mockWorkflowInstance);
@@ -161,7 +285,7 @@ describe('API Client', () => {
       mockFetchOk(mockWorkflowInstance);
       await getWorkflow('wf/123');
       expect(globalThis.fetch).toHaveBeenCalledWith(
-        '/api/workflows/wf/123',
+        '/api/workflows/wf/123?redact=true',
         undefined,
       );
     });
@@ -312,6 +436,19 @@ describe('API Client', () => {
     });
   });
 
+  // -- listDeadLetters ------------------------------------------------------
+
+  describe('listDeadLetters', () => {
+    it('asks for the redacted view (cleat#3581)', async () => {
+      mockFetchOk([mockWorkflowInstance]);
+      await listDeadLetters();
+      expect(globalThis.fetch).toHaveBeenCalledWith(
+        '/api/dead-letters?redact=true',
+        undefined,
+      );
+    });
+  });
+
   // -- getQueryState --------------------------------------------------------
 
   describe('getQueryState', () => {
@@ -319,7 +456,7 @@ describe('API Client', () => {
       mockFetchOk({ key: 'my-key', value: 'my-value' });
       const result = await getQueryState('wf-123', 'my-key');
       expect(globalThis.fetch).toHaveBeenCalledWith(
-        '/api/workflows/wf-123/query?key=my-key',
+        '/api/workflows/wf-123/query?key=my-key&redact=true',
         undefined,
       );
       expect(result).toEqual({ key: 'my-key', value: 'my-value' });
@@ -329,7 +466,7 @@ describe('API Client', () => {
       mockFetchOk({ key: '', value: '' });
       await getQueryState('wf-123', 'key with spaces');
       expect(globalThis.fetch).toHaveBeenCalledWith(
-        '/api/workflows/wf-123/query?key=key%20with%20spaces',
+        '/api/workflows/wf-123/query?key=key%20with%20spaces&redact=true',
         undefined,
       );
     });

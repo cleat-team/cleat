@@ -1048,8 +1048,8 @@ func TestMySQLStore_LoadWorkflowConfig_Found(t *testing.T) {
 func TestMySQLStore_LoadWorkflowConfig_NotFound(t *testing.T) {
 	store := newMySQLStoreForTest(t, nil, nil)
 	_, err := store.LoadWorkflowConfig(testCtx, "nonexistent", 1)
-	if err == nil || !strings.Contains(err.Error(), "workflow def not found") {
-		t.Errorf("expected 'workflow def not found', got: %v", err)
+	if err == nil || !strings.Contains(err.Error(), "workflow def not found") || !errors.Is(err, ErrWorkflowDefNotFound) {
+		t.Errorf("expected 'workflow def not found' that is ErrWorkflowDefNotFound (cleat#3883), got: %v", err)
 	}
 }
 
@@ -1070,8 +1070,8 @@ func TestMySQLStore_LoadDAGSpec_Found(t *testing.T) {
 func TestMySQLStore_LoadDAGSpec_NotFound(t *testing.T) {
 	store := newMySQLStoreForTest(t, nil, nil)
 	_, err := store.LoadDAGSpec(testCtx, "nonexistent", 1)
-	if err == nil || !strings.Contains(err.Error(), "workflow def not found") {
-		t.Errorf("expected 'workflow def not found', got: %v", err)
+	if err == nil || !strings.Contains(err.Error(), "workflow def not found") || !errors.Is(err, ErrWorkflowDefNotFound) {
+		t.Errorf("expected 'workflow def not found' that is ErrWorkflowDefNotFound (cleat#3883), got: %v", err)
 	}
 }
 

@@ -114,23 +114,14 @@ func TestRustExampleEntryPointResolutionLive(t *testing.T) {
 	dsn, containerName := startSandboxPostgres(t)
 
 	workerBinary := buildWorkerBinaryOnce(t)
-	worker := exec.Command(workerBinary,
-		"--db="+dsn,
-		"--api-addr=:8080",
+	// A kernel-assigned port read back from the worker's own log (cleat#3510), not a hard-coded
+	// :8080 that two runs on one host would fight over.
+	apiBase, worker, workerOut := startLiveTestWorker(t, workerBinary, dsn, repoRoot,
 		// A worker no longer migrates unless asked (cleat#2117), and this starts one on an
 		// empty database.
 		"--migrate-on-start",
 		"--require-auth=false",
 	)
-	worker.Dir = repoRoot
-	waitForPortFree(t, 8080)
-	worker.Env = os.Environ()
-	var workerOut strings.Builder
-	worker.Stdout = &workerOut
-	worker.Stderr = &workerOut
-	if startErr := worker.Start(); startErr != nil {
-		t.Fatalf("start cleat-worker: %v", startErr)
-	}
 	t.Cleanup(func() {
 		if worker.Process != nil {
 			worker.Process.Kill()
@@ -141,7 +132,7 @@ func TestRustExampleEntryPointResolutionLive(t *testing.T) {
 			t.Logf("worker output:\n%s", workerOut.String())
 		}
 	})
-	waitForHealthz(t, "http://localhost:8080/healthz")
+	waitForHealthz(t, apiBase+"/healthz")
 
 	const workflowName = "rust_workflow"
 	deployCmd := exec.Command(cleatBinary, "deploy", "--name", workflowName, wasmPath)
@@ -152,11 +143,11 @@ func TestRustExampleEntryPointResolutionLive(t *testing.T) {
 	}
 
 	// 1. Implicit start: no entry_point at all.
-	implicitID, implicitErr := startWorkflow(t, workflowName, "")
+	implicitID, implicitErr := startWorkflow(t, apiBase, workflowName, "")
 	if implicitErr != nil {
 		t.Fatalf("starting %s with no entry_point: %v", workflowName, implicitErr)
 	}
-	status := pollWorkflowStatus(t, "http://localhost:8080/api/workflows/"+implicitID)
+	status := pollWorkflowStatus(t, apiBase+"/api/workflows/"+implicitID)
 	if status.Status != "failed" {
 		t.Fatalf("run %s (implicit start, ambiguous entry point): want status \"failed\", got %q (error: %q)",
 			implicitID, status.Status, status.Error)
@@ -183,11 +174,11 @@ func TestRustExampleEntryPointResolutionLive(t *testing.T) {
 	// reason -- see cleat#2066's own test for the same pattern), but it must
 	// NOT fail on entry-point resolution, which is the one thing this test
 	// exists to check.
-	explicitID, explicitErr := startWorkflow(t, workflowName, "place_order")
+	explicitID, explicitErr := startWorkflow(t, apiBase, workflowName, "place_order")
 	if explicitErr != nil {
 		t.Fatalf("starting %s with entry_point=place_order: %v", workflowName, explicitErr)
 	}
-	status = pollWorkflowStatus(t, "http://localhost:8080/api/workflows/"+explicitID)
+	status = pollWorkflowStatus(t, apiBase+"/api/workflows/"+explicitID)
 	if strings.Contains(status.Error, "cannot determine entry point") || strings.Contains(status.Error, "no handle_* export") {
 		t.Fatalf("run %s (entry_point=place_order, a name the build itself extracted) failed on entry-point "+
 			"resolution: %s -- the name cargo exported does not match what the cleat_entry_points section put "+
@@ -197,7 +188,7 @@ func TestRustExampleEntryPointResolutionLive(t *testing.T) {
 }
 
 // startWorkflow POSTs to /api/workflows/:name/start and returns the new run's id.
-func startWorkflow(t *testing.T, name, entryPoint string) (string, error) {
+func startWorkflow(t *testing.T, base, name, entryPoint string) (string, error) {
 	t.Helper()
 	body := map[string]any{"input": map[string]any{"user_id": "u1", "cart": []map[string]any{{"sku": "widget", "quantity": 1}}}}
 	if entryPoint != "" {
@@ -207,7 +198,7 @@ func startWorkflow(t *testing.T, name, entryPoint string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("marshal start body: %w", err)
 	}
-	resp, err := http.Post("http://localhost:8080/api/workflows/"+name+"/start", "application/json", strings.NewReader(string(payload)))
+	resp, err := http.Post(base+"/api/workflows/"+name+"/start", "application/json", strings.NewReader(string(payload)))
 	if err != nil {
 		return "", err
 	}

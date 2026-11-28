@@ -32,6 +32,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/cleat-team/cleat/engine/testutil"
 )
 
 // postgresProcedureMigrations lists the migration files (in order) that
@@ -254,6 +256,20 @@ func applyMSSQLProcedures(t *testing.T, db *sql.DB) {
 			mssqlProceduresErr = fmt.Errorf("mssqlProcedureMigrations is empty")
 			return
 		}
+		// 003 replaces dbo.fn_tenant_filter, which SQL Server refuses (error 3729)
+		// while any policy references it, and a migration after 003 may have
+		// created one (cleat#3540's TenantFilter_LibraryInstalls). Drop them all
+		// for the replay and put back the later ones afterwards.
+		if err := testutil.MSSQLDropTenantFilterPolicies(db); err != nil {
+			mssqlProceduresErr = err
+			return
+		}
+		defer func() {
+			if mssqlProceduresErr != nil {
+				return
+			}
+			mssqlProceduresErr = testutil.MSSQLRestoreLaterFilterPolicies(db, filepath.Join("..", "migrations", "mssql"))
+		}()
 		for _, f := range mssqlProcedureMigrations[len(mssqlProcedureMigrations)-1:] {
 			path := filepath.Join("..", "migrations", "mssql", f)
 			data, err := os.ReadFile(path)

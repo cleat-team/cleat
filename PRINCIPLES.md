@@ -64,7 +64,7 @@ filesystem or memory.
 
 User workflow code runs inside WebAssembly, not natively. WASM provides
 deterministic execution (no undefined behavior), language flexibility (Go,
-Rust, AssemblyScript, and more targets), and a security boundary (user code
+Rust, and more targets), and a security boundary (user code
 cannot access the host system except through explicit HostCalls). No user code
 ever runs in the worker process address space.
 
@@ -194,8 +194,7 @@ rare edge case, it is the primary execution mode after restarts.
 Cleat's native SDK is Go -- write standard Go functions, no DSL, no special
 annotations, no framework inheritance. The `cleat build` pipeline handles WASM
 compilation transparently. Rust support is first-class via `cleat-sdk` crate
-and `#[cleat_entry]` proc-macros. Community SDKs cover Python, Java, and
-AssemblyScript. The developer writes idiomatic code in their language of
+and `#[cleat_entry]` proc-macros. Community SDKs cover Python and Java. The developer writes idiomatic code in their language of
 choice; cleat handles the rest.
 
 **Do this:** Write `func MyWorkflow(h cleat.HostCalls, input string) error`

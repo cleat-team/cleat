@@ -16,10 +16,14 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"fmt"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -127,12 +131,29 @@ func TestWorkerMigratesFromOutsideTheRepo(t *testing.T) {
 	t.Logf("applied %s migrations from outside the repo", applied)
 }
 
+// workerTestContainerName is a Docker container name for this test run that no other run, concurrent or earlier, can have: the test's name, the process id, and four random
+// bytes. t.Name() alone is the same on every machine and every run, and can carry "/" for a subtest, which Docker refuses in a name.
+func workerTestContainerName(t *testing.T) string {
+	t.Helper()
+	var b [4]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		t.Fatalf("random container-name suffix: %v", err)
+	}
+	safe := regexp.MustCompile(`[^a-zA-Z0-9_.-]`).ReplaceAllString(t.Name(), "_")
+	return fmt.Sprintf("cleat-test-1968-pg-%s-%d-%s", safe, os.Getpid(), hex.EncodeToString(b[:]))
+}
+
 func startWorkerTestPostgres(t *testing.T) (dsn, containerName string) {
 	t.Helper()
-	containerName = "cleat-test-1968-pg-" + t.Name()
-	exec.Command("docker", "rm", "-f", containerName).Run()
+	// A name no other run can share (cleat#4416). It used to be "cleat-test-1968-pg-"+t.Name() with a `docker rm -f` of that name BEFORE starting, so a second run of
+	// this test on the same machine did not fail on a taken name: it DELETED the first run's live database. Measured, two concurrent runs of this test: with the second
+	// started 3 s after the first the FIRST failed ("no HTTP API listening line within 30s", its database gone); started together the second failed (docker run, exit 125).
+	containerName = workerTestContainerName(t)
 
 	run := exec.Command("docker", "run", "-d", "--name", containerName,
+		// Findable if a killed run leaks its container: `docker ps -a --filter label=cleat-test=1968`. The old fixed name healed a leak by being removed on the next run,
+		// which is the same behaviour that deleted a concurrent run's database, so a leak is now reported by the label and not silently removed.
+		"--label", "cleat-test=1968",
 		"-e", "POSTGRES_USER=cleat",
 		"-e", "POSTGRES_PASSWORD=cleat",
 		"-e", "POSTGRES_DB=cleat",

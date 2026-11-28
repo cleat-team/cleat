@@ -25,21 +25,60 @@ type eventWaiter interface {
 	WaitForEvent(ctx context.Context, m api.Module, pluginName, functionName, inputJSON, signalNames string, timeoutMs int64, outPtr, outMaxLen uint32) int64
 }
 
-// eventRecheckMs is the longest a single re-claim sleeps before looking again.
+// eventRecheckMs is the FIRST re-claim's wait, and eventRecheckMaxMs is the longest
+// any later one waits. Between them the wait doubles each iteration (6 s, 12 s,
+// 24 s, ... capped at 300 s): see eventRecheckDelayMs.
 //
 // The wake is usually the signal the registration itself triggers, so this is
-// not the wait's expected duration -- it is the bound on a *spurious* wake.
-// A publish's INSERT and its
-// signalAwaiters call are two separate steps, so a wake can arrive for an event
-// an earlier wake of this same awaiter already claimed; the loop re-checks the
-// condition after each wake, and this is how long it waits before doing so
-// unprompted.
+// not the wait's expected duration -- it is how long the loop waits before
+// looking again UNPROMPTED. That unprompted look is a safety net, and for one
+// case only (cleat#3806): a spurious wake is handled by re-claiming after each
+// wake, and the register-versus-publish race is closed inside
+// eventtriggers.ClaimOrRegisterAwaiter, which claims a second time after it
+// registers. What neither covers is a publish whose INSERT committed and whose
+// signalAwaiters then failed: that logs a WARN, keeps the awaiter registered and
+// never signals that event again, so only a re-claim can find it -- or, since
+// cleat#3835, the event-triggers reconciler, which a worker runs every 30 s and
+// which delivers the missing signal for an awaiter whose event has sat unclaimed
+// for 15 s.
 //
-// It does NOT need to be recorded for replay: each iteration's wait goes
-// through DurableAwaitSignals, which writes its own TimeoutMs into the
-// await_signals record, so a replay uses the recorded value and a change here
-// cannot move an existing history's deadline.
-const eventRecheckMs = 6000
+// It was a constant 6 s, and every iteration records a plugin_call and an
+// await_signals, so a wait with no event grew its history by about 950 events an
+// hour (measured: cleat#3806), roughly 52 hours from the default quota. The cost
+// of the doubling is that the WAIT can now take up to eventRecheckMaxMs to notice
+// a failed delivery by itself, not 6 s; the reconciler is what keeps that from
+// being the delivery's latency.
+//
+// IT DOES NOT NEED TO BE RECORDED FOR REPLAY: each iteration's wait goes through
+// DurableAwaitSignals, which writes its own TimeoutMs into the await_signals
+// record, so a replay uses the recorded value and a change here cannot move an
+// existing history's deadline. engine/testdata/wait_for_event_history_pre3806.json
+// is a history recorded by the 6 s code and replayed by this one.
+const (
+	eventRecheckMs    = 6000
+	eventRecheckMaxMs = 300_000
+)
+
+// eventRecheckDelayMs is how long iteration `attempt` (0 for the first) waits
+// before re-claiming unprompted: eventRecheckMs doubled `attempt` times, capped at
+// eventRecheckMaxMs.
+//
+// A pure function of the iteration count, because the loop must make the same
+// choice on every replay. On a replay of a history written by the 6 s code the
+// early iterations are served from the recorded awaits and this value is not
+// consulted for them; a fresh iteration after them gets the schedule's value
+// for its position (iteration 3 waits 48 s, iteration 6 and later the cap), not
+// 6 s restarted.
+func eventRecheckDelayMs(attempt int) int64 {
+	d := int64(eventRecheckMs)
+	for i := 0; i < attempt && d < eventRecheckMaxMs; i++ {
+		d *= 2
+	}
+	if d > eventRecheckMaxMs {
+		d = eventRecheckMaxMs
+	}
+	return d
+}
 
 // WaitForEvent blocks until the workflow's claim on an external event
 // succeeds, or until the total timeout expires.
@@ -120,11 +159,14 @@ func (s *execSession) WaitForEvent(ctx context.Context, m api.Module,
 	if !s.isReplay && s.stopBeforeNewWork() {
 		return callSuspendSentinel
 	}
+	// NO post-suspension refusal of its own (cleat#4285), on purpose: before its first PluginCall this does nothing but compute a deadline, and every effect it
+	// has goes through PluginCall, which refuses once the execution has suspended and answers the stop word this returns unchanged just below. A guard
+	// here would be unobservable (removing it changes no answer and no record), which is how one was found unpinned in review.
 
 	// Durable clock, so replay recomputes the same deadline. See the doc above.
 	deadline := s.nowMs + timeoutMs
 
-	for {
+	for attempt := 0; ; attempt++ {
 		// ---- 1. attempt the claim, through the recorded plugin path ----
 		//
 		// s.PluginCall is the dispatcher (fresh vs replay); calling it rather
@@ -155,13 +197,21 @@ func (s *execSession) WaitForEvent(ctx context.Context, m api.Module,
 					pluginName, functionName, written))
 		}
 
+		// What the message may show of `out` (cleat#4321). A call that SUCCEEDED returns what the awaited function produced, which can be a webhook's payload: named by
+		// its size and hash, never printed. A call that returned an error code (a replay divergence returns one, with a zero call-error byte, so it reaches this
+		// check) wrote its own message into the buffer; that is text the engine built, which redacts its own bodies, and it is the only thing that says what
+		// went wrong, so it is shown. Hiding it behind a hash would leave a divergence in a wait with no diagnosis.
+		shownOut := redactedBody(out)
+		if byte(res) != 0 {
+			shownOut = out
+		}
 		found, wellFormed := waitForEventClaimFound(out)
 		if !wellFormed {
 			return s.waitForEventFailure(ctx, m, outPtr, outMaxLen,
 				fmt.Sprintf("wait_for_event: %s/%s output has no boolean \"found\" field, so this "+
 					"call cannot tell a claimed event from an unclaimed one. The awaited function must be "+
 					"claim-shaped -- see WaitForEvent's doc comment. Output was: %s",
-					pluginName, functionName, truncateWithHash(out, maxPayloadLen)))
+					pluginName, functionName, shownOut))
 		}
 		if found {
 			// Claimed. outPtr holds the event, and res carries the length the
@@ -174,7 +224,7 @@ func (s *execSession) WaitForEvent(ctx context.Context, m api.Module,
 		if timeoutMs <= 0 || remaining <= 0 {
 			return s.waitForEventTimeout(ctx, m, outPtr, outMaxLen, pluginName, functionName, timeoutMs)
 		}
-		waitMs := int64(eventRecheckMs)
+		waitMs := eventRecheckDelayMs(attempt)
 		if remaining < waitMs {
 			waitMs = remaining
 		}

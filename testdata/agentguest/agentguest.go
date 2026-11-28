@@ -8,11 +8,10 @@
 // and it is the one this file wrote itself. What must ALSO be present is the
 // five that agentworkflow needs and this file never mentions.
 //
-// WHY THE SDK HELPER TABLE CANNOT COVER THIS, so that nobody "simplifies" the
-// fixture away by adding a row to sdkHelperImports: SDKDurableHelper accepts
-// only receivers whose package is named "cleat", and this package is named
-// agentworkflow. A row for agentworkflow.Run would be written and never
-// consulted. The directive is the route, exactly as it is for cleat/dagrun.
+// THE DIRECTIVE IS READ ON ITS OWN in wasm's test for this fixture. Until cleat#3803 the build's hand list of SDK
+// helpers accepted only receivers in a package named "cleat", and this package is named agentworkflow, so the
+// directive was the only route to these five imports; the build now also reads agentworkflow.Run's body, which
+// wires them as well.
 package agentguest
 
 import (

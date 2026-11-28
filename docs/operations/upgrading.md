@@ -34,8 +34,11 @@ each deployment shape does step 1:
 **A schema ahead of the binary starts.** During a rolling upgrade the migration job
 runs before the last old workers have been replaced; those workers see a schema newer
 than they know. They start, with a warning naming both versions, rather than refuse and
-wedge the rollout. This relies on migrations staying additive within a release line.
-A schema *behind* the binary is refused.
+wedge the rollout. This relies on migrations staying additive within a release line;
+the worker reports both versions and does not check that they are compatible.
+A schema *behind* the binary is refused. This is the mechanism, not a promise that two
+releases can run together: see
+[Worker binary upgrade](#worker-binary-upgrade-rolling-restart) for what is and is not tested.
 
 **Before you upgrade from a release that migrated on start:** anything that started a
 worker against a fresh or older database and relied on it migrating now needs a
@@ -44,9 +47,22 @@ un-migrated database exits with the message above.
 
 ## Worker binary upgrade (rolling restart)
 
-Cleat workers are stateless and horizontally scalable, making rolling upgrades
-straightforward. The worker handles SIGTERM gracefully, so you can rely on
-orchestrator-driven rolling updates.
+Cleat workers are stateless and horizontally scalable. A worker handles SIGTERM by
+draining in-flight work before it cancels (cleat#2285); it used to cancel at once and
+write the runs it interrupted as failed. So replacing workers one at a time does not
+fail the runs they were on.
+
+**That is about stopping one worker. It is not a statement that two releases can run
+side by side**, which a rolling update does for as long as it takes. What cleat checks
+across releases is the schema: a worker starts against a schema ahead of it and refuses
+one behind it (above). Nothing tests two different releases claiming and replaying the
+same runs together; the rolling-restart tests in `tests/upgrade` simulate replacing
+workers as goroutines claiming through one store, on PostgreSQL, all one version. So
+whether a given upgrade may be rolled is something that release's notes have to say.
+**0.5.0 to 0.6.0 may not: stop every 0.5.0 worker first** (the paragraph "Moving from
+0.5.0 to 0.6.0" under [Automatic migration](#automatic-migration-recommended)). For any
+other step, treat a rolling upgrade as untested unless the notes for that release say
+it is supported.
 
 ### Manual rolling restart
 
@@ -80,6 +96,10 @@ run again on the worker that picks the run up (at-least-once); see
 [What SIGTERM does](zero-downtime-deploy.md#what-sigterm-does).
 
 ### Kubernetes rolling update
+
+A rolling update runs the old and the new release side by side until it finishes. Read
+the note above first: it is not supported for 0.5.0 to 0.6.0, and untested otherwise
+unless the release notes say it is supported.
 
 ```bash
 # Update the worker image tag in your deployment manifest
@@ -166,6 +186,95 @@ A recorded version the binary does *not* ship, carrying a name and checksum, is
 allowed. That is the rolling-upgrade case described under
 [Migration is a deploy step](#migration-is-a-deploy-step), where workers on release
 N run against a database release N+1's deploy step already migrated.
+
+**Moving from 0.5.0 to 0.6.0** is an in-place upgrade (owner decision D79, which
+reverses D18 for this step). The supported path is:
+
+1. **Stop every 0.5.0 worker.**
+2. Run 0.6.0's `cleat-worker --migrate-only --db "$CLEAT_DATABASE_URL"` against the
+   database (with `--migrate-db` for a role that has DDL rights). It applies the
+   migrations added since 0.5.0 and the plugins' own, and leaves every run's event
+   history as 0.5.0 wrote it.
+3. Start the 0.6.0 workers. Runs that were in flight are resumed: runs that were parked
+   on a timer or a signal, runs that were queued and not yet claimed, and a step that
+   was executing when its worker stopped (it is reclaimed once its lease expires).
+
+**Running 0.5.0 and 0.6.0 workers at the same time (a rolling upgrade) is untested and
+not supported for this step.** A 0.5.0 worker started against a 0.6.0-migrated schema
+is the case no test covers; stop all of them first. If rolling upgrades are wanted
+later, that is a new decision.
+
+**How to stop first, by deployment shape.**
+
+- **Helm.** A plain `helm upgrade` does **not** stop anything, and it **succeeds silently**.
+  The chart's migration is a `pre-upgrade` hook, which Helm runs before it replaces any pod,
+  so the schema migrates while the 0.5.0 pods are still Ready, and the default rolling update
+  then runs old and new workers together. Measured on a real cluster (cleat#3758), it printed
+  `Upgrade complete` and warned of nothing. Stop the workers first:
+
+  ```bash
+  # The Deployment is named <release>-cleat, or just <release> when the release name contains "cleat".
+  kubectl scale deployment/<deployment> --replicas=0 -n <namespace>
+  kubectl wait --for=delete pod -l app.kubernetes.io/instance=<release> -n <namespace> --timeout=180s
+  helm upgrade <release> <chart> -n <namespace> --set image.tag=<the 0.6.0 tag> ...
+  # Autoscaling on (the default): ALWAYS run this next, not only if the Deployment looks wrong (see below):
+  kubectl scale deployment/<deployment> --replicas=<autoscaling.minReplicas> -n <namespace>
+  ```
+
+  Measured (Helm 4.3.0, Kubernetes 1.31, PostgreSQL, an empty database): the
+  HorizontalPodAutoscaler switches itself off at 0 replicas (`ScalingActive=False`,
+  `ScalingDisabled`), so it needs no separate pause, and the migration hook then runs with no
+  workers. **What the replica count is afterwards depends on autoscaling** (cleat#3761, measured
+  2026-11-13 on k3s v1.31.5, Helm 4.3.0). The 0.5.0 chart rendered `replicas` unconditionally, so
+  Helm restored `replicaCount` when it applied the chart. The 0.6.0 chart does not render it while
+  `autoscaling.enabled` is true (the default), because Helm and the autoscaler were both writing it
+  and a Helm 4 `helm upgrade` then failed with a field-ownership conflict. So with autoscaling on,
+  upgrading a release the 0.5.0 chart created leaves the Deployment **at 0 under Helm 4's default
+  server-side apply, every time** (the workers stay down, with no error, until you scale them up),
+  and at 1 under client-side apply (Helm 3, or a release first installed that way), from which the
+  autoscaler raises it to `autoscaling.minReplicas` within about 15 seconds. **So run the scale-up
+  after every stop-first upgrade with autoscaling on, whatever the Deployment reads:** under
+  server-side apply it is always needed, and under client-side apply it is harmless. With
+  `autoscaling.enabled=false` Helm still restores `replicaCount`. **Not measured:** Helm 3 itself (client-side apply was measured with
+  Helm 4's `--server-side=false`), runs in flight, a large database.
+
+  **The chart refuses the unsafe upgrade.** Helm renders templates before it runs any hook, so
+  `templates/upgrade-guard.yaml` reads the live Deployment and fails the upgrade before the
+  migration Job exists, with the commands above in the message. It fires only when the live
+  worker image is identifiably 0.5.x (a `0.5`, `0.5.N` or `v0.5.N` tag) and has replicas above 0,
+  and the image being deployed is not 0.5.x. **Limits:** it does not fire for the tag `latest`
+  (the chart's default, cleat#3762) or for a digest with no tag, because they carry no version;
+  it reads replicas, not pods, so a Deployment scaled to 0 whose pods are still draining passes,
+  which is why the `kubectl wait` step is there; and `lookup` returns nothing under `helm
+  template`, `helm upgrade --dry-run` and renderers that do not talk to the cluster (Argo CD,
+  Flux), so it is silent there. To skip it, set `upgrade.allowLiveWorkers=true`; that is the
+  unsupported case. The guard is temporary and is removed after 0.6.0 (cleat#3759).
+- **Raw Kubernetes (`k8s/`).** Scale the worker Deployment to zero and wait for its pods to
+  go before you apply `k8s/migrate-job.yaml`; the manifest does not do this for you (not tested).
+- **Docker Compose.** Stop the worker services before `docker compose up`, because the
+  `migrate` service otherwise runs while the old workers are still up (not tested).
+- **systemd.** `ExecStartPre` migrates on each worker's own restart, so restarting workers one
+  at a time migrates under the ones still running; stop every worker unit first, then start
+  them (not tested).
+
+Why mixing matters is an inference, not a reproduction: a post-0.5.0 PostgreSQL migration drops
+`NOT NULL` from `workflow_defs.wasm_bytes` (`005_workflow_libraries.sql`), so a 0.5.0 worker
+that reads a library member's definition could meet a `NULL` it cannot scan (cleat#3758).
+
+What is checked end to end, by `scripts/upgrade_from_v040.py --from-version v0.5.0
+--expect upgrade` (the **Upgrade From v0.5.0** workflow, on every push to a `release/**`
+branch, every pull request into one, and on demand; cleat#3735): a database seeded by the *published* 0.5.0 worker is
+migrated in place by the release candidate to the schema a fresh release candidate
+produces, with each plugin that gained a migration since 0.5.0 recording it and every
+run's event history unchanged by the migration; then every run that was in flight
+completes on the release candidate (a step running at the kill, runs asleep on a timer or
+waiting on a signal, parents awaiting a child, and runs queued and never claimed), and a
+run whose recorded checksums were corrupted is refused. **On all three dialects**, one job each: `Upgrade From v0.5.0 (PostgreSQL)`, `(SQL Server)`
+and `(MySQL)`, plus `(SQL Server, CS_AS)`, the SQL Server upgrade in a database created under the
+case-sensitive collation `SQL_Latin1_General_CP1_CS_AS` (it held on that and on a `_UTF8` collation when
+measured, cleat#3735; a database whose collation is not the default is not otherwise exercised). On SQL Server and MySQL the schema comparison includes column collations,
+because the 0.6.0 migrations changed several; on MySQL it also compares the tenant's own
+schema (where the runs live) to a fresh core schema. The workflow is not yet a *required* check on release branches.
 
 **Moving from 0.4.0.** There is no export/import tool. The route is to run the two
 side by side until 0.4.0 has nothing left to do:
@@ -363,30 +472,168 @@ the same phantom migration, so all three were instructions about a file that
 was never there -- and, since cleat#1981, a different file sits at that same
 number; none of this history ever applied to it.
 
+### SQL Server: three plugin-owned columns are rewritten (cleat#3641)
+
+Plugin migrations run in the same step as the core ones, so everything below happens during
+`cleat-worker --migrate-only` (or a `--migrate-on-start` worker), **not at worker boot**. A worker started
+without either, on a database where these steps are pending, refuses and changes nothing:
+
+```
+refusing to start: the database's plugin schema is behind this worker: plugin migration(s) not applied:
+event-triggers v11, jobqueue v6, scheduler v4.
+```
+
+Measured on the real binary, exit code 1. The three steps each run `ALTER TABLE ... ALTER COLUMN ... COLLATE
+Latin1_General_100_BIN2` on an `NVARCHAR(MAX)` column so that it compares exactly (owner decision D60):
+
+| plugin (step) | table.column | size to expect |
+|---|---|---|
+| `eventtriggers` (11) | `event_subscriptions.def_name` | one row per subscription; small |
+| `scheduler` (4) | `schedules.workflow_name` | one row per schedule; small |
+| `jobqueue` (6) | `task_queue.def_name` | **one row per queued job; check this one** |
+
+**It is not a metadata-only change.** Migration `011` was, because the core columns are `NVARCHAR(255)`; these
+are `NVARCHAR(MAX)`, and SQL Server rewrites them. Measured on SQL Server 2022 (16.0.4265.3, **Developer
+Edition only**), on a table with `task_queue`'s column definitions and 1,000,000 rows (719.6 MB):
+
+| | plain `ALTER COLUMN` (what the step runs) |
+|---|---|
+| duration | 17.1 s the first time, 8.8 s on a repeat |
+| transaction-log records | about 2.7 million |
+| table used space | 719.6 MB before, **1,439.3 MB** after |
+| while it runs | a point read and an insert both waited for the whole statement (longest 8.6 s and 8.7 s of a 9.3 s statement), none failed |
+
+Treat that as a scaling figure of **roughly 9 to 17 s and a doubled table per million rows of this column, with
+reads and writes blocked**, and measure on a copy of your own data. It is linear across one measured size only.
+
+- **Count first:** `SELECT COUNT_BIG(*) FROM task_queue;` If the queue holds completed jobs you do not need,
+  removing them before the migration shortens it in proportion.
+- **Run it with enqueuers stopped, or in a window.** An enqueue that arrives during the statement waits for it,
+  so a client with a shorter timeout fails.
+- **Not measured:** Standard Edition, rows with long values, more than 1,000,000 rows, whether rebuilding the
+  table afterwards returns the extra space, and a failure part-way through. `ALTER COLUMN ... WITH (ONLINE = ON)`
+  took 56 s with a longest read of 0.3 s and a longest insert of 2.4 s on Developer Edition, but it depends on the
+  edition, so the step does not use it.
+- **Nothing reads these columns in a `WHERE`**, so the change fixes no behaviour you can see today. It exists
+  so that the schema compares workflow names exactly everywhere.
+- MySQL's equivalent is the next section.
+
+### MySQL: the same three plugin-owned columns are rewritten, and writers wait for the whole copy (cleat#3658)
+
+The MySQL half of the section above. `event_subscriptions.def_name`, `schedules.workflow_name` and
+`task_queue.def_name` were still `utf8mb4_0900_ai_ci` after core migration `012` (cleat#3640), which
+converted the core columns. Three new plugin steps convert them — `eventtriggers` 12, `scheduler` 5 and
+`jobqueue` 7 — and they are **new versions rather than an arm added to the old ones**, because MySQL
+already has the previous steps recorded as applied: their `Up` is empty for MySQL and the runner records
+a version whether or not any SQL ran, which the log states plainly — `scheduler v4: no MySQL migration —
+skipping`. A step reusing the old version would never execute on a database that has already migrated.
+
+**A MySQL collation change rebuilds the table.** `ALGORITHM=INPLACE` is refused outright on all three
+tables (error 1845), so each step asks for `COPY, LOCK=SHARED`: the table is copied once, **reads
+continue and writers wait for the whole copy.**
+
+Measured on MySQL 8.4.11 with a 128 MB buffer pool, on the plugins' real table definitions, under load
+(2.8 to 4.7) and with a writer and a reader probing throughout:
+
+| table.column | rows | duration |
+|---|---|---|
+| `event_subscriptions.def_name` | 100,000 | 1.2 s |
+| `schedules.workflow_name` | 100,000 | 1.3 s |
+| `task_queue.def_name` | 1,000,000 | **16.6 s** |
+| `task_queue.def_name` | 3,000,614 | **56.2 s** |
+
+**`task_queue` is the one to size for**: one row per queued job, so it scales with load rather than with
+configuration. Its growth is measured across two points (about 17 to 19 s per million rows) and is not
+claimed beyond them. The table carries two secondary indexes and `CHECK (json_valid(...))` on its JSON
+columns, so the rebuild re-validates and re-indexes every row. No probe call failed.
+
+- **Run it with enqueuers stopped, or in a window.** A write that arrives during the copy waits for it, so
+  a client with a shorter timeout fails.
+- **The figures scale with the host** and with the table. Measure on a copy of your own data.
+- **Not measured:** other buffer-pool sizes, other MySQL versions, other machines, `task_queue` above
+  3,000,614 rows, and a failure part-way through a step.
+- **Nothing reads these columns in a `WHERE`**, so this fixes no behaviour you can see today. It makes the
+  schema compare workflow names exactly everywhere.
+
+`--migrate-only` applies these with the core migrations. A worker started without it, on a database where
+they are pending, refuses and changes nothing — measured on the real binary against a MySQL database
+migrated by the previous release:
+
+```
+refusing to start: the database's plugin schema is behind this worker: plugin migration(s) not applied:
+event-triggers v12, jobqueue v7, scheduler v5.
+```
+
+Exit code 1, and all three columns were still `utf8mb4_0900_ai_ci` afterwards.
+
+### The application role can no longer rewrite a tombstone (cleat#3638)
+
+`admin.tenant_tombstones` is the one record of where a dropped tenant's own audit chain ended; the
+chain is deleted with the tenant, so this row is what lets an earlier copy of that chain still be
+checked. It is written once, read, and deleted by an operator, and nothing updates it. PostgreSQL
+migration `007` granted `cleat_app` `SELECT, INSERT, DELETE` and said so in a comment. The
+application role held `UPDATE` anyway, on both dialects: on PostgreSQL through `001`'s
+`ALTER DEFAULT PRIVILEGES IN SCHEMA admin`, which applies when a table is *created* and was never
+taken back, and on SQL Server through `001`'s schema-level `GRANT ... ON SCHEMA::[admin]`, which no
+table-level `DENY` overrode.
+
+Migration `011` (PostgreSQL) revokes it and migration `014` (SQL Server) denies it.
+
+**This is not a behaviour change.** The statements against the table in this tree are the drop's
+`INSERT`, the reads and the operator's `DELETE`; nothing updates the row. What changes is a
+capability. `cleat_app` is the credential a compromised worker process holds, and with `UPDATE` it
+could rewrite the anchor an earlier copy of a deleted tenant's audit chain is checked against — after
+which the check would agree with a chain somebody had edited.
+
+- **It runs in the deploy step**, with the other core migrations: `cleat-worker --migrate-only`,
+  from a role with DDL rights. Nothing needs to be drained first.
+- **Cost.** Both are privilege statements, not data ones: no table is rewritten and no row is read.
+  Measured on PostgreSQL 16: the `REVOKE` completed immediately while another session held an
+  `ACCESS SHARE` lock on the table, so an ordinary reader is not blocked. SQL Server's lock
+  behaviour for a `DENY` was not measured separately.
+- **Nothing else is narrowed.** `SELECT`, `INSERT` and `DELETE` are unchanged, and the tests assert
+  them on both dialects; the drop route and the operator's delete route go on working as this login.
+- **To undo it:** `GRANT UPDATE ON admin.tenant_tombstones TO cleat_app;` (PostgreSQL) or
+  `REVOKE UPDATE ON [admin].[tenant_tombstones] FROM cleat_app_role;` (SQL Server). The second removes
+  only the table-level `DENY` and leaves the schema-level `GRANT` beneath it intact.
+- **If your deployment grants the application role's privileges outside these migrations,** that
+  grant will hand `UPDATE` back on the next run. `deploy/postgres/900-app-role.sh` and
+  `deploy/mssql/900-app-role.sh` do not — every `GRANT` and `DENY` this login has comes from
+  `migrations/` — so the shipped deployment path keeps the restriction.
+
 ## Running old and new workers side by side
 
-Because workers are stateless and read workflow definitions from the database,
-old and new worker binaries can coexist during a rollout. The key compatibility
-rules are:
+**This is not supported for 0.5.0 to 0.6.0:** stop every 0.5.0 worker first (see
+[Moving from 0.5.0 to 0.6.0](#automatic-migration-recommended)). For any other step it is
+untested unless that release's notes say it is supported: no test in this repository runs
+two different releases against the same runs. Before 1.0 a minor release can change
+behaviour. What follows is how the pieces are designed to fit, and what each rests on.
 
 ### Database schema compatibility
 
-- **Minor/patch upgrades**: database schema changes are backward compatible.
-  Old workers ignore new columns and new tables. New workers handle the older
-  schema because migrations add columns with NULL defaults.
-- **Major upgrades**: the schema may change in non-backward-compatible ways.
-  Migrations are applied before any worker connects, so all workers see the
-  same schema. See [Major version upgrades](#major-version-upgrades).
+- A worker starts against a schema **ahead** of it, with a warning naming both versions, and
+  refuses one **behind** it (see [Migration is a deploy step](#migration-is-a-deploy-step)).
+  That is all that is checked. The design **relies on migrations staying additive within a
+  release line**; the worker reports both versions and does not check that they are
+  compatible.
+- **The 0.6.0 migrations are not all additive:** on SQL Server and MySQL they change column
+  collations (see the schema comparison under "Moving from 0.5.0 to 0.6.0"). A 0.5.0 worker
+  against that schema is the case no test covers.
+- Whether a later minor or patch release's migrations are additive is for that release's
+  notes. Do not infer it from the version number.
 
 ### Workflow definition compatibility
 
-- Old workers can execute workflows deployed as WASM blobs at any version.
-  The WASM binary is self-contained with its own host call imports.
-- New workers can execute older WASM blobs because the host call interface
-  is backward compatible within the same major version.
-- If the new binary introduces new host functions, old workers may fail to
-  execute workflows that use them. In practice, this is avoided because old
-  workers drain before new workflows are deployed.
+- A workflow definition is a WASM blob in the database, with its own host-call imports and an
+  `abi_version` in its metadata. A run executes the definition version it recorded.
+- **Nothing guarantees that a module built by one release runs on another.** A worker that
+  meets a module whose `abi_version` is higher than its own logs a warning and **runs it
+  anyway**; it does not refuse, and a host call the module expects may be missing
+  (cleat#1054). The ABI version is 1 in 0.5.0 and on the 0.6.0 development branch, so no
+  module can declare a higher one yet.
+- The host-call set (`engine/imports.go`) did not change between 0.5.0 and the 0.6.0
+  development branch as of 2026-11-13. That is an observation about two releases, not a
+  policy, and no test runs a module built by one release on a worker of another.
 
 ### Practical rollout window
 
@@ -464,10 +711,11 @@ the detour.
 
 **What to do instead**, in order of preference:
 
-1. **Roll the worker binary back and leave the schema forward.** This is the
-   supported path for a minor or patch upgrade, because those schema changes
-   are backward compatible by policy — see *Database schema compatibility*
-   below. An older worker runs against a newer schema.
+1. **Roll the worker binary back and leave the schema forward**, where the release's
+   migrations are additive. An older worker starts against a newer schema, but nothing
+   checks that the migrations were additive, so whether this is safe is for that release's
+   notes — see *Database schema compatibility* above. **For 0.5.0 to 0.6.0 it is untested**
+   (the 0.6.0 migrations change column collations), and the supported way back is item 2.
 2. **Restore from backup** if the schema change itself must be undone. Take the
    backup *before* the upgrade; this is the only way back from a major-version
    schema change, and it is why the checklist asks for one.

@@ -7,6 +7,7 @@
 package main
 
 import (
+	"strings"
 	"time"
 
 	"github.com/cleat-team/cleat/cleat"
@@ -55,6 +56,28 @@ func DeferSurvivesSuspension(h cleat.HostCalls, input string) (string, error) {
 	}
 
 	h.DurableSleepMs(300000)
+
+	if _, err := h.DurableCall("work", "body", `{}`); err != nil {
+		return "", err
+	}
+	return `{"status":"ok"}`, nil
+}
+
+// DeferThenCall registers cleanup and then makes a call of its OWN, with nothing that waits in between.
+//
+// cleat#4143. A run killed after the registration and before the call has the history [defer]. A terminate's defer segment replays that
+// and the body's next call arrives at the REPLAY FRONTIER. That call is new work for a workflow that is being terminated, and
+// work/body is its observable: a segment that performs it has broken the contract that a segment runs the defers and nothing else.
+//
+// Nothing waits between the two on purpose. A sleep or an await is also a dispatch point: the SDK polls for updates before it, and a
+// defer segment refuses that poll, which stops the body there. So a body that waits before its call never reaches the frontier with the
+// call to make (measured: a registered defer, a 200ms sleep and then a call was stopped at the sleep in a terminate's segment).
+func DeferThenCall(h cleat.HostCalls, input string) (string, error) {
+	if _, err := h.DurableDeferFunc(func() {
+		h.DurableCall("cleanup", "after_defer_then_call", `{}`)
+	}); err != nil {
+		return "", err
+	}
 
 	if _, err := h.DurableCall("work", "body", `{}`); err != nil {
 		return "", err
@@ -133,6 +156,23 @@ func DeferContinuesAsNew(h cleat.HostCalls, input string) (string, error) {
 		return "", err
 	}
 	h.DurableCall("cleanup", "body", `{}`)
+	return `{"ok":true}`, nil
+}
+
+// DeferThenContinueAsNew registers cleanup and then, in the BODY, continues as new, with nothing that waits in between.
+//
+// cleat#4143. A defer segment replays [defer] and the body's next call, here a ContinueAsNew, arrives at the REPLAY FRONTIER. Unlike
+// DeferContinuesAsNew, whose continue-as-new is inside the defer body, this one is the workflow's own: new work for a workflow that is being
+// terminated. Its observables are the history (a continue_as_new event) and the run chain (a new run).
+func DeferThenContinueAsNew(h cleat.HostCalls, input string) (string, error) {
+	if _, err := h.DurableDeferFunc(func() {
+		h.DurableCall("cleanup", "after_defer_then_continue", `{}`)
+	}); err != nil {
+		return "", err
+	}
+	if err := h.ContinueAsNew(`{"round":2}`); err != nil {
+		return "", err
+	}
 	return `{"ok":true}`, nil
 }
 
@@ -254,6 +294,21 @@ func DeferOnLongRetryPolicy(h cleat.HostCalls, input string) (string, error) {
 	return "", err
 }
 
+// RetryOnHostFirstAttemptSucceeds calls the LOW-LEVEL retry entry directly, which the Go SDK documents as having NO
+// fallback: a refusal comes back as a CallError with CallErrorRetryPolicyTooLong and the caller must handle it.
+//
+// It exists for cleat#4032's regression test, and for the SDKs that behave the same way -- AssemblyScript, Java and
+// Python have no code-6 fallback at all. A refused policy is a hard failure for them, so a replay that refuses a call
+// the host actually ran is a regression on shipped code rather than a retry.
+func RetryOnHostFirstAttemptSucceeds(h cleat.HostCalls, input string) (string, error) {
+	return h.DurableCallWithRetry("succeeds", "op", `{}`, cleat.RetryPolicy{
+		MaxAttempts:        3,
+		InitialInterval:    time.Millisecond,
+		BackoffCoefficient: 2.0,
+		MaxInterval:        time.Millisecond,
+	})
+}
+
 // TwoSequentialCalls has no defer at all -- it is cleat#2008's fixture, not
 // 3.112's. It makes two plain DurableCalls back to back, so a test can put an
 // external side effect (the first call reaching the service) between them and
@@ -325,6 +380,46 @@ func RetryBacksOffOnHost(h cleat.HostCalls, input string) (string, error) {
 	return "", err
 }
 
+// SleepThenRetryCall is cleat#4152's fixture: one recorded call, a durable sleep, then a call under a retry policy that is short enough to
+// run on the host. The run suspends on the sleep, and the claim that resumes it replays [work/before] and meets the retried call at the
+// replay frontier. The same call in a run's first segment gets its whole policy.
+//
+// THE FIRST CALL IS LOAD-BEARING. A sleep records no event, so a run that sleeps and has recorded nothing resumes with an EMPTY history and
+// a session that is not replaying; the retried call is then fresh and gets its policy. The defect needs at least one recorded event ahead
+// of the suspension.
+//
+// 5 attempts at 1ms, so a service that fails twice and then succeeds is retried to success in a few milliseconds, and a call that gets
+// ONE attempt fails.
+func SleepThenRetryCall(h cleat.HostCalls, input string) (string, error) {
+	if _, err := h.DurableCall("work", "before", `{}`); err != nil {
+		return "", err
+	}
+	h.DurableSleepMs(300)
+	return RetryCallOnly(h, input)
+}
+
+// CallThenRetryCall is cleat#4152's fixture without the wait: one recorded call and then the retried call, nothing in between that waits.
+// A run lost after the first call (a worker crash, a reclaim, a deploy) resumes with history [work/before] and meets the retried call at
+// the replay frontier with no dispatch point ahead of it.
+func CallThenRetryCall(h cleat.HostCalls, input string) (string, error) {
+	if _, err := h.DurableCall("work", "before", `{}`); err != nil {
+		return "", err
+	}
+	return RetryCallOnly(h, input)
+}
+
+// RetryCallOnly is SleepThenRetryCall's control: the same call under the same policy, made by a session that has nothing to replay.
+func RetryCallOnly(h cleat.HostCalls, input string) (string, error) {
+	return h.DurableCallWithOptions(cleat.CallOptions{
+		Retry: &cleat.RetryPolicy{
+			MaxAttempts:        5,
+			InitialInterval:    time.Millisecond,
+			BackoffCoefficient: 1.0,
+			MaxInterval:        time.Millisecond,
+		},
+	}, "flaky", "op", `{}`)
+}
+
 // RetryThenCompensate is cleat#2285's fixture: RetryBacksOffOnHost, plus what a saga does when a call fails.
 // If a shutdown that interrupts the backoff reaches the guest as a failed call, this workflow runs its
 // compensation and finishes "compensated" -- COMPLETED, on a fault that never happened -- and the service
@@ -378,4 +473,57 @@ func ScheduleInvokeAfterAMarker(h cleat.HostCalls, input string) (string, error)
 		return "", err
 	}
 	return `{"status":"scheduled"}`, nil
+}
+
+// BranchOnServiceVersion is cleat#3581's fixture: a guest that decides what to
+// do next from a value a service returned, then suspends, so the NEXT segment
+// has to replay that decision from the durable history.
+//
+// The service answers {"api_key":"sk-live-SECRET123","version":"1.2.3"}. The
+// guest takes one branch if it sees the key's value and the other if it does
+// not, and the two branches are
+// different calls, so a replay that reads a different value than the first
+// execution did is visible as a different call.
+func BranchOnServiceVersion(h cleat.HostCalls, input string) (string, error) {
+	v, err := h.DurableCall("info", "version", `{}`)
+	if err != nil {
+		return "", err
+	}
+	branch := "saw-redacted"
+	if strings.Contains(v, "SECRET123") {
+		branch = "saw-live"
+	}
+	if _, err := h.DurableCall("info", branch, `{}`); err != nil {
+		return "", err
+	}
+	h.DurableSleep(time.Second)
+	return `{"branch":"` + branch + `"}`, nil
+}
+
+// BranchOnChildResult is BranchOnServiceVersion for a CHILD's result: the
+// guest awaits a child, branches on what it returned, then suspends so the
+// next segment replays the await (cleat#3581).
+func BranchOnChildResult(h cleat.HostCalls, input string) (string, error) {
+	runID, err := h.ChildWorkflow("replay-reads-child", `{"__entry_point":"ChildAnswersVersion"}`)
+	if err != nil {
+		return "", err
+	}
+	res, err := h.AwaitChild(runID)
+	if err != nil {
+		return "", err
+	}
+	branch := "saw-redacted"
+	if strings.Contains(res, "SECRET123") {
+		branch = "saw-live"
+	}
+	if _, err := h.DurableCall("info", branch, `{}`); err != nil {
+		return "", err
+	}
+	h.DurableSleep(time.Second)
+	return `{"branch":"` + branch + `"}`, nil
+}
+
+// ChildAnswersVersion is the child BranchOnChildResult awaits.
+func ChildAnswersVersion(h cleat.HostCalls, input string) (string, error) {
+	return `{"api_key":"sk-live-SECRET123","version":"1.2.3"}`, nil
 }

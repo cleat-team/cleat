@@ -2,8 +2,23 @@ package engine
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"time"
 )
+
+// ErrLimitsUnavailable is returned by an execution that could not read the
+// limits it must run under: this tenant's settings, or this run's own.
+//
+// It is not a failure OF the workflow. The guest never ran, so there is no
+// outcome to record, and a caller that records one destroys a run that did
+// nothing wrong. The worker releases the run for another attempt (with the
+// unservable backoff) instead.
+var ErrLimitsUnavailable = errors.New("the limits this execution must run under could not be read")
+
+// limitsReadBackoff is the pause before a failed limits read is retried. A var
+// so a test does not wait on it.
+var limitsReadBackoff = 100 * time.Millisecond
 
 // TenantSettings is one tenant's overrides for the execution limits that are
 // otherwise process-wide worker flags.
@@ -154,29 +169,113 @@ func tenantSettingsFromMillis(instanceMs, wallClockMs, retryMs, maxWorkflowMs *i
 	}
 }
 
-// tenantSettings reads this execution's settings once and memoises the result.
+// limitsReadAttempts is how many times a limits read is tried before it is
+// final. A dropped connection is the case this exists for: the pool hands out
+// the dead one once, and the next attempt gets a live one.
+const limitsReadAttempts = 3
+
+// readLimits reads one tier of limits, retrying a failure, and reports a final
+// one as ErrLimitsUnavailable.
 //
-// A read failure is logged and resolves to the flag defaults rather than
-// failing the workflow. The alternative -- treating an unreadable settings row
-// as fatal -- would let one bad table take down every execution on the
-// deployment, and the fallback direction is the safe one: the operator's own
-// limits, never wider.
+// A cancelled context is NOT a final failure of the limits, and is returned as
+// the context's own error. A fence or a shutdown cancels the context, the read
+// fails with it, and what that describes is a run being stopped; the worker
+// tells a stopped run from a broken one by the context.
+func (e *Engine) readLimits(ctx context.Context, what string, read func() (TenantSettings, error)) (TenantSettings, error) {
+	var err error
+	for attempt := 1; attempt <= limitsReadAttempts; attempt++ {
+		var s TenantSettings
+		if s, err = read(); err == nil {
+			return s, nil
+		}
+		if cerr := ctx.Err(); cerr != nil {
+			return TenantSettings{}, fmt.Errorf("reading %s: %v: %w", what, err, cerr)
+		}
+		e.log().WarnContext(ctx, "reading limits failed",
+			"what", what, "attempt", attempt, "of", limitsReadAttempts,
+			"tenant_id", e.tenantID, "workflow_id", e.workflowID, "error", err)
+		if attempt == limitsReadAttempts {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return TenantSettings{}, fmt.Errorf("reading %s: %v: %w", what, err, ctx.Err())
+		case <-time.After(time.Duration(attempt) * limitsReadBackoff):
+		}
+	}
+	return TenantSettings{}, fmt.Errorf("%w: reading %s failed %d times: %w",
+		ErrLimitsUnavailable, what, limitsReadAttempts, err)
+}
+
+// ensureLimits reads this execution's two tiers of limits, the tenant's
+// settings and the run's own, and keeps what it read.
+//
+// Only a SUCCESSFUL read is kept. A failure is retried and then returned, and
+// the next call tries again. cleat#3565: this used to log a failure and
+// memoise "no overrides" for the whole execution, on the argument that the
+// operator's own flags are "never wider". They are wider for exactly the
+// tenants that set a tighter limit -- a 2s instance timeout against a 30s flag
+// -- so one dropped connection at the first read let a guest run for fifteen
+// times its bound, and nothing said so but a log line.
+//
+// An execution that cannot read its limits therefore does not run. The cost is
+// real and is the one the old comment named: a settings table that stays
+// unreadable stops executions on that worker, where it used to run them
+// unbounded. It stops them as a RELEASE (see ErrLimitsUnavailable), not a
+// failure, so each run keeps its history and waits; and a database that cannot
+// answer this query is not one that can append the run's events either.
+//
+// A store that does not implement a tier's reader has no overrides to read,
+// which is a successful read of nothing and not a failure.
+//
+// Called at the top of every execution entry point, so the accessors below are
+// reading values that are already there. They call it as well, so an engine
+// driven some other way still reads; see tenantSettings.
+func (e *Engine) ensureLimits(ctx context.Context) error {
+	e.limitsMu.Lock()
+	defer e.limitsMu.Unlock()
+
+	if !e.tenantSettingsLoaded {
+		if reader, ok := e.workflowStore.(TenantSettingsReader); ok {
+			s, err := e.readLimits(ctx, "per-tenant settings", func() (TenantSettings, error) {
+				return reader.GetTenantSettings(ctx)
+			})
+			if err != nil {
+				return err
+			}
+			e.tenantSettingsValue = s
+			e.warnIfTenantLimitsConflict(ctx, s)
+		}
+		e.tenantSettingsLoaded = true
+	}
+	if !e.runLimitsLoaded {
+		if reader, ok := e.workflowStore.(RunLimitsReader); ok && e.workflowID != "" {
+			s, err := e.readLimits(ctx, "per-run limits", func() (TenantSettings, error) {
+				return reader.GetRunLimits(ctx, e.workflowID)
+			})
+			if err != nil {
+				return err
+			}
+			e.runLimitsValue = s
+		}
+		e.runLimitsLoaded = true
+	}
+	return nil
+}
+
+// tenantSettings returns this execution's tenant settings, reading them if
+// ensureLimits has not.
+//
+// Every execution entry point has called ensureLimits and returned its error
+// before reaching a caller of this, so in a real execution the read cannot fail
+// here. If it does -- an engine driven by a path that skipped the entry points
+// -- the answer is "no overrides" for THIS call only: it is logged, not kept,
+// and the next call reads again.
 func (e *Engine) tenantSettings(ctx context.Context) TenantSettings {
-	e.tenantSettingsOnce.Do(func() {
-		reader, ok := e.workflowStore.(TenantSettingsReader)
-		if !ok {
-			return
-		}
-		s, err := reader.GetTenantSettings(ctx)
-		if err != nil {
-			e.log().WarnContext(ctx,
-				"reading per-tenant settings failed, falling back to worker flags",
-				"tenant_id", e.tenantID, "workflow_id", e.workflowID, "error", err)
-			return
-		}
-		e.tenantSettingsValue = s
-		e.warnIfTenantLimitsConflict(ctx, s)
-	})
+	if err := e.ensureLimits(ctx); err != nil {
+		e.log().ErrorContext(ctx, "per-tenant settings are unavailable; this call sees no overrides",
+			"tenant_id", e.tenantID, "workflow_id", e.workflowID, "error", err)
+	}
 	return e.tenantSettingsValue
 }
 
@@ -190,8 +289,8 @@ func (e *Engine) tenantSettings(ctx context.Context) TenantSettings {
 // timeout stops being the number that decides. Nothing fails; the wrong number
 // just wins, which is why this is worth saying out loud.
 //
-// Called from inside tenantSettingsOnce, so it logs once per engine rather than
-// once per execution. A per-execution warning for a durable workflow is a log
+// Called from ensureLimits when the settings are first read, so it logs once per
+// engine rather than once per execution. A per-execution warning for a durable workflow is a log
 // line per replay segment, which is how a real signal becomes noise nobody
 // reads.
 //

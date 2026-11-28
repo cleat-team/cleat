@@ -85,6 +85,7 @@ jobs:
   dco:
     name: Developer Certificate of Origin
     runs-on: ubuntu-latest
+    timeout-minutes: 10  # max 0.9m over 47 successful runs (develop push + pull_request samples), 2026-10-27; cleat#3479
 
     # DCO gates *contribution*, and contribution enters at develop. A PR into
     # main carries no new authorship: it is a release or hotfix branch whose

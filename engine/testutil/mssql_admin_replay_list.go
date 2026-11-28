@@ -1,12 +1,16 @@
 package testutil
 
 import (
+	"database/sql"
+	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/cleat-team/cleat/migration"
 )
 
 // cleat#3173. restoreMSSQLPlainPredicate used to replay a hardcoded list --
@@ -40,6 +44,78 @@ import (
 // this repository has made that mistake four times already.
 var mssqlRoutineDefRe = regexp.MustCompile(
 	`(?i)\bCREATE\s+(?:OR\s+ALTER\s+)?(?:PROCEDURE|FUNCTION)\s+([A-Za-z_][A-Za-z0-9_.]*)`)
+
+// mssqlPolicyDefRe matches a statement that CREATES a security policy. It is
+// matched in the file's text, so a policy created through EXEC(N'CREATE SECURITY
+// POLICY ...') counts, which is how a guarded, replayable migration has to write
+// it (CREATE SECURITY POLICY wants a batch of its own).
+//
+// cleat#3540. 003_procedures.sql drops, by name, only the policies it knows, and
+// recreates them. A policy a LATER migration creates against dbo.fn_tenant_filter
+// is not among them, so replaying 003 over it fails with error 3729 ("Cannot ALTER
+// 'dbo.fn_tenant_filter' because it is being referenced by object ..."), and, once
+// the policy has been dropped to let the replay through, the replay would leave
+// that table with no policy at all. restoreMSSQLPlainPredicate therefore drops every
+// policy bound to the function first, and replays each later file that creates one.
+var mssqlPolicyDefRe = regexp.MustCompile(`(?i)\bCREATE\s+SECURITY\s+POLICY\b`)
+
+// mssqlCreatesSecurityPolicy reports whether the file at path creates a security
+// policy, with comments stripped first for the same reason as mssqlRoutinesDefinedIn.
+func mssqlCreatesSecurityPolicy(path string) (bool, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return false, err
+	}
+	return mssqlPolicyDefRe.MatchString(mssqlStripSQLComments(string(raw))), nil
+}
+
+// MSSQLDropTenantFilterPolicies drops every security policy bound to
+// dbo.fn_tenant_filter. A caller that is about to replay 003_procedures.sql on a
+// migrated database calls it first, because 003 replaces the function and SQL
+// Server refuses with error 3729 while any policy still references it -- including
+// one a later migration created. It is followed by MSSQLRestoreLaterFilterPolicies.
+func MSSQLDropTenantFilterPolicies(db *sql.DB) error {
+	if _, err := db.Exec(mssqlDropFilterPoliciesSQL); err != nil {
+		return fmt.Errorf("drop the policies bound to fn_tenant_filter: %w", err)
+	}
+	return nil
+}
+
+// MSSQLRestoreLaterFilterPolicies replays each numbered migration after 003 that
+// creates a security policy, which puts back what MSSQLDropTenantFilterPolicies
+// dropped and 003 does not know about. The files are written to be re-run.
+func MSSQLRestoreLaterFilterPolicies(db *sql.DB, migrationsDir string) error {
+	files, err := mssqlNumberedMigrationFiles(migrationsDir)
+	if err != nil {
+		return err
+	}
+	for _, f := range files {
+		if f.num <= 3 {
+			continue
+		}
+		path := filepath.Join(migrationsDir, f.name)
+		creates, err := mssqlCreatesSecurityPolicy(path)
+		if err != nil {
+			return err
+		}
+		if !creates {
+			continue
+		}
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		for _, batch := range migration.SplitMSSQL(string(raw)) {
+			if strings.TrimSpace(batch) == "" {
+				continue
+			}
+			if _, err := db.Exec(batch); err != nil {
+				return fmt.Errorf("replay %s: %w", f.name, err)
+			}
+		}
+	}
+	return nil
+}
 
 // mssqlStripSQLComments removes `--` line comments and `/* ... */` block
 // comments from sql, so mssqlRoutineDefRe cannot match one.
@@ -179,11 +255,25 @@ func mssqlPlainPredicateReplayFiles(dir string) ([]string, error) {
 		if err != nil {
 			return nil, err
 		}
+		redefines := false
 		for name := range defined {
 			if bundled[name] {
-				replay = append(replay, f.name)
+				redefines = true
 				break
 			}
+		}
+		// A later file that creates a security policy is replayed too: the
+		// restore drops every policy bound to dbo.fn_tenant_filter before 003 runs,
+		// and 003 recreates only its own.
+		if !redefines {
+			creates, err := mssqlCreatesSecurityPolicy(filepath.Join(dir, f.name))
+			if err != nil {
+				return nil, err
+			}
+			redefines = creates
+		}
+		if redefines {
+			replay = append(replay, f.name)
 		}
 	}
 	return replay, nil

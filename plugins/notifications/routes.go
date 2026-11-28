@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"regexp"
+	"strings"
 	"time"
 
 	"github.com/cleat-team/cleat/auth"
@@ -23,6 +25,7 @@ func (p *Plugin) RegisterRoutes(mux plugin.Router) error {
 	mux.HandleFunc("PUT /webhooks/{id}", p.handleUpdateWebhook)
 	mux.HandleFunc("DELETE /webhooks/{id}", p.handleDeleteWebhook)
 	mux.HandleFunc("GET /webhooks/{id}/deliveries", p.handleListDeliveries)
+	mux.HandleFunc("POST /webhooks/{id}/deliveries/{delivery_id}/redeliver", p.handleRedeliver)
 	return nil
 }
 
@@ -84,12 +87,15 @@ type webhookConfigJSON struct {
 	Enabled          bool      `json:"enabled"`
 	CreatedAt        time.Time `json:"created_at"`
 	UpdatedAt        time.Time `json:"updated_at"`
+	// Name is the caller-set name, or null for a webhook that has none. cleat#3538.
+	Name *string `json:"name"`
 }
 
 type createWebhookRequest struct {
 	URL    string        `json:"url"`
 	Secret plugin.Secret `json:"secret,omitempty"`
 	Events []string      `json:"events"`
+	Name   *string       `json:"name,omitempty"`
 }
 
 type updateWebhookRequest struct {
@@ -97,6 +103,34 @@ type updateWebhookRequest struct {
 	Secret  *plugin.Secret `json:"secret,omitempty"`
 	Events  *[]string      `json:"events,omitempty"`
 	Enabled *bool          `json:"enabled,omitempty"`
+	Name    *string        `json:"name,omitempty"`
+}
+
+// webhookNameIndex is the unique index (v8) that makes a name unique per tenant among live rows. The
+// duplicate-name classifier below matches on it, so a collision on any other key is not reported as one.
+const webhookNameIndex = "uq_webhook_config_tenant_name"
+
+// webhookNamePattern is the whole of what a name may be: lowercase ASCII, digits, '.', '_' and '-', starting
+// with a letter or digit, at most 128 characters. It is narrow on purpose. MySQL and SQL Server compare
+// text case-insensitively by default and PostgreSQL does not, so any name that differs only by case would
+// be unique on one and a duplicate on another; no name that can be written here has that property.
+var webhookNamePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,127}$`)
+
+const webhookNameRule = "name must be 1 to 128 characters of a-z, 0-9, '.', '_' or '-', starting with a letter or digit"
+
+func validWebhookName(n string) bool { return webhookNamePattern.MatchString(n) }
+
+// isDuplicateWebhookName reports whether err is the unique index on (tenant_id, name) refusing a write. It
+// asks for the index NAME, not just "duplicate": every dialect's message carries the index (PostgreSQL
+// `unique constraint "uq_..."`, MySQL `for key 'webhook_config.uq_...'`, SQL Server `with unique index
+// 'uq_...'`), and a classifier that accepted any duplicate would call a collision on some other key a
+// taken name.
+func isDuplicateWebhookName(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "duplicate") && strings.Contains(msg, webhookNameIndex)
 }
 
 type deliveryJSON struct {
@@ -112,6 +146,67 @@ type deliveryJSON struct {
 	ResponseCode  *int            `json:"response_code,omitempty"`
 	ResponseBody  *string         `json:"response_body,omitempty"`
 	CreatedAt     time.Time       `json:"created_at"`
+
+	// RedeliveryCount is how many times an operator has put this delivery back after it failed
+	// (cleat#3612). LastRedeliveredAt and LastRedeliveredBy say when and who; the latter is
+	// absent when nothing resolved an identity for the request, which is not an error.
+	RedeliveryCount   int        `json:"redelivery_count"`
+	LastRedeliveredAt *time.Time `json:"last_redelivered_at,omitempty"`
+	LastRedeliveredBy *string    `json:"last_redelivered_by,omitempty"`
+}
+
+// deliverySelectColumns is the column list scanDelivery reads, in its order.
+const deliverySelectColumns = `id, webhook_id, event_type, payload, status, attempt_count,
+			       last_attempt_at, next_attempt_at, delivered_at,
+			       response_code, response_body, created_at,
+			       redelivery_count, last_redelivered_at, last_redelivered_by`
+
+// scanDelivery reads one row selected with deliverySelectColumns.
+func scanDelivery(s interface{ Scan(...any) error }) (deliveryJSON, error) {
+	var (
+		d                 deliveryJSON
+		payloadRaw        []byte
+		lastAttemptAt     sql.NullTime
+		nextAttemptAt     sql.NullTime
+		deliveredAt       sql.NullTime
+		responseCode      sql.NullInt64
+		responseBody      sql.NullString
+		lastRedeliveredAt sql.NullTime
+		lastRedeliveredBy sql.NullString
+	)
+	if err := plugin.ScanRow(s,
+		&d.ID, &d.WebhookID, &d.EventType, &payloadRaw,
+		&d.Status, &d.AttemptCount,
+		&lastAttemptAt, &nextAttemptAt, &deliveredAt,
+		&responseCode, &responseBody, &d.CreatedAt,
+		&d.RedeliveryCount, &lastRedeliveredAt, &lastRedeliveredBy,
+	); err != nil {
+		return d, err
+	}
+	d.Payload = json.RawMessage(payloadRaw)
+	if lastAttemptAt.Valid {
+		d.LastAttemptAt = &lastAttemptAt.Time
+	}
+	if nextAttemptAt.Valid {
+		d.NextAttemptAt = &nextAttemptAt.Time
+	}
+	if deliveredAt.Valid {
+		d.DeliveredAt = &deliveredAt.Time
+	}
+	if responseCode.Valid {
+		v := int(responseCode.Int64)
+		d.ResponseCode = &v
+	}
+	if responseBody.Valid {
+		d.ResponseBody = &responseBody.String
+	}
+	if lastRedeliveredAt.Valid {
+		d.LastRedeliveredAt = &lastRedeliveredAt.Time
+	}
+	if lastRedeliveredBy.Valid {
+		d.LastRedeliveredBy = &lastRedeliveredBy.String
+	}
+	return d, nil
 }
 
 // ---- POST /webhooks ----
@@ -140,6 +235,11 @@ func (p *Plugin) handleCreateWebhook(w http.ResponseWriter, r *http.Request) {
 	// created.
 	if req.Secret.Reveal() == "" {
 		p.writeError(w, 400, "secret is required")
+		return
+	}
+
+	if req.Name != nil && !validWebhookName(*req.Name) {
+		p.writeError(w, 400, webhookNameRule)
 		return
 	}
 
@@ -175,9 +275,14 @@ func (p *Plugin) handleCreateWebhook(w http.ResponseWriter, r *http.Request) {
 	// first; this one was missed in the same PR and caught by cleat-review
 	// running POST /webhooks against real MySQL.
 	_, err = p.db.Exec(r.Context(), `
-			INSERT INTO webhook_config (tenant_id, id, url, secret_configured, events, enabled, created_at, updated_at)
-			VALUES ($1, $2, $3, $4, $5, true, $6, $7)
-		`, tid, id, req.URL, secretConfigured, string(eventsJSON), now, now)
+			INSERT INTO webhook_config (tenant_id, id, url, secret_configured, events, enabled, created_at, updated_at, name)
+			VALUES ($1, $2, $3, $4, $5, true, $6, $7, $8)
+		`, tid, id, req.URL, secretConfigured, string(eventsJSON), now, now, req.Name)
+	if req.Name != nil && isDuplicateWebhookName(err) {
+		// Before the secret is stored, so a refused name leaves no secret behind.
+		p.writeError(w, 409, fmt.Sprintf("a webhook named %q already exists", *req.Name))
+		return
+	}
 	if err != nil {
 		p.logger.Error("notifications: create webhook", "error", err)
 		p.writeError(w, 500, "failed to create webhook")
@@ -191,7 +296,7 @@ func (p *Plugin) handleCreateWebhook(w http.ResponseWriter, r *http.Request) {
 			p.logger.Error("notifications: compensating delete after failed secret store",
 				"id", id, "error", delErr)
 		}
-		p.writeError(w, 500, "failed to store secret")
+		p.writeError(w, 500, plugin.StoreFailureMessage(err))
 		return
 	}
 
@@ -206,6 +311,7 @@ func (p *Plugin) handleCreateWebhook(w http.ResponseWriter, r *http.Request) {
 		Enabled:          true,
 		CreatedAt:        now,
 		UpdatedAt:        now,
+		Name:             req.Name,
 	})
 }
 
@@ -218,12 +324,27 @@ func (p *Plugin) handleListWebhooks(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	rows, err := p.db.Query(r.Context(), `
-			SELECT id, url, secret_configured, events, enabled, created_at, updated_at
+	// ?name= is a lookup by the caller-set name (cleat#3538): the answer is still a list, of one webhook
+	// or none, so a client reads it the same way as an unfiltered list. A name that could never exist is
+	// a 400 rather than an empty list, so a typo reads as a typo.
+	query := `
+			SELECT id, url, secret_configured, events, enabled, created_at, updated_at, name
 			FROM webhook_config
-			WHERE tenant_id = $1 AND deleted_at IS NULL
-			ORDER BY created_at DESC
-		`, tid)
+			WHERE tenant_id = $1 AND deleted_at IS NULL`
+	args := []any{tid}
+	if q := r.URL.Query(); q.Has("name") {
+		name := q.Get("name")
+		if !validWebhookName(name) {
+			p.writeError(w, 400, webhookNameRule)
+			return
+		}
+		query += ` AND name = $2`
+		args = append(args, name)
+	}
+	query += `
+			ORDER BY created_at DESC`
+
+	rows, err := p.db.Query(r.Context(), query, args...)
 	if err != nil {
 		p.logger.Error("notifications: list webhooks", "error", err)
 		p.writeError(w, 500, "failed to list webhooks")
@@ -237,7 +358,7 @@ func (p *Plugin) handleListWebhooks(w http.ResponseWriter, r *http.Request) {
 			c         webhookConfigJSON
 			eventsRaw []byte
 		)
-		if err := plugin.ScanRow(rows, &c.ID, &c.URL, &c.SecretConfigured, &eventsRaw, &c.Enabled, &c.CreatedAt, &c.UpdatedAt); err != nil {
+		if err := plugin.ScanRow(rows, &c.ID, &c.URL, &c.SecretConfigured, &eventsRaw, &c.Enabled, &c.CreatedAt, &c.UpdatedAt, &c.Name); err != nil {
 			p.logger.Error("notifications: scan webhook", "error", err)
 			continue
 		}
@@ -274,10 +395,10 @@ func (p *Plugin) handleGetWebhook(w http.ResponseWriter, r *http.Request) {
 		eventsRaw []byte
 	)
 	err = plugin.ScanRow(p.db.QueryRow(r.Context(), `
-			SELECT id, url, secret_configured, events, enabled, created_at, updated_at
+			SELECT id, url, secret_configured, events, enabled, created_at, updated_at, name
 			FROM webhook_config
 			WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL
-		`, id, tid), &c.ID, &c.URL, &c.SecretConfigured, &eventsRaw, &c.Enabled, &c.CreatedAt, &c.UpdatedAt)
+		`, id, tid), &c.ID, &c.URL, &c.SecretConfigured, &eventsRaw, &c.Enabled, &c.CreatedAt, &c.UpdatedAt, &c.Name)
 	if errors.Is(err, sql.ErrNoRows) {
 		p.writeError(w, 404, "webhook not found")
 		return
@@ -349,6 +470,18 @@ func (p *Plugin) handleUpdateWebhook(w http.ResponseWriter, r *http.Request) {
 		args = append(args, *req.Enabled)
 		argIdx++
 	}
+	// A name can be set or changed, not cleared, as the secret can be rotated and not cleared: a webhook
+	// that an app looks up by name does not lose that identity by an update that omits the field, and an
+	// explicit "" is refused rather than read as "remove it".
+	if req.Name != nil {
+		if !validWebhookName(*req.Name) {
+			p.writeError(w, 400, webhookNameRule)
+			return
+		}
+		setClauses = append(setClauses, fmt.Sprintf("name = $%d", argIdx))
+		args = append(args, *req.Name)
+		argIdx++
+	}
 
 	// A secret rotation carries no SET clause of its own any more -- it goes
 	// through p.secrets, not this UPDATE -- so it no longer counts toward
@@ -369,14 +502,33 @@ func (p *Plugin) handleUpdateWebhook(w http.ResponseWriter, r *http.Request) {
 		`, joinSetClauses(setClauses), argIdx, argIdx+1)
 
 	rows, err := p.db.Exec(r.Context(), query, args...)
+	if req.Name != nil && isDuplicateWebhookName(err) {
+		// Before the secret is rotated: a refused rename changes nothing.
+		p.writeError(w, 409, fmt.Sprintf("a webhook named %q already exists", *req.Name))
+		return
+	}
 	if err != nil {
 		p.logger.Error("notifications: update webhook", "error", err)
 		p.writeError(w, 500, "failed to update webhook")
 		return
 	}
 	if rows == 0 {
-		p.writeError(w, 404, "webhook not found")
-		return
+		// 0 rows is not "no such webhook" on every dialect. PostgreSQL and SQL Server count the rows
+		// MATCHED; MySQL counts rows CHANGED, and its now() has second precision, so an update that
+		// changes nothing else and lands in the same second as the row's last one assigns the value it
+		// already holds and affects 0 rows for a webhook that exists (cleat#3541). Ask, rather than infer.
+		// The same statement the other read paths use, so a deleted webhook, another tenant's and an id
+		// that never existed all still answer 404.
+		var exists bool
+		if err := p.db.QueryRow(r.Context(), webhookExistsSQL(p.dialect), id, tid).Scan(&exists); err != nil {
+			p.logger.Error("notifications: check webhook exists", "error", err)
+			p.writeError(w, 500, "failed to update webhook")
+			return
+		}
+		if !exists {
+			p.writeError(w, 404, "webhook not found")
+			return
+		}
 	}
 
 	// The secret write happens AFTER the row update confirms id belongs to
@@ -388,7 +540,7 @@ func (p *Plugin) handleUpdateWebhook(w http.ResponseWriter, r *http.Request) {
 	if req.Secret != nil {
 		if err := p.secrets.Put(r.Context(), WebhookSecretName(id), req.Secret.Reveal()); err != nil {
 			p.logger.Error("notifications: rotate webhook secret", "error", err, "id", id)
-			p.writeError(w, 500, "failed to store secret")
+			p.writeError(w, 500, plugin.StoreFailureMessage(err))
 			return
 		}
 	}
@@ -399,10 +551,10 @@ func (p *Plugin) handleUpdateWebhook(w http.ResponseWriter, r *http.Request) {
 		eventsRaw []byte
 	)
 	err = plugin.ScanRow(p.db.QueryRow(r.Context(), `
-			SELECT id, url, secret_configured, events, enabled, created_at, updated_at
+			SELECT id, url, secret_configured, events, enabled, created_at, updated_at, name
 			FROM webhook_config
 			WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL
-		`, id, tid), &c.ID, &c.URL, &c.SecretConfigured, &eventsRaw, &c.Enabled, &c.CreatedAt, &c.UpdatedAt)
+		`, id, tid), &c.ID, &c.URL, &c.SecretConfigured, &eventsRaw, &c.Enabled, &c.CreatedAt, &c.UpdatedAt, &c.Name)
 	if err != nil {
 		p.logger.Error("notifications: re-fetch webhook", "error", err)
 		p.writeError(w, 500, "failed to retrieve updated webhook")
@@ -550,9 +702,7 @@ func (p *Plugin) handleListDeliveries(w http.ResponseWriter, r *http.Request) {
 	}
 
 	query := `
-			SELECT id, webhook_id, event_type, payload, status, attempt_count,
-			       last_attempt_at, next_attempt_at, delivered_at,
-			       response_code, response_body, created_at
+			SELECT ` + deliverySelectColumns + `
 			FROM webhook_delivery
 			WHERE webhook_id = $1
 		`
@@ -584,40 +734,10 @@ func (p *Plugin) handleListDeliveries(w http.ResponseWriter, r *http.Request) {
 
 	var deliveries []deliveryJSON
 	for rows.Next() {
-		var (
-			d             deliveryJSON
-			payloadRaw    []byte
-			lastAttemptAt sql.NullTime
-			nextAttemptAt sql.NullTime
-			deliveredAt   sql.NullTime
-			responseCode  sql.NullInt64
-			responseBody  sql.NullString
-		)
-		if err := plugin.ScanRow(rows,
-			&d.ID, &d.WebhookID, &d.EventType, &payloadRaw,
-			&d.Status, &d.AttemptCount,
-			&lastAttemptAt, &nextAttemptAt, &deliveredAt,
-			&responseCode, &responseBody, &d.CreatedAt,
-		); err != nil {
+		d, err := scanDelivery(rows)
+		if err != nil {
 			p.logger.Error("notifications: scan delivery", "error", err)
 			continue
-		}
-		d.Payload = json.RawMessage(payloadRaw)
-		if lastAttemptAt.Valid {
-			d.LastAttemptAt = &lastAttemptAt.Time
-		}
-		if nextAttemptAt.Valid {
-			d.NextAttemptAt = &nextAttemptAt.Time
-		}
-		if deliveredAt.Valid {
-			d.DeliveredAt = &deliveredAt.Time
-		}
-		if responseCode.Valid {
-			v := int(responseCode.Int64)
-			d.ResponseCode = &v
-		}
-		if responseBody.Valid {
-			d.ResponseBody = &responseBody.String
 		}
 		deliveries = append(deliveries, d)
 	}
@@ -627,6 +747,125 @@ func (p *Plugin) handleListDeliveries(w http.ResponseWriter, r *http.Request) {
 	}
 
 	p.writeJSON(w, 200, deliveries)
+}
+
+// ---- POST /webhooks/{id}/deliveries/{delivery_id}/redeliver ----
+
+// redeliveredByMax bounds the recorded identity to what the narrowest column holds
+// (VARCHAR(512) on MySQL, NVARCHAR(512) on SQL Server), counted in runes so a UTF-16
+// pair cannot push it over.
+const redeliveredByMax = 256
+
+// handleRedeliver puts one FAILED delivery back to pending so the sweep sends it again
+// (cleat#3612). A delivery that ends failed was otherwise lost to the operator: the payload is
+// in the row and no route sent it, which is why a status that an operator repairs from outside
+// (a rotated secret, a wrong URL, a receiver that was down longer than the retry window) cannot
+// be classed permanent in isPermanentWebhookRefusal.
+//
+// It accepts a delivery of THIS webhook, in THIS tenant, whose status is failed, and nothing
+// else: a pending or retrying one is already going out, a delivered one would be sent twice,
+// and a cancelled one belongs to a deleted webhook. Those, and a webhook that is disabled (the
+// sweep does not send for it, so the delivery would sit pending and look like a send that did
+// not happen), are 409. The reset uses the database clock, as the retry path does.
+func (p *Plugin) handleRedeliver(w http.ResponseWriter, r *http.Request) {
+	tid, ok := auth.TenantIDFromRequest(r)
+	if !ok {
+		p.writeError(w, 401, "tenant required")
+		return
+	}
+	webhookID, err := uuid.Parse(r.PathValue("id"))
+	if err != nil {
+		p.writeError(w, 400, "invalid webhook id")
+		return
+	}
+	deliveryID, err := uuid.Parse(r.PathValue("delivery_id"))
+	if err != nil {
+		p.writeError(w, 400, "invalid delivery id")
+		return
+	}
+	ctx := r.Context()
+
+	var enabled bool
+	err = p.db.QueryRow(ctx,
+		`SELECT enabled FROM webhook_config WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL`,
+		webhookID, tid).Scan(&enabled)
+	if errors.Is(err, sql.ErrNoRows) {
+		p.writeError(w, 404, "webhook not found")
+		return
+	}
+	if err != nil {
+		p.logger.Error("notifications: verify webhook", "error", err)
+		p.writeError(w, 500, "failed to verify webhook")
+		return
+	}
+	if !enabled {
+		p.writeError(w, 409, "webhook is disabled: enable it, then redeliver, or the delivery would wait unsent")
+		return
+	}
+
+	// The identity is whatever authentication resolved, and NULL when nothing did.
+	var by any
+	if subject, ok := auth.SubjectFromContext(ctx); ok && subject != "" {
+		by = truncateRunes(subject, redeliveredByMax)
+	}
+
+	// Every placeholder is numbered once, in the order it appears in the text (CLAUDE.md,
+	// "MySQL binds ? by APPEARANCE"). The status guard is the whole decision, and it is in the
+	// same single UPDATE as the write, so resends that arrive together cannot both match. That is
+	// by construction; the tests do not race two resends.
+	query := fmt.Sprintf(`
+			UPDATE webhook_delivery
+			SET status = 'pending',
+			    attempt_count = 0,
+			    next_attempt_at = %s,
+			    redelivery_count = redelivery_count + 1,
+			    last_redelivered_at = %s,
+			    last_redelivered_by = $1
+			WHERE id = $2 AND webhook_id = $3 AND status = 'failed'
+		`, nowSQLExpr(p.dialect), nowSQLExpr(p.dialect))
+	n, err := p.db.Exec(ctx, query, by, deliveryID, webhookID)
+	if err != nil {
+		p.logger.Error("notifications: redeliver", "error", err)
+		p.writeError(w, 500, "failed to redeliver")
+		return
+	}
+	if n == 0 {
+		// Nothing was reset. Say why, which a rows-affected count cannot.
+		var status string
+		err := p.db.QueryRow(ctx,
+			`SELECT status FROM webhook_delivery WHERE id = $1 AND webhook_id = $2`,
+			deliveryID, webhookID).Scan(&status)
+		if errors.Is(err, sql.ErrNoRows) {
+			p.writeError(w, 404, "delivery not found")
+			return
+		}
+		if err != nil {
+			p.logger.Error("notifications: read delivery after refused redeliver", "error", err)
+			p.writeError(w, 500, "failed to redeliver")
+			return
+		}
+		p.writeError(w, 409, fmt.Sprintf("delivery is %s: only a failed delivery can be redelivered", status))
+		return
+	}
+
+	d, err := scanDelivery(p.db.QueryRow(ctx,
+		`SELECT `+deliverySelectColumns+` FROM webhook_delivery WHERE id = $1 AND webhook_id = $2`,
+		deliveryID, webhookID))
+	if err != nil {
+		p.logger.Error("notifications: read redelivered delivery", "error", err)
+		p.writeError(w, 500, "redelivered, but the delivery could not be read back")
+		return
+	}
+	p.logger.Info("notifications: delivery redelivered", "id", deliveryID, "webhook", webhookID, "by", by)
+	p.writeJSON(w, 200, d)
+}
+
+// truncateRunes returns s cut to at most max runes.
+func truncateRunes(s string, max int) string {
+	if r := []rune(s); len(r) > max {
+		return string(r[:max])
+	}
+	return s
 }
 
 // joinSetClauses joins SET clause fragments with ", ".

@@ -2,16 +2,19 @@
 
 ## Supported Versions
 
-The cleat project provides security updates for the following versions:
+cleat is pre-1.0: every release is a `0.x` release. The cleat project provides
+security updates for the following versions:
 
-| Version | Supported          |
-|---------|--------------------|
-| 1.x     | :white_check_mark: |
-| < 1.0   | :x:                |
+| Version                        | Supported          |
+|--------------------------------|--------------------|
+| The latest `0.x` minor release | :white_check_mark: |
+| Any earlier minor release      | :x:                |
 
-Only the latest minor release of the current major version receives security patches.
-Users are strongly encouraged to upgrade to the latest version to ensure they receive
-security fixes.
+Only the latest minor release receives security patches. Before 1.0 a minor release can
+change behaviour, so read the upgrade notes at the top of `CHANGELOG.md` and
+`docs/operations/upgrading.md` before you upgrade. Users are strongly encouraged to
+upgrade to the latest version to ensure they receive security fixes. This table will be
+restated when cleat reaches 1.0.
 
 ## Scope Boundaries
 
@@ -162,7 +165,7 @@ threat model assumes:
   `engine/imports.go` disagree). They cannot access the filesystem, network, environment
   variables, or system clock except through these host functions.
 - **Memory isolation**: Each WASM module has its own linear memory. The wasmtime
-  store enforces memory bounds (32 MiB per module by default,
+  store enforces memory bounds (256 MiB per module by default,
   `--wasm-memory-max-mb`); modules cannot read or write outside their
   allocated memory region.
 - **A second runtime, outside the worker**: [wazero](https://github.com/tetratelabs/wazero)
@@ -221,8 +224,8 @@ replay behavior.
   dialect the load-bearing layer is statement-level tenant predicates in cleat's
   own queries, gated at authoring time per dialect. Row-level security is a
   backstop underneath it, and its coverage differs sharply: PostgreSQL forces RLS
-  on 19 of 23 tenant-bearing tables, SQL Server binds read-only FILTER predicates
-  to 14 and, since cleat#2205, write-blocking BLOCK predicates to the same 14,
+  on 20 of 24 tenant-bearing tables, SQL Server binds read-only FILTER predicates
+  to 15 and, since cleat#2205, write-blocking BLOCK predicates to the same 15,
   and MySQL has none and is single-tenant only by decision (`tiers.yaml` D1).
   Both SQL Server predicates are additionally inert for a `cleat_admin`
   connection. So a write from that connection, or from MySQL's own application

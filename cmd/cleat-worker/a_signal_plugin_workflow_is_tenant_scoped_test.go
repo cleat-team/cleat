@@ -90,6 +90,10 @@ import (
 // a_plugin_start_workflow_is_tenant_scoped_test.go: the defect is in what
 // the STORE does under a foreign tenant's context, which a mock cannot show.
 
+// WHY EVERY START IN THIS FILE CARRIES A UNIQUE KEY (cleat#4340). These tests used a fixed key ("start-"+tenant), and idempotency keys outlive a test run in the shared database, so a second
+// invocation did not start a run: it REPLAYED the run the first one left behind, which that run's cleanup had already terminated. The known-positive controls then signalled a terminated run and
+// passed only because delivering a signal to a settled run was accepted and lost, so they measured nothing about a run that can receive one. A unique key makes every start a fresh, open run.
+
 // TestSignalPluginWorkflow_PostgresScopesToTheTargetsTenant is the
 // PostgreSQL half.
 func TestSignalPluginWorkflow_PostgresScopesToTheTargetsTenant(t *testing.T) {
@@ -97,6 +101,7 @@ func TestSignalPluginWorkflow_PostgresScopesToTheTargetsTenant(t *testing.T) {
 		t.Skip("CLEAT_TEST_POSTGRES not set, skipping database-backed cleat#2209 test")
 	}
 	db := testutil.SuiteTestDB(t, "cleat_worker")
+	settleRunsLeftBehind(t, db)
 	rlsDB := testutil.OpenPostgresRLSTestDB(t, db)
 	factory := engine.NewPostgresStoreFactory(rlsDB, "public")
 	ctx := context.Background()
@@ -128,7 +133,7 @@ func TestSignalPluginWorkflow_PostgresScopesToTheTargetsTenant(t *testing.T) {
 			t.Fatalf("deploy def for %s: %v", tenant, err)
 		}
 		runID, _, err := st.StartNewRun(ctx, "", "signal-2209", 1, json.RawMessage(`{}`),
-			"start-"+tenant, tenant, 0)
+			"start-"+tenant+"-"+uuid.NewString(), tenant, 0)
 		if err != nil {
 			t.Fatalf("start run for %s: %v", tenant, err)
 		}
@@ -257,6 +262,7 @@ func TestSignalPluginWorkflow_PostgresShardedStoreScopesToTheTargetsTenant(t *te
 		t.Skip("CLEAT_TEST_POSTGRES not set, skipping database-backed cleat#2209 test")
 	}
 	db := testutil.SuiteTestDB(t, "cleat_worker")
+	settleRunsLeftBehind(t, db)
 	rlsDB := testutil.OpenPostgresRLSTestDB(t, db)
 	factory := engine.NewPostgresStoreFactory(rlsDB, "public")
 	ctx := context.Background()
@@ -321,7 +327,7 @@ func TestSignalPluginWorkflow_PostgresShardedStoreScopesToTheTargetsTenant(t *te
 		// against a different def name, and reusing it here would fail with
 		// ErrIdempotencyKeyDefMismatch instead of exercising the start path.
 		runID, _, err := ss.WithTenant(tenant).StartNewRun(ctx, "", "signal-2209-sharded", 1, json.RawMessage(`{}`),
-			"start-sharded-"+tenant, tenant, 0)
+			"start-sharded-"+tenant+"-"+uuid.NewString(), tenant, 0)
 		if err != nil {
 			t.Fatalf("start run for %s via ShardedStore: %v", tenant, err)
 		}
@@ -432,7 +438,10 @@ func TestSignalPluginWorkflow_MSSQLScopesToTheTargetsTenant(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open admin connection: %v", err)
 	}
-	defer adminDB.Close()
+	// Closed by a cleanup registered BEFORE the one that drops the scratch database, so it runs AFTER it
+	// (cleanups run last in, first out). A `defer` here ran when the test function returned, which is before
+	// any t.Cleanup, so the DROP DATABASE found a closed connection and its error was discarded (cleat#3609).
+	t.Cleanup(func() { _ = adminDB.Close() })
 	if err := adminDB.Ping(); err != nil {
 		t.Fatalf("CLEAT_TEST_MSSQL is set but SQL Server is unreachable at %s: %v",
 			redactMSSQLDSN(base), err)
@@ -494,7 +503,7 @@ func TestSignalPluginWorkflow_MSSQLScopesToTheTargetsTenant(t *testing.T) {
 			t.Fatalf("deploy def for %s: %v", tenant, err)
 		}
 		runID, _, err := st.StartNewRun(ctx, "", "signal-2209-mssql", 1, json.RawMessage(`{}`),
-			"start-"+tenant, tenant, 0)
+			"start-"+tenant+"-"+uuid.NewString(), tenant, 0)
 		if err != nil {
 			t.Fatalf("start run for %s: %v", tenant, err)
 		}
@@ -637,6 +646,7 @@ func TestSignalPluginWorkflowWithAuth_OnlyAnAllowedCallerCanSignal(t *testing.T)
 		t.Skip("CLEAT_TEST_POSTGRES not set, skipping database-backed cleat#2209 test")
 	}
 	db := testutil.SuiteTestDB(t, "cleat_worker")
+	settleRunsLeftBehind(t, db)
 	rlsDB := testutil.OpenPostgresRLSTestDB(t, db)
 	factory := engine.NewPostgresStoreFactory(rlsDB, "public")
 	ctx := context.Background()

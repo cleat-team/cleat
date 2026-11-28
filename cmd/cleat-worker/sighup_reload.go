@@ -147,6 +147,7 @@ func (w *Worker) reloadKeyRingsOnSIGHUP(ctx context.Context) {
 		Concurrency:       w.concurrency,
 		ConnectionBudget:  w.clusterConnectionBudget,
 		SecretKeyVersions: candidateSecrets.Versions(),
+		Plugins:           loadedPluginNames(w.plugList),
 	}
 	// revertSecretsTo/secretsMoved cover a gap cleat-review found and
 	// falsified live: RegisterUnderKeyGate runs this callback, including the
@@ -201,6 +202,15 @@ func (w *Worker) reloadKeyRingsOnSIGHUP(ctx context.Context) {
 	if len(droppedSecrets) > 0 {
 		logger.WarnContext(ctx, "SIGHUP: secret key reload dropped a key version -- any secret still sealed under it will fail to resolve on this worker",
 			"worker_id", workerID, "dropped_versions", droppedSecrets)
+	}
+
+	// cleat#3853: the ring has changed on the success path only (a refused or
+	// reverted reload returned above), so a run whose sealed compaction state
+	// this worker could not open may now be openable. Retry those on the next
+	// compaction tick instead of waiting out compactionSkipWindow.
+	if n := w.compactionSkipSetFor().clear(); n > 0 {
+		logger.InfoContext(ctx, "SIGHUP: payload keys reloaded; the runs whose compaction state this worker could not open will be retried",
+			"worker_id", workerID, "compaction_skips_cleared", n)
 	}
 
 	logger.InfoContext(ctx, "SIGHUP: key reload complete", "worker_id", workerID, "secret_key_versions", candidateSecrets.Versions())

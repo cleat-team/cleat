@@ -198,8 +198,9 @@ also why the sibling ports' CI jobs run one arm rather than cleat's
 `order-lifecycle-scenario`'s three.
 
 That is a different reason from the **cleat** side's, which is PostgreSQL-only
-because it creates tenants via `cleat-worker --create-tenant` and that refuses
-on MySQL and SQL Server. So the pair is single-dialect from both directions at
+because it creates tenants via `cleat-worker --create-tenant`, which refuses
+MySQL (and refused SQL Server until cleat#3552; this scenario has not been run
+there). So the pair is single-dialect from both directions at
 once, and neither side's reason is the other's — see
 `examples/b2b-saas-control-plane/README.md`'s
 [Which dialects this runs on](../b2b-saas-control-plane/README.md#which-dialects-this-runs-on)

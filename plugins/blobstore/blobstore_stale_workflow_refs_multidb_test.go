@@ -65,8 +65,8 @@ func TestStaleWorkflowRefs_SparesAnInFlightWorkflow_MultiBackend(t *testing.T) {
 			// creates. See blobstore_expiry_decrement_multidb_test.go's own
 			// comment on this same requirement. It must also run before
 			// CrossTenantConn: on MSSQL that now routes through MSSQLAdminDB,
-			// which Fatals if core RLS is enforced but migration 012's
-			// cleat_admin role does not exist yet. cleat#2226.
+			// which Fatals if core RLS is enforced but the cleat_admin
+			// role does not exist yet. cleat#2226.
 			testutil.SetupMinimalSchema(t, be.DB, be.Dialect)
 			if err := plugin.RunMigrations(ctx, be.DB, dialect, nil,
 				[]*plugin.LoadedPlugin{{Plugin: p, Healthy: true}}); err != nil {

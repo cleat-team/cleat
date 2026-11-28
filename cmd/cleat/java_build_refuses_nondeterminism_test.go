@@ -10,7 +10,7 @@ import (
 
 // The two absence-arms below call requireReachedStage(t, out, javaVetMarker); both
 // it and requireBuildStarted live in build_reached_the_stage_test.go, shared with
-// the Rust and AssemblyScript siblings. This file used to carry its own
+// the Rust sibling. This file used to carry its own
 // requireTheCheckerRan -- written first, in cleat#3056, and generalised once the
 // siblings landed (cleat#3075). The rationale that used to sit here is on the shared
 // helper, which is now the one place a reader has to look.

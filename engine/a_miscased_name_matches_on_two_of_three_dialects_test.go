@@ -21,27 +21,29 @@ import (
 //
 //	                     collation of workflow_defs.name    'placeorder' = 'PlaceOrder'
 //	PostgreSQL 16        en_US.utf8, deterministic `=`      false
-//	MySQL 8.4.11         utf8mb4_0900_ai_ci                 TRUE
-//	SQL Server 2022      SQL_Latin1_General_CP1_CI_AS       TRUE
+//	MySQL 8.4.11         utf8mb4_0900_bin (012)             false   (was utf8mb4_0900_ai_ci, TRUE, until cleat#3640)
+//	SQL Server 2022      Latin1_General_100_BIN2 (011)      false   (was SQL_Latin1_General_CP1_CI_AS, TRUE, until cleat#3635)
 //
-// So `WHERE name = ?` is an exact lookup on ONE dialect of three, and registering
-// both `PlaceOrder` and `placeorder` succeeds on PostgreSQL while both other
-// dialects reject the second as a duplicate primary key (MySQL 1062, SQL Server
-// 2627). Same input, same tier-1 matrix, three-way divergence in whether a
-// deployment is even possible.
+// When this was written (2026-09-16) `WHERE name = ?` was an exact lookup on ONE dialect
+// of three, and registering both `PlaceOrder` and `placeorder` succeeded on PostgreSQL
+// while both other dialects rejected the second as a duplicate primary key (MySQL 1062,
+// SQL Server 2627): a three-way divergence in whether a deployment was even possible.
+// Owner decision D60 (2026-10-30) closed it: migration 011 (cleat#3635) made SQL Server
+// exact and migration 012 (cleat#3640) made MySQL exact, so TODAY NO DIALECT FOLDS. The
+// test's name predates that and is kept because IMPROVEMENT-PLAN.md 3.316 and other files
+// cite it; read it as "what each dialect does", not as a count.
 //
-// THIS TEST FIXES NOTHING AND IS NOT A REGRESSION TEST. Choosing a collation is a
-// decision with a migration behind it -- IMPROVEMENT-PLAN.md 3.316 holds the
-// options and the argument -- and it is deliberately not taken here. What this
-// pins is the CURRENT behaviour, per dialect, with a reason recorded for each, so
-// that the divergence is executable rather than latent: today nothing in the tree
-// compares two strings differing only in case, which is why this has stayed
-// invisible. No test anywhere reads a server or column collation:
+// THIS TEST IS NOT A REGRESSION TEST FOR ANY ONE FIX. It pins the CURRENT behaviour,
+// per dialect, with a reason recorded for each, so that a dialect changing is executable
+// rather than latent. No other test reads a server or column collation:
 //
 //	git ls-files '*_test.go' | xargs grep -lniE 'collation_name|@@collation|datcollate'
 //
-// If a future migration pins a collation, this test goes red and names the
-// dialect that moved. That is the intended outcome, not a failure of this test.
+// (That grep returned nothing when this was written. Besides this file it now returns
+// migration/catalogdiff's collation test, the MySQL baseline test, and the tests for
+// migrations 011 and 012.) If a future migration moves a
+// collation, this test goes red and names the dialect that moved. That is the intended
+// outcome, not a failure of this test.
 //
 // WHY cleat#936's REMEDY DOES NOT TRANSFER. #936 was the same mechanism reaching
 // `parent_close_policy`, and it was closed by validating at the write boundary
@@ -110,23 +112,24 @@ func caseFoldingDialects() []caseFoldingDialect {
 			name:      "mysql",
 			dialect:   testutil.DialectMySQL,
 			setup:     testutil.SetupMySQLFullSchema,
-			foldsCase: true,
-			why: "MySQL 8's server default is utf8mb4_0900_ai_ci -- accent-insensitive " +
-				"and CASE-insensitive. Nothing opted into it; no migration names a " +
-				"collation, so every VARCHAR inherits it. This is the collation " +
-				"cleat#936 measured on parent_close_policy.",
+			foldsCase: false,
+			why: "Migration 012 (cleat#3640, owner D60-b) gave every workflow-definition name " +
+				"column utf8mb4_0900_bin, the one MySQL collation that matched PostgreSQL on " +
+				"every probe (case, accent, trailing space, NFC/NFD, zero-width, sharp s). " +
+				"Until then these columns inherited the server default, utf8mb4_0900_ai_ci -- " +
+				"accent-insensitive and CASE-insensitive -- which is the collation cleat#936 " +
+				"measured on parent_close_policy, and this entry read true.",
 		},
 		{
 			name:      "mssql",
 			dialect:   testutil.DialectMSSQL,
 			setup:     testutil.SetupMSSQLFullSchema,
-			foldsCase: true,
-			why: "SQL Server's container default is SQL_Latin1_General_CP1_CI_AS -- the " +
-				"CI is case-insensitive. cleat#936 EXPECTED this and said so, " +
-				"explicitly flagging it as unmeasured; IMPROVEMENT-PLAN 3.316 then " +
-				"asserted the opposite, that SQL Server is case-sensitive. Measured " +
-				"2026-09-16: #936's expectation was right and 3.316 was wrong, which " +
-				"moves SQL Server from the minority column to the majority one.",
+			foldsCase: false,
+			why: "Migration 011 (cleat#3635, owner D60) gave every workflow-definition name " +
+				"column the binary collation Latin1_General_100_BIN2, so `=` is byte " +
+				"equality here as on PostgreSQL. Until then these columns inherited the " +
+				"database default, SQL_Latin1_General_CP1_CI_AS, and this entry read true " +
+				"(measured 2026-09-16).",
 		},
 	}
 }

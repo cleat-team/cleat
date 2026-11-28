@@ -6,12 +6,13 @@ package migration_test
 // IMPROVEMENT-PLAN 2.71 / administrative access under Row-Level Security.
 //
 // SQL Server applies a security policy to every principal -- sysadmin, db_owner
-// and dbo included -- so before migration 012 there was no connection that
-// could read or delete across tenants. PostgreSQL gets that for free, because a
-// superuser bypasses RLS unconditionally; the cleat_app role
-// is entirely about keeping the *application* out of that exemption. SQL Server
-// has to write the privileged half into the predicate, because the predicate is
-// the only place an exemption can live.
+// and dbo included -- so before the cleat_admin bypass existed there was no
+// connection that could read or delete across tenants. The bypass is opt-in:
+// migrations/mssql/optional/cross_tenant_claim.sql is what adds it.
+// PostgreSQL gets that for free: a superuser bypasses RLS unconditionally;
+// the cleat_app role is entirely about keeping the *application* out of that
+// exemption. SQL Server has to write the privileged half into the predicate,
+// because the predicate is the only place an exemption can live.
 //
 // These tests assert both directions, and the negative direction is the more
 // important one: the exemption must be something a principal has to be given,
@@ -239,7 +240,7 @@ func TestMSSQLAdminRoleShipsEmpty(t *testing.T) {
 		t.Fatalf("look up cleat_admin: %v", err)
 	}
 	if exists != 1 {
-		t.Fatalf("migration 012 did not create the cleat_admin role (found %d)", exists)
+		t.Fatalf("the core migrations did not create the cleat_admin role (found %d)", exists)
 	}
 
 	// Only the two logins this test added itself, one of which it put in the

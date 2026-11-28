@@ -128,7 +128,11 @@ func (s *MSSQLStore) ListTenantIDs(ctx context.Context) ([]string, error) {
 	return ids, nil
 }
 
-// TenantSuspensionReader reports whether one tenant is suspended.
+// TenantSuspensionReader reports whether one tenant is suspended, or has been dropped.
+//
+// A DROPPED tenant (cleat#3552, B3b-2) has a row in admin.tenant_tombstones and none in admin.tenants,
+// and it counts as suspended here: a start for it is refused. Without that, "no row" would read as "not
+// suspended" and a plugin still holding a dropped tenant's id could start a run that writes rows under it.
 //
 // Separate from TenantLister because the two answer different questions at
 // different rates: the lister runs once per dispatch tick and is a whole-table
@@ -137,9 +141,10 @@ type TenantSuspensionReader interface {
 	IsTenantSuspended(ctx context.Context, tenantID string) (bool, error)
 }
 
-// IsTenantSuspended reports whether admin.tenants marks this tenant suspended.
+// IsTenantSuspended reports whether admin.tenants marks this tenant suspended, or admin.tenant_tombstones
+// says it was dropped.
 //
-// A tenant with no row is NOT suspended. That is the honest answer rather than
+// A tenant with no row in either is NOT suspended. That is the honest answer rather than
 // a safe-looking one: admin.tenants is a registry that a deployment can run
 // without populating -- 002_defaults.sql seeds only the default tenant -- so
 // treating "absent" as suspended would refuse every start on a deployment that
@@ -147,10 +152,9 @@ type TenantSuspensionReader interface {
 func (s *PostgresStore) IsTenantSuspended(ctx context.Context, tenantID string) (bool, error) {
 	var suspended bool
 	err := s.db.QueryRowContext(ctx,
-		`SELECT suspended FROM admin.tenants WHERE tenant_id = $1::uuid`, tenantID).Scan(&suspended)
-	if errors.Is(err, sql.ErrNoRows) {
-		return false, nil
-	}
+		`SELECT COALESCE((SELECT suspended FROM admin.tenants WHERE tenant_id = $1::uuid), false)
+		     OR EXISTS (SELECT 1 FROM admin.tenant_tombstones WHERE dropped_tenant_id = $1::uuid)`,
+		tenantID).Scan(&suspended)
 	if err != nil {
 		return false, fmt.Errorf("is tenant suspended: %w", err)
 	}
@@ -161,14 +165,50 @@ func (s *PostgresStore) IsTenantSuspended(ctx context.Context, tenantID string) 
 func (s *MSSQLStore) IsTenantSuspended(ctx context.Context, tenantID string) (bool, error) {
 	var suspended bool
 	err := s.db.QueryRowContext(ctx,
-		`SELECT suspended FROM admin.tenants WHERE tenant_id = @p1`, tenantID).Scan(&suspended)
-	if errors.Is(err, sql.ErrNoRows) {
-		return false, nil
-	}
+		`SELECT CASE WHEN EXISTS (SELECT 1 FROM admin.tenants WHERE tenant_id = @p1 AND suspended = 1)
+		               OR EXISTS (SELECT 1 FROM admin.tenant_tombstones WHERE dropped_tenant_id = @p1)
+		            THEN CAST(1 AS bit) ELSE CAST(0 AS bit) END`, tenantID).Scan(&suspended)
 	if err != nil {
 		return false, fmt.Errorf("is tenant suspended: %w", err)
 	}
 	return suspended, nil
+}
+
+// NoTenantSuspensionMarker is implemented by a store that deliberately has no notion of a suspended
+// tenant, and says so. MySQLStore is the one such store: it is single-tenant by construction (D1,
+// mysql/038), so there is no admin.tenants row to consult.
+//
+// It exists because the start paths used to decide "may this tenant start work" with a bare type
+// assertion on TenantSuspensionReader, and a store that failed the assertion was NOT refused -- the check
+// was skipped without a word. That made "cannot answer" and "answered no" the same thing, which is how a
+// sharded store (cleat#3596) and a suspended tenant's plugin starts (cleat#3594) went unguarded without
+// anything failing. A store now has to be one or the other: a reader, or a declared opt-out.
+type NoTenantSuspensionMarker interface {
+	NoTenantSuspension()
+}
+
+// ErrTenantSuspensionUnanswerable is what TenantSuspended returns for a store that is neither a
+// TenantSuspensionReader nor a NoTenantSuspensionMarker. A start path turns it into a refusal.
+var ErrTenantSuspensionUnanswerable = errors.New(
+	"store can neither report whether a tenant is suspended nor declares that it has no such notion")
+
+// TenantSuspended asks a store whether tenantID is suspended, and refuses to guess.
+//
+//   - a TenantSuspensionReader answers (and its error is returned, never read as "not suspended");
+//   - a NoTenantSuspensionMarker is "not suspended" -- by its own declaration, not by default;
+//   - anything else is ErrTenantSuspensionUnanswerable, naming the store's type.
+//
+// A reader wins over a marker if a type somehow carries both: the more specific answer is the one to
+// believe.
+func TenantSuspended(ctx context.Context, store any, tenantID string) (bool, error) {
+	if r, ok := store.(TenantSuspensionReader); ok {
+		return r.IsTenantSuspended(ctx, tenantID)
+	}
+	if _, ok := store.(NoTenantSuspensionMarker); ok {
+		return false, nil
+	}
+	return false, fmt.Errorf("%w: %T (add IsTenantSuspended(ctx, tenantID) (bool, error), or NoTenantSuspension() if the store has no tenants to suspend)",
+		ErrTenantSuspensionUnanswerable, store)
 }
 
 // TenantExposurePolicyReader reports whether an operator has opted a tenant

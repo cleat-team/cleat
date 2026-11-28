@@ -24,6 +24,11 @@ import (
 // or absent one makes a resumed workflow see a Now() the run that recorded it
 // never returned.
 //
+// A row that was answered over (an await recorded empty and answered later at
+// the same step, a write-ahead-intent call completed over its intent row)
+// carries the time of the answer in this column since cleat#4465, so that the
+// value read here is the one the live run read.
+//
 // Deriving both in Go from the one column is what makes the nine agree by
 // construction rather than by nine people remembering. The SQL-side
 // timestamp_ms expressions are gone; there is nothing left for a new read path
@@ -137,7 +142,7 @@ func (s *PostgresStore) readEventHistoryTx(ctx context.Context, tx *sql.Tx, work
 		rec.PromiseResult = promiseResult.String
 		rec.PromiseError = promiseError.String
 
-		// Decrypt and redact event record.
+		// Decrypt event record.
 		//
 		// A field that will not decrypt fails the LOAD. This is the read that
 		// replay acts on, and the placeholder is not data: with it accepted,
@@ -147,25 +152,8 @@ func (s *PostgresStore) readEventHistoryTx(ctx context.Context, tx *sql.Tx, work
 		// ErrPayloadDecryption so the worker can tell "this worker cannot
 		// read it" from "the database is down" and release the run.
 		// cleat#2311.
-		if err := s.decryptAndRedactEventRecord(&rec, workflowID); err != nil {
+		if err := s.decryptEventRecord(&rec, workflowID); err != nil {
 			return nil, fmt.Errorf("load history: %w", err)
-		}
-
-		// Retroactive redaction on read path: ensure sensitive fields are
-		// redacted even if they were stored before redaction was mandatory.
-		// Redaction runs AFTER decryption (see block above) since redacting
-		// ciphertext would yield meaningless "[REDACTED]" placeholders.
-		if !s.disableReadRedaction {
-			rec.Request = RedactOnRead(rec.Request)
-			rec.Response = RedactOnRead(rec.Response)
-			rec.Err = RedactOnRead(rec.Err)
-			rec.SignalPayload = RedactOnRead(rec.SignalPayload)
-			rec.ChildInput = RedactOnRead(rec.ChildInput)
-			rec.NewInput = RedactOnRead(rec.NewInput)
-			rec.PluginInput = RedactOnRead(rec.PluginInput)
-			rec.PluginOutput = RedactOnRead(rec.PluginOutput)
-			rec.PromiseResult = RedactOnRead(rec.PromiseResult)
-			rec.PromiseError = RedactOnRead(rec.PromiseError)
 		}
 
 		if payload.Valid {
@@ -274,6 +262,16 @@ func eventRecordToPayload(rec EventRecord) ([]byte, error) {
 		if rec.SignalPayload != "" {
 			payload["signal_payload"] = rec.SignalPayload
 		}
+		// A SEND (cleat#4102) records its outcome in Response and replay RETURNS it to the guest, so it is replay-relevant and has to be
+		// inside the checksum: an edited outcome must break the chain. Only when Op is set, so a delivery and every send recorded before
+		// the outcome existed hash exactly as they always did; adding the keys unconditionally would invalidate every stored chain.
+		if rec.Op != "" {
+			payload["service"] = rec.Service
+			payload["op"] = rec.Op
+			if rec.Response != "" {
+				payload["outcome"] = rec.Response
+			}
+		}
 	case "defer":
 		if rec.DeferDescription != "" {
 			payload["defer_description"] = rec.DeferDescription
@@ -339,6 +337,11 @@ func eventRecordToPayload(rec EventRecord) ([]byte, error) {
 	case "create_promise":
 		payload["promise_name"] = rec.PromiseName
 		payload["promise_id"] = rec.PromiseID
+		// A store write that FAILED (cleat#4335): replay answers the call from it, so it is inside the checksum and an edited one breaks the chain. Only
+		// when set, so every create recorded before this existed hashes exactly as it did.
+		if rec.Err != "" {
+			payload["error"] = rec.Err
+		}
 	case "await_promise", "promise_resolved", "promise_rejected":
 		payload["promise_id"] = rec.PromiseID
 		// Only when set, so an await recorded before this existed keeps
@@ -352,6 +355,10 @@ func eventRecordToPayload(rec EventRecord) ([]byte, error) {
 		}
 		if rec.PromiseError != "" {
 			payload["promise_error"] = rec.PromiseError
+		}
+		// The same for a resolve or reject whose store write failed (cleat#4335). An await never sets Err, so its payload is unchanged.
+		if rec.Err != "" {
+			payload["error"] = rec.Err
 		}
 	case "update_handler":
 		if rec.UpdateHandlerName != "" {
@@ -414,6 +421,11 @@ func eventRecordToPayload(rec EventRecord) ([]byte, error) {
 		}
 		if rec.DetachedRunID != "" {
 			payload["detached_run_id"] = rec.DetachedRunID
+		}
+		// A start the child-workflow store REFUSED (cleat#4114): the event carries the refusal and no run id, so a replay returns the same
+		// failure instead of finding nothing where the event should be.
+		if rec.Err != "" {
+			payload["error"] = rec.Err
 		}
 	case "admin_action":
 		// Without this arm the payload is "{}", and computeEventChecksum
@@ -504,6 +516,11 @@ func eventRecordToPayload(rec EventRecord) ([]byte, error) {
 		// callErrorUnknown, which is what those failures actually reported.
 		if rec.StreamErrCode != 0 {
 			payload["stream_err_code"] = rec.StreamErrCode
+		}
+		// Plugin output rather than the synthetic failure chunk (cleat#4117). Only when set, so every chunk written before this field keeps
+		// its exact payload and its stored checksum still verifies.
+		if rec.StreamData {
+			payload["stream_data"] = true
 		}
 	case "scope_acquired":
 		if rec.ScopeKey != "" {
@@ -644,6 +661,15 @@ func eventRecordToPayload(rec EventRecord) ([]byte, error) {
 	if rec.InDeferPhase {
 		payload["in_defer_phase"] = true
 	}
+	// Same convention, and the same reason: only when true, so no event written before cleat#4079 reverifies differently.
+	if rec.InDeferSegment {
+		payload["in_defer_segment"] = true
+	}
+	// Replay reads it (an await's pair is one call or two, cleat#4277), so it is inside the checksum, and only when true: every event written before it
+	// keeps its checksum.
+	if rec.FirstRead {
+		payload["first_read"] = true
+	}
 	return sortedJSONMarshal(payload)
 }
 
@@ -771,6 +797,15 @@ func populateFromPayload(rec *EventRecord, payload []byte) {
 		if v, ok := m["signal_payload"].(string); ok {
 			rec.SignalPayload = v
 		}
+		if v, ok := m["service"].(string); ok {
+			rec.Service = v
+		}
+		if v, ok := m["op"].(string); ok {
+			rec.Op = v
+		}
+		if v, ok := m["outcome"].(string); ok {
+			rec.Response = v
+		}
 	case "defer":
 		if v, ok := m["defer_description"].(string); ok {
 			rec.DeferDescription = v
@@ -836,6 +871,9 @@ func populateFromPayload(rec *EventRecord, payload []byte) {
 		if v, ok := m["promise_error"].(string); ok {
 			rec.PromiseError = v
 		}
+		if v, ok := m["error"].(string); ok {
+			rec.Err = v
+		}
 	case "update_handler":
 		if v, ok := m["update_handler_name"].(string); ok {
 			rec.UpdateHandlerName = v
@@ -891,6 +929,9 @@ func populateFromPayload(rec *EventRecord, payload []byte) {
 		if v, ok := m["detached_run_id"].(string); ok {
 			rec.DetachedRunID = v
 		}
+		if v, ok := m["error"].(string); ok {
+			rec.Err = v
+		}
 	case "admin_action":
 		if v, ok := m["service"].(string); ok {
 			rec.Service = v
@@ -943,6 +984,9 @@ func populateFromPayload(rec *EventRecord, payload []byte) {
 		}
 		if v, ok := m["stream_err_code"].(float64); ok {
 			rec.StreamErrCode = int(v)
+		}
+		if v, ok := m["stream_data"].(bool); ok {
+			rec.StreamData = v
 		}
 	case "scope_acquired":
 		if v, ok := m["scope_key"].(string); ok {
@@ -1096,5 +1140,11 @@ func populateFromPayload(rec *EventRecord, payload []byte) {
 	// retries_exhausted.
 	if v, ok := m["in_defer_phase"].(bool); ok {
 		rec.InDeferPhase = v
+	}
+	if v, ok := m["in_defer_segment"].(bool); ok {
+		rec.InDeferSegment = v
+	}
+	if v, ok := m["first_read"].(bool); ok {
+		rec.FirstRead = v
 	}
 }

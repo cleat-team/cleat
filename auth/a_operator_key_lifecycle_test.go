@@ -55,7 +55,7 @@ func TestAnOperatorKeyRoundTripsOnEveryDialect(t *testing.T) {
 			// same reasoning a_key_expiry_test.go records for GenerateAPIKey.
 			raw := GenerateOperatorKey()
 			const description = "round trip"
-			op, err := store.CreateOperatorKey(ctx, description, raw, nil)
+			op, err := store.CreateOperatorKey(ctx, raw, adminSpec(description, nil))
 			if err != nil {
 				t.Fatalf("CreateOperatorKey(%s): %v", dialect, err)
 			}
@@ -134,7 +134,7 @@ func TestAnExpiredOperatorKeyCannotAuthenticate(t *testing.T) {
 			// case could.
 			past := time.Now().Add(-time.Hour)
 			expiredRaw := GenerateOperatorKey()
-			if _, err := store.CreateOperatorKey(ctx, "expired", expiredRaw, &past); err != nil {
+			if _, err := store.CreateOperatorKey(ctx, expiredRaw, adminSpec("expired", &past)); err != nil {
 				t.Fatalf("CreateOperatorKey(expired): %v", err)
 			}
 			if _, err := store.ResolveOperatorFromAPIKey(ctx, operatorHash(expiredRaw)); err == nil {
@@ -143,7 +143,7 @@ func TestAnExpiredOperatorKeyCannotAuthenticate(t *testing.T) {
 
 			future := time.Now().Add(time.Hour)
 			liveRaw := GenerateOperatorKey()
-			if _, err := store.CreateOperatorKey(ctx, "live", liveRaw, &future); err != nil {
+			if _, err := store.CreateOperatorKey(ctx, liveRaw, adminSpec("live", &future)); err != nil {
 				t.Fatalf("CreateOperatorKey(live): %v", err)
 			}
 			if _, err := store.ResolveOperatorFromAPIKey(ctx, operatorHash(liveRaw)); err != nil {
@@ -155,7 +155,7 @@ func TestAnExpiredOperatorKeyCannotAuthenticate(t *testing.T) {
 			// permanent one since. The lookup's `expires_at IS NULL OR ...` is
 			// the half that keeps those authenticating.
 			neverRaw := GenerateOperatorKey()
-			if _, err := store.CreateOperatorKey(ctx, "never expires", neverRaw, nil); err != nil {
+			if _, err := store.CreateOperatorKey(ctx, neverRaw, adminSpec("never expires", nil)); err != nil {
 				t.Fatalf("CreateOperatorKey(no expiry): %v", err)
 			}
 			if _, err := store.ResolveOperatorFromAPIKey(ctx, operatorHash(neverRaw)); err != nil {
@@ -163,4 +163,10 @@ func TestAnExpiredOperatorKeyCannotAuthenticate(t *testing.T) {
 			}
 		})
 	}
+}
+
+// adminSpec is the spec every key in this file's older tests was minted with: the scope a
+// key had before scopes existed, which is the one that reaches every /api/admin/* route.
+func adminSpec(description string, expiresAt *time.Time) OperatorKeySpec {
+	return OperatorKeySpec{Description: description, ExpiresAt: expiresAt, Scopes: []string{ScopeAdmin}}
 }

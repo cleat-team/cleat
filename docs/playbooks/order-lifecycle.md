@@ -264,8 +264,9 @@ holding its history for `--retention-days`. Query both surfaces, or half your fa
 to the dashboard you built for failures.
 
 **"This tenant's open orders" is a query, not a projection you build.** `GET /api/workflows` is
-tenant-scoped and takes `status`, `def_name`, `id_prefix`, `concurrency_key`, `error_code` and
-paging, so the read model a commerce team would otherwise hand-write — a side table maintained by
+tenant-scoped and takes `status`, `def_name`, `id_prefix`, `concurrency_key`, `error_code`,
+`state.<key>=<value>` (a value the run published, so `?state.order_id=12345` is "the run for order
+12345"; see [Find a run by a value it published](../how-to/find-a-run.md)) and paging, so the read model a commerce team would otherwise hand-write — a side table maintained by
 triggers, drifting from the truth it mirrors — is a query against the instance table itself:
 `?def_name=PlaceOrder&status=running` is the whole of it.
 

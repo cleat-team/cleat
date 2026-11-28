@@ -142,5 +142,57 @@ func (p *Plugin) Migrations() []plugin.Migration {
 					MODIFY input JSON NULL DEFAULT ('{}');
 			`,
 		},
+		{
+			// cleat#3641 (owner decision D60): this plugin's workflow-definition NAME column compares exactly
+			// on SQL Server, as it already does on PostgreSQL and as migration 011 made the core columns.
+			// Until now schedules.workflow_name inherited the database collation, which is
+			// case-insensitive on a default install.
+			//
+			// NOTHING IN SQL COMPARES THIS COLUMN TODAY (it is written and read back in a select list, with no
+			// predicate, join, grouping, ordering or key on it), so this fixes no user-visible behaviour. It makes the
+			// schema uniformly exact, which is what a later comparison (event routing) needs.
+			//
+			// NOT METADATA-ONLY, MEASURED: the column is NVARCHAR(MAX), and on 1,000,000 rows (720 MB) a plain ALTER
+			// COLUMN ... COLLATE took 9 to 17 s, wrote about 2.7 million log records and doubled the table's used space,
+			// blocking reads and writes for its duration. #3635's metadata-only result was for NVARCHAR(255). This runs
+			// under --migrate-only, with the core migrations. The type and nullability are restated exactly.
+			Version:         4,
+			Up:              "",
+			DialectSpecific: "SQL Server only: PostgreSQL's comparison of this column is already exact, and MySQL's is a separate step (cleat#3658) because its cost and its decision differ (a write-blocking table copy).",
+			UpMSSQL: `
+				ALTER TABLE schedules ALTER COLUMN workflow_name NVARCHAR(MAX) COLLATE Latin1_General_100_BIN2 NOT NULL;
+			`,
+			// Reversal restores the database default, which is what the column had before.
+			DownMSSQL: `
+				ALTER TABLE schedules ALTER COLUMN workflow_name NVARCHAR(MAX) COLLATE DATABASE_DEFAULT NOT NULL;
+			`,
+		},
+		{
+			// cleat#3658 (owner decision D60): this plugin's workflow-definition NAME column compares exactly on
+			// MySQL, as it already does on PostgreSQL and -- since step 4, cleat#3641 -- on SQL Server. See
+			// plugins/eventtriggers/migrations.go's step 12 for the full reasoning; this is the same change.
+			//
+			// A NEW VERSION, NOT AN UpMySQL ADDED TO 4: MySQL has 4 recorded as applied already, because 4's Up
+			// is empty and the runner records a version whether or not any SQL ran for that dialect.
+			//
+			// NOT IN-PLACE, MEASURED: ALGORITHM=INPLACE is refused (error 1845), so this asks for COPY,
+			// LOCK=SHARED -- reads continue, writers wait for the whole copy. schedules holds one row per
+			// schedule: 100,000 rows took 1.3 s on MySQL 8.4.11 with a 128 MB buffer pool. Nothing in SQL
+			// compares this column today, so it fixes no visible behaviour.
+			Version:         5,
+			Up:              "",
+			DialectSpecific: "MySQL only: PostgreSQL's comparison of this column is already exact, and SQL Server's was made exact by this plugin's step 4 (cleat#3641).",
+			UpMySQL: `
+				SET @col := (SELECT COLLATION_NAME FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'schedules' AND COLUMN_NAME = 'workflow_name');
+				SET @ddl := IF(@col <> 'utf8mb4_0900_bin', 'ALTER TABLE schedules MODIFY workflow_name VARCHAR(255) COLLATE utf8mb4_0900_bin NOT NULL, ALGORITHM=COPY, LOCK=SHARED', 'DO 0');
+				PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+			`,
+			// Reversal restores the server default, which is what the column had before. It costs the same copy.
+			DownMySQL: `
+				SET @col := (SELECT COLLATION_NAME FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'schedules' AND COLUMN_NAME = 'workflow_name');
+				SET @ddl := IF(@col <> 'utf8mb4_0900_ai_ci', 'ALTER TABLE schedules MODIFY workflow_name VARCHAR(255) COLLATE utf8mb4_0900_ai_ci NOT NULL, ALGORITHM=COPY, LOCK=SHARED', 'DO 0');
+				PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+			`,
+		},
 	}
 }

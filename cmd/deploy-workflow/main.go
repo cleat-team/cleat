@@ -9,9 +9,11 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"strings"
 	"time"
@@ -27,6 +29,13 @@ import (
 func main() {
 	dbURL := flag.String("db", "", "Database connection URL")
 	driver := flag.String("driver", "postgres", "Database driver (postgres, mysql, mssql)")
+	// cleat#3497: different bytes onto a version that still has open runs are
+	// refused unless this is given. The embedded stamp wins here (chooseDeployVersion),
+	// and `cleat build` stamps 1 by default, so a rebuild-and-redeploy lands on v1.
+	force := flag.Bool("force", false, "replace the WASM of a version that has open runs and different bytes (a deliberate hot-fix: those runs will replay their history under the new code, and a running worker can keep the previous bytes for up to about 5 seconds after a replacement of the same length)")
+	// cleat#3600 (owner D52): the explicit override of the plugin-dependency check, for a
+	// definition deployed before the first worker carrying its plugin has registered.
+	allowMissingPlugins := flag.Bool("allow-missing-plugins", false, "deploy even though a plugin this binary depends on has never been registered by any worker (logged; a run that needs it is released until a worker carrying it registers)")
 	flag.Parse()
 
 	args := flag.Args()
@@ -59,6 +68,8 @@ func main() {
 	ctx := context.Background()
 	var store engine.WorkflowStore
 	var closer io.Closer
+	// registryDB is the connection the plugin-name registry is read through (cleat#3600).
+	var registryDB *sql.DB
 
 	switch *driver {
 	case "postgres":
@@ -68,6 +79,7 @@ func main() {
 			os.Exit(1)
 		}
 		defer db.Close()
+		registryDB = db
 		factory := engine.NewPostgresStoreFactory(db, "public")
 		store, closer, err = factory.OpenStore(ctx, "00000000-0000-0000-0000-000000000000", "default")
 		if err != nil {
@@ -83,6 +95,7 @@ func main() {
 			os.Exit(1)
 		}
 		defer db.Close()
+		registryDB = db
 		baseDSN := mysqlBaseDSN(*dbURL)
 		factory := engine.NewMySQLStoreFactory(db, baseDSN)
 		store, closer, err = factory.OpenStore(ctx, "00000000-0000-0000-0000-000000000000", "default")
@@ -93,6 +106,14 @@ func main() {
 		defer closer.Close()
 
 	case "mssql":
+		// The store factory holds its own pools; the registry read needs a plain connection.
+		mdb, merr := sql.Open("sqlserver", *dbURL)
+		if merr != nil {
+			fmt.Fprintf(os.Stderr, "failed to open mssql: %v\n", merr)
+			os.Exit(1)
+		}
+		defer mdb.Close()
+		registryDB = mdb
 		factory := engine.NewMSSQLStoreFactory(*dbURL)
 		store, closer, err = factory.OpenStore(ctx, "00000000-0000-0000-0000-000000000000", "default")
 		if err != nil {
@@ -215,9 +236,33 @@ func main() {
 		MinVersion: minVersion,
 		Exposure:   exposure,
 		CreatedAt:  time.Now(),
+
+		ReplaceUnderOpenRuns: *force,
+	}
+	// cleat#3600. Before the write, so a refusal leaves no row. This command records no
+	// plugin_deps on the row, so the binary's embedded deps are the only declaration.
+	var pluginReg engine.PluginRegistryAccess
+	if registryDB != nil {
+		pluginReg = &engine.PluginNameRegistry{DB: registryDB, Dialect: engine.Dialect(*driver)}
+	}
+	pluginSrc, pluginRec := engine.RegistrySplit(pluginReg)
+	if perr := engine.EnforcePluginDeps(ctx, pluginSrc, engine.BinaryPluginDeps(wasmBytes), nil, engine.EnforceOptions{
+		AllowMissing: *allowMissingPlugins,
+		Log:          slog.Default(),
+		Recorder:     pluginRec,
+		Override:     engine.PluginDepOverride{TenantID: engine.DefaultTenantUUID, Definition: name, Version: version, Via: "deploy-workflow", Actor: engine.CommandLineActor()},
+	}); perr != nil {
+		fmt.Fprintf(os.Stderr, "error deploying %s v%d: %v\n", name, version, perr)
+		if errors.Is(perr, engine.ErrUnmetPluginDeps) {
+			fmt.Fprintln(os.Stderr, engine.UnmetPluginDepsCLIAdvice)
+		}
+		os.Exit(1)
 	}
 	if err := store.DeployWorkflowDef(ctx, def); err != nil {
 		fmt.Fprintf(os.Stderr, "error deploying %s v%d: %v\n", name, version, err)
+		if errors.Is(err, engine.ErrWorkflowDefInUse) {
+			fmt.Fprintln(os.Stderr, engine.WorkflowDefInUseCLIAdvice)
+		}
 		os.Exit(1)
 	}
 	fmt.Printf("Deployed %s v%d (%d bytes, SHA256=%x) to %s\n",

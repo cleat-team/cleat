@@ -38,7 +38,7 @@ const DefaultOutBufSize = 1048576
 
 // OutBufSize is the output buffer size in bytes for WASM export calls.
 // Set before creating any Runtime to configure. Default: 1 MiB.
-var OutBufSize uint32 = 1048576
+var OutBufSize uint32 = DefaultOutBufSize
 
 const wasmPageSize = 65536 // 64 KB WASM page size
 
@@ -82,14 +82,16 @@ func scratchBaseFor(currentSize uint64, outBufSz uint32) (uint32, error) {
 	return uint32(base), nil
 }
 
-// DefaultMaxWasmStringLen is the default maximum WASM string length (1 MiB).
-const DefaultMaxWasmStringLen = 1048576
+// DefaultMaxWasmStringLen is the default maximum WASM string length (2 MiB, cleat#4130: the limit Temporal enforces per payload and the figure
+// DBOS's guidance stays under). It was 1 MiB here and 64 KiB in the worker's flag, which is the value a running worker used; both now read this
+// constant, so they cannot disagree again (TestTheWorkersStringLimitFlagDefaultsToTheEngines).
+const DefaultMaxWasmStringLen = 2097152
 
 // MaxWasmStringLen is the maximum size of any string parameter read from WASM
-// linear memory. This prevents a malicious or buggy WASM module from causing
-// the host to allocate excessive memory via a single host function call.
-// Set before creating any Runtime to configure. Default: 1 MiB.
-var MaxWasmStringLen uint32 = 1048576
+// linear memory, on every guest path: the core-module paths and, since cleat#4130, every component dispatcher. This prevents a malicious or
+// buggy WASM module from causing the host to allocate excessive memory via a single host function call.
+// Set before creating any Runtime to configure. Default: DefaultMaxWasmStringLen (2 MiB).
+var MaxWasmStringLen uint32 = DefaultMaxWasmStringLen
 
 // validServiceName checks that a name contains only allowed characters:
 // alphanumeric, dot, underscore, and hyphen. Service and operation names
@@ -126,6 +128,25 @@ const errSignalAuthRequired uint64 = 0xFFFFFFFF_00000002
 // errSignalAuthRequired overflows int64 so it cannot be used directly in
 // execSession methods that return int64.
 const errSignalAuthRequiredInt int64 = -4294967294
+
+// errSignalDeliveryFailedInt and errSignalTargetNotFoundInt are returned by cleat_signal_workflow when the signal store refused the delivery
+// (cleat#4102). Before them the call returned 0 whatever the store said, so a workflow told "recorded" about a signal that was
+// never sent could wait forever for the reply.
+//
+// They follow errBadParam and errSignalAuthRequired: the low bits are the code, the high 32 bits are all ones, and every SDK
+// already reads any non-zero code in this word as a failed call, so a guest that has not been taught the names still sees the call
+// fail rather than succeed.
+//
+//   - errSignalDeliveryFailedInt (3): the store returned an error. Retryable: nothing was delivered, and a later attempt may succeed.
+//   - errSignalTargetNotFoundInt (4): the store reported ErrWorkflowNotFound. Terminal, and IDENTICAL for a target that does not exist
+//     and one that belongs to another tenant: cleat#2218 and #2227 made the two indistinguishable on purpose, so a guest cannot
+//     enumerate other tenants' run ids, and this code must not reopen that by saying which it was.
+//
+// Only the int64 forms exist, because the one caller is an execSession method that returns int64 (see errSignalAuthRequiredInt for why the
+// unsigned form cannot be used there): errSignalDeliveryFailedInt is 0xFFFFFFFF_00000003 and errSignalTargetNotFoundInt is
+// 0xFFFFFFFF_00000004. An unsigned twin nothing but a test referenced would be dead code to scripts/check-test-only-code.sh.
+const errSignalDeliveryFailedInt int64 = -4294967293
+const errSignalTargetNotFoundInt int64 = -4294967292
 
 // readWasmString reads a Go string from WASM linear memory at (ptr, length).
 func readWasmString(mem api.Memory, ptr, length uint32) string {
@@ -175,6 +196,9 @@ func readOutBufString(ctx context.Context, m api.Module, ptr, length, maxLen uin
 		return "", false
 	}
 	if rawBuf, ok := ctx.Value(wasmMemBufKey{}).([]byte); ok && rawBuf != nil {
+		if rb, grows := responseBufFrom(ctx); grows {
+			rawBuf = rb.bytes() // the growable buffer holds what was written; the placeholder in the key is empty
+		}
 		if uint64(ptr)+uint64(length) > uint64(len(rawBuf)) {
 			return "", false
 		}
@@ -293,7 +317,7 @@ func (e *OutputTruncatedError) Error() string {
 // output buffer was too small.
 //
 // 7, which is free in both spaces this value has to live in: the simple-result
-// errCode byte (0, 1, 3, 4 and 5 are in use) and cleat.CallErrorCode, whose
+// errCode byte (0, 1, 2, 3, 4 and 5 are in use; 2 is side-effect-recorded's "not recorded") and cleat.CallErrorCode, whose
 // iota ends at 6 with CallErrorRetryPolicyTooLong. Using one number for both
 // keeps a guest from having to know which layout it is decoding in order to
 // recognise this particular failure.

@@ -254,8 +254,8 @@ one engine, US-only results. The claim is that no such product surfaced, not tha
 **Read-only is the fence, and it is not sufficient.** Two things it does not stop:
 
 **Exfiltration.** Read access to event history is read access to every recorded prompt, payload and
-credential. `engine.Redact` does run over recorded call arguments and responses
-(`cmd/cleat-worker/setup.go:2226-2227`, `:3840-3841`) — but it is a field-name heuristic
+credential. Since cleat#3581 `engine.Redact` runs where history is shown (the history and
+event APIs, the stream, the dashboard, the logs), not on what is recorded — and it is a field-name heuristic
 (`isSensitiveField`, `engine/redact.go:36-44`), so a secret in a field named `config`, or PII inside
 an `llm.chat` `messages` array, is stored in the clear. An agent that can be induced to summarise
 tenant B's data into tenant A's incident report is a cross-tenant breach with read-only access

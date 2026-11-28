@@ -44,6 +44,7 @@ jobs:
   versions:
     name: Version agreement and the Python stamper
     runs-on: ubuntu-latest
+    timeout-minutes: 10  # max 0.3m over 10 successful runs (release/** push and workflow_dispatch samples), 2026-10-31; cleat#3493
     steps:
       - uses: actions/checkout@v7
 
@@ -74,7 +75,9 @@ jobs:
           if [ -z "$expected" ]; then
             expected="$(python3 -c "import tomllib; print(tomllib.load(open('python-sdk/pyproject.toml','rb'))['project']['version'])")"
           fi
-          fixture=tests/plugin-harness/testdata/asworkflow/prebuilt/workflow.wasm
+          # Any compiled module will do: the stamper adds a metadata section and the read-back checks it. This was the
+          # AssemblyScript prebuilt until cleat#4023 removed that SDK; the Java prebuilt is the one tracked module left.
+          fixture=tests/plugin-harness/testdata/javaworkflow/prebuilt/workflow.wasm
           python3 python-sdk/scripts/stamp_metadata.py "$fixture" \
             --name ReleaseSmoke --version 1 --min-version 1 --abi-version 1 \
             --output /tmp/stamped.wasm
@@ -99,6 +102,7 @@ jobs:
   wheel:
     name: The built wheel reports its version
     runs-on: ubuntu-latest
+    timeout-minutes: 10  # max 0.3m over 10 successful runs (release/** push and workflow_dispatch samples), 2026-10-31; cleat#3493
     steps:
       - uses: actions/checkout@v7
 
@@ -178,6 +182,7 @@ jobs:
     name: Built wheel on Python ${{ matrix.python-version }}
     needs: wheel
     runs-on: ubuntu-latest
+    timeout-minutes: 10  # max 0.2m per matrix leg over 10 successful runs each (release/** push and workflow_dispatch samples), 2026-10-31; cleat#3493
     strategy:
       fail-fast: false
       # 3.13 first, because it is the one no other job exercises. ci.yml's

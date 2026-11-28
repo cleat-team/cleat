@@ -393,8 +393,16 @@ func runOne(ctx context.Context, store *engine.PostgresStore, db *sql.DB, worker
 	// returns each error to the sampler instead of failing the test. It writes
 	// the run's workflow_instances, workflow_leases and workflow_payloads rows,
 	// which ClaimWorkflow's candidate scan reads (cleat#3245).
-	if err := testutil.SeedRunErr(ctx, db, testutil.RunSeed{ID: id, DefName: "test", TaskQueue: soakQueue}); err != nil {
-		return fmt.Errorf("insert %s: %w", id, err)
+	//
+	// In ONE transaction, and that is load-bearing. Another goroutine's
+	// ClaimWorkflow takes any ready row in soakQueue, and the claim reads
+	// def_name from workflow_payloads through a LEFT JOIN. Seeded through the
+	// pool, the three inserts autocommit separately and a claimer could take
+	// the lease before its payload existed: "converting NULL to string is
+	// unsupported", about once in 40,000 runs, which failed the nightly twice
+	// (cleat#3733). StartNewRun writes the same three rows in one transaction.
+	if err := seedRun(ctx, db, id); err != nil {
+		return err
 	}
 
 	// ClaimWorkflow decides which workflow this worker gets; it need not be
@@ -435,6 +443,23 @@ func runOne(ctx context.Context, store *engine.PostgresStore, db *sql.DB, worker
 		if err := store.VerifyWorkflowEvents(ctx, wf.ID); err != nil {
 			return fmt.Errorf("verify %s (%s): %w", wf.ID, wt.name, err)
 		}
+	}
+	return nil
+}
+
+// seedRun writes one run's rows in a single transaction, so no claimer can see
+// a lease whose payload row is not there yet.
+func seedRun(ctx context.Context, db *sql.DB, id string) error {
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("insert %s: begin: %w", id, err)
+	}
+	if err := testutil.SeedRunErr(ctx, tx, testutil.RunSeed{ID: id, DefName: "test", TaskQueue: soakQueue}); err != nil {
+		_ = tx.Rollback()
+		return fmt.Errorf("insert %s: %w", id, err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("insert %s: commit: %w", id, err)
 	}
 	return nil
 }

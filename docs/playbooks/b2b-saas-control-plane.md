@@ -184,7 +184,8 @@ reach for it in an incident sets it, sees nothing happen, and has spent the minu
 finding that out.
 
 `cleatctl drop-tenant` removes a tenant's rows across the full set of tenant-scoped tables and
-reports counts per table, with a dry-run mode (`cmd/cleatctl/droptenant.go`). The list it reports
+reports counts per table, with a dry-run mode (`cmd/cleatctl/droptenant.go`). That includes the tenant's audit
+trail: run `cleatctl audit export` first if you need it. The list it reports
 against is maintained deliberately, and the comment on it is worth reading as a lesson in how this
 goes wrong:
 

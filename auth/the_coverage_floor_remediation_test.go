@@ -45,7 +45,7 @@ func TestCreateOrg(t *testing.T) {
 	})
 }
 
-func TestCreateOrg_NotImplementedOffPostgres(t *testing.T) {
+func TestCreateOrg_RefusesMySQL(t *testing.T) {
 	ts, err := NewTenantStoreForDialect(&sql.DB{}, DialectMySQL)
 	if err != nil {
 		t.Fatalf("NewTenantStoreForDialect: %v", err)

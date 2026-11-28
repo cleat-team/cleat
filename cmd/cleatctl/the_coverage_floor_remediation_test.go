@@ -21,19 +21,6 @@ import (
 	"github.com/cleat-team/cleat/engine/testutil"
 )
 
-func TestBracketQuote(t *testing.T) {
-	cases := []struct{ in, want string }{
-		{"tenants", "[tenants]"},
-		{"weird]name", "[weird]]name]"},
-		{"", "[]"},
-	}
-	for _, c := range cases {
-		if got := bracketQuote(c.in); got != c.want {
-			t.Errorf("bracketQuote(%q) = %q, want %q", c.in, got, c.want)
-		}
-	}
-}
-
 func TestMysqlBaseDSN(t *testing.T) {
 	cases := []struct{ in, want string }{
 		{"root:pass@tcp(host:3306)/mydb?parseTime=true", "root:pass@tcp(host:3306)/?parseTime=true"},

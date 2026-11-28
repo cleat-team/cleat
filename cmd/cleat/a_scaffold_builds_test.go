@@ -79,17 +79,31 @@ func TestEveryGoTemplateScaffoldsIntoAProjectThatBuilds(t *testing.T) {
 			name := "p_" + template
 			wantArtifact := name + ".wasm"
 
-			out, err := runCleatIn(t, root, "init", "--template", template, name)
+			initOut, err := runCleatIn(t, root, "init", "--template", template, name)
 			if err != nil {
-				t.Fatalf("cleat init --template %s failed: %v\n%s", template, err, out)
+				t.Fatalf("cleat init --template %s failed: %v\n%s", template, err, initOut)
 			}
 
+			// A successful init says nothing about dependencies: the closing warning
+			// (cleat#3533) is only for a tidy that failed. When it did fail, and the cause is a
+			// transient network error, the tidy is re-run here (up to scaffoldTidyRetries times) and the build below proceeds
+			// (cleat#3659, D61 option 3): the product does not retry, but a template's build is
+			// not what a flaky checksum database is meant to fail. Any other warning is an error.
 			proj := filepath.Join(root, name)
-			out, err = runCleatIn(t, proj, "build", "-o", "./out", ".")
+			if err := resolveAfterATransientInitWarning(t, initOut, proj, goModTidy, scaffoldTidyPause); err != nil {
+				t.Errorf("%v", err)
+			}
+			out, err := runCleatIn(t, proj, "build", "-o", "./out", ".")
 			if err != nil {
+				// init's own output is printed here too (cleat#3533). init exits 0 even when
+				// the `go mod tidy` it runs in the scaffold fails, and says so only in a
+				// warning, so on a failed build that warning is the likeliest explanation and
+				// used to be discarded with the rest of a successful init's output. Printing it
+				// changes no behaviour: tidyScaffold stays non-fatal.
 				t.Fatalf("a scaffolded %s project does not build.\n"+
-					"This is the first command its own README tells a new user to run.\n%v\n%s",
-					template, err, out)
+					"This is the first command its own README tells a new user to run.\n%v\n%s\n"+
+					"--- the output of the `cleat init` that made it (it exited 0):\n%s",
+					template, err, out, initOut)
 			}
 
 			// An exit code of 0 is not the claim -- an artifact is. `cleat

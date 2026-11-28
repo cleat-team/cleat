@@ -16,6 +16,7 @@ import (
 	"testing"
 
 	"github.com/cleat-team/cleat/engine/testutil"
+	"github.com/cleat-team/cleat/internal/tenantdrop"
 	"github.com/cleat-team/cleat/plugin"
 	"github.com/cleat-team/cleat/plugins/oauthprovider"
 	"github.com/cleat-team/cleat/plugins/scheduledbackup"
@@ -96,6 +97,15 @@ func TestEveryInlineStatementParsesOnPostgres(t *testing.T) {
 	}
 
 	stmts := inlineStatements(t)
+	// The drop-tenant count statements moved to internal/tenantdrop, out of this package's
+	// source, so the scan above no longer sees them. They still run against PostgreSQL
+	// from this command, so they still have to parse: add them to the population rather
+	// than lose the check. (The two SQL Server-only statements that moved with them were
+	// pinned here as unparseable on PostgreSQL; they are not in this package any more, so
+	// their pins went too.)
+	for i, tbl := range tenantdrop.PostgresTables {
+		stmts = append(stmts, inlineStatement{where: fmt.Sprintf("internal/tenantdrop PostgresTables[%d] (%s)", i, tbl.Label), sql: tbl.Query})
+	}
 	if len(stmts) < 15 {
 		t.Fatalf("found only %d inline statements in this package; there were 25 on "+
 			"2026-09-11.\n\n"+
@@ -164,19 +174,6 @@ func TestEveryInlineStatementParsesOnPostgres(t *testing.T) {
 		// issues the fully-assembled UPDATE, for every one of the six tables,
 		// against a real database with the schema applied.
 		"UPDATE": "a prefix: resealpayloads_sensitive_tables.go's resealTable builds the table name, SET list and WHERE clause from a tableSpec at runtime, so there is no statement here to parse. Exercised assembled by TestResealSensitiveTablesConvertsEachOfTheSix (cleat#3241)",
-
-		// Both are SQL Server-only, from drop-tenant's port in cleat#1635.
-		//
-		// Pinned rather than written as a plugin.Query MSSQL arm -- which is
-		// what the pruning above would recognise -- because Query.Default is
-		// required and is PostgreSQL. There is no PostgreSQL statement these
-		// are the SQL Server arm OF: the whole point of the first one is that
-		// it asks sys.columns, and PostgreSQL's answer to the same question
-		// comes from a different catalogue with different column names. A
-		// Default written only to satisfy the struct would be dead code that
-		// reads like a supported path.
-		"SELECT s.name, t.name FROM sys.tables t JOIN sys.schemas s ON s.schema_id = t.schema_id WHERE EXISTS (SELECT 1 FROM sys.columns c WHERE c.object_id = t.object_id AND c.name = 'tenant_id') ORDER BY s.name, t.name": "SQL Server catalogue views; cleat#1635. PostgreSQL has no sys.tables",
-		"SELECT count(*) FROM %s.%s WHERE tenant_id = @p1": "a format string, and SQL Server-only: the schema and table come from the row above, so there is no statement here to parse. cleat#1635",
 
 		// T-SQL, and it is REACHED only on SQL Server: rlsPostureOf dispatches
 		// on the dialect before this runs, so PostgreSQL never issues it.

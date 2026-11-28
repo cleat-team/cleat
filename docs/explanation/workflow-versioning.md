@@ -123,6 +123,36 @@ version is exactly what was pinned. With policy `"stable"`, the entries record
 what was stable at build time (for auditing), but runtime resolution re-queries
 the `stable` tag so you can move the tag without rebuilding.
 
+### Which child names the build can pin
+
+The build reads child names from the source. A name that is a compile-time
+constant is pinned: a string literal, a named `const`, or a constant expression
+such as `prefix + "-child"`. A name computed at run time (a variable, a
+parameter, the result of a call) cannot be known at build time, so it gets no
+entry in `ChildVersions` and no line in `cleat.lock`.
+
+Under `cleat build --channel frozen` that is an error, because a frozen build
+promises exactly-this-version children: the build stops and prints each such
+call as `file:line: ChildWorkflow(expr)`. Name those children with a `const`.
+Under any other channel the child resolves at the point of use, as that channel
+says, and the build is unchanged. `cleat lock` warns about each such call and
+leaves it out of the lock (cleat#3500).
+
+The build reads only the workflow's own package. A child started from an
+**imported** package (a helper module, `dagrun`) is not visible to it, so its
+name is neither refused nor discovered. A frozen build carries every entry in
+`cleat.lock` into the metadata, so list such a child in the lock by hand and it
+is pinned. That holds with `--db` too: the build re-resolves the children it can
+see against the database and keeps every other entry in the lock as it was, both
+in the file and in the pins (cleat#3508). The cost of keeping them is that an
+entry for a child that is no longer called also stays, so remove a stale entry
+from `cleat.lock` by hand. `cleat lock` does not prune either. `cleat lock
+<package>` re-resolves the children the scan finds and keeps every other entry
+as it was, and `cleat lock --update` with no package re-resolves every name in the
+lock, replacing a version you chose, and prints each version it moved
+(cleat#3521). With no lock, nothing can pin it: the build says so and the child
+resolves to the highest deployed version at runtime.
+
 ## Use cases
 
 ### 1. Development: always pick up latest child changes

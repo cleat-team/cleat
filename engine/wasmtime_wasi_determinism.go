@@ -22,8 +22,9 @@ const (
 // errno enum, counted rather than recalled.
 const wasiErrnoFault int32 = 21
 
-// registerWasiDeterminism replaces WASI's clock and entropy with replayable
-// sources, AFTER DefineWasi has bound the originals.
+// registerWasiDeterminism replaces WASI's clock and entropy, AFTER DefineWasi
+// has bound the originals. The wall clock and the entropy it installs are
+// replayable. The monotonic clock is NOT, and that is deliberate.
 //
 // WHY THE TWO CLOCK IDS ARE SOURCED SEPARATELY, which is the whole design.
 // The obvious implementation feeds the durable clock to both. That is the
@@ -35,13 +36,24 @@ const wasiErrnoFault int32 = 21
 //	                   recorded and replayable, and it may jump freely. The Go
 //	                   runtime never reads it -- measured at zero reads across
 //	                   every guest tried, on both backends.
-//	CLOCK_MONOTONIC -> a synthetic counter, smooth, never zero, never backwards,
-//	                   and carrying no relationship to wall-clock time. It is
-//	                   still replayable: it is a pure function of how many times
-//	                   the guest has asked.
+//	CLOCK_MONOTONIC -> REAL ELAPSED TIME since this execution's start, never
+//	                   zero and never backwards (nextMonotonicNs), with no
+//	                   relationship to the durable clock. A replay of the same
+//	                   workflow reads different values, so it is NOT replayable.
 //
-// Both are deterministic, which is the point; they are deterministic in
-// different ways because they answer different questions.
+// CLOCK_MONOTONIC was a synthetic counter -- a fixed step per read, a pure
+// function of how many times the guest had asked, and so replayable -- until
+// cleat#1300. That version made a real 500ms time.Sleep take 62.5 seconds,
+// because poll_oneoff really blocks for the relative timeout the guest computes
+// as deadline - nanotime(); see the read below. The clock exists so timers
+// terminate, and a workflow that reaches it is already outside the
+// deterministic surface: what it should use instead is the durable clock and a
+// durable sleep, and docs/determinism.md ("The monotonic clock is real elapsed
+// time, in every language") says so to authors.
+//
+// This function is the core-module path only. A component guest (Python, C#)
+// does not come through here: its monotonic clock is the host's own, because a
+// shadow of wasi:clocks/monotonic-clock cannot be built (cleat#4396).
 func (b *wasmtimeBackend) registerWasiDeterminism(linker *wasmtime.Linker) error {
 	// Shadowing is off by default and registerWasiStubs relies on that: it
 	// registers environ_get/environ_sizes_get with `_ =` specifically because a

@@ -4,8 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"strings"
 
+	"github.com/cleat-team/cleat/internal/tenantdrop"
 	"github.com/cleat-team/cleat/plugin"
 )
 
@@ -39,65 +39,18 @@ import (
 // third and is still open), and a preview built from a list that has drifted
 // under-reports exactly the tables nobody remembered.
 
-// mssqlTenantTablesSQL names every table carrying a tenant_id column.
-//
-// Deliberately the same predicate as the cursor in migrations/mssql/074, minus
-// that procedure's exclusions: the procedure skips admin.tenants because it
-// deletes it last, and skips its five foreign-key-ordered tables because it
-// names them explicitly. Both are deleted, so both belong in the preview.
-const mssqlTenantTablesSQL = `
-	SELECT s.name, t.name
-	FROM sys.tables t
-	JOIN sys.schemas s ON s.schema_id = t.schema_id
-	WHERE EXISTS (SELECT 1 FROM sys.columns c
-	              WHERE c.object_id = t.object_id AND c.name = 'tenant_id')
-	ORDER BY s.name, t.name`
-
-// mssqlTenantTables returns one count query per tenant-owned table, in the
-// shape dropTenantTables has, so the printing and confirmation code is shared.
+// mssqlTenantTables is tenantdrop.MSSQLTables in this command's counting shape. The
+// derivation, and the reason it is derived rather than listed, moved with it.
 func mssqlTenantTables(ctx context.Context, conn *sql.Conn) ([]struct{ label, query string }, error) {
-	rows, err := conn.QueryContext(ctx, mssqlTenantTablesSQL)
+	ts, err := tenantdrop.MSSQLTables(ctx, conn)
 	if err != nil {
-		return nil, fmt.Errorf("enumerate tenant-owned tables: %w", err)
+		return nil, err
 	}
-	defer rows.Close()
-
-	var tables []struct{ label, query string }
-	for rows.Next() {
-		var schema, name string
-		if err := rows.Scan(&schema, &name); err != nil {
-			return nil, fmt.Errorf("enumerate tenant-owned tables: %w", err)
-		}
-		tables = append(tables, struct{ label, query string }{
-			label: schema + "." + name,
-			query: fmt.Sprintf("SELECT count(*) FROM %s.%s WHERE tenant_id = @p1",
-				bracketQuote(schema), bracketQuote(name)),
-		})
+	out := make([]struct{ label, query string }, len(ts))
+	for i, t := range ts {
+		out[i] = struct{ label, query string }{t.Label, t.Query}
 	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("enumerate tenant-owned tables: %w", err)
-	}
-	if len(tables) == 0 {
-		// Not a "healthy empty". No table in this database carries a tenant_id
-		// column at all, which means the migrations have not been applied --
-		// and counting zero rows would print the same "Nothing to delete" as a
-		// tenant that genuinely has none.
-		return nil, fmt.Errorf("no table in this database has a tenant_id column -- has this database been migrated?")
-	}
-	return tables, nil
-}
-
-// bracketQuote renders an identifier as a SQL Server delimited identifier.
-//
-// These names come from sys.tables rather than from a request, so this is not
-// the primary defence against injection -- it is here so that a plugin table
-// whose name needs quoting produces a quoted identifier instead of a syntax
-// error, and so that a name containing `]` cannot end the identifier early.
-// Doubling `]` is how T-SQL escapes it, and is what QUOTENAME does server-side;
-// the same statement is built client-side here because the table name has to be
-// part of the statement text rather than a parameter.
-func bracketQuote(ident string) string {
-	return "[" + strings.ReplaceAll(ident, "]", "]]") + "]"
+	return out, nil
 }
 
 // setMSSQLTenantKey points the connection's security-policy key at the tenant

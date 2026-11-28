@@ -506,11 +506,29 @@ func (s *MSSQLStore) CancelWorkflow(ctx context.Context, workflowID, reason stri
 }
 
 func (s *MSSQLStore) preemptivelySettleOnce(ctx context.Context, workflowID, reason, finalStatus string) error {
+	return s.preemptivelySettleOnceTo(ctx, workflowID, reason, finalStatus, nil)
+}
+
+// preemptivelySettleOnceTo is preemptivelySettleOnce that also says which run it acted on, through settled when it is not nil: a cancel or a terminate addressed to a run that has
+// continued as new acts on the END of its chain (cleat#4340). It is the body the deadlock retry wraps, so the chain walk is retried with it. See PostgresStore.preemptivelySettleTo.
+func (s *MSSQLStore) preemptivelySettleOnceTo(ctx context.Context, workflowID, reason, finalStatus string, settled *string) error {
+	hint, err := latestRunInChain(ctx, workflowID, s.successorOfRun)
+	if err != nil {
+		return fmt.Errorf("%s workflow: resolve the chain: %w", finalStatus, err)
+	}
 	tx, err := s.beginTxWithContext(ctx)
 	if err != nil {
 		return fmt.Errorf("%s workflow: begin: %w", finalStatus, err)
 	}
 	defer tx.Rollback()
+	addressed := workflowID
+	workflowID, err = s.lockChainEndTx(ctx, tx, addressed, hint)
+	if err != nil {
+		return fmt.Errorf("%s workflow: lock: %w", finalStatus, err)
+	}
+	if settled != nil {
+		*settled = workflowID
+	}
 
 	// Does this workflow owe a defer phase? See deferPhaseOwed. UPDLOCK holds
 	// the row for the UPDATE that follows, so the status this reads is the
@@ -558,9 +576,7 @@ func (s *MSSQLStore) preemptivelySettleOnce(ctx context.Context, workflowID, rea
 	// class (isMSSQLRollbackGuaranteed only checks deadlock/snapshot errors),
 	// so withRollbackGuaranteedRetry returns it on the first attempt.
 	if isSettledStatus(curStatus) && !(finalStatus == statusTerminated && curStatus == statusDeadLettered) {
-		return adminErrorf(ErrAdminStateConflict,
-			"workflow %s: already settled (status=%s); refusing to write %s over it",
-			workflowID, curStatus, finalStatus)
+		return settledRefusal(addressed, workflowID, curStatus, finalStatus)
 	}
 
 	if deferPhaseOwed(curStatus, hasDefers == 1, compacted == 1) {
@@ -624,4 +640,49 @@ func (s *MSSQLStore) preemptivelySettleOnce(ctx context.Context, workflowID, rea
 	// failed them, with nothing recording why the two differed.
 	s.enforceParentClosePolicy(context.Background(), workflowID, parentOutcomeMessage(finalStatus))
 	return nil
+}
+
+// lockChainEndTx locks the END of addressed's continue-as-new chain in tx and returns its id, walking from hint (cleat#4340). See PostgresStore.lockChainEndTx. A deadlock error is
+// returned with its type intact (wrapped, never flattened), so the retry that wraps every caller still recognises it.
+func (s *MSSQLStore) lockChainEndTx(ctx context.Context, tx *sql.Tx, addressed, hint string) (string, error) {
+	return lockChainEnd(addressed, hint,
+		func(run string) (string, bool, error) {
+			var status string
+			switch err := tx.QueryRowContext(ctx, `SELECT status FROM workflow_instances WITH (UPDLOCK, ROWLOCK) WHERE id = @p1 AND tenant_id = @p2`, run, s.tenantID).Scan(&status); {
+			case errors.Is(err, sql.ErrNoRows):
+				return "", false, nil
+			case err != nil:
+				return "", false, err
+			}
+			return status, true, nil
+		},
+		func(run string) (string, error) {
+			return successorScan(tx.QueryRowContext(ctx, `SELECT id FROM workflow_instances WHERE continued_from = @p1 AND tenant_id = @p2`, run, s.tenantID))
+		})
+}
+
+// CancelWorkflowReceipt, TerminateWorkflowReceipt and RequestCancellationReceipt implement SettleReceiptStore: the same verbs, with the same deadlock retry, saying which run they
+// acted on (cleat#4340).
+func (s *MSSQLStore) CancelWorkflowReceipt(ctx context.Context, workflowID, reason string) (SettleReceipt, error) {
+	var acted string
+	err := withRollbackGuaranteedRetry(ctx, "cancel workflow", mssqlTxRetries, mssqlTxRetryDelay, func() error {
+		return s.preemptivelySettleOnceTo(ctx, workflowID, reason, statusCancelled, &acted)
+	})
+	return settleReceiptFor(workflowID, acted), err
+}
+
+func (s *MSSQLStore) TerminateWorkflowReceipt(ctx context.Context, workflowID, reason string) (SettleReceipt, error) {
+	var acted string
+	err := withRollbackGuaranteedRetry(ctx, "terminate workflow", mssqlTxRetries, mssqlTxRetryDelay, func() error {
+		return s.preemptivelySettleOnceTo(ctx, workflowID, reason, statusTerminated, &acted)
+	})
+	return settleReceiptFor(workflowID, acted), err
+}
+
+func (s *MSSQLStore) RequestCancellationReceipt(ctx context.Context, workflowID, reason string) (SettleReceipt, error) {
+	var acted string
+	err := withRollbackGuaranteedRetry(ctx, "request cancellation", mssqlTxRetries, mssqlTxRetryDelay, func() error {
+		return s.requestCancellationOnceTo(ctx, workflowID, reason, &acted)
+	})
+	return settleReceiptFor(workflowID, acted), err
 }

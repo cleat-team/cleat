@@ -30,6 +30,8 @@ var goFixtureExpectations = map[string]string{
 	// cleat#3383: CreatePromise -> AwaitPromise -> DurableCall on timeout, one
 	// entry point taking one struct. Must verify cleanly.
 	"awaitpromisebranch": "",
+	// cleat#4169: the fault-injection harness's script guest -- one entry point that interprets a list of operations. Must verify cleanly.
+	"chaosscript": "",
 	// cleat#3378: AwaitSignals -> PluginCall on timeout -> AwaitSignals, one
 	// entry point taking one struct. Must verify cleanly.
 	"awaittimeoutbranch": "",
@@ -37,9 +39,13 @@ var goFixtureExpectations = map[string]string{
 	// cleat#1065: the Go reader for tests/conformance/entry_point_binding_cases.json.
 	"bindingconformance": "",
 	"cancelpoll":         "",
-	"clew-lifecycle":     "",
-	"crashcall":          "",
-	"crosslang":          "",
+	// cleat#3500: starts children by literal, const, constant expression, raw
+	// string, variable and call. Must verify cleanly -- the unresolvable names are
+	// reported by the usage scan, not refused by analysis.
+	"childnames":     "",
+	"clew-lifecycle": "",
+	"crashcall":      "",
+	"crosslang":      "",
 	// cleat#3408: one entry point, one string input, one DurableFetch. Must verify cleanly.
 	"fetchprobe": "",
 	// cleat#1617: its only host-call route is cleat/dagrun, whose needs are
@@ -62,20 +68,26 @@ var goFixtureExpectations = map[string]string{
 	// crash scenario starts through ChildWorkflow and counts the runs of. One
 	// DurableCall and nothing exotic; listed because a fixture holding Go files
 	// that is not listed is a fixture nothing checks.
-	"summarise":    "",
-	"deferfunc":    "",
-	"durablesend":  "",
-	"fencereentry": "",
-	"generics":     "",
+	"summarise": "",
+	"deferfunc": "",
+	// cleat#4285: a guest that recovers the suspension the SDK panics for a pending child await and then makes a DurableCall. It makes the call directly, so it
+	// verifies cleanly.
+	"ignoredsuspend": "",
+	"residentsleep":  "",
+	"hotfixmarker":   "",
+	// cleat#4079: a workflow that makes a call, registers a defer and then spins or fails, so the engine's failure path has a guest
+	// to be killed in. Must verify cleanly.
+	"killafterwork": "",
+	"durablesend":   "",
+	"fencereentry":  "",
+	"generics":      "",
 	// cleat#1967: the workflow README.md's first command runs. No DurableCall,
 	// so it must verify cleanly with nothing else running.
 	"hello": "",
-	// cleat#1131. Verifies cleanly BECAUSE of analyzer.SDKDurableHelper: its
-	// saga steps are StepCall data, so the DurableCall lives in the SDK and
-	// nothing in this package writes a HostCalls method. Before that predicate
-	// it also "verified cleanly" -- and produced a module importing no
-	// cleat_call, which is why the real guard is the import check in
-	// testdata/sagaparameterised's sibling test rather than this row.
+	// cleat#1131. Its saga steps are StepCall data, so the DurableCall lives in the SDK and nothing in this
+	// package writes a HostCalls method. It verifies cleanly because analyzer.DepHostCalls reads Saga.AddStepCall's
+	// body (cleat#3803; a hand list of names before that). Without it the module built, imported no cleat_call,
+	// and failed at run time; the import check is in cmd/cleat's an_sdk_function_that_makes_host_calls_wires_them_test.go.
 	"sagaparameterised": "",
 	"minimal-wf":        "",
 	"noargs":            "",
@@ -122,6 +134,11 @@ var goFixtureExpectations = map[string]string{
 	// one this fixture was never written to exercise.
 	"errors": "does not have a HostCalls parameter",
 
+	// cleat#4123. Must verify cleanly HERE: this table measures entry-point threading and shape, which the fixture's functions satisfy (the typed
+	// ones return a string for that reason). The non-determinism rules it exists for (E001, E002, E003, E008...) belong to the closure scan and
+	// are asserted in internal/closure/side_effect_nondeterminism_test.go, which reads the same package.
+	"sideeffectnondet": "",
+
 	// cleat#1614. A method reaching the host through the package-level h.
 	// The substring is the part that is specific to a METHOD: the generic
 	// "does not have a HostCalls parameter" above would be satisfied by the
@@ -136,6 +153,12 @@ var goFixtureExpectations = map[string]string{
 	// the declaration path. The declaration itself is asserted by
 	// TestABuiltFixtureDeclaresItsExposureFromSource in wasm/.
 	"exposure": "",
+	// cleat#3524. Two fixtures `cleat build` and `cleat vet` both REFUSE, on a
+	// bad //cleat:exposure declaration. Both verify cleanly here on purpose:
+	// the refusal is not a threading error, it is read from the usage scan, and
+	// is asserted by TestVetAndBuildGiveOneAnswerOnTheRefusalsOnlyBuildUsedToTake.
+	"exposureconflict": "",
+	"exposureinvalid":  "",
 }
 
 // TestEveryGoFixtureMatchesItsExpectedVerification is cleat#1313.

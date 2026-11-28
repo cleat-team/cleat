@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/cleat-team/cleat/cleat/wasmtest"
 
@@ -330,45 +331,6 @@ func buildRustWorkflowWasm(t *testing.T) []byte {
 	return nil
 }
 
-// buildASWorkflowWasm compiles the AssemblyScript workflow in testdata/asworkflow
-// to WASM using cleat build --target assemblyscript.
-func buildASWorkflowWasm(t *testing.T) []byte {
-	t.Helper()
-
-	projectRoot := findProjectRoot(t)
-	workflowDir := filepath.Join(projectRoot, "tests", "plugin-harness", "testdata", "asworkflow")
-
-	if _, err := exec.LookPath("npx"); err != nil {
-		t.Skip("npx not available — install Node.js")
-	}
-
-	tmpDir := t.TempDir()
-	cmd := commandAt(workflowDir, cleatBinary(t),
-		"build", "--target", "assemblyscript", "-o", tmpDir, workflowDir,
-	)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("cleat build (assemblyscript) failed:\n%s\n%v", string(out), err)
-	}
-
-	entries, err := os.ReadDir(tmpDir)
-	if err != nil {
-		t.Fatalf("reading cleat build output: %v", err)
-	}
-	for _, e := range entries {
-		if filepath.Ext(e.Name()) == ".wasm" {
-			wasmBytes, err := os.ReadFile(filepath.Join(tmpDir, e.Name()))
-			if err != nil {
-				t.Fatalf("reading WASM file: %v", err)
-			}
-			t.Logf("built AS WASM (%d bytes)", len(wasmBytes))
-			return wasmBytes
-		}
-	}
-	t.Fatalf("no .wasm file found in cleat build output: %s", tmpDir)
-	return nil
-}
-
 // buildPythonWorkflowWasm compiles the Python workflow in testdata/pythonworkflow
 // to WASM using cleat build --target python (componentize-py).
 func buildPythonWorkflowWasm(t *testing.T) []byte {
@@ -383,7 +345,7 @@ func buildPythonWorkflowWasm(t *testing.T) []byte {
 	checkCmd := exec.Command("python3", "-c", "import componentize_py; import cleat_sdk")
 	checkCmd.Env = append(os.Environ(), "PYTHONPATH="+filepath.Join(projectRoot, "python-sdk"))
 	if err := checkCmd.Run(); err != nil {
-		t.Skip("componentize-py or cleat_sdk not installed — run: pip install componentize-py && cd python-sdk && pip install -e .")
+		t.Skip("componentize-py or cleat_sdk not installed — run: pip install componentize-py==0.25.1 && cd python-sdk && pip install -e .")
 	}
 	// The importable module and the console script come apart, and it is the
 	// script that matters here: `cleat build --target python` shells out to
@@ -688,63 +650,6 @@ func TestPluginCalls_Wasm_Rust(t *testing.T) {
 	t.Logf("Rust WASM plugin workflow: execute and replay produce identical results (%d keys)", len(results))
 }
 
-func TestPluginCalls_Wasm_AS(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping WASM compilation test in short mode")
-	}
-
-	env := NewTestPluginEnvInMemory(t)
-	defer env.Close()
-
-	wasmBytes := buildASWorkflowWasm(t)
-
-	wenv := wasmtest.NewWasmTestEnv(t, wasmtest.WithPluginRegistry(env.Registry))
-	defer wenv.Close()
-
-	result, history, err := wenv.Execute(t, wasmBytes, "call_all_plugins", `{}`)
-	if err != nil {
-		if strings.Contains(err.Error(), "wasm trap") {
-			t.Fatalf("AS WASM module trapped at runtime: %v", err)
-		}
-		t.Fatalf("workflow execution failed: %v", err)
-	}
-
-	var results map[string]interface{}
-	// Clean trailing bytes that AS/Java may write past the JSON content.
-	result = strings.TrimRight(result, "\x00")
-	result = strings.TrimSpace(result)
-	// Use json.Decoder which is more lenient than Unmarshal for trailing data.
-	dec := json.NewDecoder(strings.NewReader(result))
-	if err := dec.Decode(&results); err != nil {
-		t.Fatalf("AS result JSON parse failed: %v\nraw: %.2000s", err, result)
-	}
-	t.Logf("workflow completed with %d plugin results", len(results))
-
-	expectedKeys := []string{
-		"blobstore.put", "blobstore.get",
-		"event-triggers.await_event",
-		"feature-flags.evaluate_flag",
-		"kafka-connect.produce",
-		"notifications.send_webhook",
-		"pagerduty-alert.trigger_incident", "pagerduty-alert.resolve_incident",
-		"pgvector.upsert", "pgvector.search", "pgvector.delete",
-		"slack-notify.send_message",
-		"webhook-ingest.await_webhook",
-		"llm.chat", "llm.embed", "llm.list_models", "llm.chat_stream",
-	}
-	assertPluginOutcomes(t, results, expectedKeys)
-
-	result2, err := wenv.Replay(t, wasmBytes, "call_all_plugins", `{}`, history)
-	if err != nil {
-		t.Fatalf("replay failed: %v", err)
-	}
-	if result != result2 {
-		t.Errorf("replay mismatch")
-	}
-
-	t.Logf("AS WASM plugin workflow: execute and replay produce identical results (%d keys)", len(results))
-}
-
 // TestPluginCalls_Wasm_Python builds the Python workflow, executes it through
 // the WASM engine with plugin support, and replays to verify determinism.
 //
@@ -768,7 +673,15 @@ func TestPluginCalls_Wasm_Python(t *testing.T) {
 	wasmBytes := buildPythonWorkflowWasm(t)
 
 	// Create wasmtest env with the plugin registry wired in.
-	wenv := wasmtest.NewWasmTestEnv(t, wasmtest.WithPluginRegistry(env.Registry))
+	//
+	// Two minutes PER CALL, not the default 30s: the native component path
+	// compiles the 19 MB component afresh on every Execute and every Replay
+	// (cleat#3748), measured at about 19s each on a loaded CI runner, and that
+	// time counts against the call's deadline. cleat#3746. A hung guest still
+	// fails, after two minutes.
+	wenv := wasmtest.NewWasmTestEnv(t,
+		wasmtest.WithPluginRegistry(env.Registry),
+		wasmtest.WithCallTimeout(2*time.Minute))
 	defer wenv.Close()
 
 	// Execute the workflow. Python WASM components always export "run" as
@@ -863,7 +776,7 @@ func TestPluginCalls_Wasm_Java(t *testing.T) {
 		t.Fatalf("Java/TeaVM module crashed: execution returned the crash-default placeholder result instead of plugin output, raw: %.200s", result)
 	}
 	// TeaVM encodes the result as a JSON-encoded string matching the
-	// Go/Python/AS convention. Unwrap the outer JSON string, then
+	// Go/Python convention. Unwrap the outer JSON string, then
 	// parse the inner JSON object.
 	var results map[string]interface{}
 	var rawJSON string

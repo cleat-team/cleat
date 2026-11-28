@@ -154,28 +154,13 @@ func TestPostgresStore_WithEncryption_Disabled(t *testing.T) {
 	}
 }
 
-func TestPostgresStore_WithReadRedactionDisabled(t *testing.T) {
-	db := &sql.DB{}
-	s := NewPostgresStore(db)
-	result := s.WithReadRedactionDisabled(true)
-	if result == s {
-		t.Error("WithReadRedactionDisabled should return a copy")
-	}
-	if !result.disableReadRedaction {
-		t.Error("disableReadRedaction should be true on copy")
-	}
-	if s.disableReadRedaction {
-		t.Error("original should not be modified")
-	}
-}
-
 func TestPostgresStore_optionChaining(t *testing.T) {
 	db := &sql.DB{}
 	s := NewPostgresStore(db)
 	enc := &PayloadEncryption{}
 	ttl := 5 * time.Minute
 
-	result := s.WithEncryption(enc, true).WithIdempotencyKeyTTL(ttl).WithReadRedactionDisabled(true)
+	result := s.WithEncryption(enc, true).WithIdempotencyKeyTTL(ttl)
 
 	if result.encryption != enc {
 		t.Error("encryption not set through chain")
@@ -186,10 +171,7 @@ func TestPostgresStore_optionChaining(t *testing.T) {
 	if result.idempotencyKeyTTL != ttl {
 		t.Errorf("TTL not set through chain: got %v", result.idempotencyKeyTTL)
 	}
-	if !result.disableReadRedaction {
-		t.Error("disableReadRedaction not set through chain")
-	}
-	if s.encryption != nil || s.idempotencyKeyTTL == ttl || s.disableReadRedaction {
+	if s.encryption != nil || s.idempotencyKeyTTL == ttl {
 		t.Error("chaining should not modify original store")
 	}
 }

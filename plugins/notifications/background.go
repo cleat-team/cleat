@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"time"
 
@@ -25,8 +26,36 @@ import (
 // outright rather than degrading it. cleat#1512.
 var deliveryInterval = 30 * time.Second
 
-// Run starts the delivery retry loop. It runs every 30 seconds, finding
-// undelivered webhook deliveries whose next_attempt_at <= now() and
+// deliveryHTTPTimeout bounds one outbound delivery POST, response body included
+// (http.Client.Timeout covers reading it). It is the client's timeout in Init and
+// the number the lease below is derived from.
+const deliveryHTTPTimeout = 30 * time.Second
+
+// deliveryLeaseMargin is what a lease allows beyond the HTTP timeout: the secret
+// fetch before the POST and the mark* write after it.
+const deliveryLeaseMargin = 30 * time.Second
+
+// deliveryLease is how long a claimed delivery stays out of every sweep's due
+// set (cleat#3526). It is DERIVED from the HTTP timeout, never a free-standing
+// number: if a send could outlast its lease, another sweeper would reclaim the row
+// and send it again, which is the defect the claim exists to remove, returning
+// through a different path. TestTheLeaseOutlastsTheSlowestSend pins the relation.
+const deliveryLease = deliveryHTTPTimeout + deliveryLeaseMargin
+
+// leaseSeconds converts a lease to the whole seconds the claim binds. It refuses
+// anything under one second: a zero lease would claim nothing (the row would be
+// due again at once), and on MySQL, whose affected-row count is rows CHANGED
+// rather than matched, would also make a successful claim read as zero rows.
+func leaseSeconds(d time.Duration) (int, error) {
+	if d < time.Second {
+		return 0, fmt.Errorf("notifications: delivery lease %v is under one second; a lease must outlast the send it protects", d)
+	}
+	return int(d / time.Second), nil
+}
+
+// Run starts the delivery retry loop. It runs every 30 seconds, and also at
+// once when send_webhook records a delivery on this process (cleat#3525),
+// finding undelivered webhook deliveries whose next_attempt_at <= now() and
 // attempting HTTP POST delivery. Returns when ctx is cancelled.
 func (p *Plugin) Run(ctx context.Context) error {
 	if p.db == nil {
@@ -78,6 +107,7 @@ func (p *Plugin) Run(ctx context.Context) error {
 
 	ticker := time.NewTicker(deliveryInterval)
 	defer ticker.Stop()
+	nudge := p.nudgeCh()
 
 	p.logger.Info("notifications: delivery retry loop started", "interval", deliveryInterval)
 
@@ -88,23 +118,32 @@ func (p *Plugin) Run(ctx context.Context) error {
 			return nil
 
 		case <-ticker.C:
-			start := time.Now()
-			attempted, succeeded, failed, err := p.processDeliveries(ctx, baseCtx)
-			if err != nil {
-				p.logger.Error("notifications: delivery processing failed",
-					"plugin", p.Info().Name,
-					"error", err,
-				)
-				continue
-			}
-			p.logger.Info("notifications: work cycle completed",
-				"plugin", p.Info().Name,
-				"duration_ms", time.Since(start).Milliseconds(),
-				"deliveries_attempted", attempted,
-				"deliveries_succeeded", succeeded,
-				"deliveries_failed", failed,
-			)
+		case <-nudge:
 		}
+
+		start := time.Now()
+		attempted, succeeded, failed, err := p.processDeliveries(ctx, baseCtx)
+		if err != nil {
+			p.logger.Error("notifications: delivery processing failed",
+				"plugin", p.Info().Name,
+				"error", err,
+			)
+			continue
+		}
+		// A tick that found nothing due is DEBUG: at the 30s interval that is
+		// 2,880 lines a day per worker saying nothing, and more at any shorter
+		// interval (cleat#3525). A tick that attempted a delivery stays INFO.
+		level := slog.LevelInfo
+		if attempted == 0 {
+			level = slog.LevelDebug
+		}
+		p.logger.Log(ctx, level, "notifications: work cycle completed",
+			"plugin", p.Info().Name,
+			"duration_ms", time.Since(start).Milliseconds(),
+			"deliveries_attempted", attempted,
+			"deliveries_succeeded", succeeded,
+			"deliveries_failed", failed,
+		)
 	}
 }
 
@@ -125,6 +164,7 @@ type webhookConfigRow struct {
 	URL              string
 	TenantID         uuid.UUID
 	SecretConfigured bool
+	Enabled          bool
 }
 
 // processDeliveries queries for pending and retrying deliveries whose retry
@@ -167,6 +207,22 @@ func (p *Plugin) processDeliveries(ctx, baseCtx context.Context) (int, int, int,
 		}
 		d.Payload = payload.Raw
 
+		// CLAIM BEFORE SENDING (cleat#3526). The due query above is a plain
+		// SELECT, and every worker runs this loop, so two sweeps that overlapped
+		// could both read this row as due and both POST it -- measured: two POSTs
+		// of one delivery on PostgreSQL, MySQL and SQL Server. send_webhook is
+		// Idempotent:false. Only the sweep whose UPDATE moves the row's due time
+		// goes on to send it; any other, and a delivery cancelled since the read,
+		// is skipped.
+		claimed, cerr := p.claimDelivery(ctx, d.ID)
+		if cerr != nil {
+			p.logger.Error("notifications: claim delivery", "delivery_id", d.ID, "error", cerr)
+			continue
+		}
+		if !claimed {
+			continue
+		}
+
 		attempted++
 		// ONE TRACE PER DELIVERY, originated here because a webhook delivery has
 		// no caller: this sweep runs on a timer with no inbound request, so there
@@ -194,6 +250,41 @@ func (p *Plugin) processDeliveries(ctx, baseCtx context.Context) (int, int, int,
 	return attempted, succeeded, failed, rows.Err()
 }
 
+// claimDelivery takes a lease on one due delivery: it moves next_attempt_at
+// forward by deliveryLease, and reports true only if this call is the one that
+// moved it. It is a compare-and-swap on the row, so it needs no new status, no
+// schema change and no change to the mark* guards, and a sweep that dies after
+// claiming frees the row when the lease runs out.
+//
+// THE DATABASE CLOCK ON BOTH SIDES. The SET and the WHERE both use the
+// database's own now (nowPlusSecondsSQLExpr, nowSQLExpr), the clock the due query
+// and every other next_attempt_at stamp already use. Two workers with skewed
+// clocks therefore cannot disagree about whether a lease has run out, and no Go
+// time.Time is bound.
+//
+// The WHERE re-checks status and that the row is still due: a delivery cancelled
+// since it was read (handleDeleteWebhook sets 'cancelled'), or claimed by another
+// sweep a moment ago, matches nothing. MySQL's affected-row count is rows
+// CHANGED; the SET always moves next_attempt_at forward (old <= now < now+lease),
+// so changed equals matched provided the lease is at least a second, which
+// leaseSeconds enforces.
+func (p *Plugin) claimDelivery(ctx context.Context, id uuid.UUID) (bool, error) {
+	secs, err := leaseSeconds(deliveryLease)
+	if err != nil {
+		return false, err
+	}
+	// $1 is textually first (inside the SET), then $2: MySQL binds by appearance.
+	n, err := p.db.Exec(ctx, fmt.Sprintf(`
+			UPDATE webhook_delivery
+			SET next_attempt_at = %s
+			WHERE id = $2 AND status IN ('pending', 'retrying') AND next_attempt_at <= %s
+		`, nowPlusSecondsSQLExpr(p.dialect, "$1"), nowSQLExpr(p.dialect)), secs, id)
+	if err != nil {
+		return false, fmt.Errorf("claim delivery: %w", err)
+	}
+	return n == 1, nil
+}
+
 // deliver attempts a single webhook delivery. It reads the webhook config,
 // builds and sends an HTTP POST with HMAC-SHA256 signing, and updates the
 // delivery status accordingly. Returns the outcome ("delivered", "retrying", "failed").
@@ -219,10 +310,25 @@ func (p *Plugin) deliver(ctx, baseCtx context.Context, d deliveryRow) (string, e
 	// webhook that has since been soft-deleted.
 	var cfg webhookConfigRow
 	err := plugin.ScanRow(p.db.QueryRow(ctx, `
-			SELECT url, tenant_id, secret_configured FROM webhook_config WHERE id = $1 AND deleted_at IS NULL
-		`, d.WebhookID), &cfg.URL, &cfg.TenantID, &cfg.SecretConfigured)
+			SELECT url, tenant_id, secret_configured, enabled FROM webhook_config WHERE id = $1 AND deleted_at IS NULL
+		`, d.WebhookID), &cfg.URL, &cfg.TenantID, &cfg.SecretConfigured, &cfg.Enabled)
 	if err != nil {
 		return "", fmt.Errorf("lookup webhook config: %w", err)
+	}
+	// A DISABLED webhook's deliveries are HELD (cleat#3539): not sent, and not
+	// touched, so that re-enabling resumes them. queryDueDeliveries' join already
+	// leaves them out, and that is the layer that matters; this is the one for a
+	// disable that lands between the sweep's read and this lookup, the way the
+	// deleted_at filter above is for a delete.
+	//
+	// IT IS NOT HOW A HELD ROW IS KEPT OUT OF THE SWEEP. A row skipped here would
+	// still be in queryDueDeliveries' result, which is ORDER BY next_attempt_at
+	// LIMIT 100 across every webhook, so held rows left in it would take places
+	// ahead of enabled webhooks' deliveries. Nothing is marked: the claim moved
+	// next_attempt_at by the lease, so a re-enable inside that minute resumes the
+	// row up to a lease later, and the join excludes it from the next sweep.
+	if !cfg.Enabled {
+		return "held", nil
 	}
 
 	// A signing secret is now REQUIRED on every webhook (cleat#1992/#2172,
@@ -274,6 +380,11 @@ func (p *Plugin) deliver(ctx, baseCtx context.Context, d deliveryRow) (string, e
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Webhook-Event", d.EventType)
 	req.Header.Set("X-Webhook-Signature", "sha256="+signature)
+	// The delivery's own id, the webhook_delivery.id the list route returns: the same value on the
+	// first send, on every retry and after a redelivery (cleat#3612), because all of them are this
+	// row. A receiver dedupes on it and an operator matches a receiver's log line to a delivery.
+	// Not covered by the signature, which stays the HMAC of the body alone (cleat#3621).
+	req.Header.Set("X-Webhook-Delivery", d.ID.String())
 
 	// Execute the HTTP request.
 	resp, err := p.httpClient.Do(req)
@@ -289,7 +400,34 @@ func (p *Plugin) deliver(ctx, baseCtx context.Context, d deliveryRow) (string, e
 		return "delivered", p.markDelivered(ctx, d.ID, d.AttemptCount+1, resp.StatusCode, respBody)
 	}
 
-	return p.retryOrFail(ctx, d, fmt.Sprintf("HTTP %d: %s", resp.StatusCode, respBody))
+	reason := fmt.Sprintf("HTTP %d: %s", resp.StatusCode, respBody)
+	if isPermanentWebhookRefusal(resp.StatusCode) {
+		// The receiver said, in a form HTTP defines, that THIS request will never be accepted.
+		// Retrying it for another ~6h21m only repeats the refusal (cleat#3611).
+		return "failed", p.markFailed(ctx, d.ID, d.AttemptCount+1, reason)
+	}
+	return p.retryOrFail(ctx, d, reason)
+}
+
+// isPermanentWebhookRefusal reports whether a receiver's non-2xx status is a refusal of the event
+// itself, which no repeat can change: 410 (the endpoint is gone), 413 (it is too large) and 422
+// (it cannot be processed).
+//
+// Every OTHER status stays retryable, 4xx included, and that is deliberate rather than an
+// omission. 401, 403 and 404 are what a receiver answers while its credentials, its allow-list or
+// its route are wrong or not yet deployed, all of which an operator repairs from the outside; 408,
+// 425 and 429 are explicitly "try again"; every 5xx is the receiver's own fault. 400 was left out
+// on a review of cleat#3616 and the coordinator's decision of 2026-10-30: receivers commonly answer
+// 400 for a failed signature check, which a rotated secret repairs from the outside, so it is the
+// same case as 401. There is no way to resend a delivery once it is `failed` (cleat#3612), so
+// classifying one of those as permanent would turn a repairable outage into lost events. With a
+// redeliver route more codes could move here, 400 first.
+func isPermanentWebhookRefusal(status int) bool {
+	switch status {
+	case http.StatusGone, http.StatusRequestEntityTooLarge, http.StatusUnprocessableEntity:
+		return true
+	}
+	return false
 }
 
 // retryOrFail marks a delivery for another attempt, or permanently failed
@@ -482,6 +620,15 @@ func nowPlusSecondsSQLExpr(d plugin.Dialect, ph string) string {
 // missed sweep before the next one caught it -- silent by dilution, not by
 // impossibility, which is exactly the class of bug a lower-frequency
 // production system does not surface for itself.
+// AND wc.enabled (cleat#3539) is what HOLDS the deliveries of a disabled webhook:
+// they stay pending/retrying and unchanged, and are due again the moment the
+// webhook is re-enabled. It belongs in this join and nowhere later: the query is
+// ORDER BY next_attempt_at LIMIT 100 over every webhook, so a held row left in the
+// result and skipped afterwards would still take one of the 100. The claim's lease
+// (two sweep intervals) takes a skipped row out of the next sweep, so that delays
+// an enabled webhook's delivery by a sweep or two while fewer than about 200 rows
+// are held, and starves it for as long as more are.
+//
 // INNER JOIN webhook_config, not a LEFT JOIN: cleat#2220. A LEFT JOIN plus
 // "wc.deleted_at IS NULL" would read true when there is no matching config
 // row at all (a missing row makes every wc.* column NULL, and NULL IS NULL
@@ -496,22 +643,41 @@ func nowPlusSecondsSQLExpr(d plugin.Dialect, ph string) string {
 var queryDueDeliveries = plugin.Query{
 	Default: `SELECT d.id, d.webhook_id, d.event_type, d.payload, d.attempt_count
 FROM webhook_delivery d
-JOIN webhook_config wc ON wc.id = d.webhook_id AND wc.deleted_at IS NULL
+JOIN webhook_config wc ON wc.id = d.webhook_id AND wc.deleted_at IS NULL AND wc.enabled
 WHERE d.status IN ('pending', 'retrying')
   AND d.next_attempt_at <= now()
 ORDER BY d.next_attempt_at ASC
 LIMIT 100`,
 	MySQL: `SELECT d.id, d.webhook_id, d.event_type, d.payload, d.attempt_count
 FROM webhook_delivery d
-JOIN webhook_config wc ON wc.id = d.webhook_id AND wc.deleted_at IS NULL
+JOIN webhook_config wc ON wc.id = d.webhook_id AND wc.deleted_at IS NULL AND wc.enabled = 1
 WHERE d.status IN ('pending', 'retrying')
   AND d.next_attempt_at <= NOW(6)
 ORDER BY d.next_attempt_at ASC
 LIMIT 100`,
 	MSSQL: `SELECT TOP 100 d.id, d.webhook_id, d.event_type, d.payload, d.attempt_count
 FROM webhook_delivery d
-JOIN webhook_config wc ON wc.id = d.webhook_id AND wc.deleted_at IS NULL
+JOIN webhook_config wc ON wc.id = d.webhook_id AND wc.deleted_at IS NULL AND wc.enabled = 1
 WHERE d.status IN ('pending', 'retrying')
   AND d.next_attempt_at <= now()
 ORDER BY d.next_attempt_at ASC`,
+}
+
+// nudgeCh returns the channel send_webhook uses to wake Run, building it on
+// first use. Buffered by one: any number of deliveries recorded while a sweep
+// is running collapse into a single follow-up sweep, which is all they need.
+func (p *Plugin) nudgeCh() chan struct{} {
+	p.nudgeOnce.Do(func() { p.nudge = make(chan struct{}, 1) })
+	return p.nudge
+}
+
+// nudgeDeliveryLoop asks this process's Run to sweep now rather than at its next
+// tick. It never blocks and never fails: with no loop running, or one already
+// signalled, the signal is dropped and the delivery waits for the tick exactly
+// as it did before (cleat#3525).
+func (p *Plugin) nudgeDeliveryLoop() {
+	select {
+	case p.nudgeCh() <- struct{}{}:
+	default:
+	}
 }

@@ -66,7 +66,10 @@ func TestTenantIsolationOverHTTP_MSSQL(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open admin connection: %v", err)
 	}
-	defer adminDB.Close()
+	// Closed by a cleanup registered BEFORE the one that drops the scratch database, so it runs AFTER it
+	// (cleanups run last in, first out). A `defer` here ran when the test function returned, which is before
+	// any t.Cleanup, so the DROP DATABASE found a closed connection and its error was discarded (cleat#3609).
+	t.Cleanup(func() { _ = adminDB.Close() })
 	// Not a skip: CLEAT_TEST_MSSQL was set, so a SQL Server was asked for and
 	// is unreachable. Skipping here would report success for a backend nobody
 	// tested, which is the failure mode scripts/check-skips.sh exists to catch.

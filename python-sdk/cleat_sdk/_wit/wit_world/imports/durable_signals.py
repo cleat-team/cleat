@@ -13,11 +13,52 @@ import weakref
 from componentize_py_types import Result, Ok, Err, Some
 
 
+@dataclass
+class Signal:
+    """
+    A signal a wait received: the name it was sent under, and its payload.
+    """
+    name: str
+    payload: str
 
-def durable_await_signals(names: str, timeout_ms: int, sig_name_ptr: int, sig_name_max_len: int, payload_ptr: int, payload_max_len: int) -> int:
+
+@dataclass
+class SignalOutcome_Received:
+    value: Signal
+
+
+@dataclass
+class SignalOutcome_TimedOut:
+    pass
+
+
+SignalOutcome = Union[SignalOutcome_Received, SignalOutcome_TimedOut]
+"""
+How a wait for signals ended.
+
+This import used to take four pointers into the guest's linear memory
+and return a packed ``u64`` of lengths (cleat#3786). A component host
+cannot dereference a guest pointer, so the dispatcher wrote the name and
+payload into a buffer of its own and returned only the lengths: the
+guest read the right number of bytes from the wrong place and was handed
+NULs -- a signal that arrived, with its name and payload erased, in a
+tier-1 language. Measured on a real worker: signal ``go`` with payload
+``{"approved":true}`` reached the guest as 2 + 17 bytes of ``0x00``.
+"""
+
+
+
+def durable_await_signals(names: str, timeout_ms: int) -> SignalOutcome:
     """
     Wait for one or more external signals, with a timeout.
-    Output buffers kept for multi-return (name + payload).
+    
+    ``err(call-failure.suspended)`` is the engine stopping the workflow: no
+    signal has arrived, the wait has been recorded, and the guest must
+    unwind. ``err(call-failure.failed)`` is a host error -- for example a
+    delivered signal whose name or payload is larger than the 65,535 bytes
+    the host can hand over -- not an outcome of the wait.
+    
+    Raises: `componentize_py_types.Err(wit_world.imports.outcomes.CallFailure)`
     """
     raise NotImplementedError
 def durable_poll_signal(name: str) -> str:

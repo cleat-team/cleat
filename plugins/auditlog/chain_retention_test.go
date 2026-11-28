@@ -39,12 +39,113 @@ func (e *chainEnv) mustVerifyOK(tenant uuid.UUID, what string) ChainReport {
 	return rep
 }
 
+// tryRecord appends n events for tenant through p and reports, instead of assuming, that n rows
+// landed. recordAudit logs and drops its error, so a lost insert leaves a chain shorter than the
+// test believes, and the test then fails at a later row count with a message that blames retention
+// (cleat#3530: "13 rows remain, want the 19 that were there" could not say whether six rows had been
+// deleted or never written). Three independent readings, because each misses something the others
+// see: the plugin's own loss counter, anything it logged at error level, and the table itself.
+func (e *chainEnv) tryRecord(p *Plugin, tenant uuid.UUID, n int) error {
+	e.t.Helper()
+	before := e.rowCount(tenant)
+	lostBefore := p.q.lostTotal.Load()
+
+	// Capture for the length of the append only, then give back whatever logger the test installed:
+	// a test that called captureErrors has its own slice, and a replaced logger would leave it
+	// reading nothing.
+	prev := p.logger
+	errs := p.captureErrors()
+	e.record(p, tenant, n)
+	p.logger = prev
+
+	landed := e.rowCount(tenant) - before
+	lost := p.q.lostTotal.Load() - lostBefore
+	if landed == n && lost == 0 && len(*errs) == 0 {
+		return nil
+	}
+	first := "nothing was logged"
+	if len(*errs) > 0 {
+		first = (*errs)[0]
+	}
+	return fmt.Errorf("setup: recording %d events for tenant %s wrote %d rows (the plugin counted %d lost, %d logged); "+
+		"the test would have started from fewer rows than it asserts on, and a later count would blame retention. First error: %s",
+		n, tenant, landed, lost, len(*errs), first)
+}
+
+// recordAll is e.record that fails at the setup, naming the insert, when any event is lost.
+func (e *chainEnv) recordAll(p *Plugin, tenant uuid.UUID, n int) {
+	e.t.Helper()
+	if err := e.tryRecord(p, tenant, n); err != nil {
+		e.t.Fatal(err)
+	}
+}
+
+// watchedPlugin is e.plugin() whose logged errors fail the test when it ends. recordAudit logs and
+// drops its error, and e.plugin() logs to nowhere, so without this a failed insert, a failed
+// retention step or a lost event is invisible to any test that does not ask.
+func (e *chainEnv) watchedPlugin() *Plugin {
+	e.t.Helper()
+	p := e.plugin()
+	errs := p.captureErrors()
+	t := e.t
+	t.Cleanup(func() {
+		if len(*errs) > 0 {
+			t.Errorf("the plugin logged %d error(s), the first: %s", len(*errs), (*errs)[0])
+		}
+	})
+	return p
+}
+
+// failNthBeginDB fails the n-th Begin with err and passes everything else through. appendEvent
+// takes one transaction per event, so this loses exactly one insert.
+type failNthBeginDB struct {
+	plugin.PluginDB
+	n, at int
+	err   error
+}
+
+func (f *failNthBeginDB) Begin(ctx context.Context) (plugin.PluginTx, error) {
+	if f.n++; f.n == f.at {
+		return nil, f.err
+	}
+	return f.PluginDB.Begin(ctx)
+}
+
+// A lost insert must name itself at the setup. This is the falsification for cleat#3530, kept as a
+// test: the third of ten inserts fails, and tryRecord has to say so, with the cause, rather than
+// leave a test to find nine rows later and read that as retention's doing. The control is the same
+// call with nothing failing.
+func TestALostInsertIsReportedAtTheSetupNotAtALaterCount(t *testing.T) {
+	forEachChainDialect(t, func(t *testing.T, e *chainEnv) {
+		healthy := e.plugin()
+		if err := e.tryRecord(healthy, uuid.New(), 10); err != nil {
+			t.Fatalf("control: with no failing insert tryRecord reported %v", err)
+		}
+
+		p := e.plugin()
+		p.db = &failNthBeginDB{PluginDB: p.db, at: 3, err: fmt.Errorf("injected: insert refused")}
+		tenant := uuid.New()
+		err := e.tryRecord(p, tenant, 10)
+		if err == nil {
+			t.Fatal("one of ten inserts failed and tryRecord reported nothing: a test built on it would start from nine rows")
+		}
+		for _, want := range []string{"wrote 9 rows", "1 lost", "injected: insert refused"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("the report does not say %q:\n  %v", want, err)
+			}
+		}
+		if got := e.rowCount(tenant); got != 9 {
+			t.Errorf("%d rows were written, want the 9 whose inserts did not fail", got)
+		}
+	})
+}
+
 func TestRetentionRemovesAPrefixAndRecordsTheFloor(t *testing.T) {
 	forEachChainDialect(t, func(t *testing.T, e *chainEnv) {
 		p := e.plugin()
 		errs := p.captureErrors()
 		tenant := uuid.New()
-		e.record(p, tenant, 20)
+		e.recordAll(p, tenant, 20)
 		cutoff := e.tsOf(tenant, 13) // rows 1..12 are older than this, 13 is not
 
 		n, err := p.retainTenant(context.Background(), tenant, cutoff)
@@ -60,7 +161,7 @@ func TestRetentionRemovesAPrefixAndRecordsTheFloor(t *testing.T) {
 		}
 
 		// The chain carries on from where it was, not from the floor.
-		e.record(p, tenant, 3)
+		e.recordAll(p, tenant, 3)
 		if rep := e.mustVerifyOK(tenant, "after appending past the floor"); rep.Checked != 11 || rep.HeadSeq != 23 || rep.FloorSeq != 12 {
 			t.Fatalf("%+v", rep)
 		}
@@ -79,9 +180,9 @@ func TestRetentionRemovesAPrefixAndRecordsTheFloor(t *testing.T) {
 // event links to the last row that existed rather than starting a second chain.
 func TestRetentionOfEveryRowLeavesAChainThatCanBeExtended(t *testing.T) {
 	forEachChainDialect(t, func(t *testing.T, e *chainEnv) {
-		p := e.plugin()
+		p := e.watchedPlugin()
 		tenant := uuid.New()
-		e.record(p, tenant, 6)
+		e.recordAll(p, tenant, 6)
 		if n, err := p.retainTenant(context.Background(), tenant, time.Now().Add(time.Hour)); err != nil || n != 6 {
 			t.Fatalf("removed %d, %v; want 6", n, err)
 		}
@@ -89,7 +190,7 @@ func TestRetentionOfEveryRowLeavesAChainThatCanBeExtended(t *testing.T) {
 		if rep.Checked != 0 || rep.FloorSeq != 6 || rep.HeadSeq != 6 {
 			t.Fatalf("%+v", rep)
 		}
-		e.record(p, tenant, 2)
+		e.recordAll(p, tenant, 2)
 		if rep := e.mustVerifyOK(tenant, "after extending an emptied chain"); rep.Checked != 2 || rep.HeadSeq != 8 || rep.FloorSeq != 6 {
 			t.Fatalf("%+v", rep)
 		}
@@ -101,9 +202,9 @@ func TestRetentionRemovesAtMostOneBatchPerSweep(t *testing.T) {
 	retentionBatch = 4
 	t.Cleanup(func() { retentionBatch = old })
 	forEachChainDialect(t, func(t *testing.T, e *chainEnv) {
-		p := e.plugin()
+		p := e.watchedPlugin()
 		tenant := uuid.New()
-		e.record(p, tenant, 10)
+		e.recordAll(p, tenant, 10)
 		future := time.Now().Add(time.Hour)
 		for i, want := range []int64{4, 4, 2, 0} {
 			n, err := p.retainTenant(context.Background(), tenant, future)
@@ -120,9 +221,9 @@ func TestRetentionRemovesAtMostOneBatchPerSweep(t *testing.T) {
 // and let verify report it.
 func TestRetentionDoesNotMoveTheFloorOverAGap(t *testing.T) {
 	forEachChainDialect(t, func(t *testing.T, e *chainEnv) {
-		p := e.plugin()
+		p := e.watchedPlugin()
 		tenant := uuid.New()
-		e.record(p, tenant, 20)
+		e.recordAll(p, tenant, 20)
 		e.mustChange(tenant, `DELETE FROM audit_events WHERE tenant_id = $1 AND seq = 5`, tenant.String())
 		cutoff := e.tsOf(tenant, 13)
 
@@ -146,9 +247,9 @@ func TestRetentionDoesNotMoveTheFloorOverAGap(t *testing.T) {
 // verifier already reports and an operator has to decide.
 func TestRetentionSkipsATenantWhoseNewFloorRowIsGone(t *testing.T) {
 	forEachChainDialect(t, func(t *testing.T, e *chainEnv) {
-		p := e.plugin()
+		p := e.watchedPlugin()
 		tenant := uuid.New()
-		e.record(p, tenant, 20)
+		e.recordAll(p, tenant, 20)
 		cutoff := e.tsOf(tenant, 13) // rows 1..12 are expired, so 12 would be the new floor
 		e.mustChange(tenant, `DELETE FROM audit_events WHERE tenant_id = $1 AND seq = 12`, tenant.String())
 
@@ -170,10 +271,10 @@ func TestRetentionSkipsATenantWhoseNewFloorRowIsGone(t *testing.T) {
 // is reported.
 func TestAFloorThatDoesNotMatchTheRowsIsReported(t *testing.T) {
 	forEachChainDialect(t, func(t *testing.T, e *chainEnv) {
-		p := e.plugin()
+		p := e.watchedPlugin()
 		tenant := uuid.New()
 		T := tenant.String()
-		e.record(p, tenant, 12)
+		e.recordAll(p, tenant, 12)
 		if n, err := p.retainTenant(context.Background(), tenant, e.tsOf(tenant, 7)); err != nil || n != 6 {
 			t.Fatalf("setup: removed %d, %v", n, err)
 		}
@@ -204,10 +305,10 @@ func TestTheRetentionSweepVisitsEveryTenantAndTheUnchainedRows(t *testing.T) {
 		// that enumerated the registry would keep a removed tenant's rows forever.
 		a := uuid.New()
 		tenants := []uuid.UUID{a, uuid.New(), uuid.New()}
-		e.record(p, a, 5)
+		e.recordAll(p, a, 5)
 		chained := int64(5)
 		floors := map[uuid.UUID]int64{a: 5}
-		e.record(p, tenants[1], 4) // tenants[2] never gets a chain
+		e.recordAll(p, tenants[1], 4) // tenants[2] never gets a chain
 		chained += 4
 		floors[tenants[1]] = 4
 

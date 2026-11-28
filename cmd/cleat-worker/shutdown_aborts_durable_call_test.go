@@ -54,6 +54,7 @@ func TestWorkerShutdownAbortsADurableCallsHostBackoffWait(t *testing.T) {
 	ctx := context.Background()
 
 	db := testutil.SuiteTestDB(t, "cleat_worker")
+	settleRunsLeftBehind(t, db)
 	store := engine.NewPostgresStore(db)
 
 	wasmBytes := buildDeferFixture(t)
@@ -62,7 +63,10 @@ func TestWorkerShutdownAbortsADurableCallsHostBackoffWait(t *testing.T) {
 		t.Fatalf("ReadMetadata: %v", err)
 	}
 
-	const defName = "shutdown-backoff-acceptance-worker"
+	// Unique per run: the database persists between runs, the fixture's bytes
+	// differ per build, and a run left open by an earlier invocation would make
+	// a redeploy of the same name a refused replacement (cleat#3497).
+	defName := fmt.Sprintf("shutdown-backoff-acceptance-worker-%d", time.Now().UnixNano())
 	if err := store.DeployWorkflowDef(ctx, &engine.WorkflowDef{
 		Name: defName, Version: meta.WorkflowVersion, WASMBytes: wasmBytes,
 		ABIVersion: meta.ABIVersion, MinVersion: meta.MinCompatibleVersion,
@@ -167,6 +171,11 @@ func (s ctxBlindStore) FinalizeWorkflowSegment(ctx context.Context, runID, worke
 	return s.WorkflowStore.FinalizeWorkflowSegment(context.WithoutCancel(ctx), runID, workerID, generation, newEvents, finalStatus, result, errorCode, errorOp, queryState, nextWakeAt)
 }
 
+// PublishQueryState: the test double writes nothing and reports no fence loss (cleat#4162); a test that needs otherwise overrides it on its own type.
+func (s ctxBlindStore) PublishQueryState(ctx context.Context, runID, workerID string, generation int64, queryState map[string]string) error {
+	return nil
+}
+
 func (s ctxBlindStore) FailWorkflow(ctx context.Context, workflowID, workerID string, generation int64, errorMsg, errorCode, errorOp string, queryState map[string]string) error {
 	return s.WorkflowStore.FailWorkflow(context.WithoutCancel(ctx), workflowID, workerID, generation, errorMsg, errorCode, errorOp, queryState)
 }
@@ -187,6 +196,7 @@ func TestShutdownDuringABackoffNeverReachesAGuestThatCompensates(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			ctx := context.Background()
 			db := testutil.SuiteTestDB(t, "cleat_worker")
+			settleRunsLeftBehind(t, db)
 			store := engine.NewPostgresStore(db)
 
 			wasmBytes := buildDeferFixture(t)

@@ -155,9 +155,13 @@ h.DurableCall("http", "fetch", `{
 
 Write the reference, not the credential. Putting the real value in that request
 puts it in `event_history.request`, where the only thing in front of it is
-`engine.Redact` — a field-name heuristic, described below, which matches seven
-substrings and returns non-JSON input untouched. It does not match `X-Auth`, a
-`Cookie`, or a key in a URL query string, where the field name is `url`.
+`engine.Redact` — a field-name heuristic, described below. It reads a key as
+words and matches `token`, `secret`, `password`, `credential`, `authorization`
+and `api key`, plus any string value that is a real JWT (a header and claims
+that decode to JSON, with an `alg`), and it returns other non-JSON input
+untouched. It does not match `X-Auth`, a `Cookie`, or a key in a URL query
+string, where the field name is `url`. Keys that only describe a secret, such as
+`token_usage`, `max_tokens` or `password_policy`, are left alone.
 
 A reference naming a secret the tenant does not have is a **permanent** error,
 not a retryable one: retrying cannot create it, and a retry budget spent on a
@@ -193,6 +197,19 @@ resolved value.
 `engine` calls `ResolveSecretRefs`, because moving resolution up into the engine
 would write the plaintext into history with no behavioural test failing — the
 call would still succeed.
+
+**Workflow data is stored as sent and redacted where it leaves the system.** Since
+cleat#3581 nothing rewrites a start input, a signal payload or a recorded event on
+the way in or out of the database, so a replay reads exactly what the workflow was
+given. The history and event APIs, the live stream, the dashboard, the log lines and
+`cleatctl debug`/`replay` output apply `engine.Redact` to what they show (`cleatctl`
+prints the stored value with `--no-redact`). A tenant reading its own workflow's
+status and result over the API gets it as stored; `?redact=true` asks for the
+redacted view. **What that means for a secret you put in workflow data: it is in
+`event_history`.** Turn on payload encryption (`--encrypt-sensitive-payloads` with
+`--encryption-key-file`; see `docs/how-to/rotate-payload-encryption-key.md`) if that
+can happen, and prefer a `${secret:...}` reference, which keeps the value out of the
+record entirely. Rows stored before the change stay redacted.
 
 That distinction matters because `engine.Redact` is a **field-name heuristic**:
 it catches `password` and `token`, and would not catch a credential under a

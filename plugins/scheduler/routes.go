@@ -316,11 +316,32 @@ func (p *Plugin) handleUpdate(w http.ResponseWriter, r *http.Request) {
 	query += fmt.Sprintf(" WHERE id = $%d AND tenant_id = $%d", argIdx, argIdx+1)
 	args = append(args, id, tid)
 
-	_, err = p.db.Exec(r.Context(), query, args...)
+	rows, err := p.db.Exec(r.Context(), query, args...)
 	if err != nil {
 		p.logger.Error("scheduler: update", "id", id, "error", err)
 		p.writeError(w, 500, "failed to update schedule")
 		return
+	}
+	if rows == 0 {
+		// The existence read above found this schedule, so 0 rows is one of two things and only one of them is
+		// "gone". Deleted between that read and this write: the UPDATE matched nothing and said nothing, and
+		// the handler used to answer 200 for a schedule that no longer exists (cleat#3551). Or changed nothing:
+		// PostgreSQL and SQL Server count the rows MATCHED, but MySQL counts rows CHANGED, and its now() has
+		// second precision, so a PUT that assigns the values the row already holds, inside a second of its last
+		// update, affects 0 rows for a schedule that exists (cleat#3541, cleat#3550). Ask, rather than infer.
+		var one int
+		err := p.db.QueryRow(r.Context(), `
+			SELECT 1 FROM schedules WHERE id = $1 AND tenant_id = $2
+		`, id, tid).Scan(&one)
+		if errors.Is(err, sql.ErrNoRows) {
+			p.writeError(w, 404, "schedule not found")
+			return
+		}
+		if err != nil {
+			p.logger.Error("scheduler: update existence check", "id", id, "error", err)
+			p.writeError(w, 500, "failed to update schedule")
+			return
+		}
 	}
 
 	p.logger.Info("scheduler: updated", "id", id, "tenant", tid)

@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/cleat-team/cleat/engine/testutil"
 )
 
 // cleatBinary is set by TestMain after build.
@@ -24,7 +26,9 @@ func TestMain(m *testing.M) {
 	var tmpDir string
 	if !testing.Short() {
 		var err error
-		tmpDir, err = os.MkdirTemp("", "cleat-vet-test-*")
+		// OwnedTempDir also removes the directories earlier runs of this binary left behind when they were killed or timed out, which nothing
+		// in a dying process can do for itself (cleat#4226).
+		tmpDir, err = testutil.OwnedTempDir("cleat-vet-test-")
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Failed to create temp dir: %v\n", err)
 			os.Exit(1)
@@ -35,6 +39,7 @@ func TestMain(m *testing.M) {
 		build.Dir = "."
 		if out, err := build.CombinedOutput(); err != nil {
 			fmt.Fprintf(os.Stderr, "Failed to build cleat: %v\n%s", err, out)
+			os.RemoveAll(tmpDir) // os.Exit runs no defers, and a failed build is the case that leaves the directory behind
 			os.Exit(1)
 		}
 
@@ -446,15 +451,6 @@ func TestDetectVetLang(t *testing.T) {
 				return dir
 			},
 			wantLang: "java",
-		},
-		{
-			name: "assemblyscript_package_json",
-			setup: func(t *testing.T) string {
-				dir := t.TempDir()
-				os.WriteFile(filepath.Join(dir, "package.json"), []byte("{}"), 0644)
-				return dir
-			},
-			wantLang: "as",
 		},
 		{
 			name: "fallback_go_ext",

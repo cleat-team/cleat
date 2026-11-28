@@ -127,18 +127,10 @@ func (r *tenantRotation) advance(tenantID string) {
 // race the current statement closes in one. Syntax is not a good enough reason
 // to give that up.
 func (w *Worker) claimRotating(limit int) ([]*engine.WorkflowInstance, error) {
-	if w.storeFactory == nil {
-		// Without a factory, storeForTenant returns the worker's own store for
-		// every tenant -- so the rotation would claim the same tenant k times
-		// and call it fair. Refusing is the only honest answer.
-		return nil, fmt.Errorf("%w: no store factory to open per-tenant stores with", errRotatingClaimUnavailable)
+	tenants, err := w.listTenantsToServe()
+	if errors.Is(err, errRotatingClaimUnavailable) {
+		return nil, err
 	}
-	lister, ok := w.store.(engine.TenantLister)
-	if !ok {
-		return nil, fmt.Errorf("%w: this store cannot enumerate tenants", errRotatingClaimUnavailable)
-	}
-
-	tenants, err := lister.ListTenantIDs(w.ctx)
 	if err != nil {
 		return nil, fmt.Errorf("rotating claim: %w", err)
 	}
@@ -222,4 +214,69 @@ func (w *Worker) claimRotating(limit int) ([]*engine.WorkflowInstance, error) {
 			"worker_id", w.id, "claimed", len(claimed), "error", firstErr)
 	}
 	return claimed, nil
+}
+
+// listTenantsToServe is the one place a worker learns which tenants it serves
+// beyond its own: the claim's rotation and every other loop that must visit each
+// tenant's store (the reaper, cleat#3570) read it here, so there is not a second
+// list to drift from the first. It wraps errRotatingClaimUnavailable when the
+// worker cannot serve other tenants at all, which is a static property.
+func (w *Worker) listTenantsToServe() ([]string, error) {
+	if w.storeFactory == nil {
+		// Without a factory, storeForTenant returns the worker's own store for
+		// every tenant -- so visiting each would visit the same tenant k times
+		// and call it fair. Refusing is the only honest answer.
+		return nil, fmt.Errorf("%w: no store factory to open per-tenant stores with", errRotatingClaimUnavailable)
+	}
+	lister, ok := w.store.(engine.TenantLister)
+	if !ok {
+		return nil, fmt.Errorf("%w: this store cannot enumerate tenants", errRotatingClaimUnavailable)
+	}
+	return lister.ListTenantIDs(w.ctx)
+}
+
+// otherTenantSweep is what forEachOtherTenantStore did.
+type otherTenantSweep struct {
+	Visited    int   // tenants whose store was opened and handed to fn
+	OpenFailed int   // tenants whose store would not open
+	FirstErr   error // the first open failure, for the caller's log
+}
+
+// forEachOtherTenantStore hands fn the store of every tenant the worker serves
+// other than its own, one at a time, releasing each as soon as fn returns, as the
+// claim does and for the same reason: a deferred release would pin every
+// tenant's pool until the last had been tried. It is the shape cleat#3566's
+// heartbeat and #3570's reaper both need, and the one the remaining own-store
+// loops (cleat#3572) should reuse rather than enumerate tenants again.
+//
+// A tenant whose store will not open is counted and skipped; the rest are still
+// visited. A listing failure, or a worker that cannot serve other tenants, is
+// returned and nothing is visited; check errors.Is(err, errRotatingClaimUnavailable)
+// to tell "this worker serves its own tenant only" from a listing that failed.
+func (w *Worker) forEachOtherTenantStore(fn func(tenantID string, st engine.WorkflowStore)) (otherTenantSweep, error) {
+	var sweep otherTenantSweep
+	tenants, err := w.listTenantsToServe()
+	if err != nil {
+		return sweep, err
+	}
+	for _, tenantID := range tenants {
+		if w.ctx.Err() != nil {
+			break
+		}
+		if tenantID == "" || tenantID == w.storeTenantID {
+			continue
+		}
+		st, release, serr := w.storeForTenant(tenantID)
+		if serr != nil {
+			sweep.OpenFailed++
+			if sweep.FirstErr == nil {
+				sweep.FirstErr = fmt.Errorf("tenant %s: %w", tenantID, serr)
+			}
+			continue
+		}
+		fn(tenantID, st)
+		release()
+		sweep.Visited++
+	}
+	return sweep, nil
 }

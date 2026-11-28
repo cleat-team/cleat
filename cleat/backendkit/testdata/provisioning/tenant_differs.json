@@ -1,0 +1,11 @@
+{
+  "status": 409,
+  "body": {
+    "error": "auth: a tenant with this id exists and differs in: name, org_id",
+    "fields": [
+      "name",
+      "org_id"
+    ],
+    "reason": "tenant_differs"
+  }
+}

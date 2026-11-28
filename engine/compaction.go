@@ -95,6 +95,9 @@ const (
 	EventCodeUpdateReceived        = 34
 	EventCodeCallAttemptFailed     = 36
 	EventCodeUpdateCompleted       = 35
+	// 37, because 36 is CallAttemptFailed and the numbers are a stored format:
+	// a code that already means something must never be reused.
+	EventCodeCallRetryRefused = 37
 )
 
 // EventCodeSleep (1) is defined above but has no corresponding EventType
@@ -104,6 +107,7 @@ const (
 var eventTypeToCode = map[EventType]int{
 	EventTypeCall:                  EventCodeCall,
 	EventTypeCallAttemptFailed:     EventCodeCallAttemptFailed,
+	EventTypeCallRetryRefused:      EventCodeCallRetryRefused,
 	EventTypeAwaitSignals:          EventCodeAwaitSignals,
 	EventTypeSignalReceived:        EventCodeSignalReceived,
 	EventTypeDefer:                 EventCodeDefer,
@@ -142,6 +146,7 @@ var eventTypeToCode = map[EventType]int{
 var codeToEventType = map[int]EventType{
 	EventCodeCall:                  EventTypeCall,
 	EventCodeCallAttemptFailed:     EventTypeCallAttemptFailed,
+	EventCodeCallRetryRefused:      EventTypeCallRetryRefused,
 	EventCodeAwaitSignals:          EventTypeAwaitSignals,
 	EventCodeSignalReceived:        EventTypeSignalReceived,
 	EventCodeDefer:                 EventTypeDefer,
@@ -187,9 +192,38 @@ type CompactionState struct {
 	OpenChildren  []CompactedChild  `json:"open_children,omitempty"`
 	QueryState    map[string]string `json:"query_state,omitempty"`
 
+	// PrevChecksum is the stored checksum of the last event row the compaction
+	// deleted: the predecessor of the first row it kept. Verification and replay
+	// both start the checksum chain from it (cleat#3837). Set by CompactHistory,
+	// in the transaction that deletes the row, so the store has not been
+	// compacted without it; empty on a state written before that fix.
+	PrevChecksum string `json:"prev_checksum,omitempty"`
+
 	// Summary is populated when Events exceeds DefaultMaxCompactedEvents and is
 	// truncated. It records the truncation count for observability.
 	Summary *TruncationSummary `json:"summary,omitempty"`
+
+	// StampedFrom is the index in Events of the first event that was captured by a build that carries the drain stamps (InDeferPhase, InDeferSegment) and a signal send's
+	// target (cleat#4310, cleat#4231). Events BEFORE it were compacted by an earlier build and have those fields UNKNOWN, not absent; events from it on have them.
+	// nil means no event in this state is stamped, which is what every state written before this field decodes to, so the old behaviour is the default.
+	//
+	// It is per EVENT RANGE and not per state, because a state is EXTENDED by every compaction: a run first compacted by an old build and compacted again after an
+	// upgrade holds both kinds, and a single version number would either judge the old events by stamps they never had (refusing a healthy drain) or leave the new ones
+	// exempt forever. It is a pointer so that 0 ("every event is stamped") can be told from absent. It is an ADDITIVE field on purpose: a 0.5.x decoder ignores
+	// unknown fields and never reads Version, and when it rewrites the state it drops this field and the per-event stamps TOGETHER, so a rolled-back state degrades to
+	// "none stamped" (the old exempt behaviour), never to a marker that claims stamps a rewrite removed. See unstampedRecords.
+	StampedFrom *int `json:"stamped_from,omitempty"`
+}
+
+// unstampedRecords is how many records at the front of the history this state expands whose drain stamps (and send target) are unknown. A nil state expands nothing.
+func (cs *CompactionState) unstampedRecords() int {
+	if cs == nil {
+		return 0
+	}
+	if cs.StampedFrom == nil {
+		return len(cs.Events)
+	}
+	return min(max(*cs.StampedFrom, 0), len(cs.Events))
 }
 
 // TruncationSummary records how many compacted events were truncated to keep
@@ -223,7 +257,11 @@ type CompactedEvent struct {
 	PromiseName   string `json:"prom_name,omitempty"`
 	PromiseID     string `json:"prom_id,omitempty"`
 	PromiseResult string `json:"prom_res,omitempty"`
-	PromiseError  string `json:"prom_err,omitempty"`
+	// FirstRead mirrors EventRecord.FirstRead on a promise_resolved or promise_rejected: it is what tells an await's own answer from the next call's
+	// first-read settlement (cleat#4277). A compaction that dropped it would turn every such pair back into the ambiguous one on the first replay of a
+	// compacted history, which nothing else would notice: the record still reads as a settlement.
+	FirstRead    bool   `json:"fr,omitempty"`
+	PromiseError string `json:"prom_err,omitempty"`
 
 	// ErrNonRetryable mirrors EventRecord.ErrNonRetryable for a call event
 	// (call or call_heartbeat -- both use EventTypeCall). Its omission here
@@ -265,6 +303,19 @@ type CompactedEvent struct {
 	// exactly like S4a, just triggered by Now() instead of Retryable().
 	TimestampMs int64 `json:"ts,omitempty"`
 
+	// Attempt mirrors EventRecord.Attempt, the 1-based attempt number of a call_attempt_failed event (cleat#4316). Replay does not branch on it, but the store
+	// persists it and `cleatctl replay` prints it, so a compacted failed attempt would otherwise read as attempt 0.
+	Attempt int `json:"att,omitempty"`
+
+	// InDeferPhase and InDeferSegment mirror the same-named EventRecord fields, and like TimestampMs they are set for EVERY event type and not inside a per-type case: a
+	// record's stamp says WHEN it was recorded (by a defer drain, by a defer segment), not what it is (cleat#4310). They were left out, so a compacted record read as
+	// "written by the workflow body" whatever it was, and everything that reads the stamps (lastStoppableIndex, fastForwardToStop, the redrive refusal, and the check for
+	// a call recorded after a pending child await) was blind to the compacted part of a history. omitempty is safe: false is already "not stamped", and a state written
+	// before this field existed reads back false, which for it means UNKNOWN and not "recorded by the body": the stamps of events compacted before the fix are gone and
+	// cannot be recovered.
+	InDeferPhase   bool `json:"idp,omitempty"`
+	InDeferSegment bool `json:"ids,omitempty"`
+
 	// NewVersion mirrors EventRecord.NewVersion for a continue_as_new event.
 	// ContinueAsNewWithVersion reads rec.NewVersion straight off the replayed
 	// event to decide which workflow version to restart as (lifecycle.go); a
@@ -288,6 +339,10 @@ type CompactedEvent struct {
 	// after -- engine-introduced non-determinism of the same shape as the
 	// TimestampMs note above.
 	StreamErrCode int `json:"sec,omitempty"`
+
+	// StreamData mirrors EventRecord.StreamData (cleat#4117). Without it a compacted one-chunk stream that succeeded replays as the failure
+	// whose message is the chunk, which is the defect that field exists to prevent.
+	StreamData bool `json:"sd,omitempty"`
 
 	// StateKeys mirrors EventRecord.StateKeys for a state_mutation event with
 	// StateOp=="list" (ListState). lifecycle.go's ListState replay path reads
@@ -375,6 +430,14 @@ func CompactWorkflowHistory(ctx context.Context, store WorkflowStore, workflowID
 		effective = perDefinition
 	}
 
+	// A run that has been compacted before already has a state covering steps
+	// 0..first-retained-1. This pass extends it (cleat#3838). A state that cannot
+	// be read is not "no state": compacting without it would replace it.
+	prev, err := store.LoadCompactionState(ctx, workflowID)
+	if err != nil {
+		return fmt.Errorf("compact: load existing compaction state: %w", err)
+	}
+
 	events, err := store.LoadEventHistory(ctx, workflowID)
 	if err != nil {
 		return fmt.Errorf("compact: load events: %w", err)
@@ -385,15 +448,31 @@ func CompactWorkflowHistory(ctx context.Context, store WorkflowStore, workflowID
 
 	// Determine the compaction point: keep the most recent effective/2 events
 	// as the tail, compact everything before that.
-	keepStep := len(events) - effective/2
-	if keepStep < 0 {
-		keepStep = 0
+	//
+	// keepIdx is a position in the rows loaded, which after an earlier compaction
+	// start at the first retained step and not at 0. keepStep is the STEP of the
+	// first row kept, and it is what CompactHistory deletes below and what the
+	// state records. They were one number until a second compaction made them
+	// differ (cleat#3838): the index was used as a step, the store deleted
+	// nothing, and the state was written for rows it had not removed.
+	keepIdx := len(events) - effective/2
+	if keepIdx < 1 {
+		return nil // nothing to remove
+	}
+	keepStep := events[len(events)-1].Step + 1
+	if keepIdx < len(events) {
+		keepStep = events[keepIdx].Step
+	}
+	if prev != nil && events[0].Step != prev.firstRetainedStep() {
+		// The rows and the state disagree about where the history starts. Not
+		// compacting is always safe; extending a state from the wrong place is not.
+		return fmt.Errorf("compact: workflow %s history starts at step %d but its compaction state says the first retained step is %d",
+			workflowID, events[0].Step, prev.firstRetainedStep())
 	}
 	compactedStep := keepStep
 
-	// Extract compaction state from the events being compacted.
-	compactedEvents := events[:keepStep]
-	cs, err := extractCompactionState(compactedEvents)
+	// Extend the state with the events being removed.
+	cs, err := extractCompactionStateFrom(prev, events[:keepIdx])
 	if err != nil {
 		// Not compacting is always safe; compacting wrongly is not.
 		return err
@@ -439,10 +518,10 @@ func CompactWorkflowHistory(ctx context.Context, store WorkflowStore, workflowID
 	}
 
 	if metrics != nil {
-		metrics.AddCompactionEventsDeleted(ctx, int64(compactedStep))
+		metrics.AddCompactionEventsDeleted(ctx, int64(keepIdx))
 	}
 	slog.InfoContext(ctx, "compact completed",
-		"workflow_id", workflowID, "events", len(events), "compacted", compactedStep, "kept", len(events)-keepStep, "state_size", len(csJSON))
+		"workflow_id", workflowID, "events", len(events), "compacted", keepIdx, "kept", len(events)-keepIdx, "state_size", len(csJSON))
 	return nil
 }
 
@@ -461,7 +540,16 @@ func isCompactionDeadlockError(err error) bool {
 
 // extractCompactionState builds a CompactionState from the events being
 // compacted away.
-func extractCompactionState(events []EventRecord) (*CompactionState, error) {
+// extractCompactionStateFrom builds the state that covers prev's events and then
+// the rows in events, which must be the rows that directly follow them. With a
+// nil prev it builds the state for a first compaction.
+//
+// CompactedStep always means "the events for steps 0..CompactedStep-1 are in
+// Events" (less any truncated from the front), which is what a second
+// compaction has to preserve: a state built from the removed rows alone covers
+// only those, and the replay that rebuilds the prefix from it hands the guest
+// events from the wrong steps (cleat#3838).
+func extractCompactionStateFrom(prev *CompactionState, events []EventRecord) (*CompactionState, error) {
 	cs := &CompactionState{
 		Version:       1,
 		CompactedStep: len(events),
@@ -472,6 +560,34 @@ func extractCompactionState(events []EventRecord) (*CompactionState, error) {
 
 	defersSeen := make(map[string]string) // deferID -> description
 	openChildren := make(map[string]bool) // runID -> still open
+	childDetails := make(map[string]CompactedChild)
+	prevTruncated := 0
+	// Where the events captured BY THIS BUILD begin in the extended list: after everything the previous state held when it held no stamped events (a state written
+	// by an earlier build), where it said they begin when it did, and at the start for a first compaction.
+	stampedFrom := 0
+	if prev != nil {
+		if prev.StampedFrom == nil {
+			stampedFrom = len(prev.Events)
+		} else {
+			stampedFrom = *prev.StampedFrom
+		}
+		cs.Events = append(cs.Events, prev.Events...)
+		cs.CompactedStep = prev.CompactedStep + len(events)
+		for _, d := range prev.PendingDefers {
+			defersSeen[d.ID] = d.Description
+		}
+		for _, c := range prev.OpenChildren {
+			openChildren[c.RunID] = true
+			childDetails[c.RunID] = c
+		}
+		if len(prev.QueryState) > 0 {
+			cs.QueryState = make(map[string]string, len(prev.QueryState))
+			for k, v := range prev.QueryState {
+				cs.QueryState[k] = v
+			}
+		}
+		prevTruncated = truncatedCompactedEvents(prev)
+	}
 
 	for _, ev := range events {
 		// CHECKED, not a bare lookup. A map miss used to yield 0 -- which was
@@ -494,6 +610,9 @@ func extractCompactionState(events []EventRecord) (*CompactionState, error) {
 			// switch below: Now() during replay needs it regardless of
 			// which event carried it. See the field doc on CompactedEvent.
 			TimestampMs: ev.TimestampMs,
+			// The drain stamps are universal in the same way (cleat#4310).
+			InDeferPhase:   ev.InDeferPhase,
+			InDeferSegment: ev.InDeferSegment,
 		}
 		switch ev.EventType {
 		case EventTypeCall:
@@ -507,12 +626,33 @@ func extractCompactionState(events []EventRecord) (*CompactionState, error) {
 			ce.ErrCode = ev.ErrCode
 			ce.RetriesExhausted = ev.RetriesExhausted
 			ce.ResolvedBy = ev.ResolvedBy
+		case EventTypeCallAttemptFailed:
+			// cleat#4316: this type had a code and NO arm, so a history holding one (any call that retried) refused to compact at all, and the run grew without bound.
+			// The four fields are exactly what the store persists for it (store_events.go), and replay reads the record by type and Service/Op.
+			ce.Service = ev.Service
+			ce.Op = ev.Op
+			ce.Attempt = ev.Attempt
+			ce.Error = ev.Err
+		case EventTypeCallRetryRefused:
+			// Kept so a compacted history can still say WHICH call was refused; replay matches on the type, and the
+			// two fields are what a divergence report needs to name the call.
+			ce.Service = ev.Service
+			ce.Op = ev.Op
 		case EventTypeAwaitSignals:
 			ce.SignalNames = ev.SignalNames
 			ce.TimeoutMs = ev.TimeoutMs
 		case EventTypeSignalReceived:
 			ce.SignalName = ev.SignalName
 			ce.SignalPayload = ev.SignalPayload
+			// A send's outcome (cleat#4102) is what replay returns to the guest. Without these a compacted region would replay a failed
+			// send as the success every send used to be reported as. Empty for a delivery, so omitempty leaves its bytes unchanged.
+			ce.Service = ev.Service
+			ce.Op = ev.Op
+			ce.Response = ev.Response
+			// A send's TARGET (cleat#4231). Compaction dropped it, so the identity check on replay of a compacted send could only compare the signal name: a send to
+			// another workflow with the same name replayed as the recorded one. The store keeps it in the run_id column, and the event checksum does not read it for a
+			// signal, so capturing it changes no hash. Empty for a delivery.
+			ce.RunID = ev.RunID
 		case EventTypeDefer:
 			ce.DeferID = ev.DeferID
 			ce.DeferDesc = ev.DeferDescription
@@ -524,6 +664,9 @@ func extractCompactionState(events []EventRecord) (*CompactionState, error) {
 			ce.ParentWorkflowID = ev.ParentWorkflowID
 			ce.ParentClosePolicy = ev.ParentClosePolicy
 			openChildren[ev.RunID] = true
+			if _, ok := childDetails[ev.RunID]; !ok {
+				childDetails[ev.RunID] = CompactedChild{RunID: ev.RunID, Name: ev.ChildName, Input: ev.ChildInput}
+			}
 		case EventTypeAwaitChild:
 			ce.RunID = ev.RunID
 			ce.Response = ev.Response
@@ -540,6 +683,9 @@ func extractCompactionState(events []EventRecord) (*CompactionState, error) {
 			ce.Op = ev.Op
 		case EventTypeAwaitAllChildren:
 			ce.Response = ev.Response
+			// The request, which is the call's IDENTITY: awaitAllChildrenStep compares it on replay, and a compacted record that had lost it replayed as a divergence
+			// (cleat#4325, measured: result 0x1 and the step not consumed where the uncompacted record replays 0x0).
+			ce.Request = ev.Request
 			// All children resolved.
 			openChildren = make(map[string]bool)
 		case EventTypePluginCall:
@@ -551,14 +697,29 @@ func extractCompactionState(events []EventRecord) (*CompactionState, error) {
 		case EventTypeCreatePromise:
 			ce.PromiseName = ev.PromiseName
 			ce.PromiseID = ev.PromiseID
+			// A store write that failed (cleat#4335): replay answers the call from it, so a compacted region that dropped it would answer success.
+			ce.Error = ev.Err
 		case EventTypeAwaitPromise:
 			ce.PromiseID = ev.PromiseID
 		case EventTypePromiseResolved:
 			ce.PromiseID = ev.PromiseID
 			ce.PromiseResult = ev.PromiseResult
+			ce.Error = ev.Err // see EventTypeCreatePromise above (cleat#4335)
+			ce.FirstRead = ev.FirstRead
+			// Service and Op are what tell a resolve_promise CALL from an await of a promise that was already settled, which records
+			// this same event type (cleat#4079): a killed run's stop point is chosen by them (isStoppableEvent). A compacted region
+			// that dropped them would make every settlement in it a non-stop-point, so the cleanup of exactly the oldest runs would
+			// silently miss the effect. They are not in the event checksum (eventRecordToPayload hashes the promise fields only),
+			// so dropping them breaks no chain, which is also why nothing else would notice.
+			ce.Service = ev.Service
+			ce.Op = ev.Op
 		case EventTypePromiseRejected:
 			ce.PromiseID = ev.PromiseID
 			ce.PromiseError = ev.PromiseError
+			ce.Error = ev.Err // see EventTypeCreatePromise above (cleat#4335)
+			ce.FirstRead = ev.FirstRead
+			ce.Service = ev.Service
+			ce.Op = ev.Op
 		case EventTypeUpdateHandler:
 			// Reuse PromiseName/PromiseID fields for storage efficiency.
 			ce.PromiseName = ev.UpdateHandlerName
@@ -592,6 +753,7 @@ func extractCompactionState(events []EventRecord) (*CompactionState, error) {
 			ce.ChildName = ev.DetachedName
 			ce.ChildInput = ev.DetachedInput
 			ce.RunID = ev.DetachedRunID
+			ce.Error = ev.Err
 		case EventTypeDurableLog:
 			ce.Response = ev.Message
 			ce.Service = ev.LogLevel
@@ -630,6 +792,7 @@ func extractCompactionState(events []EventRecord) (*CompactionState, error) {
 			ce.StreamChunkIndex = ev.StreamChunkIndex
 			ce.StreamFinish = ev.StreamFinish
 			ce.StreamErrCode = ev.StreamErrCode
+			ce.StreamData = ev.StreamData
 		case EventTypeDurableSend:
 			ce.Service = ev.Service
 			ce.Op = ev.Op
@@ -661,15 +824,8 @@ func extractCompactionState(events []EventRecord) (*CompactionState, error) {
 
 	// Build list of still-open children with their details.
 	for runID := range openChildren {
-		for _, ev := range events {
-			if ev.EventType == EventTypeChildWorkflow && ev.RunID == runID {
-				cs.OpenChildren = append(cs.OpenChildren, CompactedChild{
-					RunID: runID,
-					Name:  ev.ChildName,
-					Input: ev.ChildInput,
-				})
-				break
-			}
+		if c, ok := childDetails[runID]; ok {
+			cs.OpenChildren = append(cs.OpenChildren, c)
 		}
 	}
 
@@ -677,9 +833,13 @@ func extractCompactionState(events []EventRecord) (*CompactionState, error) {
 	if len(cs.Events) > DefaultMaxCompactedEvents {
 		truncated := len(cs.Events) - DefaultMaxCompactedEvents
 		cs.Events = cs.Events[truncated:]
+		stampedFrom = max(stampedFrom-truncated, 0) // the oldest events are what is dropped, so the boundary moves up with them
 		cs.CompactedStep -= truncated
-		cs.Summary = &TruncationSummary{TruncatedCount: truncated}
+		cs.Summary = &TruncationSummary{TruncatedCount: truncated + prevTruncated}
+	} else if prevTruncated > 0 {
+		cs.Summary = &TruncationSummary{TruncatedCount: prevTruncated}
 	}
+	cs.StampedFrom = &stampedFrom
 
 	return cs, nil
 }
@@ -699,6 +859,9 @@ func buildFullHistoryFromCompaction(tail []EventRecord, cs *CompactionState) []E
 			// TimestampMs is restored for every event, mirroring the
 			// universal (not per-type) assignment in extractCompactionState.
 			TimestampMs: ce.TimestampMs,
+			// And the drain stamps (cleat#4310).
+			InDeferPhase:   ce.InDeferPhase,
+			InDeferSegment: ce.InDeferSegment,
 		}
 		switch ce.Type {
 		case EventCodeCall:
@@ -712,12 +875,24 @@ func buildFullHistoryFromCompaction(tail []EventRecord, cs *CompactionState) []E
 			rec.ErrCode = ce.ErrCode
 			rec.RetriesExhausted = ce.RetriesExhausted
 			rec.ResolvedBy = ce.ResolvedBy
+		case EventCodeCallAttemptFailed:
+			rec.Service = ce.Service
+			rec.Op = ce.Op
+			rec.Attempt = ce.Attempt
+			rec.Err = ce.Error
+		case EventCodeCallRetryRefused:
+			rec.Service = ce.Service
+			rec.Op = ce.Op
 		case EventCodeAwaitSignals:
 			rec.SignalNames = ce.SignalNames
 			rec.TimeoutMs = ce.TimeoutMs
 		case EventCodeSignalReceived:
 			rec.SignalName = ce.SignalName
 			rec.SignalPayload = ce.SignalPayload
+			rec.Service = ce.Service
+			rec.Op = ce.Op
+			rec.Response = ce.Response
+			rec.RunID = ce.RunID
 		case EventCodeDefer:
 			rec.DeferID = ce.DeferID
 			rec.DeferDescription = ce.DeferDesc
@@ -739,6 +914,7 @@ func buildFullHistoryFromCompaction(tail []EventRecord, cs *CompactionState) []E
 			rec.Op = ce.Op
 		case EventCodeAwaitAllChildren:
 			rec.Response = ce.Response
+			rec.Request = ce.Request
 		case EventCodePluginCall:
 			rec.PluginName = ce.PluginName
 			rec.PluginFunc = ce.PluginFunc
@@ -748,14 +924,23 @@ func buildFullHistoryFromCompaction(tail []EventRecord, cs *CompactionState) []E
 		case EventCodeCreatePromise:
 			rec.PromiseName = ce.PromiseName
 			rec.PromiseID = ce.PromiseID
+			rec.Err = ce.Error
 		case EventCodeAwaitPromise:
 			rec.PromiseID = ce.PromiseID
 		case EventCodePromiseResolved:
 			rec.PromiseID = ce.PromiseID
 			rec.PromiseResult = ce.PromiseResult
+			rec.Err = ce.Error
+			rec.FirstRead = ce.FirstRead
+			rec.Service = ce.Service
+			rec.Op = ce.Op
 		case EventCodePromiseRejected:
 			rec.PromiseID = ce.PromiseID
 			rec.PromiseError = ce.PromiseError
+			rec.Err = ce.Error
+			rec.FirstRead = ce.FirstRead
+			rec.Service = ce.Service
+			rec.Op = ce.Op
 		case EventCodeUpdateHandler:
 			rec.UpdateHandlerName = ce.PromiseName
 		case EventCodeUpdateReceived:
@@ -783,6 +968,7 @@ func buildFullHistoryFromCompaction(tail []EventRecord, cs *CompactionState) []E
 			rec.DetachedName = ce.ChildName
 			rec.DetachedInput = ce.ChildInput
 			rec.DetachedRunID = ce.RunID
+			rec.Err = ce.Error
 		case EventCodeDurableLog:
 			rec.Message = ce.Response
 			rec.LogLevel = ce.Service
@@ -821,6 +1007,7 @@ func buildFullHistoryFromCompaction(tail []EventRecord, cs *CompactionState) []E
 			rec.StreamChunkIndex = ce.StreamChunkIndex
 			rec.StreamFinish = ce.StreamFinish
 			rec.StreamErrCode = ce.StreamErrCode
+			rec.StreamData = ce.StreamData
 		case EventCodeDurableSend:
 			// extractCompactionState has captured Service/Op/Request for this
 			// type since it was added; this reconstruction case was simply

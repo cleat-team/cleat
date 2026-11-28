@@ -186,7 +186,7 @@ Three memory controls work together:
 
 | Flag | What it does |
 |------|-------------|
-| `--wasm-memory-max-mb` | Per-WASM-module linear memory cap. A workflow exceeding this is killed. |
+| `--wasm-memory-max-mb` | Per-WASM-module linear memory cap. A workflow exceeding this is killed. Leave it unset for a C# guest: unset, C# gets 64 MiB (a .NET runtime needs 52 MiB to start); setting it applies that value to every language, so the `32` in the examples below would stop a C# guest from starting. |
 | `--memory-soft-limit` | When system memory exceeds this fraction (0.0–1.0), stop claiming new work. |
 | `--memory-hard-limit` | When system memory exceeds this fraction, reject API workflow starts (HTTP 503). |
 
@@ -196,8 +196,11 @@ Three memory controls work together:
 total_wasm_memory ≈ concurrent_workflows × wasm_memory_max_mb × 1.2 (overhead factor)
 ```
 
-Example: 10 concurrent workflows × 32 MB per module × 1.2 = ~384 MB WASM memory.
-Add ~256 MB for the Go runtime and caches → ~640 MB total recommended.
+Example: 10 concurrent workflows × 256 MB per module × 1.2 = ~3 GB WASM memory.
+Add ~256 MB for the Go runtime and caches → ~3.3 GB total, **as a worst case**: `--wasm-memory-max-mb` is a
+ceiling and not a reservation, so a workflow uses only what it allocates, and most use far less. The default
+was 32 MB until cleat#4171 (then the same example came to ~640 MB). If the machine cannot hold the worst case,
+lower the flag or `--concurrency`; do not size to the ceiling unless every workflow may really grow to it.
 
 ### Recommendations
 
@@ -207,6 +210,37 @@ Add ~256 MB for the Go runtime and caches → ~640 MB total recommended.
 | 2 GB | 10 | 32 | 0.75 |
 | 4 GB | 20 | 64 | 0.75 |
 | 8 GB | 40 | 64 | 0.80 |
+
+### In Kubernetes: the Helm chart's defaults
+
+The chart ships requests 500m CPU / 2Gi and limits 2 CPU / 2Gi (the memory request equals the limit by the owner's decision: a worker reserves its memory; the default 2 replicas need 4 GiB of allocatable memory free), and an autoscaler on CPU only (cleat#4393). They are
+chosen to work out of the box, not to be tight; set `resources` to shrink them for a workload you have measured, and
+**set both `requests` and `limits`** for each of cpu and memory: Helm merges your values over the chart's, so a limit
+set alone below the default request leaves a request above its limit, which Kubernetes rejects. The chart refuses that at
+render time and names what to set. The raw manifests `k8s/deployment.yaml` and `k8s/migrate-job.yaml` carry the same values.
+What a worker uses, measured on 2026-11-22/23 (arm64 Linux; cleat#4377 and cleat#4389 have the data):
+
+| | |
+|---|---|
+| idle worker, no workflows | about 35 MiB resident |
+| process baseline after one guest has compiled and run | Go about 207 MiB, C# about 112 MiB, **Python about 565 MiB** |
+| the first compile of a distinct Python component | peaks about 475 to 525 MiB **above** the baseline, once per component per worker |
+| each held run (residency), idle instance | Go about 1.5 MiB; Python 1.3 MiB (12 before cleat#4382); C# 17 MiB (49 before cleat#4378). **After a guest has churned large objects:** Python about 9.5 MiB, C# about 57. The budget charges that figure (Python 11, C# 59, Go 24) |
+| a cached compiled component | about 100 MiB (Python), 10 to 17 MiB (C#) |
+
+Under a cgroup limit the Python compile was killed at 512 MiB and completed at 768 MiB and above, so the old 512Mi
+default could not run a Python workflow at all; and at a 0.5 CPU limit it took 11.4 s against 1.2 to 2.4 s
+unconstrained. Two things scale with the limit: the worker stops claiming new work at `--memory-soft-limit` of the
+container limit (1.6 GiB of 2Gi at the default 0.80), and the residency budget defaults to 20% of the container limit
+(`--resident-memory-percent`), 410 MiB at 2Gi, about a fifth of it. When the limit cannot be read it falls back to 8 held runs x the dearest
+per-run charge (472 MiB, because C# is charged 59 MiB).
+
+**Why the autoscaler does not scale on memory by default.** The HPA's memory metric is a percentage of the *request*,
+and per-pod memory does not fall as replicas are added: it is dominated by the compiled-module cache, held runs
+and allocator retention, which grow by design. With the old 128Mi request an 80% target was 102 MiB, below a warmed
+Go worker's 207 MiB, so the HPA computed `ceil(2 x 162/80)` = 5 replicas (207 MiB is 162% of a 128Mi request) and kept climbing to `maxReplicas`. (From
+the HPA's documented formula and the measured baselines; not from a cluster run.) Set `autoscaling.targetMemory` if
+you want it anyway, against a request you have sized for it.
 
 ## WASM cache sizing
 
@@ -375,6 +409,10 @@ under load looked like a dead worker. Three reserved connections cost little
 against PgBouncer's `default_pool_size` and remove that failure mode; set
 `--heartbeat-max-connections 0` to opt back out and share the core pool as
 before.
+
+The pool serves every tenant's runs, not only the worker's own: another tenant's
+beat uses it re-scoped to that tenant, so serving more tenants does not add
+connections to this term (cleat#3571).
 
 **The tenant pool is unbounded in tenant count, and reaped.** A worker opens a
 pool per tenant it touches, from either of two sources — `--tenant-isolation=role`

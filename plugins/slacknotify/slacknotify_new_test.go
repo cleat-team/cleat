@@ -1471,8 +1471,8 @@ func (*scanErrorConn) ExecContext(_ context.Context, _ string, _ []driver.NamedV
 func (*scanErrorConn) QueryContext(_ context.Context, query string, args []driver.NamedValue) (driver.Rows, error) {
 	if strings.Contains(query, "tenant_api_keys") {
 		return &fakeRows{
-			columns: []string{"tenant_id"},
-			data:    [][]driver.Value{{"00000000-0000-0000-0000-000000000001"}},
+			columns: []string{"tenant_id", "key_id"},
+			data:    [][]driver.Value{{"00000000-0000-0000-0000-000000000001", "11111111-1111-1111-1111-111111111111"}},
 		}, nil
 	}
 	// Return a row where one of the columns has an incompatible type to trigger scan error.

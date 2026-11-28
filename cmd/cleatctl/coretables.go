@@ -16,15 +16,21 @@ package main
 var coreTables = []string{
 	"admin.orgs",
 	"admin.plugin_tables",
+	"admin.plugin_dep_overrides",
+	"admin.registered_plugins",
 	"admin.operator_api_keys",
 	"admin.tenant_api_keys",
 	"admin.tenant_roles",
+	"admin.tenant_tombstones",
 	"admin.tenant_egress_allow",
 	"admin.tenants",
 	"admin.workers",
 	"concurrency_keys",
 	"event_history",
 	"idempotency_keys",
+	"library.bundle_members",
+	"library.bundles",
+	"library.members",
 	"payload_encryption_ever_enabled",
 	"plugin_defs",
 	"deployment_secrets",
@@ -33,6 +39,7 @@ var coreTables = []string{
 	"queue_rate_tokens",
 	"slack_workspace",
 	"tenant_domains",
+	"tenant_library_installs",
 	"tenant_secrets",
 	"tenant_settings",
 	"workflow_defs",
@@ -66,7 +73,7 @@ var coreTables = []string{
 // found by running check-db against a real, freshly-migrated MySQL database
 // (cleat-review2, #2924 round 7).
 //
-// payload_encryption_ever_enabled (cleat#2324, migrations/postgres/008) is
+// payload_encryption_ever_enabled (cleat#2324, defined in migrations/postgres/001_schema.sql) is
 // the first entry: encrypt-sensitive-payloads is a PostgreSQL-only feature --
 // MySQL and SQL Server have no equivalent key-ring flag and no migration
 // defining this table -- so a MySQL or SQL Server database lacking it is
@@ -82,4 +89,28 @@ var postgresOnlyTables = map[string]bool{
 	"payload_encryption_ever_enabled": true,
 	"workflow_leases":                 true,
 	"workflow_payloads":               true,
+}
+
+// notOnMySQLTables is the subset of coreTables that PostgreSQL and SQL Server have and
+// MySQL does not, by decision: workflow libraries are PostgreSQL and SQL Server only
+// (cleat#3540, migrations/{postgres,mssql}/005_workflow_libraries.sql), and MySQL has no
+// 005. The tenant tombstone is the same kind of table: dropping a tenant over the API is
+// PostgreSQL and SQL Server only (cleat#3552, 007_a_dropped_tenant_leaves_a_tombstone.sql
+// on both, and MySQL has none). A MySQL deployment lacking them is healthy, for the
+// reason postgresOnlyTables gives about its own members.
+var notOnMySQLTables = map[string]bool{
+	"admin.tenant_tombstones": true,
+	"library.bundle_members":  true,
+	"library.bundles":         true,
+	"library.members":         true,
+	"tenant_library_installs": true,
+}
+
+// absentByDesign reports whether a core table is not expected on the named dialect
+// ("postgres", "mysql" or "mssql").
+func absentByDesign(dialectName, table string) bool {
+	if dialectName != "postgres" && postgresOnlyTables[table] {
+		return true
+	}
+	return dialectName == "mysql" && notOnMySQLTables[table]
 }

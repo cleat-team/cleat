@@ -41,7 +41,7 @@ const suspendTenantUsage = `usage: cleatctl suspend-tenant <tenant-id> [--yes]
 
 Suspending stops NEW work for a tenant:
   - its workflows are no longer claimed
-  - its cron schedules no longer fire
+  - a cron schedule, event trigger or job-queue dispatch for it starts nothing (the start is refused)
   - starting a workflow returns 403
 
 It does NOT stop runs already executing -- they finish normally -- and it does

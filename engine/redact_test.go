@@ -82,18 +82,6 @@ func TestRedactNonJSON(t *testing.T) {
 	}
 }
 
-func TestRedactOnRead(t *testing.T) {
-	// RedactOnRead should behave identically to Redact.
-	input := `{"token": "secret", "name": "hello"}`
-	got := RedactOnRead(input)
-	if !strings.Contains(got, `"[REDACTED]"`) {
-		t.Errorf("RedactOnRead should redact sensitive fields: %s", got)
-	}
-	if !strings.Contains(got, "hello") {
-		t.Errorf("RedactOnRead should preserve non-sensitive fields: %s", got)
-	}
-}
-
 func TestLoadRedactPatterns(t *testing.T) {
 	defer ResetPatterns()
 
@@ -121,6 +109,12 @@ func TestLoadRedactPatterns(t *testing.T) {
 	}
 	if strings.Contains(got, "sensitive-data") {
 		t.Errorf("custom pattern value should be redacted: %s", got)
+	}
+	// "my-secret" already matches the built-in "secret", so the two checks above
+	// hold with the custom list ignored, as they did for as long as nothing read
+	// it. "private-key" is covered by no built-in, so this one cannot.
+	if strings.Contains(got, "abc123") {
+		t.Errorf("a field only a custom pattern names was not redacted: %s", got)
 	}
 }
 
@@ -354,10 +348,13 @@ func TestResetPatterns(t *testing.T) {
 func TestLoadRedactPatterns_Duplicates(t *testing.T) {
 	defer ResetPatterns()
 
-	// Load patterns that duplicate built-in sensitive patterns.
+	// A repeated line is loaded once, whatever its case. A line that spells a
+	// built-in name is NOT a duplicate (see
+	// TestACustomPatternSpelledLikeABuiltinIsALoadedRule): since the built-ins read
+	// a key as words, the same spelling as a custom pattern is a wider rule.
 	dir := t.TempDir()
 	path := dir + "/dups.txt"
-	content := "# duplicate test\ntoken\nsecret\nmy-custom\n"
+	content := "# duplicate test\ntoken\nsecret\nmy-custom\nMY-CUSTOM\ntoken\n"
 	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
@@ -366,9 +363,14 @@ func TestLoadRedactPatterns_Duplicates(t *testing.T) {
 		t.Fatalf("LoadRedactPatterns: %v", err)
 	}
 
-	// "token" and "secret" are duplicates (in sensitivePatterns) and should not be added.
-	// Only "my-custom" is genuinely new.
-	if len(customPatterns) != 1 || customPatterns[0] != "my-custom" {
-		t.Errorf("customPatterns = %v, want [my-custom]", customPatterns)
+	want := []string{"token", "secret", "my-custom"}
+	if len(customPatterns) != len(want) {
+		t.Fatalf("customPatterns = %v, want %v", customPatterns, want)
+	}
+	for i := range want {
+		if customPatterns[i] != want[i] {
+			t.Errorf("customPatterns = %v, want %v", customPatterns, want)
+			break
+		}
 	}
 }

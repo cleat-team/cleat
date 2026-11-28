@@ -2,330 +2,274 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
 	"github.com/tetratelabs/wazero/api"
 )
 
+// DurableAwaitSignals is a step (cleat#4152, W5): the dispatcher owns where the call is in history, whether it may start new work, and what a
+// replay consumes; awaitSignalsStep says what the call is. It used to carry all of that in one 350-line function whose comments were the record of
+// nine bugs (cleat#933, #947, #975, #1331, #3378, #4105, #4144, #4153, #4157); each is kept next to the rule it produced, below.
 func (s *execSession) DurableAwaitSignals(ctx context.Context, m api.Module, signalNames string, timeoutMs int64, sigNamePtr, sigNameMaxLen, payloadPtr, payloadMaxLen uint32) int64 {
+	return s.step(ctx, m, &awaitSignalsStep, stepArgs{
+		s1: signalNames, i1: timeoutMs,
+		// A divergence message goes to the payload buffer, as it always did; the signal's name has its own.
+		outPtr: payloadPtr, outMaxLen: payloadMaxLen,
+		out2Ptr: sigNamePtr, out2MaxLen: sigNameMaxLen,
+	})
+}
 
-	if s.isReplay {
-		if s.stepCount < len(s.history) {
-			rec := s.history[s.stepCount]
-			if rec.EventType == EventTypeSignalReceived {
-				if !s.advanceReplayStep(ctx, &rec) {
-					return 0
-				}
-				written, writtenEC := s.writeOut(ctx, m, sigNamePtr, rec.SignalName, sigNameMaxLen)
-				payloadWritten, payloadEC := s.writeOut(ctx, m, payloadPtr, rec.SignalPayload, payloadMaxLen)
-				// Either write can overflow, and the first non-zero code wins: a
-				// caller that sees one truncation does not need to know there were
-				// two, and reporting success because only the payload was cut would
-				// be the defect this replaces.
-				return packAwaitSignalsResult(written, payloadWritten, false, uint32(firstNonZero(writtenEC, payloadEC)))
+// awaitSignalsStep is DurableAwaitSignals. Its history is, per call, one of:
+//
+//	[signal_received]            a first poll found a delivery: no await record is written for a poll that answered at once
+//	[await]                      the await timed out, or was a no-wait poll that found nothing (cleat#4144); also a history that ENDS here
+//	[await, signal_received]     the await was recorded, then answered
+//
+// Identity is what makes the runs separable. The await's names must be the call's, and a delivery's name must be one it asked for: without that
+// a delivery recorded for another await was consumed by this one (the misattribution cleat#933 describes), and a run of timed-out awaits could
+// not be told apart from the next call's records (validate() requires an Identity for EndsWithoutFinal). That is a TIGHTENING: the old code
+// compared nothing. MaxPrefix is 1 because a polling loop that times out records [await, await, ...] with the SAME names each time, which no
+// Identity can separate.
+//
+// A no-wait call (timeout <= 0) whose recorded await is also no-wait is a run of ONE record, so the delivery that follows it belongs to the next
+// call and is never paired (cleat#4144: the poll loop's [await, delivery] is two calls). That is the Role's dependence on the call's argument.
+var awaitSignalsStep = stepSpec{
+	Name:               "await_signals",
+	NoDivergenceDetail: "its old message was the shared one: the step and both event types; " + divergenceSweepNote,
+	// sigNameLen 48-63, payloadLen 32-47, timedOut 16-31, errCode 0-15: its own layout, not the simple one (see resultLayout)
+	Result:           layoutAwaitSignals,
+	Effect:           effectEffect,
+	Records:          recordsMany,
+	Want:             EventTypeSignalReceived,
+	EndsWithoutFinal: true,
+	MaxPrefix:        1,
+	Identity: func(a stepArgs, rec *EventRecord) string {
+		asked := parseSignalNames(a.s1)
+		switch rec.EventType {
+		case EventTypeAwaitSignals:
+			if got := parseSignalNames(rec.SignalNames); !sameSignalNames(got, asked) {
+				return fmt.Sprintf("signals %v, recorded %v", asked, got)
 			}
-			if rec.EventType == EventTypeAwaitSignals {
-				if !s.advanceReplayStep(ctx, &rec) {
-					return 0
+		case EventTypeSignalReceived:
+			for _, n := range asked {
+				if n == rec.SignalName {
+					return ""
 				}
-				// Check if there is a following signal_received event.
-				if s.stepCount < len(s.history) {
-					nextRec := s.history[s.stepCount]
-					if nextRec.EventType == EventTypeSignalReceived {
-						if !s.advanceReplayStep(ctx, &nextRec) {
-							return 0
-						}
-						written, writtenEC := s.writeOut(ctx, m, sigNamePtr, nextRec.SignalName, sigNameMaxLen)
-						payloadWritten, payloadEC := s.writeOut(ctx, m, payloadPtr, nextRec.SignalPayload, payloadMaxLen)
-						// Either write can overflow, and the first non-zero code wins: a
-						// caller that sees one truncation does not need to know there were
-						// two, and reporting success because only the payload was cut would
-						// be the defect this replaces.
-						return packAwaitSignalsResult(written, payloadWritten, false, uint32(firstNonZero(writtenEC, payloadEC)))
-					}
-					// History CONTINUES past this await with something that is
-					// not a delivery, so the original execution reached that
-					// next event without receiving a signal: the await timed
-					// out. Reproduce that, and do not look in the store.
-					//
-					// The rule is DurableAwaitUpdate's, stated in its doc:
-					// "The table is NOT consulted -- a request that arrived
-					// later must not be delivered at an earlier step." Its
-					// reason applies verbatim here, because it is a property
-					// of recordEvent rather than of updates: an event can only
-					// land at the frontier, so there is nowhere to put a
-					// delivery that belongs in the middle of a written
-					// history.
-					//
-					// Polling here did all four (cleat#947): handed the guest
-					// a signal the original run never saw, consumed the
-					// delivery so a later legitimate await could not have it,
-					// wrote a record whose Step was s.stepCount while the
-					// append landed at len(s.history) -- colliding with the
-					// event already at that step -- and left s.stepCount one
-					// past the record it should read next, so the rest of the
-					// replay ran off by one against its own history.
-					//
-					// Returning timed-out is not a new behaviour: it is what
-					// this path already did whenever the store happened to be
-					// empty, which is why an empty store was correct and a
-					// non-empty one was not.
-					return packAwaitSignalsResult(0, 0, true, 0)
+			}
+			return fmt.Sprintf("signals %v, recorded a delivery of %q", asked, rec.SignalName)
+		}
+		return ""
+	},
+	Role: func(a stepArgs, rec *EventRecord) recordRole {
+		switch rec.EventType {
+		case EventTypeSignalReceived:
+			return roleFinal
+		case EventTypeAwaitSignals:
+			if a.i1 <= 0 && rec.TimeoutMs <= 0 {
+				return roleFinal // a no-wait poll that found nothing: a run of one, the answer is the timeout
+			}
+			return rolePrefix
+		}
+		return roleForeign
+	},
+	DecodeRun: func(c *stepCtx, run []EventRecord) int64 {
+		last := run[len(run)-1]
+		if last.EventType != EventTypeSignalReceived {
+			// An await with nothing after it that answers it: history CONTINUES past it with something that is not a delivery, so the original
+			// execution reached that event without receiving a signal, and the await timed out. The store is NOT consulted: an event can only
+			// land at the frontier, so there is nowhere to put a delivery that belongs in the middle of a written history (cleat#947: polling
+			// here handed the guest a signal the original run never saw and wrote a record that collided with the one already at that step).
+			return packAwaitSignalsResult(0, 0, true, 0)
+		}
+		return awaitDelivery(c, last.SignalName, last.SignalPayload)
+	},
+	// A history written before cleat#4151 recorded nothing for a no-wait poll that timed out (cleat#1331), so the record at this step is the
+	// NEXT call's. A no-wait poll's answer is the timeout, and the record is left for the call it belongs to. A build that has #4151 records every
+	// such poll, so it never gets here.
+	ForeignFirst: func(a stepArgs) (int64, bool) {
+		if a.i1 <= 0 {
+			return packAwaitSignalsResult(0, 0, true, 0), true
+		}
+		return 0, false
+	},
+	Fresh: func(c *stepCtx) int64 {
+		s, ctx := c.s, c.ctx
+		names, timeoutMs := c.args.s1, c.args.i1
+
+		// deliverIfWaiting is the ONE read of the signal store an await makes, on the first poll, at the replay frontier and after a wake: it polls
+		// the asked names in order, and a delivery found is recorded and THEN consumed (so a crash between them leaves the delivery for the next
+		// poll, never a consumed delivery with no record), then written to the guest. A store error is read as nothing found. It is a closure here,
+		// and not a function, because every Record call must sit inside a spec's Fresh: that is what the dispatcher's exemption for Record says.
+		deliverIfWaiting := func() (int64, bool) {
+			if s.engine.signalStore == nil {
+				return 0, false
+			}
+			for _, name := range parseSignalNames(names) {
+				d, found, err := s.engine.signalStore.PollSignal(ctx, s.engine.workflowID, name)
+				if err == nil && found {
+					c.Record(EventRecord{Step: s.stepCount, EventType: EventTypeSignalReceived, SignalName: name, SignalPayload: d.Payload})
+					s.consumeDelivered(ctx, name, d)
+					return awaitDelivery(c, name, d.Payload), true
 				}
-				// No signal_received in history. The signal may have
-				// arrived after suspend (stored in workflow_signals,
-				// not event_history). Check the signal store.
-				//
-				// REPLAY ENDS HERE, and saying so is load-bearing rather
-				// than tidy. History is exhausted at this await, so polling
-				// the store and consuming a delivery is new work, not
-				// reproduction of old work -- and recordEvent behaves
-				// differently on the two sides of that line:
-				//
-				//	if s.engine.db != nil && !s.isReplay {   // lifecycle.go
-				//		... flush ...
-				//		s.lastChecksum = checksum
-				//	}
-				//
-				// Recording the signal_received with isReplay still true
-				// therefore skipped BOTH halves, and only one of them came
-				// back. The ROW did: the worker persists everything
-				// appended past the loaded history at segment end
-				// (cmd/cleat-worker/setup.go, "newEvents =
-				// resultHistory[len(history):]"), so it lands one segment
-				// late -- durable eventually, but not at the moment
-				// consumeDelivered deletes the delivery, which is the
-				// window that comment's ordering argument exists to close.
-				//
-				// s.lastChecksum did NOT come back, and that is what fails
-				// the run. The next event -- the second await, flushed
-				// immediately -- was chained from the await BEFORE the
-				// signal. Verification recomputes the chain over what is
-				// stored, including the row finalize wrote, and the two
-				// disagree at exactly the step cleat#933 reports:
-				//
-				//	verify events: workflow ...: step 2: checksum mismatch
-				//
-				// Unconditional: the branch above returns for every case where
-				// history continues, so reaching here means it is exhausted and
-				// the poll below is this run's first fresh act.
-				s.exitReplay()
-				if s.engine.signalStore != nil {
-					// Same parser as the fresh path below. They disagreed
-					// until cleat#975 -- this arm handled the JSON a guest
-					// actually sends and the fresh one did not -- and the
-					// difference was invisible because the eventual result was
-					// still correct. See parseSignalNames.
-					names := parseSignalNames(rec.SignalNames)
-					for _, name := range names {
-						d, found, err := s.engine.signalStore.PollSignal(ctx, s.engine.workflowID, name)
-						if err == nil && found {
-							// Record the signal_received event so
-							// subsequent replays find it in history,
-							// THEN consume. See consumeDelivered.
-							sigRec := EventRecord{
-								Step:          s.stepCount,
-								EventType:     EventTypeSignalReceived,
-								SignalName:    name,
-								SignalPayload: d.Payload,
-							}
-							s.recordEvent(sigRec)
-							s.consumeDelivered(ctx, name, d)
-							written, writtenEC := s.writeOut(ctx, m, sigNamePtr, name, sigNameMaxLen)
-							payloadWritten, payloadEC := s.writeOut(ctx, m, payloadPtr, d.Payload, payloadMaxLen)
-							// Either write can overflow, and the first non-zero code wins: a
-							// caller that sees one truncation does not need to know there were
-							// two, and reporting success because only the payload was cut would
-							// be the defect this replaces.
-							return packAwaitSignalsResult(written, payloadWritten, false, uint32(firstNonZero(writtenEC, payloadEC)))
-						}
-					}
-				}
-				// No signal found, and the await it belongs to has NOT
-				// resolved. It must suspend, exactly as the fresh path does --
-				// not report a timeout that has not happened (cleat#933).
-				//
-				// This returned packAwaitSignalsResult(..., timedOut=true)
-				// under the comment "Should not happen (we only wake when
-				// signal arrives), but handle gracefully". It does happen, on
-				// any replay that reaches the await before the signal arrives,
-				// and it is the ordinary case rather than an edge one.
-				//
-				// THE TWO PATHS RETURNED THE SAME WORD AND DIFFERED IN WHETHER
-				// THE RUN SUSPENDED, which is what made this survive: the fresh
-				// path below also returned timedOut=true, on the belief that
-				// setting suspendErr first meant the guest never observed the
-				// value. Here nothing suspended, so the guest read it as a real
-				// timeout and ran on to its next await. (The belief was wrong
-				// for the fresh path too -- cleat#3378 -- and both now return
-				// suspendingAwaitResult.)
-				//
-				// That is what wrote the corrupt history cleat#933 reports.
-				// Measured, two straight-line awaits and one signal:
-				//
-				//	step 0  await_signals ["a","b"]
-				//	step 1  await_signals ["a","b"]     <- the second await,
-				//	step 2  signal_received a              recorded because the
-				//	                                       first falsely returned
-				//
-				// Replaying that pairs the delivery with the SECOND await and
-				// times out the first -- the misattribution reported against
-				// the real system, faithfully reproduced from a history that
-				// should never have been written. The replay arm was innocent;
-				// the fault is one segment earlier, here.
-				//
-				// The deadline comes from the RECORDED await, not from now.
-				// Deriving it from the current clock would push the timeout
-				// further out on every replay and the await would never expire.
-				// A deadline already passed is a genuine timeout, and reporting
-				// it is then correct -- the same virtual-versus-real comparison
-				// DurableSleep makes before deciding to suspend.
-				// A record with no timestamp cannot yield a deadline, and
-				// rec.TimestampMs + rec.TimeoutMs would then be a few seconds
-				// past the epoch -- already elapsed, so it would report a
-				// timeout instantly and rebuild the exact defect above. Every
-				// event recordEvent writes carries a timestamp and every row
-				// loaded from a store carries created_at, so this is a guard
-				// rather than a live case; it is here because the failure mode
-				// it prevents is the one being removed. Found by a fixture that
-				// omitted TimestampMs, which is how the shape reached me.
-				deadline := rec.TimestampMs + rec.TimeoutMs
-				expired := rec.TimestampMs > 0 && rec.TimeoutMs > 0 &&
-					s.engine.realNowMs() >= deadline
-				if expired {
-					return packAwaitSignalsResult(0, 0, true, 0)
-				}
-				if rec.TimestampMs == 0 || rec.TimeoutMs <= 0 {
-					// No usable deadline: suspend without one and let the
-					// worker's own scheduling decide when to look again.
-					deadline = s.engine.realNowMs() + rec.TimeoutMs
-				}
-				s.suspendErr = &SuspendError{
-					Reason: fmt.Sprintf("await_signals(%s, %dms) [replayed]",
-						rec.SignalNames, rec.TimeoutMs),
-					Until: time.UnixMilli(deadline),
-				}
+			}
+			return 0, false
+		}
+
+		// A SECOND AWAIT IN A SESSION THAT HAS ALREADY SUSPENDED IS ALSO NEW WORK (cleat#933): a suspending await's result used to be
+		// byte-identical to a timeout, the guest ran on, and the next await recorded a second await_signals into a segment that had already ended.
+		// Since cleat#3378 the suspending await returns the stop, so this is the backstop for a guest that ignores it, and for the defer drain.
+		// Scoped to awaits deliberately: widening it to every call refused the cleanup a workflow registered at a continue-as-new boundary.
+		if s.suspendErr != nil && !s.inDeferDrain {
+			return callSuspendSentinel
+		}
+
+		if len(c.Prefix) > 0 {
+			// The history ENDED INSIDE this run: the await was recorded and not answered, and replay has just ended. Replay ends here, and
+			// saying so is load-bearing: polling the store and consuming a delivery is new work, and recordEvent persists differently on the
+			// two sides of that line (a signal_received recorded with replay still on skipped the checksum chain: cleat#933's
+			// "step 2: checksum mismatch").
+			if r, ok := deliverIfWaiting(); ok {
+				return r
+			}
+			// Still nothing. The await has NOT resolved, so it must suspend, not report a timeout that has not happened (cleat#933). The
+			// deadline comes from the RECORDED await, not from now: deriving it from the clock would push the timeout out on every replay and
+			// the await would never expire. A deadline already passed is a genuine timeout. A record with no timestamp, or no timeout, has no
+			// usable deadline, and rec.TimestampMs + rec.TimeoutMs would be a few seconds past the epoch, so it would time out instantly.
+			rec := c.Prefix[0]
+			deadline := rec.TimestampMs + clampGuestMs(rec.TimeoutMs)
+			if rec.TimestampMs > 0 && rec.TimeoutMs > 0 && s.engine.realNowMs() >= deadline {
+				return packAwaitSignalsResult(0, 0, true, 0)
+			}
+			req := parkRequest{
+				Kind: wakeSignal, Key: names, DeadlineMs: deadline,
+				Reason:  fmt.Sprintf("await_signals(%s, %dms) [replayed]", rec.SignalNames, rec.TimeoutMs),
+				Until:   time.UnixMilli(deadline),
+				Recheck: signalRecheckFor(s, names),
+			}
+			if rec.TimestampMs == 0 || rec.TimeoutMs <= 0 {
+				// The deadline above is INVENTED (a record with no timestamp, or no timeout, has none), and it lies at about now. It must not be
+				// handed to a wake source: a wait that parks until a deadline of now would time out on the first return, where the old code
+				// suspended from now. So it suspends, as it always did, and never asks the source. Reachable once a source exists: the quorum
+				// helpers recompute the timeout argument on every iteration (cleat-review3, #4249). Whether such an await should keep suspending
+				// into an immediate re-claim is a separate question and is not decided here.
+				req.DeadlineMs = s.engine.realNowMs() + clampGuestMs(rec.TimeoutMs)
+				req.Until = time.UnixMilli(req.DeadlineMs)
+				s.suspendFor(req)
 				return s.suspendingAwaitResult()
 			}
+			return awaitSuspendOrPark(c, deliverIfWaiting, req, packAwaitSignalsResult(0, 0, true, 0))
 		}
-		s.exitReplay()
+
+		// Fresh: the store first, so a delivery that is already waiting is returned and no await is recorded for it.
+		if r, ok := deliverIfWaiting(); ok {
+			return r
+		}
+		// A 0ms await has no deadline to expire, so it must not suspend (cleat#1331): a deadline of NOW makes the run immediately re-claimable and
+		// it livelocks at about fourteen claims a second. Guarded here as well as in the SDK because this is on the public interface and a guest
+		// that computes a sub-millisecond timeout arrives here with 0. It RECORDS the await (cleat#4144, #4153): the constant it returns is the
+		// outcome of a look at the store, and a replay that reached this call after a signal arrived would otherwise return the signal where the
+		// original returned a timeout. A poll loop therefore records one event per iteration, each counting toward the event cap.
+		if timeoutMs <= 0 {
+			if s.refuseAtEventCap(c) {
+				return s.suspendingAwaitResult()
+			}
+			c.Record(EventRecord{Step: s.stepCount, EventType: EventTypeAwaitSignals, SignalNames: names, TimeoutMs: timeoutMs})
+			return packAwaitSignalsResult(0, 0, true, 0)
+		}
+		// Record the await, then wait: it is written BEFORE the call blocks or suspends, once, and never per iteration of a park.
+		c.Record(EventRecord{Step: s.stepCount, EventType: EventTypeAwaitSignals, SignalNames: names, TimeoutMs: timeoutMs})
+		until := time.UnixMilli(s.nowMs).Add(guestMsDuration(timeoutMs))
+		return awaitSuspendOrPark(c, deliverIfWaiting, parkRequest{
+			Kind: wakeSignal, Key: names, DeadlineMs: until.UnixMilli(),
+			Reason:  fmt.Sprintf("await_signals(%s, %dms)", names, timeoutMs),
+			Until:   until,
+			Recheck: signalRecheckFor(s, names),
+		}, packAwaitSignalsResult(0, 0, true, 0))
+	},
+}
+
+func init() { registerStepSpec(&awaitSignalsStep) }
+
+// signalRecheckFor is the read a HELD signal wait runs to find its delivery without being woken by anything (parkRequest.Recheck): is a delivery of any asked name waiting? It asks the
+// same store, for the same workflow and in the same order as deliverIfWaiting, and PollSignal does not consume, so this changes nothing. It does not record an event or write to the
+// guest: after a wake the call's own read, deliverIfWaiting, does that, so the delivery still reaches the guest through the one path replay uses.
+//
+// Unlike deliverIfWaiting, which reads a store error as "nothing found", this returns it: a hold that cannot tell must end and let the run suspend, because a wait that reads every
+// error as "not yet" would hold a run for its whole deadline against a store that is down. A nil store returns nil, which means the wait cannot be held (nothing could wake it).
+func signalRecheckFor(s *execSession, names string) func(ctx context.Context) (bool, error) {
+	if s.engine.signalStore == nil {
+		return nil
 	}
-
-	// A fresh await is new work: it records an await_signals event and suspends
-	// the run, so a defer segment that reached this point would leave the
-	// terminated workflow waiting for a signal instead of finishing its
-	// cleanup. See IMPROVEMENT-PLAN 3.84.
-	if s.stopBeforeNewWork() {
-		return callSuspendSentinel
-	}
-
-	// A SECOND AWAIT IN A SESSION THAT HAS ALREADY SUSPENDED IS ALSO NEW WORK,
-	// and missing that is cleat#933.
-	//
-	// A suspending await set s.suspendErr and returned
-	// packAwaitSignalsResult(0, 0, true, 0) -- byte-identical to a genuine
-	// timeout. The guest could not tell the two apart, so it ran on and the
-	// next await recorded a second await_signals into a segment that had
-	// already ended. (Since cleat#3378 the suspending await itself returns the
-	// stop, so this guard is now the backstop for a guest that ignores it, and
-	// for the defer drain, which still gets the old word.) Measured on a fresh
-	// session with an empty store:
-	//
-	//	step 0  await_signals  ts=1788874160927
-	//	step 1  await_signals  ts=1788874160927   <- same millisecond
-	//
-	// which is the history the samples-go port dumps from a real run: two
-	// awaits recorded three seconds before the signal existed. The next replay
-	// then pairs the delivery with the SECOND await and times out the first.
-	// The replay arm reproduces that faithfully; the fault is that the history
-	// was written.
-	//
-	// SCOPED TO AWAITS DELIBERATELY. The same session will happily run a
-	// DurableCall or a SideEffect after a suspend, and widening
-	// stopBeforeNewWork to cover them looked like the general fix -- it is not,
-	// and two tests said so. At a continue-as-new boundary the GUEST drains its
-	// own defer table by returning through its wrapper, with no inDeferDrain
-	// bracket to distinguish it, so gating every call refused the cleanup
-	// (TestTheEventCapDoesNotDispatchTheCallItRefused, "the cleanup a workflow
-	// registered did not run"). A second await is unambiguous in a way a
-	// second call is not: nothing legitimate awaits a signal in a segment that
-	// has already decided to end. The broader case is filed rather than
-	// guessed at.
-	if s.suspendErr != nil && !s.inDeferDrain {
-		return callSuspendSentinel
-	}
-
-	// Fresh execution: check signal store first.
-	if s.engine.signalStore != nil {
-		names := parseSignalNames(signalNames)
-		for _, name := range names {
-			d, found, err := s.engine.signalStore.PollSignal(ctx, s.engine.workflowID, name)
-			if err == nil && found {
-				rec := EventRecord{
-					Step:          s.stepCount,
-					EventType:     EventTypeSignalReceived,
-					SignalName:    name,
-					SignalPayload: d.Payload,
-				}
-				s.recordEvent(rec)
-				s.consumeDelivered(ctx, name, d)
-
-				written, writtenEC := s.writeOut(ctx, m, sigNamePtr, name, sigNameMaxLen)
-				payloadWritten, payloadEC := s.writeOut(ctx, m, payloadPtr, d.Payload, payloadMaxLen)
-				// Either write can overflow, and the first non-zero code wins: a
-				// caller that sees one truncation does not need to know there were
-				// two, and reporting success because only the payload was cut would
-				// be the defect this replaces.
-				return packAwaitSignalsResult(written, payloadWritten, false, uint32(firstNonZero(writtenEC, payloadEC)))
+	list := parseSignalNames(names)
+	workflowID := s.engine.workflowID
+	store := s.engine.signalStore
+	return func(ctx context.Context) (bool, error) {
+		for _, name := range list {
+			_, found, err := store.PollSignal(ctx, workflowID, name)
+			if err != nil {
+				return false, err
+			}
+			if found {
+				return true, nil
 			}
 		}
+		return false, nil
 	}
+}
 
-	// A 0ms await has no deadline to expire, so it must not suspend. cleat#1331.
-	//
-	// The suspension below sets Until = nowMs + timeoutMs, which for 0 is a
-	// deadline of NOW: the run is immediately re-claimable, wakes, replays to
-	// this step and suspends again -- about fourteen claims a second forever,
-	// with event_history constant and reclaim_count 0, because each cycle is a
-	// legitimate claim rather than a stall.
-	//
-	// GUARDED HERE AS WELL AS IN THE SDK, and that is the point rather than
-	// belt-and-braces. cleat/runtime_signals.go guards Go guests only; this
-	// function is on the public interface and reached over a shared ABI, so a
-	// Rust, Java, Python or AssemblyScript guest that computes a sub-
-	// millisecond timeout arrives here with 0 and has nothing between it and
-	// the livelock.
-	//
-	// Timed out rather than an error, matching DurableSleep, where 0ms means
-	// "do not wait" and is both harmless and what was asked. Placed AFTER the
-	// signal-store check above, so a 0ms await still reports a signal that is
-	// already waiting -- it degrades to PollSignals rather than to nothing.
-	//
-	// Records NO event. A loop of these would otherwise append a row per
-	// iteration, trading a livelock that writes nothing for one that grows
-	// event_history without bound. Replay is unaffected: the branch above
-	// consumes await records written before this fix, and a call that records
-	// nothing and returns a constant is reproducible by construction.
-	if timeoutMs <= 0 {
-		return packAwaitSignalsResult(0, 0, true, 0)
+// awaitSuspendOrPark is the wait: park if this session may and there is a wake source, else suspend (production today: every wait suspends). timedOut is
+// the word the call hands back when the deadline has passed: await_signals and await_promise pack it differently, and the loop is the same.
+//
+// What a park returns is ADVISORY, exactly as for a durable sleep (cleat#4237): a wake and a deadline both carry no payload, a delivery can land
+// with either, and a source can be wrong about the time. So after EVERY return from the source the call polls the store once, through the same read
+// the first poll used; it is a timeout only if the engine's real clock agrees the deadline has passed; and a deadline outcome the clock does not
+// agree with suspends, so the scheduler's own clock decides when the run wakes. Trusting the outcome returned a timeout without looking, which lost
+// a delivery that landed with the deadline (it was then delivered only by suspend and replay) and timed a wait out at once on a source that was early.
+// The clock check also gives an empty wake loop an exit that does not depend on the source. The real clock, not the cached one (s.nowMs), because
+// the scheduler wakes on real time: the same reasoning as AwaitPromise's deadline.
+//
+// Baseline is 0: the lost-wakeup window is closed by the wake source's own ordering (it registers, then the call re-polls), so no sequence is
+// compared in v1 (WS-cleat-2, #4152).
+func awaitSuspendOrPark(c *stepCtx, deliverIfWaiting func() (int64, bool), req parkRequest, timedOut int64) int64 {
+	for {
+		out := c.s.parkOrSuspend(c.ctx, req)
+		if out == parkRefused {
+			return c.s.suspendingAwaitResult()
+		}
+		if r, ok := deliverIfWaiting(); ok {
+			return r
+		}
+		if c.s.engine.realNowMs() >= req.DeadlineMs {
+			return timedOut
+		}
+		if out == parkDeadline {
+			c.s.suspendFor(req)
+			return c.s.suspendingAwaitResult()
+		}
 	}
+}
 
-	// Record await and suspend.
-	rec := EventRecord{
-		Step:        s.stepCount,
-		EventType:   EventTypeAwaitSignals,
-		SignalNames: signalNames,
-		TimeoutMs:   timeoutMs,
+// awaitDelivery writes a delivery's name and payload to the guest. Either write can overflow, and the first non-zero code wins: a caller that
+// sees one truncation does not need to know there were two, and reporting success because only the payload was cut would be the defect this
+// replaced.
+func awaitDelivery(c *stepCtx, name, payload string) int64 {
+	written, writtenEC := c.s.writeOut(c.ctx, c.m, c.args.out2Ptr, name, c.args.out2MaxLen)
+	payloadWritten, payloadEC := c.s.writeOut(c.ctx, c.m, c.args.outPtr, payload, c.args.outMaxLen)
+	return packAwaitSignalsResult(written, payloadWritten, false, uint32(firstNonZero(writtenEC, payloadEC)))
+}
+
+func sameSignalNames(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
 	}
-	s.recordEvent(rec)
-
-	s.suspendErr = &SuspendError{
-		Reason: fmt.Sprintf("await_signals(%s, %dms)", signalNames, timeoutMs),
-		Until:  time.UnixMilli(s.nowMs).Add(time.Duration(timeoutMs) * time.Millisecond),
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
 	}
-
-	return s.suspendingAwaitResult()
+	return true
 }
 
 // suspendingAwaitResult is what an await that has just suspended the run hands
@@ -491,54 +435,152 @@ func (s *execSession) signalIsVisibleNow(d SignalDelivery) bool {
 // the reply channel and its ID is the correlation ID, so the reply address is
 // data rather than protocol -- which is how DBOS and Temporal handle it too,
 // neither having a primitive for it.
+// The send side's event (cleat#4102). A send and a delivery are both recorded as signal_received, and the await path matches on
+// that type alone, so the send carries Service and Op to be told apart from a delivery, and its OUTCOME in Response. The outcome is
+// what replay returns to the guest, so it is inside the event checksum (eventRecordToPayload) and survives compaction. Response is
+// empty for a send that was delivered, which is also what every send recorded before cleat#4102 holds, so an old history replays
+// as the success it was reported as.
+const (
+	SignalEventService = "signal"
+	SignalOpSend       = "send"
+
+	signalOutcomeAuthRequired   = "auth_required"
+	signalOutcomeDeliveryFailed = "delivery_failed"
+	signalOutcomeNotFound       = "not_found"
+)
+
+// signalOutcomeCode is the call's result word for a recorded outcome. An outcome this build does not know is a failure and not a
+// success: a history written by a newer engine that added one must not be replayed by this one as "delivered".
+func signalOutcomeCode(outcome string) int64 {
+	switch outcome {
+	case "":
+		return 0
+	case signalOutcomeAuthRequired:
+		return errSignalAuthRequiredInt
+	case signalOutcomeNotFound:
+		return errSignalTargetNotFoundInt
+	default:
+		return errSignalDeliveryFailedInt
+	}
+}
+
+// signalSendOutcomeCode reads a replayed signal_received event as the result of a send. An event with no Op is a delivery, or a send
+// recorded before cleat#4102, and is the success it always replayed as.
+func signalSendOutcomeCode(rec EventRecord) int64 {
+	if rec.Service != SignalEventService || rec.Op != SignalOpSend {
+		return 0
+	}
+	return signalOutcomeCode(rec.Response)
+}
+
+// deliverSignal hands the signal to the store and classifies what came back. The error text is logged and not recorded: the event
+// carries a CLASS, which is all a guest can act on and all that is safe to put in a history an admin can read.
+func (s *execSession) deliverSignal(ctx context.Context, targetRunID, signalName, payload string) string {
+	if s.engine.signalStore == nil {
+		// No store is configured, so there is nowhere to deliver to. This has always reported success, and whether it should is a
+		// separate question from the one cleat#4102 asked (a store that REFUSED); engines without a store are tests and embedded
+		// development engines, listed in the pull request.
+		return ""
+	}
+	err := s.engine.signalStore.DeliverSignal(ctx, targetRunID, signalName, payload)
+	switch {
+	case err == nil:
+		return ""
+	case errors.Is(err, ErrWorkflowNotFound):
+		// The same outcome for a target that does not exist and one under another tenant (cleat#2218, cleat#2227): the store already
+		// returns one error for both, and this keeps it one outcome. Do not log the target's existence either way.
+		s.engine.log().WarnContext(ctx, "deliver_signal: target not found", "workflow_id", s.workflowID, "tenant_id", s.tenantID)
+		return signalOutcomeNotFound
+	case errors.Is(err, ErrWorkflowNotOpen):
+		// A target that has SETTLED (cleat#4340): nothing will ever read a signal sent to it, so it is terminal for the sender like a missing one. It reports the existing not-found outcome and not a
+		// new one because the outcome classes are part of the guest ABI every SDK decodes, and a new class is a change in all of them; the log line says which it was.
+		s.engine.log().WarnContext(ctx, "deliver_signal: target is no longer open", "workflow_id", s.workflowID, "tenant_id", s.tenantID, "error", err)
+		return signalOutcomeNotFound
+	default:
+		s.engine.log().ErrorContext(ctx, "deliver_signal failed", "workflow_id", s.workflowID, "tenant_id", s.tenantID, "error", err)
+		return signalOutcomeDeliveryFailed
+	}
+}
+
+// SignalWorkflow sends a signal to another workflow.
+//
+// ORDER IS THE CONTRACT. The signal is delivered FIRST and its outcome recorded after, which is the opposite of what this did until
+// cleat#4102, and the difference is who loses. Recording first (the old order) meant a store error AND a crash between the two
+// steps both lost the signal for good: the event said it was sent, replay returns what the event says, and nothing ever tried
+// again. Delivering first means a crash between the two re-delivers on replay, which is a DUPLICATE and not a loss. That is
+// at-least-once, the stance consumeDelivered already takes for the await side; an idempotency key on the delivery would make it
+// effectively-once and is a follow-up.
+//
+// The outcome is recorded whatever it was, and replay returns the recorded one. Not recording a failure would let the guest see an
+// error live, handle it, and carry on, while replay found no event at this step, re-ran the delivery, possibly succeeded, and
+// diverged from the history the guest's later events were recorded against.
 func (s *execSession) SignalWorkflow(ctx context.Context, m api.Module, targetRunID, signalName, payload string) int64 {
-	// Fire-and-forget: record the signal event.
-	if s.isReplay {
-		if s.stepCount < len(s.history) {
-			rec := s.history[s.stepCount]
-			if rec.EventType == EventTypeSignalReceived {
-				if !s.advanceReplayStep(ctx, &rec) {
-					return 0
-				}
-				return 0
+	return s.step(ctx, m, &signalWorkflowStep, stepArgs{s1: targetRunID, s2: signalName, s3: payload})
+}
+
+// signalWorkflowStep is SignalWorkflow as a step (cleat#4152, G1b). A fresh signal_workflow is new work: it delivers a signal to another
+// workflow, which can wake it and start a run, so the dispatcher refuses it in a defer segment's body, after a refused event write and on
+// shutdown, as the call did by hand.
+//
+// IDENTITY IS NEW. The old replay consumed whatever signal_received record sat at the step, so a send to another target, or of another
+// signal, replayed as the send the history recorded and the guest was told it had been delivered. A send now names the target and the
+// signal, and a record that names others is a divergence (the target only where the record has one: see the Identity below). A record WITHOUT the cleat#4102 discriminator (Service/Op) is a delivery, or a
+// send recorded before that change, and is accepted unchecked, as the promise settlements accept theirs.
+var signalWorkflowStep = stepSpec{
+	Name:               "signal_workflow",
+	NoDivergenceDetail: "it had no divergence message of its own before it moved: no removed message was found for it; " + divergenceSweepNote,
+	Result:             layoutSimple,
+	Effect:             effectEffect,
+	Records:            recordsOne,
+	Want:               EventTypeSignalReceived,
+	Identity: func(a stepArgs, rec *EventRecord) string {
+		if rec.Service != SignalEventService || rec.Op != SignalOpSend {
+			return ""
+		}
+		// The TARGET is compared only when the record carries one. Compaction keeps a signal send's name and not its RunID
+		// (extractCompactionStateFrom copies SignalName, SignalPayload, Service, Op and Response for signal_received), so an expanded history
+		// reads "" there, and comparing it would report a divergence on every replay of a compacted send
+		// (TestACompactedHistoryReplaysTheCallsThatCheckAnIdentity measured exactly that, res=0x1 step=0, before this condition). The cost is
+		// that on a compacted history only the signal NAME is checked.
+		if rec.SignalName != a.s2 || (rec.RunID != "" && rec.RunID != a.s1) {
+			return fmt.Sprintf("signal %q to %q, recorded %q to %q", a.s2, a.s1, rec.SignalName, rec.RunID)
+		}
+		return ""
+	},
+	Decode: func(c *stepCtx, rec *EventRecord) int64 { return signalSendOutcomeCode(*rec) },
+	Fresh: func(c *stepCtx) int64 {
+		s, ctx, targetRunID, signalName, payload := c.s, c.ctx, c.args.s1, c.args.s2, c.args.s3
+
+		outcome := ""
+		refused := false
+		// Check signal authorization before delivering.
+		if s.engine.requireSignalAuth && s.engine.signalAuthCheck != nil {
+			if err := s.engine.signalAuthCheck(ctx, targetRunID, s.defName); err != nil {
+				s.engine.log().ErrorContext(ctx, "signal_auth failed", "workflow_id", s.workflowID, "tenant_id", s.tenantID, "error", err)
+				outcome = signalOutcomeAuthRequired
+				refused = true
 			}
 		}
-		s.exitReplay()
-	}
-
-	// A fresh signal_workflow is new work: it delivers a signal to another
-	// workflow, which can wake it and start a run. A defer segment exists to run
-	// a terminated workflow's cleanup, not to start something on its behalf.
-	if s.stopBeforeNewWork() {
-		return callSuspendSentinel
-	}
-
-	// Check signal authorization before delivering.
-	if s.engine.requireSignalAuth && s.engine.signalAuthCheck != nil {
-		if err := s.engine.signalAuthCheck(ctx, targetRunID, s.defName); err != nil {
-			s.engine.log().ErrorContext(ctx, "signal_auth failed", "workflow_id", s.workflowID, "tenant_id", s.tenantID, "error", err)
-			return errSignalAuthRequiredInt
+		if !refused {
+			outcome = s.deliverSignal(ctx, targetRunID, signalName, payload)
 		}
-	}
 
-	rec := EventRecord{
-		Step:          s.stepCount,
-		EventType:     EventTypeSignalReceived,
-		SignalName:    signalName,
-		SignalPayload: payload,
-		RunID:         targetRunID,
-	}
-	s.recordEvent(rec)
-
-	// Deliver to target via signal store if available.
-	if s.engine.signalStore != nil {
-		if err := s.engine.signalStore.DeliverSignal(ctx, targetRunID, signalName, payload); err != nil {
-			s.engine.log().ErrorContext(ctx, "deliver_signal failed", "workflow_id", s.workflowID, "tenant_id", s.tenantID, "error", err)
-		}
-	}
-
-	return 0
+		// Delivered FIRST, recorded after: see the contract above SignalWorkflow. The spec records through c.Record where the call did.
+		c.Record(EventRecord{
+			Step:          s.stepCount,
+			EventType:     EventTypeSignalReceived,
+			Service:       SignalEventService,
+			Op:            SignalOpSend,
+			Response:      outcome,
+			SignalName:    signalName,
+			SignalPayload: payload,
+			RunID:         targetRunID,
+		})
+		return signalOutcomeCode(outcome)
+	},
 }
+
+func init() { registerStepSpec(&signalWorkflowStep) }
 
 // consumeDelivered removes a delivery from this workflow's queue, after the
 // signal_received event recording it is durable.

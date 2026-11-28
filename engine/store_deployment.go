@@ -11,6 +11,10 @@ import (
 	"github.com/google/uuid"
 )
 
+// LoadWASM returns the compiled WASM bytes for a workflow definition. For a definition installed from a
+// library the bytes are the library member's, and they are returned only if they hash to the digest the
+// member records: otherwise the result is an *LibraryMemberDigestMismatchError (ErrLibraryMemberDigestMismatch)
+// and no bytes (cleat#3630).
 func (s *PostgresStore) LoadWASM(ctx context.Context, defName string, defVersion int) ([]byte, error) {
 	tx, err := s.beginTxWithRLS(ctx)
 	if err != nil {
@@ -19,14 +23,32 @@ func (s *PostgresStore) LoadWASM(ctx context.Context, defName string, defVersion
 	defer tx.Rollback()
 
 	var wasmBytes []byte
+	var library sql.NullString
 	err = tx.QueryRowContext(ctx, `
-		SELECT wasm_bytes FROM workflow_defs WHERE name = $1 AND version = $2
-	`, defName, defVersion).Scan(&wasmBytes)
+		SELECT wasm_bytes, library FROM workflow_defs WHERE name = $1 AND version = $2 AND tenant_id = $3
+	`, defName, defVersion, s.tenantID).Scan(&wasmBytes, &library)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("wasm not found: %s v%d", defName, defVersion)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("load wasm: %w", err)
+	}
+	if library.Valid {
+		// An installed library definition has no bytes of its own: it names an
+		// immutable member of a published library (cleat#3540). A second read,
+		// and only for such a row, so an ordinary definition never touches the
+		// library schema and does not depend on the role's grant on it.
+		var recorded string
+		if err := tx.QueryRowContext(ctx, `
+			SELECT wasm_bytes, wasm_sha256 FROM library.members WHERE library = $1 AND name = $2 AND version = $3
+		`, library.String, defName, defVersion).Scan(&wasmBytes, &recorded); err != nil {
+			return nil, libraryMemberReadError("load wasm", library.String, defName, defVersion, err)
+		}
+		// The bytes are checked against the digest recorded beside them (cleat#3630). ck_members_digest makes
+		// a mismatch impossible while it stands, so this only fires after a table owner removed it.
+		if err := verifyLibraryMemberDigest(library.String, defName, defVersion, recorded, wasmBytes); err != nil {
+			return nil, err
+		}
 	}
 	return wasmBytes, tx.Commit()
 }
@@ -55,13 +77,25 @@ func (s *PostgresStore) GetWASMLength(ctx context.Context, defName string, defVe
 	}
 	defer tx.Rollback()
 
-	var length int64
+	var length sql.NullInt64
+	var library sql.NullString
 	if err := tx.QueryRowContext(ctx,
-		`SELECT length(wasm_bytes) FROM workflow_defs WHERE name = $1 AND version = $2`,
-		defName, defVersion).Scan(&length); err != nil {
+		`SELECT length(wasm_bytes), library FROM workflow_defs WHERE name = $1 AND version = $2 AND tenant_id = $3`,
+		defName, defVersion, s.tenantID).Scan(&length, &library); err != nil {
 		return 0, err
 	}
-	return length, tx.Commit()
+	if library.Valid {
+		// The member's stored length, checked against its bytes when it was
+		// published, so a library definition is validated without reading them.
+		var memberLength int64
+		if err := tx.QueryRowContext(ctx, `
+			SELECT wasm_length FROM library.members WHERE library = $1 AND name = $2 AND version = $3
+		`, library.String, defName, defVersion).Scan(&memberLength); err != nil {
+			return 0, libraryMemberReadError("get wasm length", library.String, defName, defVersion, err)
+		}
+		return memberLength, tx.Commit()
+	}
+	return length.Int64, tx.Commit()
 }
 
 // TraceWorkflow sets the W3C trace_id on a workflow instance.
@@ -91,14 +125,20 @@ func (s *PostgresStore) TraceWorkflow(ctx context.Context, workflowID, traceID s
 // touched this store, so an expired key authenticated against any host that
 // wires an engine store directly instead of auth.TenantStore. cleat#2370.
 func (s *PostgresStore) ResolveTenantFromAPIKey(ctx context.Context, keyHash []byte) (uuid.UUID, error) {
-	var tenantID uuid.UUID
-	err := s.db.QueryRowContext(ctx,
-		`SELECT tenant_id FROM admin.tenant_api_keys
-		 WHERE key_hash = $1 AND disabled_at IS NULL AND (expires_at IS NULL OR expires_at > now())`, keyHash).Scan(&tenantID)
+	tenantID, _, err := s.ResolveAPIKey(ctx, keyHash)
+	return tenantID, err
+}
+
+// ResolveAPIKey is ResolveTenantFromAPIKey plus the key's own id (cleat#3623), the one statement both
+// answer through, so the expiry and disabled clauses are written once. It satisfies auth.KeyResolver.
+func (s *PostgresStore) ResolveAPIKey(ctx context.Context, keyHash []byte) (tenantID, keyID uuid.UUID, err error) {
+	err = s.db.QueryRowContext(ctx,
+		`SELECT tenant_id, key_id FROM admin.tenant_api_keys
+		 WHERE key_hash = $1 AND disabled_at IS NULL AND (expires_at IS NULL OR expires_at > now())`, keyHash).Scan(&tenantID, &keyID)
 	if err != nil {
-		return uuid.Nil, err
+		return uuid.Nil, uuid.Nil, err
 	}
-	return tenantID, nil
+	return tenantID, keyID, nil
 }
 
 // LoadWorkflowConfig returns configuration for a workflow definition.
@@ -112,10 +152,10 @@ func (s *PostgresStore) LoadWorkflowConfig(ctx context.Context, defName string, 
 
 	var maxHistoryLength int
 	err = tx.QueryRowContext(ctx, `
-		SELECT max_history_length FROM workflow_defs WHERE name = $1 AND version = $2
-	`, defName, defVersion).Scan(&maxHistoryLength)
+		SELECT max_history_length FROM workflow_defs WHERE name = $1 AND version = $2 AND tenant_id = $3
+	`, defName, defVersion, s.tenantID).Scan(&maxHistoryLength)
 	if errors.Is(err, sql.ErrNoRows) {
-		return 0, fmt.Errorf("workflow def not found: %s v%d", defName, defVersion)
+		return 0, fmt.Errorf("%w: %s v%d", ErrWorkflowDefNotFound, defName, defVersion)
 	}
 	if err != nil {
 		return 0, fmt.Errorf("load workflow config: %w", err)
@@ -147,10 +187,10 @@ func (s *PostgresStore) LoadDAGSpec(ctx context.Context, defName string, defVers
 	// which is the dialect nearly everyone runs.
 	var raw *[]byte
 	err = tx.QueryRowContext(ctx, `
-		SELECT dag_spec FROM workflow_defs WHERE name = $1 AND version = $2
-	`, defName, defVersion).Scan(&raw)
+		SELECT dag_spec FROM workflow_defs WHERE name = $1 AND version = $2 AND tenant_id = $3
+	`, defName, defVersion, s.tenantID).Scan(&raw)
 	if errors.Is(err, sql.ErrNoRows) {
-		return nil, fmt.Errorf("workflow def not found: %s v%d", defName, defVersion)
+		return nil, fmt.Errorf("%w: %s v%d", ErrWorkflowDefNotFound, defName, defVersion)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("load dag_spec: %w", err)
@@ -171,8 +211,8 @@ func (s *PostgresStore) ListVersions(ctx context.Context, defName string) ([]int
 	defer tx.Rollback()
 
 	rows, err := tx.QueryContext(ctx, `
-		SELECT version FROM workflow_defs WHERE name = $1 ORDER BY version DESC
-	`, defName)
+		SELECT version FROM workflow_defs WHERE name = $1 AND tenant_id = $2 ORDER BY version DESC
+	`, defName, s.tenantID)
 	if err != nil {
 		return nil, fmt.Errorf("list versions: %w", err)
 	}
@@ -250,6 +290,12 @@ func (s *PostgresStore) DeployWorkflowDef(ctx context.Context, def *WorkflowDef)
 	// behaviour as current.
 	tenantID := s.tenantID
 
+	// cleat#3497: this tenant's own redeploy of a version with open runs may not
+	// replace its bytes. See engine/workflow_def_replacement.go for the rule.
+	if err := CheckWorkflowDefReplacementPostgres(ctx, tx, tenantID, def.Name, def.Version, def.WASMBytes, def.ReplaceUnderOpenRuns); err != nil {
+		return err
+	}
+
 	// No ownership check: under (tenant_id, name, version) another tenant's
 	// definition of the same name is a different row, so there is nothing to
 	// adjudicate. The ON CONFLICT below can now only fire for this tenant's own
@@ -276,6 +322,58 @@ func (s *PostgresStore) DeployWorkflowDef(ctx context.Context, def *WorkflowDef)
 	return tx.Commit()
 }
 
+// preflightWorkflowDefReplacement asks cleat#3497's question for def without writing: would deploying
+// these bytes replace a version's WASM under runs that are still open on THIS database. ShardedStore
+// asks it of every shard before it writes any (sharded_store_defs.go). The transaction is read-only
+// in effect and is rolled back.
+func (s *PostgresStore) preflightWorkflowDefReplacement(ctx context.Context, def *WorkflowDef) error {
+	tx, err := s.beginTxWithRLS(ctx)
+	if err != nil {
+		return fmt.Errorf("preflight workflow def replacement: begin: %w", err)
+	}
+	defer tx.Rollback()
+	return CheckWorkflowDefReplacementPostgres(ctx, tx, s.tenantID, def.Name, def.Version, def.WASMBytes, def.ReplaceUnderOpenRuns)
+}
+
+// beginWorkflowDefPurge runs a purge's DELETE on THIS database and keeps the transaction OPEN, so
+// ShardedStore can commit it only once every shard's DELETE has succeeded (cleat#3687). It is the
+// statement PurgeWorkflowDef runs, so the question "would this be refused" is the statement itself
+// and cannot drift from it: workflow_payloads_def_fkey is NO ACTION, so any run row of the version,
+// finished or not, refuses it until retention removes the row.
+//
+// WHY THE DELETE IS HELD OPEN RATHER THAN ROLLED BACK. The roll-back version answered the question and
+// then let go, so a run starting between the answer and the real delete made the real delete fail on
+// that shard after the others had already committed. An uncommitted DELETE keeps its row lock, and a
+// run insert for the same version has to take a share lock on that row for the foreign key, so the
+// insert WAITS for the purge to finish and then fails cleanly because the version is gone. Measured as
+// a non-superuser login with row-level security on (the test suite's RLS role) on 2026-11-08: the same-version insert
+// waited the full 3 s the DELETE was held, a different version of the same name and a different name
+// did not wait at all, and with a run committed first the DELETE refused with the same constraint.
+//
+// The caller bounds how long this stays open: the transaction is bound to ctx, and database/sql rolls
+// it back when ctx ends.
+func (s *PostgresStore) beginWorkflowDefPurge(ctx context.Context, name string, version int) (defPurgeHold, error) {
+	tx, err := s.beginTxWithRLS(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("purge workflow def: begin: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+		DELETE FROM workflow_defs WHERE name = $1 AND version = $2 AND tenant_id = $3
+	`, name, version, s.tenantID); err != nil {
+		_ = tx.Rollback()
+		return nil, fmt.Errorf("purge workflow def: %w", err)
+	}
+	return &pgDefPurgeHold{tx: tx}, nil
+}
+
+// pgDefPurgeHold is a DELETE that has run and not been committed.
+type pgDefPurgeHold struct{ tx *sql.Tx }
+
+func (h *pgDefPurgeHold) commit() error { return h.tx.Commit() }
+
+// rollback is safe after commit: ErrTxDone is the normal answer and is ignored.
+func (h *pgDefPurgeHold) rollback() { _ = h.tx.Rollback() }
+
 // ListWorkflowDefs returns all versions of a workflow, ordered by version DESC.
 // If name is empty, returns all workflow definitions across all workflows.
 
@@ -290,13 +388,13 @@ func (s *PostgresStore) ListWorkflowDefs(ctx context.Context, name string) ([]Wo
 	if name == "" {
 		rows, err = tx.QueryContext(ctx, `
 			SELECT name, version, abi_version, min_version, plugin_deps, created_at, disabled_at, gc_eligible, entry_point_schemas, input_validation_disabled, exposure
-			FROM workflow_defs ORDER BY name, version DESC
-		`)
+			FROM workflow_defs WHERE tenant_id = $1 ORDER BY name, version DESC
+		`, s.tenantID)
 	} else {
 		rows, err = tx.QueryContext(ctx, `
 			SELECT name, version, abi_version, min_version, plugin_deps, created_at, disabled_at, gc_eligible, entry_point_schemas, input_validation_disabled, exposure
-			FROM workflow_defs WHERE name = $1 ORDER BY version DESC
-		`, name)
+			FROM workflow_defs WHERE name = $1 AND tenant_id = $2 ORDER BY version DESC
+		`, name, s.tenantID)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("list workflow defs: %w", err)
@@ -342,17 +440,29 @@ func (s *PostgresStore) GetWorkflowDef(ctx context.Context, name string, version
 	var pluginDepsRaw []byte
 	var entryPointSchemasRaw []byte
 	var wasmBytes []byte
+	var library sql.NullString
 	var createdAt time.Time
 	err = tx.QueryRowContext(ctx, `
-		SELECT name, version, wasm_bytes, abi_version, min_version, plugin_deps, created_at, disabled_at, gc_eligible, entry_point_schemas, input_validation_disabled, exposure
-		FROM workflow_defs WHERE name = $1 AND version = $2
-	`, name, version).Scan(&def.Name, &def.Version, &wasmBytes, &def.ABIVersion,
+		SELECT name, version, wasm_bytes, library, abi_version, min_version, plugin_deps, created_at, disabled_at, gc_eligible, entry_point_schemas, input_validation_disabled, exposure
+		FROM workflow_defs WHERE name = $1 AND version = $2 AND tenant_id = $3
+	`, name, version, s.tenantID).Scan(&def.Name, &def.Version, &wasmBytes, &library, &def.ABIVersion,
 		&def.MinVersion, &pluginDepsRaw, &createdAt, &def.DisabledAt, &def.GCEligible, &entryPointSchemasRaw, &def.InputValidationDisabled, &def.Exposure)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, tx.Commit()
 	}
 	if err != nil {
 		return nil, fmt.Errorf("get workflow def: %w", err)
+	}
+	if library.Valid {
+		// WorkflowDef.WASMBytes is the code the definition RUNS, wherever it is
+		// stored. The start route resolves an entry point from it to pick the
+		// input schema, and for a library definition an empty slice made that
+		// resolution fail silently, which skipped input validation altogether.
+		if err := tx.QueryRowContext(ctx, `
+			SELECT wasm_bytes FROM library.members WHERE library = $1 AND name = $2 AND version = $3
+		`, library.String, name, version).Scan(&wasmBytes); err != nil {
+			return nil, libraryMemberReadError("get workflow def", library.String, name, version, err)
+		}
 	}
 	def.WASMBytes = wasmBytes
 	def.CreatedAt = createdAt
@@ -396,8 +506,8 @@ func (s *PostgresStore) MarkVersionDeprecated(ctx context.Context, name string, 
 		UPDATE workflow_defs
 		   SET disabled_at = CASE WHEN $3 THEN COALESCE(disabled_at, now()) ELSE NULL END,
 		       gc_eligible = $3
-		 WHERE name = $1 AND version = $2
-	`, name, version, deprecated)
+		 WHERE name = $1 AND version = $2 AND tenant_id = $4
+	`, name, version, deprecated, s.tenantID)
 	if err != nil {
 		return fmt.Errorf("mark version deprecated: %w", err)
 	}
@@ -414,15 +524,17 @@ func (s *PostgresStore) PurgeWorkflowDef(ctx context.Context, name string, versi
 	defer tx.Rollback()
 
 	_, err = tx.ExecContext(ctx, `
-		DELETE FROM workflow_defs WHERE name = $1 AND version = $2
-	`, name, version)
+		DELETE FROM workflow_defs WHERE name = $1 AND version = $2 AND tenant_id = $3
+	`, name, version, s.tenantID)
 	if err != nil {
 		return fmt.Errorf("purge workflow def: %w", err)
 	}
 	return tx.Commit()
 }
 
-// CountActiveInstances returns the number of ready or running instances for a version.
+// CountActiveInstances returns the number of instances of a version that are not settled:
+// ready, running or terminating. A terminating run is mid-shutdown, running its defer phase,
+// which executes guest code (cleat#3506).
 
 func (s *PostgresStore) CountActiveInstances(ctx context.Context, name string, version int) (int, error) {
 	tx, err := s.beginTxWithRLS(ctx)
@@ -435,16 +547,17 @@ func (s *PostgresStore) CountActiveInstances(ctx context.Context, name string, v
 	err = tx.QueryRowContext(ctx, `
 		SELECT COUNT(*) FROM workflow_leases l
 		JOIN workflow_payloads p ON p.id = l.id
-		WHERE p.def_name = $1 AND p.def_version = $2
-		  AND l.status IN ('ready', 'running')
-	`, name, version).Scan(&count)
+		WHERE p.def_name = $1 AND p.def_version = $2 AND l.tenant_id = $3
+		  AND l.status NOT IN ('done', 'failed', 'dead_lettered', 'terminated', 'cancelled')
+	`, name, version, s.tenantID).Scan(&count)
 	if err != nil {
 		return 0, fmt.Errorf("count active instances: %w", err)
 	}
 	return count, tx.Commit()
 }
 
-// GetActiveInstanceCountsByVersion returns a map of "name:version" -> count.
+// GetActiveInstanceCountsByVersion returns a map of "name:version" -> count of instances
+// that are not settled (see CountActiveInstances).
 
 func (s *PostgresStore) GetActiveInstanceCountsByVersion(ctx context.Context) (map[string]int, error) {
 	tx, err := s.beginTxWithRLS(ctx)
@@ -457,9 +570,10 @@ func (s *PostgresStore) GetActiveInstanceCountsByVersion(ctx context.Context) (m
 		SELECT p.def_name, p.def_version, COUNT(*) as cnt
 		FROM workflow_leases l
 		JOIN workflow_payloads p ON p.id = l.id
-		WHERE l.status IN ('ready', 'running')
+		WHERE l.status NOT IN ('done', 'failed', 'dead_lettered', 'terminated', 'cancelled')
+		  AND l.tenant_id = $1
 		GROUP BY p.def_name, p.def_version
-	`)
+	`, s.tenantID)
 	if err != nil {
 		return nil, fmt.Errorf("get active instance counts: %w", err)
 	}
@@ -505,7 +619,7 @@ func (s *PostgresStore) ResolveLatestVersion(ctx context.Context, defName string
 // exists and is not deprecated. Returns true if the version can be used.
 //
 //	SQL: SELECT EXISTS(SELECT 1 FROM workflow_defs
-//	     WHERE name = $1 AND version = $2 AND disabled_at IS NULL)
+//	     WHERE name = $1 AND version = $2 AND disabled_at IS NULL AND tenant_id = $3)
 
 func (s *PostgresStore) ValidateVersion(ctx context.Context, defName string, defVersion int) (bool, error) {
 	tx, err := s.beginTxWithRLS(ctx)
@@ -518,9 +632,9 @@ func (s *PostgresStore) ValidateVersion(ctx context.Context, defName string, def
 	err = tx.QueryRowContext(ctx, `
 		SELECT EXISTS(
 			SELECT 1 FROM workflow_defs
-			WHERE name = $1 AND version = $2 AND disabled_at IS NULL
+			WHERE name = $1 AND version = $2 AND disabled_at IS NULL AND tenant_id = $3
 		)
-	`, defName, defVersion).Scan(&exists)
+	`, defName, defVersion, s.tenantID).Scan(&exists)
 	if err != nil {
 		return false, fmt.Errorf("validate version: %w", err)
 	}

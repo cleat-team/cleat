@@ -546,7 +546,7 @@ func (p *Plugin) handleCreateSource(w http.ResponseWriter, r *http.Request) {
 	// shape as plugins/notifications/routes.go's handleCreateWebhook.
 	if err := p.secrets.Put(r.Context(), WebhookIngestSecretName(id), req.Secret.Reveal()); err != nil {
 		p.logger.Error("webhook-ingest: store source secret", "error", err)
-		p.writeError(w, 500, "failed to store secret")
+		p.writeError(w, 500, plugin.StoreFailureMessage(err))
 		return
 	}
 

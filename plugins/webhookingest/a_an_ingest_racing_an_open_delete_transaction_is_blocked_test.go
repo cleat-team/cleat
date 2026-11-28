@@ -209,6 +209,12 @@ func runIngestRaceTest(t *testing.T, dialect plugin.Dialect, db *sql.DB) {
 		t.Fatalf("decode create response: %v", err)
 	}
 	sourceID := created["id"].(string)
+	// The row handleCreateSource sealed under this test's own key ring would
+	// outlive it on the shared PostgreSQL and MySQL databases (cleat#3474).
+	t.Cleanup(func() {
+		prefix := strings.TrimSuffix(WebhookIngestSecretName(uuid.Nil), uuid.Nil.String())
+		plugintest.RemoveTenantSecretsWithPrefix(t, db, testDialect, tenantID.String(), prefix)
+	})
 
 	// Open handleDeleteSource's own soft-delete UPDATE directly, in its own
 	// transaction, and hold it open -- reproduced verbatim from routes.go's

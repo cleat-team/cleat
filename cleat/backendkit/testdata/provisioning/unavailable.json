@@ -1,0 +1,6 @@
+{
+  "status": 501,
+  "body": {
+    "error": "tenant provisioning is not available on this worker: it needs PostgreSQL or SQL Server and a worker that is not sharded"
+  }
+}

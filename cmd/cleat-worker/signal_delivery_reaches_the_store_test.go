@@ -76,9 +76,9 @@ func TestTheSignalHandlerDeliversWhatItWasGiven(t *testing.T) {
 	}
 	if gotPayload != `{"amount":42}` {
 		t.Errorf("delivered payload %q, want {\"amount\":42}.\n\n"+
-			"The payload passes through engine.Redact before the store; this one has "+
-			"nothing redactable in it, so an exact match is the right assertion and a "+
-			"difference means the handler lost or rewrote it.", gotPayload)
+			"The payload reaches the store exactly as sent (cleat#3581); an exact match "+
+			"is the right assertion and a difference means the handler lost or rewrote "+
+			"it.", gotPayload)
 	}
 }
 

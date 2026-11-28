@@ -267,7 +267,7 @@ func runCheckDB(ctx context.Context, db *sql.DB, d dialect, dsn string, args []s
 		// this, check-db reports a false MISSING on every non-PostgreSQL
 		// deployment the moment such a table exists -- the same dialect-skip
 		// TestQualifiedTableMatchesEachDialectsMigrations already applies.
-		if d.name != "postgres" && postgresOnlyTables[table] {
+		if absentByDesign(d.name, table) {
 			continue
 		}
 		// Schema-qualified names are matched on BOTH parts. Matching on

@@ -26,7 +26,7 @@ Re-derive: `grep -rn "1 *<< *62" --include="*.go" .`
 
 Every producer and consumer in the tree uses the literal `1 << 62`: `wasm/exports.go:224`,
 `engine/helpers.go:86` (`packAwaitChildResultSuspend`), and the readers `engine/runtime.go:552`,
-`engine/backend_wasmtime.go:741,1392`, `packages/cleat-as/test_runner/test_runner.go:393`. No
+`engine/backend_wasmtime.go:741,1392`. No
 divergence found on this half of the encoding.
 
 ## Finding 2 — the "len<<32 | code" packing is NOT one duplicated pattern

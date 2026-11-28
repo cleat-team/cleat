@@ -80,7 +80,7 @@ new version.
 CREATE TABLE workflow_defs (
     name TEXT NOT NULL,
     version INTEGER NOT NULL,
-    wasm_bytes BYTEA NOT NULL,
+    wasm_bytes BYTEA,
     entry_points TEXT[] NOT NULL DEFAULT '{}',
     min_version INTEGER NOT NULL DEFAULT 0,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -96,7 +96,10 @@ CREATE TABLE workflow_defs (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     exposure TEXT NOT NULL DEFAULT 'auth' CHECK (exposure IN ('public', 'auth', 'internal')),
     input_validation_disabled BOOLEAN NOT NULL DEFAULT false,
-    PRIMARY KEY (tenant_id, name, version)
+    library TEXT,
+    PRIMARY KEY (tenant_id, name, version),
+    CHECK ((library IS NULL) <> (wasm_bytes IS NULL)),
+    FOREIGN KEY (library, name, version) REFERENCES library.members (library, name, version) ON DELETE RESTRICT
 );
 ```
 
@@ -110,7 +113,8 @@ that prose yet — not that the column does not exist.
 |--------|------|-------------|
 | `name` | TEXT | Workflow name (part of composite PK) |
 | `version` | INTEGER | Monotonically increasing version number |
-| `wasm_bytes` | BYTEA | Compiled WASM module binary |
+| `wasm_bytes` | BYTEA | Compiled WASM module binary. NULL exactly when `library` is set: a row has its own bytes or a library reference, never both and never neither (a CHECK) |
+| `library` | TEXT | NULL for an ordinary deploy. Set when the row was installed from a published library: the bytes then live in `library.members`, keyed by this row's `(library, name, version)` (see Workflow libraries below) |
 | `entry_points` | TEXT[] | Exported entry point names (e.g., `{"place_order","cancel_order"}`) |
 | `min_version` | INTEGER | Minimum compatible version for replay |
 | `max_history_length` | INTEGER | Max events before compaction triggers (0 = default) |
@@ -124,6 +128,56 @@ that prose yet — not that the column does not exist.
 
 - `idx_defs_active` on `(name, version DESC)` -- speeds up latest-version
   lookups for deployment.
+
+### Workflow libraries
+
+A library is a set of immutable, versioned workflow members that the cleat operator
+publishes once and a tenant installs **by reference** (cleat#3540). The tenant's
+`workflow_defs` row keeps its own key and all of its metadata; only the bytes live in
+`library.members`. PostgreSQL and SQL Server only: MySQL has no `library` schema, and
+its migrations stop before this one.
+
+| Table | Schema | Purpose |
+|-------|--------|---------|
+| `library.members` | `library` | One published workflow build: primary key `(library, name, version)`, its bytes, and its stored `wasm_sha256` and `wasm_length` (both checked against the bytes on every insert), plus the metadata an install copies |
+| `library.bundles` | `library` | A published release of a library: `(library, bundle_version)` |
+| `library.bundle_members` | `library` | Which members a bundle contains; a member unchanged between two bundles is listed by both |
+| `tenant_library_installs` | application schema | Which bundle of a library a tenant has installed; an explicit upgrade updates `bundle_version` and rewrites `installed_at` in place, so `installed_at` is when the current bundle was installed |
+
+```sql
+CREATE TABLE tenant_library_installs (
+    tenant_id UUID NOT NULL DEFAULT '00000000-0000-0000-0000-000000000000',
+    library TEXT NOT NULL,
+    bundle_version TEXT NOT NULL,
+    installed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    installed_by TEXT,
+    PRIMARY KEY (tenant_id, library)
+);
+```
+
+Two properties are enforced by the database, not by a route:
+
+- **Only the operator publishes.** `library` is its own schema, so nothing grants the
+  application role write access to it by default. The application role has `USAGE` and
+  `SELECT`; a separate `NOLOGIN` role, `cleat_library_publisher`, has `INSERT` and
+  `DELETE`, and nobody has `UPDATE`, so a member cannot change once published.
+- **A member in use cannot be deleted.** The foreign key from `workflow_defs` to
+  `library.members` is `ON DELETE RESTRICT`, and it holds across tenants even though
+  row-level security hides other tenants' rows from the deleting session. That key is
+  created `NOT VALID`, so `pg_constraint.convalidated` is false for it and that is not a
+  gap: validating it scans `workflow_defs` under `FORCE ROW LEVEL SECURITY`, which fails
+  for a migrating role that is not a superuser, every row that existed when it was added
+  has `library` NULL (which a foreign key never checks), and every later insert, update
+  and delete is checked.
+
+`tenant_library_installs` has `tenant_id` and a row-level security policy like every
+tenant table, and `admin.drop_tenant` removes it. The `library` tables have no
+`tenant_id` and are shared by every tenant, so any tenant may install any published
+library.
+
+On SQL Server the same tables exist, with one difference worth knowing: the index that
+backs the foreign key is **not** filtered, because with a filtered index every
+`DELETE FROM library.members` fails to compile (Msg 8624).
 
 ### workflow_instances
 
@@ -564,6 +618,7 @@ rows of one workflow may share.
 | `idx_leases_sticky` | `workflow_leases` | Sticky worker fast path | Non-unique, partial |
 | `idx_leases_concurrency_key` | `workflow_leases` | Claim path: skip a run whose concurrency key is held | Non-unique, partial |
 | `idx_defs_active` | `workflow_defs` | Latest-version lookup | Non-unique |
+| `idx_defs_library` | `workflow_defs` | The foreign key to `library.members`: finds the rows that reference a member when it is deleted | Non-unique, partial (`library IS NOT NULL`) |
 | `idx_promises_status` | `workflow_promises` | Promise resolution lookup | Non-unique |
 | `idx_concurrency_keys_workflow` | `concurrency_keys` | Key-to-workflow lookup | Non-unique |
 | `idx_update_requests_pending` | `workflow_update_requests` | Pending update lookup | Non-unique |
@@ -789,11 +844,14 @@ The Go store implementations that translate queries for each backend are at:
 **Do not point `--db` at a superuser.** Tenant isolation depends on it.
 
 Every tenant-scoped table has row-level security enabled and `FORCE`d
-(`001_schema.sql`), and for `GetWorkflowByID` and `ListWorkflows` those policies
-are the *only* isolation there is — neither carries an application-level
-`tenant_id` filter. PostgreSQL never applies row-level security to a superuser,
-and there is no setting that changes that. A superuser connection therefore
-returns every tenant's data from those calls, however the policies are written.
+(`001_schema.sql`), and the **plain** workflow listing and count are scoped by
+those policies alone — that is where a connection exempt from them shows it,
+because a plain list returns every tenant's rows. `GetWorkflowByID`
+(`engine/db.go`) and the published-state filter also name their tenant in the
+SQL, so they do not depend on the policy for that boundary. PostgreSQL never
+applies row-level security to a superuser, and there is no setting that changes
+that: a superuser connection returns every tenant's data from the plain listing
+and count, and is exempt from the policies everywhere else too.
 
 The schema baseline creates the role to use instead: `cleat_app`, which owns
 nothing, has no DDL rights, and is `NOSUPERUSER NOBYPASSRLS`. Ownership matters
@@ -838,4 +896,23 @@ which would otherwise pass every other check while isolating nothing.
 |---|---|
 | `auto` (default) | Refuse to start when `--require-auth` is set; warn otherwise |
 | `require` | Always refuse to start |
-| `off` | Skip the check |
+| `off` | Skip the warning |
+
+`auto` refuses because `--require-auth` defaults to true; it only warns on a worker started with
+`--require-auth=false`, and `off` stays silent. **Neither lifts the refusal that applies whenever the
+database holds more than one tenant** (cleat#3772, owner decision D82): a worker whose connection is
+not subject to the policies (any reason the check reports) will not start if `admin.tenants` has more
+than one row, suspended tenants counted and dropped ones not. With one tenant there is nothing to keep
+apart, so the single-tenant laptop configuration in the tutorial still starts. A worker on that
+connection also refuses `POST /api/admin/tenants` for a second tenant (409, with the same message),
+since that route creates the tenant inside the process that would then serve it; use a worker
+connected as `cleat_app`. `cleat-worker --create-tenant` is an administrative command with an owner
+DSN as its documented input and is **not** refused: it creates the tenant and prints a warning (exit status
+unchanged) that workers already serving this database on a bypassing role are serving more than one
+tenant until they restart, and the next start on that DSN is what refuses. **A second tenant that appears after startup now stops a running worker** (cleat#3773): at the top of every dispatch tick, before capacity gating and before any claim path is chosen, a worker that recorded at startup that its connection bypasses the policies counts the tenants and, if there is more than one, logs the same refusal message and exits. **The count is the startup one** — every row of `admin.tenants`, suspended tenants included — because suspension stops *starts*, not reads, and on a bypassing connection a suspended tenant's rows are still readable; a smaller predicate here would be a database a restarted worker refuses and a running one keeps serving. It runs where it cannot be skipped: the claim path is only reached with free capacity and not at all under `--claim-across-tenants=false`. The cost is one count query per tick, paid only on a connection that bypasses the policies; a worker on a role subject to them issues nothing. Two limits. The window is bounded by the tick rather than instant — up to about 500 ms while the worker is finding work and about 3 s once it has backed off idle — so a request naming another tenant inside it is not covered. And the bypass verdict is the one the **startup** check recorded, not one re-read on each tick, so a role that gains `BYPASSRLS` while the worker is running is not noticed; the opposite direction is safe, because a worker that started on a bypassing role and then had the attribute revoked still stops (fail-closed). Direct SQL, `--create-tenant` and any other path that adds a row to `admin.tenants` are all covered the same way. PostgreSQL only: SQL Server's policy applies to every principal, and
+MySQL is tenant-per-database and single-tenant. On a connection that bypasses the policies, the
+statements that read a workflow definition are scoped to the store's tenant in the SQL itself
+(cleat#3740), as they are on SQL Server and MySQL, so two tenants that hold the same workflow
+name and version do not read each other's. Before that, those reads relied on the policies
+alone and, on such a connection, answered from whichever tenant's row came first: a run could
+execute another tenant's module.

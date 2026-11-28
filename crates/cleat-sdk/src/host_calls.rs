@@ -20,6 +20,18 @@ fn suspend() -> CallError {
     CallError::Suspended
 }
 
+/// A wait's `Duration` as the milliseconds the host is given (cleat#4144).
+///
+/// `d.as_millis() as i64` did two wrong things. It TRUNCATED, so a positive sub-millisecond wait became 0, which the host
+/// reads as "do not wait" and some SDKs read as "wait for ever"; a positive wait now rounds UP, so it is at least 1 ms.
+/// And it WRAPPED: `as_millis` is a `u128`, and `as i64` keeps the low 64 bits, so a very long wait such as
+/// `Duration::MAX` came out as an arbitrary, often negative, number. It now saturates at `i64::MAX`, which the host clamps
+/// (cleat#4105). A zero `Duration` stays 0.
+pub(crate) fn wait_ms(d: Duration) -> i64 {
+    let ms = d.as_nanos().div_ceil(1_000_000);
+    i64::try_from(ms).unwrap_or(i64::MAX)
+}
+
 /// Reports whether the host refused this call because the workflow is running
 /// as a defer segment, marking the segment as suspending if so.
 ///
@@ -382,6 +394,11 @@ mod imports {
             out_ptr: *mut u8, out_max_len: u32,
         ) -> i64;
 
+        // cleat_side_effect_recorded - (ptr,maxLen) -> i64 (ABI 2.43a, cleat#4113)
+        pub fn cleat_side_effect_recorded(
+            out_ptr: *mut u8, out_max_len: u32,
+        ) -> i64;
+
         // plugin_call_streaming - (ptr,len x4, ptr,maxLen) -> i64
         #[link_name = "plugin_call_streaming"]
         pub fn cleat_plugin_call_streaming(
@@ -412,19 +429,24 @@ mod imports {
 
 // set_defer_phase reports the start and end of the guest's defer drain.
 //
-// A free pub(crate) function rather than a HostCalls method: defer::run_deferred
+// A free function rather than a HostCalls method: defer::run_deferred
 // has no HostCalls value in scope, and `imports` is private to this module. It
-// is not part of the public SDK surface because no workflow author should call
-// it -- the generated drain does. cleat#1155.
+// is not a workflow-author API -- a generated drain calls it -- but it is `pub`
+// because a bridge whose drain is not written in Rust needs it: cleat-js-plugin
+// drains a JavaScript registry, and without this a defer body's durable calls
+// would be indistinguishable from the workflow body's in the recorded history,
+// which is the defect cleat#1155 fixed for Rust. cleat#3826.
 #[cfg(target_arch = "wasm32")]
-pub(crate) fn set_defer_phase(on: bool) {
+#[doc(hidden)]
+pub fn set_defer_phase(on: bool) {
     unsafe {
         imports::cleat_defer_phase(if on { 1 } else { 0 });
     }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-pub(crate) fn set_defer_phase(_on: bool) {}
+#[doc(hidden)]
+pub fn set_defer_phase(_on: bool) {}
 
 /// Options for starting a child workflow with version control.
 /// `version = 0` means default resolution (parent's version or latest).
@@ -458,13 +480,13 @@ impl HostCalls {
     ///
     /// Deprecated: Use `call` instead.
     pub fn cleat_call(&self, service: &str, operation: &str, request_json: &str) -> (String, Option<String>) {
-        let mut resp_buf = vec![0u8; memory::OUT_BUF_SIZE as usize];
+        let mut resp_buf = vec![0u8; memory::out_buf_cap() as usize];
         let result = unsafe {
             imports::cleat_call(
                 service.as_ptr(), service.len() as u32,
                 operation.as_ptr(), operation.len() as u32,
                 request_json.as_ptr(), request_json.len() as u32,
-                resp_buf.as_mut_ptr(), memory::OUT_BUF_SIZE,
+                resp_buf.as_mut_ptr(), memory::out_buf_cap(),
             )
         };
         // The host refuses new work in a defer segment and marks the refusal
@@ -477,7 +499,7 @@ impl HostCalls {
 
         let (response_len, _call_error_code, err_code) = memory::decode_cleat_call_result(result);
         if err_code != 0 {
-            let err_msg = memory::read_result(&resp_buf, response_len);
+            let err_msg = memory::host_message_or(&resp_buf, response_len, format!("cleat_call(service=\"{}\", operation=\"{}\") failed: host error code {}.", service, operation, err_code));
             return (String::new(), Some(err_msg));
         }
         let resp = memory::read_result(&resp_buf, response_len);
@@ -540,11 +562,11 @@ impl HostCalls {
 
     /// Register cleanup to run on exit. Mirrors Go's DurableDefer.
     pub fn cleat_defer(&self, description: &str) -> (String, Option<String>) {
-        let mut id_buf = vec![0u8; memory::OUT_BUF_SIZE as usize];
+        let mut id_buf = vec![0u8; memory::out_buf_cap() as usize];
         let result = unsafe {
             imports::cleat_defer(
                 description.as_ptr(), description.len() as u32,
-                id_buf.as_mut_ptr(), memory::OUT_BUF_SIZE,
+                id_buf.as_mut_ptr(), memory::out_buf_cap(),
             )
         };
         let (id_len, err_code) = memory::decode_simple_result(result);
@@ -592,10 +614,10 @@ impl HostCalls {
 
     /// Check for cancellation. Mirrors Go's PollCancellation.
     pub fn poll_cancellation(&self) -> (bool, String) {
-        let mut reason_buf = vec![0u8; memory::OUT_BUF_SIZE as usize];
+        let mut reason_buf = vec![0u8; memory::out_buf_cap() as usize];
         let result = unsafe {
             imports::cleat_poll_cancellation(
-                reason_buf.as_mut_ptr(), memory::OUT_BUF_SIZE,
+                reason_buf.as_mut_ptr(), memory::out_buf_cap(),
             )
         };
         let (reason_len, cancelled) = memory::decode_poll_cancellation_result(result);
@@ -609,11 +631,11 @@ impl HostCalls {
 
     /// Poll for a specific signal. Mirrors Go's PollSignal.
     pub fn poll_signal(&self, name: &str) -> (String, bool, Option<String>) {
-        let mut payload_buf = vec![0u8; memory::OUT_BUF_SIZE as usize];
+        let mut payload_buf = vec![0u8; memory::out_buf_cap() as usize];
         let result = unsafe {
             imports::cleat_poll_signal(
                 name.as_ptr(), name.len() as u32,
-                payload_buf.as_mut_ptr(), memory::OUT_BUF_SIZE,
+                payload_buf.as_mut_ptr(), memory::out_buf_cap(),
             )
         };
         let (payload_len, found, err_code) = memory::decode_poll_signal_result(result);
@@ -641,6 +663,10 @@ impl HostCalls {
                 input_json.as_ptr(), input_json.len() as u32,
             )
         };
+        // cleat#4159: the host refuses a continuation in a defer segment. Read as a plain error code a stop is a success.
+        if stop_requested(result) {
+            return Err("cleat: host refused this call -- the workflow is running its defer phase".to_string());
+        }
         let (_extra, err_code) = memory::decode_simple_result(result);
         if err_code != 0 {
             return Err(format!("continue_as_new(...) failed: host error code {}. Check that the input JSON is valid and continue-as-new is available.", err_code));
@@ -650,12 +676,12 @@ impl HostCalls {
 
     /// Start a child workflow. Mirrors Go's ChildWorkflow.
     pub fn child_workflow(&self, name: &str, input_json: &str) -> (String, Option<String>) {
-        let mut run_id_buf = vec![0u8; memory::OUT_BUF_SIZE as usize];
+        let mut run_id_buf = vec![0u8; memory::out_buf_cap() as usize];
         let result = unsafe {
             imports::cleat_child_workflow(
                 name.as_ptr(), name.len() as u32,
                 input_json.as_ptr(), input_json.len() as u32,
-                run_id_buf.as_mut_ptr(), memory::OUT_BUF_SIZE,
+                run_id_buf.as_mut_ptr(), memory::out_buf_cap(),
             )
         };
         // The host refuses new work in a defer segment and marks the refusal
@@ -678,7 +704,7 @@ impl HostCalls {
     pub fn child_workflow_with_options(
         &self, name: &str, input_json: &str, opts: &ChildWorkflowOptions,
     ) -> (String, Option<String>) {
-        let mut run_id_buf = vec![0u8; memory::OUT_BUF_SIZE as usize];
+        let mut run_id_buf = vec![0u8; memory::out_buf_cap() as usize];
         let result = unsafe {
             imports::cleat_child_workflow_with_options(
                 name.as_ptr(), name.len() as u32,
@@ -686,7 +712,7 @@ impl HostCalls {
                 opts.version,
                 opts.priority as i64,
                 opts.parent_close_policy.as_ptr(), opts.parent_close_policy.len() as u32,
-                run_id_buf.as_mut_ptr(), memory::OUT_BUF_SIZE,
+                run_id_buf.as_mut_ptr(), memory::out_buf_cap(),
             )
         };
         // The host refuses new work in a defer segment and marks the refusal
@@ -709,11 +735,11 @@ impl HostCalls {
     /// Await child workflow completion. Mirrors Go's AwaitChild.
     pub fn await_child(&self, run_id: &str) -> Result<String, CallError> {
         self.dispatch_updates(); // dispatch point; see updates::dispatch_updates
-        let mut result_buf = vec![0u8; memory::OUT_BUF_SIZE as usize];
+        let mut result_buf = vec![0u8; memory::out_buf_cap() as usize];
         let r = unsafe {
             imports::cleat_await_child(
                 run_id.as_ptr(), run_id.len() as u32,
-                result_buf.as_mut_ptr(), memory::OUT_BUF_SIZE,
+                result_buf.as_mut_ptr(), memory::out_buf_cap(),
             )
         };
         // The host returns SUSPEND_SENTINEL when the child has not completed
@@ -729,23 +755,26 @@ impl HostCalls {
     }
 
     /// Await external signals for a duration. Preferred over await_signals_ms.
+    ///
+    /// A zero `Duration` does NOT wait: a signal already pending is returned, and otherwise the result is a timeout at once. A positive
+    /// `Duration` under a millisecond waits 1 ms. To wait without a limit pass `Duration::MAX`, which saturates (cleat#4144).
     pub fn await_signals(&self, signal_names: &[&str], timeout: Duration) -> Result<AwaitedSignal, CallError> {
-        self.await_signals_ms(signal_names, timeout.as_millis() as i64)
+        self.await_signals_ms(signal_names, wait_ms(timeout))
     }
 
-    /// Await external signals in milliseconds. Mirrors Go's AwaitSignals.
+    /// Await external signals in milliseconds. Mirrors Go's AwaitSignals. Zero or negative does not wait; `i64::MAX` waits without a limit.
     pub fn await_signals_ms(&self, signal_names: &[&str], timeout_ms: i64) -> Result<AwaitedSignal, CallError> {
         self.dispatch_updates(); // dispatch point; see updates::dispatch_updates
         // JSON-marshal the signal names array, matching Go's adapter.go behavior.
         let names_json = serde_json::to_string(signal_names).unwrap_or_else(|e| { eprintln!("warning: failed to serialize signal names: {}", e); "[]".to_string() });
-        let mut sig_name_buf = vec![0u8; memory::OUT_BUF_SIZE as usize];
-        let mut payload_buf = vec![0u8; memory::OUT_BUF_SIZE as usize];
+        let mut sig_name_buf = vec![0u8; memory::out_buf_cap() as usize];
+        let mut payload_buf = vec![0u8; memory::out_buf_cap() as usize];
         let result = unsafe {
             imports::cleat_await_signals(
                 names_json.as_ptr(), names_json.len() as u32,
                 timeout_ms,
-                sig_name_buf.as_mut_ptr(), memory::OUT_BUF_SIZE,
-                payload_buf.as_mut_ptr(), memory::OUT_BUF_SIZE,
+                sig_name_buf.as_mut_ptr(), memory::out_buf_cap(),
+                payload_buf.as_mut_ptr(), memory::out_buf_cap(),
             )
         };
         // The host returns SUSPEND_SENTINEL when no signal is available and a
@@ -834,7 +863,7 @@ impl HostCalls {
             eprintln!("warning: failed to serialize signal names: {}", e);
             "[]".to_string()
         });
-        let mut out_buf = vec![0u8; memory::OUT_BUF_SIZE as usize];
+        let mut out_buf = vec![0u8; memory::out_buf_cap() as usize];
         let result = unsafe {
             imports::cleat_wait_for_event(
                 plugin.as_ptr(), plugin.len() as u32,
@@ -842,7 +871,7 @@ impl HostCalls {
                 input_json.as_ptr(), input_json.len() as u32,
                 names_json.as_ptr(), names_json.len() as u32,
                 timeout_ms,
-                out_buf.as_mut_ptr(), memory::OUT_BUF_SIZE,
+                out_buf.as_mut_ptr(), memory::out_buf_cap(),
             )
         };
         // Ask BEFORE decoding, and the reason is the layout: the host marks a
@@ -878,13 +907,19 @@ impl HostCalls {
     /// Create a durable promise. Mirrors Go's CreatePromise (ABI 2.20).
     /// Returns (promise_id, error).
     pub fn create_promise(&self, name: &str) -> (String, Option<String>) {
-        let mut id_buf = vec![0u8; memory::OUT_BUF_SIZE as usize];
+        let mut id_buf = vec![0u8; memory::out_buf_cap() as usize];
         let result = unsafe {
             imports::cleat_create_promise(
                 name.as_ptr(), name.len() as u32,
-                id_buf.as_mut_ptr(), memory::OUT_BUF_SIZE,
+                id_buf.as_mut_ptr(), memory::out_buf_cap(),
             )
         };
+        // The host refuses a promise created by a defer segment's workflow body
+        // (cleat#4079 audit). The refusal reads as error code 0 with an empty id in
+        // this layout, a SUCCESSFUL create_promise, so ask before decoding.
+        if stop_requested(result) {
+            return (String::new(), Some("cleat: host refused this call -- the workflow is running its defer phase".to_string()));
+        }
         let (id_len, err_code) = memory::decode_simple_result(result);
         if err_code != 0 {
             return (String::new(), Some(memory::host_message_or(&id_buf, id_len, format!("create_promise(name=\"{}\") failed: host error code {}. Check that the promise name is valid.", name, err_code))));
@@ -894,20 +929,24 @@ impl HostCalls {
     }
 
     /// Await a durable promise for a duration. Preferred over await_promise_ms.
+    ///
+    /// A zero `Duration` does NOT wait: an already-settled promise is returned, and otherwise the result is a timeout at once. To wait
+    /// without a limit pass `Duration::MAX`, which saturates (cleat#4144).
     pub fn await_promise(&self, promise_id: &str, timeout: Duration) -> (String, bool, Option<String>) {
-        self.await_promise_ms(promise_id, timeout.as_millis() as i64)
+        self.await_promise_ms(promise_id, wait_ms(timeout))
     }
 
-    /// Await a durable promise in milliseconds. Mirrors Go's AwaitPromise (ABI 2.21).
+    /// Await a durable promise in milliseconds. Mirrors Go's AwaitPromise (ABI 2.21). Zero or negative does not wait; `i64::MAX` waits
+    /// without a limit.
     /// Returns (result, timed_out, error).
     pub fn await_promise_ms(&self, promise_id: &str, timeout_ms: i64) -> (String, bool, Option<String>) {
         self.dispatch_updates(); // dispatch point; see updates::dispatch_updates
-        let mut result_buf = vec![0u8; memory::OUT_BUF_SIZE as usize];
+        let mut result_buf = vec![0u8; memory::out_buf_cap() as usize];
         let result = unsafe {
             imports::cleat_await_promise(
                 promise_id.as_ptr(), promise_id.len() as u32,
                 timeout_ms,
-                result_buf.as_mut_ptr(), memory::OUT_BUF_SIZE,
+                result_buf.as_mut_ptr(), memory::out_buf_cap(),
             )
         };
         // A fresh await that has to wait answers with the stop sentinel, not a
@@ -956,9 +995,9 @@ impl HostCalls {
     /// update is answered. Delivery is durable, so an update returned here is
     /// recorded as delivered whether or not you complete it.
     pub fn poll_update(&self) -> (String, bool, Option<String>) {
-        let mut envelope_buf = vec![0u8; memory::OUT_BUF_SIZE as usize];
+        let mut envelope_buf = vec![0u8; memory::out_buf_cap() as usize];
         let result = unsafe {
-            imports::cleat_poll_update(envelope_buf.as_mut_ptr(), memory::OUT_BUF_SIZE)
+            imports::cleat_poll_update(envelope_buf.as_mut_ptr(), memory::out_buf_cap())
         };
         // Ask before decoding: a stop is bit 31, which in this layout sits
         // inside the flags word a decoder would read as an ordinary result.
@@ -1008,13 +1047,13 @@ impl HostCalls {
     /// Plugin calls target Go host plugins rather than external services.
     /// They are journaled for deterministic replay, same as [`call`](Self::call).
     pub fn plugin_call(&self, plugin_name: &str, function_name: &str, input_json: &str) -> (String, Option<String>) {
-        let mut resp_buf = vec![0u8; memory::OUT_BUF_SIZE as usize];
+        let mut resp_buf = vec![0u8; memory::out_buf_cap() as usize];
         let result = unsafe {
             imports::cleat_plugin_call(
                 plugin_name.as_ptr(), plugin_name.len() as u32,
                 function_name.as_ptr(), function_name.len() as u32,
                 input_json.as_ptr(), input_json.len() as u32,
-                resp_buf.as_mut_ptr(), memory::OUT_BUF_SIZE,
+                resp_buf.as_mut_ptr(), memory::out_buf_cap(),
             )
         };
         // The host refuses new work in a defer segment and marks the refusal
@@ -1027,7 +1066,7 @@ impl HostCalls {
 
         let (response_len, _call_error_code, err_code) = memory::decode_cleat_call_result(result);
         if err_code != 0 {
-            let err_msg = memory::read_result(&resp_buf, response_len);
+            let err_msg = memory::host_message_or(&resp_buf, response_len, format!("plugin_call(plugin=\"{}\", function=\"{}\") failed: host error code {}.", plugin_name, function_name, err_code));
             return (String::new(), Some(err_msg));
         }
         let resp = memory::read_result(&resp_buf, response_len);
@@ -1275,14 +1314,21 @@ impl HostCalls {
     /// Set the virtual object scope. Returns the previous scope.
     /// Mirrors Go's SetScope.
     pub fn set_scope(&self, object_type: &str, instance_key: &str) -> String {
-        let mut prev_buf = vec![0u8; memory::OUT_BUF_SIZE as usize];
+        let mut prev_buf = vec![0u8; memory::out_buf_cap() as usize];
         let result = unsafe {
             imports::cleat_set_scope(
                 object_type.as_ptr(), object_type.len() as u32,
                 instance_key.as_ptr(), instance_key.len() as u32,
-                prev_buf.as_mut_ptr(), memory::OUT_BUF_SIZE,
+                prev_buf.as_mut_ptr(), memory::out_buf_cap(),
             )
         };
+        // The host refuses a scope taken by a defer segment's workflow body
+        // (cleat#4079 audit). This function has no error channel, so the stop goes
+        // through suspend() inside stop_requested, which is what still ends the
+        // segment when the body ignores the return.
+        if stop_requested(result) {
+            return String::new();
+        }
         let (prev_len, _err_code) = memory::decode_simple_result(result);
         if prev_len > 0 {
             memory::read_result(&prev_buf, prev_len)
@@ -1294,12 +1340,12 @@ impl HostCalls {
     /// Get the current virtual object scope.
     /// Mirrors Go's GetScope.
     pub fn get_scope(&self) -> (String, String) {
-        let mut obj_type_buf = vec![0u8; memory::OUT_BUF_SIZE as usize];
-        let mut inst_key_buf = vec![0u8; memory::OUT_BUF_SIZE as usize];
+        let mut obj_type_buf = vec![0u8; memory::out_buf_cap() as usize];
+        let mut inst_key_buf = vec![0u8; memory::out_buf_cap() as usize];
         let result = unsafe {
             imports::cleat_get_scope(
-                obj_type_buf.as_mut_ptr(), memory::OUT_BUF_SIZE,
-                inst_key_buf.as_mut_ptr(), memory::OUT_BUF_SIZE,
+                obj_type_buf.as_mut_ptr(), memory::out_buf_cap(),
+                inst_key_buf.as_mut_ptr(), memory::out_buf_cap(),
             )
         };
         let (obj_type_len, inst_key_len) = memory::decode_get_scope_result(result);
@@ -1320,12 +1366,12 @@ impl HostCalls {
     /// Mirrors Go's ClearScope.
     pub fn clear_scope(&self) -> String {
         // Clear scope by setting it to empty strings.
-        let mut prev_buf = vec![0u8; memory::OUT_BUF_SIZE as usize];
+        let mut prev_buf = vec![0u8; memory::out_buf_cap() as usize];
         let result = unsafe {
             imports::cleat_set_scope(
                 std::ptr::null(), 0u32,
                 std::ptr::null(), 0u32,
-                prev_buf.as_mut_ptr(), memory::OUT_BUF_SIZE,
+                prev_buf.as_mut_ptr(), memory::out_buf_cap(),
             )
         };
         let (prev_len, _err_code) = memory::decode_simple_result(result);
@@ -1339,11 +1385,11 @@ impl HostCalls {
     /// Generate a deterministic UUID from a seed.
     /// Mirrors Go's UUID.
     pub fn uuid(&self, seed: &str) -> String {
-        let mut uuid_buf = vec![0u8; memory::OUT_BUF_SIZE as usize];
+        let mut uuid_buf = vec![0u8; memory::out_buf_cap() as usize];
         let result = unsafe {
             imports::cleat_uuid(
                 seed.as_ptr(), seed.len() as u32,
-                uuid_buf.as_mut_ptr(), memory::OUT_BUF_SIZE,
+                uuid_buf.as_mut_ptr(), memory::out_buf_cap(),
             )
         };
         let (uuid_len, _err_code) = memory::decode_simple_result(result);
@@ -1356,9 +1402,9 @@ impl HostCalls {
 
     /// Get the current workflow ID.
     pub fn workflow_id(&self) -> String {
-        let mut buf = vec![0u8; memory::OUT_BUF_SIZE as usize];
+        let mut buf = vec![0u8; memory::out_buf_cap() as usize];
         let result = unsafe {
-            imports::cleat_workflow_id(buf.as_mut_ptr(), memory::OUT_BUF_SIZE)
+            imports::cleat_workflow_id(buf.as_mut_ptr(), memory::out_buf_cap())
         };
         let (id_len, _err_code) = memory::decode_simple_result(result);
         if id_len > 0 {
@@ -1370,9 +1416,9 @@ impl HostCalls {
 
     /// Get the current run ID.
     pub fn run_id(&self) -> String {
-        let mut buf = vec![0u8; memory::OUT_BUF_SIZE as usize];
+        let mut buf = vec![0u8; memory::out_buf_cap() as usize];
         let result = unsafe {
-            imports::cleat_run_id(buf.as_mut_ptr(), memory::OUT_BUF_SIZE)
+            imports::cleat_run_id(buf.as_mut_ptr(), memory::out_buf_cap())
         };
         let (id_len, _err_code) = memory::decode_simple_result(result);
         if id_len > 0 {
@@ -1390,6 +1436,12 @@ impl HostCalls {
                 value.as_ptr(), value.len() as u32,
             )
         };
+        // The host refuses this call in a defer segment (cleat#4079): settling a promise is an effect another run may be
+        // waiting on. Ask BEFORE decoding: decode_simple_result reads errCode from the low byte, where a stop is 0, an
+        // ordinary success, so the guest would report the promise settled.
+        if stop_requested(result) {
+            return Err("cleat: host refused this call -- the workflow is running its defer phase".to_string());
+        }
         let (_extra, err_code) = memory::decode_simple_result(result);
         if err_code != 0 {
             return Err(format!("resolve_promise(promise_id=\"{}\") failed: host error code {}. Check that the promise ID is valid.", promise_id, err_code));
@@ -1405,6 +1457,12 @@ impl HostCalls {
                 error.as_ptr(), error.len() as u32,
             )
         };
+        // The host refuses this call in a defer segment (cleat#4079): settling a promise is an effect another run may be
+        // waiting on. Ask BEFORE decoding: decode_simple_result reads errCode from the low byte, where a stop is 0, an
+        // ordinary success, so the guest would report the promise settled.
+        if stop_requested(result) {
+            return Err("cleat: host refused this call -- the workflow is running its defer phase".to_string());
+        }
         let (_extra, err_code) = memory::decode_simple_result(result);
         if err_code != 0 {
             return Err(format!("reject_promise(promise_id=\"{}\") failed: host error code {}. Check that the promise ID is valid.", promise_id, err_code));
@@ -1479,14 +1537,14 @@ impl HostCalls {
         timezone: &str,
         input_json: &str,
     ) -> Result<String, String> {
-        let mut buf = vec![0u8; memory::OUT_BUF_SIZE as usize];
+        let mut buf = vec![0u8; memory::out_buf_cap() as usize];
         let result = unsafe {
             imports::cleat_schedule_cron(
                 workflow_name.as_ptr(), workflow_name.len() as u32,
                 cron_expr.as_ptr(), cron_expr.len() as u32,
                 timezone.as_ptr(), timezone.len() as u32,
                 input_json.as_ptr(), input_json.len() as u32,
-                buf.as_mut_ptr(), memory::OUT_BUF_SIZE,
+                buf.as_mut_ptr(), memory::out_buf_cap(),
             )
         };
         // Ask BEFORE decoding. A cron schedule is new work with the longest
@@ -1513,29 +1571,35 @@ impl HostCalls {
             // cleat_fetch, plugin_call and plugin_call_streaming. Following the
             // majority would have been the easy call and the wrong one; the
             // remaining 15 are tracked separately.
-            let msg = memory::read_result(&buf, result_len);
-            if msg.is_empty() {
-                return Err(format!(
-                    "schedule_cron(workflow_name=\"{}\", cron_expr=\"{}\") failed: host error code {}.",
-                    workflow_name, cron_expr, err_code
-                ));
-            }
-            return Err(msg);
+            // host_message_or, NOT read_result plus an is_empty() check: on a
+            // bad-parameter refusal the host writes nothing, yet the sentinel
+            // still decodes to a length of 4294967295, so read_result clamps it
+            // to the (zero-filled) buffer and returns 64 KiB of NULs -- which is
+            // non-empty, so the fallback below it was unreachable on exactly the
+            // path it existed for. cleat#4035.
+            return Err(memory::host_message_or(&buf, result_len, format!(
+                "schedule_cron(workflow_name=\"{}\", cron_expr=\"{}\") failed: host error code {}.",
+                workflow_name, cron_expr, err_code
+            )));
         }
         Ok(memory::read_result(&buf, result_len))
     }
 
     /// Remove a previously registered cron schedule by its ID.
     ///
-    /// No stop-bit check, and that is deliberate rather than an omission:
-    /// `DeleteCron` does not call `stopBeforeNewWork` host-side, because
-    /// removing a schedule is not new work. Verified against
-    /// `engine/schedules.go` on 2026-09-07; `ScheduleCron` is the only one of
-    /// the three that can be refused.
+    /// The host refuses this in a defer segment's workflow body, past the end
+    /// of its recorded history, and marks the refusal with bit 31 (cleat#4083).
+    /// It was unguarded until then, and a terminated workflow's segment deleted
+    /// a schedule the workflow had not reached. The refusal reads as error code
+    /// 0 in this layout, which is a SUCCESSFUL delete, so the stop is tested
+    /// before the result is decoded. A defer body's own call is not refused.
     pub fn delete_cron(&self, schedule_id: &str) -> Result<(), String> {
         let result = unsafe {
             imports::cleat_delete_cron(schedule_id.as_ptr(), schedule_id.len() as u32)
         };
+        if stop_requested(result) {
+            return Err("cleat: host refused this call -- the workflow is running its defer phase".to_string());
+        }
         let (_extra, err_code) = memory::decode_simple_result(result);
         if err_code != 0 {
             return Err(format!(
@@ -1548,20 +1612,24 @@ impl HostCalls {
 
     /// List all registered cron schedules, as a JSON array.
     ///
-    /// See `delete_cron` for why there is no stop-bit check here either.
+    /// No stop-bit check, deliberately: this is a read that changes no schedule,
+    /// so the host never refuses it (cleat#4083 left it unguarded on purpose).
+    /// Unlike `delete_cron`, a refusal is not possible.
     pub fn list_crons(&self) -> Result<String, String> {
-        let mut buf = vec![0u8; memory::OUT_BUF_SIZE as usize];
+        let mut buf = vec![0u8; memory::out_buf_cap() as usize];
         let result = unsafe {
-            imports::cleat_list_crons(buf.as_mut_ptr(), memory::OUT_BUF_SIZE)
+            imports::cleat_list_crons(buf.as_mut_ptr(), memory::out_buf_cap())
         };
         let (result_len, err_code) = memory::decode_simple_result(result);
         if err_code != 0 {
-            // The host's message, not the code -- see schedule_cron above.
-            let msg = memory::read_result(&buf, result_len);
-            if msg.is_empty() {
-                return Err(format!("list_crons() failed: host error code {}.", err_code));
-            }
-            return Err(msg);
+            // The host's message, not the code -- and host_message_or rather
+            // than read_result, for the reason spelled out in schedule_cron:
+            // an unwritten buffer decodes to a bogus length and reads back as
+            // 64 KiB of NULs. cleat#4035.
+            return Err(memory::host_message_or(&buf, result_len, format!(
+                "list_crons() failed: host error code {}.",
+                err_code
+            )));
         }
         Ok(memory::read_result(&buf, result_len))
     }
@@ -1617,12 +1685,12 @@ impl HostCalls {
     /// The started workflow is NOT a child: this workflow does not await it, is
     /// not its parent, and completing or being cancelled does not affect it.
     pub fn start_detached(&self, name: &str, input_json: &str) -> Result<String, String> {
-        let mut run_id_buf = vec![0u8; memory::OUT_BUF_SIZE as usize];
+        let mut run_id_buf = vec![0u8; memory::out_buf_cap() as usize];
         let result = unsafe {
             imports::cleat_start_detached(
                 name.as_ptr(), name.len() as u32,
                 input_json.as_ptr(), input_json.len() as u32,
-                run_id_buf.as_mut_ptr(), memory::OUT_BUF_SIZE,
+                run_id_buf.as_mut_ptr(), memory::out_buf_cap(),
             )
         };
         // The host refuses new work in a defer segment and marks the refusal
@@ -1643,11 +1711,11 @@ impl HostCalls {
     /// Await all children workflows. Returns aggregated JSON results.
     pub fn await_all_children(&self, run_ids: &[&str]) -> Result<String, CallError> {
         let run_ids_json = serde_json::to_string(run_ids).map_err(|e| CallError::Failed(format!("serialize run_ids: {}", e)))?;
-        let mut buf = vec![0u8; memory::OUT_BUF_SIZE as usize];
+        let mut buf = vec![0u8; memory::out_buf_cap() as usize];
         let result = unsafe {
             imports::cleat_await_all_children(
                 run_ids_json.as_ptr(), run_ids_json.len() as u32,
-                buf.as_mut_ptr(), memory::OUT_BUF_SIZE,
+                buf.as_mut_ptr(), memory::out_buf_cap(),
             )
         };
         if result == memory::SUSPEND_SENTINEL {
@@ -1663,11 +1731,11 @@ impl HostCalls {
 
     /// Poll a single child workflow for completion without suspending. Returns (result, error).
     pub fn poll_child(&self, run_id: &str) -> (String, Option<String>) {
-        let mut result_buf = vec![0u8; memory::OUT_BUF_SIZE as usize];
+        let mut result_buf = vec![0u8; memory::out_buf_cap() as usize];
         let r = unsafe {
             imports::cleat_poll_child(
                 run_id.as_ptr(), run_id.len() as u32,
-                result_buf.as_mut_ptr(), memory::OUT_BUF_SIZE,
+                result_buf.as_mut_ptr(), memory::out_buf_cap(),
             )
         };
         let (result_len, err_code) = memory::decode_simple_result(r);
@@ -1681,11 +1749,11 @@ impl HostCalls {
     /// Await any of the given child workflows to complete. Returns the result JSON.
     pub fn await_any_child(&self, run_ids: &[&str]) -> Result<String, CallError> {
         let run_ids_json = serde_json::to_string(run_ids).map_err(|e| CallError::Failed(format!("serialize run_ids: {}", e)))?;
-        let mut buf = vec![0u8; memory::OUT_BUF_SIZE as usize];
+        let mut buf = vec![0u8; memory::out_buf_cap() as usize];
         let result = unsafe {
             imports::cleat_await_any_child(
                 run_ids_json.as_ptr(), run_ids_json.len() as u32,
-                buf.as_mut_ptr(), memory::OUT_BUF_SIZE,
+                buf.as_mut_ptr(), memory::out_buf_cap(),
             )
         };
         if result == memory::SUSPEND_SENTINEL {
@@ -1795,7 +1863,7 @@ impl HostCalls {
         let non_retryable_json = serde_json::to_string(&retry_policy.non_retryable_errors)
             .map_err(|e| CallError::Failed(format!("serialize non-retryable errors: {}", e)))?;
         let backoff_coefficient_100x = (retry_policy.backoff_multiplier * 100.0) as i64;
-        let mut resp_buf = vec![0u8; memory::OUT_BUF_SIZE as usize];
+        let mut resp_buf = vec![0u8; memory::out_buf_cap() as usize];
         let result = unsafe {
             imports::cleat_call_with_retry(
                 service.as_ptr(), service.len() as u32,
@@ -1806,7 +1874,7 @@ impl HostCalls {
                 backoff_coefficient_100x,
                 retry_policy.maximum_interval_ms as i64,
                 non_retryable_json.as_ptr(), non_retryable_json.len() as u32,
-                resp_buf.as_mut_ptr(), memory::OUT_BUF_SIZE,
+                resp_buf.as_mut_ptr(), memory::out_buf_cap(),
             )
         };
         let (response_len, call_error_code, err_code) = memory::decode_cleat_call_result(result);
@@ -1816,7 +1884,7 @@ impl HostCalls {
             if call_error_code == CALL_ERROR_RETRY_POLICY_TOO_LONG {
                 return Err(CallError::RetryPolicyTooLong);
             }
-            let err_msg = memory::read_result(&resp_buf, response_len);
+            let err_msg = memory::host_message_or(&resp_buf, response_len, format!("cleat_call_with_retry(service=\"{}\", operation=\"{}\") failed: host error code {}.", service, operation, err_code));
             return Err(CallError::Failed(err_msg));
         }
         let resp = memory::read_result(&resp_buf, response_len);
@@ -1896,14 +1964,14 @@ impl HostCalls {
     pub fn cleat_fetch(
         &self, method: &str, url: &str, headers: &str, body: &str,
     ) -> Result<FetchResult, String> {
-        let mut resp_buf = vec![0u8; memory::OUT_BUF_SIZE as usize];
+        let mut resp_buf = vec![0u8; memory::out_buf_cap() as usize];
         let result = unsafe {
             imports::cleat_fetch(
                 method.as_ptr(), method.len() as u32,
                 url.as_ptr(), url.len() as u32,
                 headers.as_ptr(), headers.len() as u32,
                 body.as_ptr(), body.len() as u32,
-                resp_buf.as_mut_ptr(), memory::OUT_BUF_SIZE,
+                resp_buf.as_mut_ptr(), memory::out_buf_cap(),
             )
         };
         // The host refuses new work in a defer segment and marks the refusal
@@ -1914,9 +1982,14 @@ impl HostCalls {
             return Err("cleat: host refused this call -- the workflow is running its defer phase".to_string());
         }
 
-        let (response_len, _call_error_code, err_code) = memory::decode_cleat_call_result(result);
+        // cleat_fetch is packed with packSimpleResult (engine/memory.go:427), which puts the response length at bits
+        // 32-63 -- so it is decoded with decode_simple_result, not decode_cleat_call_result, which reads bits 40-63.
+        // Reading it the durable way returned 0 for every response under 256 bytes and a truncated length above that,
+        // so every Rust guest's fetch parsed an empty buffer and failed with "parse fetch response: EOF ...". The other
+        // six wrappers that use the durable decoder call hosts that really do pack durably; this one did not.
+        let (response_len, err_code) = memory::decode_simple_result(result);
         if err_code != 0 {
-            let err_msg = memory::read_result(&resp_buf, response_len);
+            let err_msg = memory::host_message_or(&resp_buf, response_len, format!("cleat_fetch(method=\"{}\", url=\"{}\") failed: host error code {}.", method, url, err_code));
             return Err(err_msg);
         }
         let resp = memory::read_result(&resp_buf, response_len);
@@ -1991,6 +2064,10 @@ impl HostCalls {
                 new_version,
             )
         };
+        // cleat#4159: the host refuses a continuation in a defer segment. Read as a plain error code a stop is a success.
+        if stop_requested(result) {
+            return Err("cleat: host refused this call -- the workflow is running its defer phase".to_string());
+        }
         let (_extra, err_code) = memory::decode_simple_result(result);
         if err_code != 0 {
             return Err(format!("continue_as_new_versioned(...) failed: host error code {}. Check that the input JSON is valid.", err_code));
@@ -2005,14 +2082,14 @@ impl HostCalls {
     pub fn cleat_call_heartbeat(
         &self, service: &str, operation: &str, request_json: &str, heartbeat_interval_ms: i64,
     ) -> (String, Option<String>) {
-        let mut resp_buf = vec![0u8; memory::OUT_BUF_SIZE as usize];
+        let mut resp_buf = vec![0u8; memory::out_buf_cap() as usize];
         let result = unsafe {
             imports::cleat_call_heartbeat(
                 service.as_ptr(), service.len() as u32,
                 operation.as_ptr(), operation.len() as u32,
                 request_json.as_ptr(), request_json.len() as u32,
                 heartbeat_interval_ms,
-                resp_buf.as_mut_ptr(), memory::OUT_BUF_SIZE,
+                resp_buf.as_mut_ptr(), memory::out_buf_cap(),
             )
         };
         // The host refuses new work in a defer segment and marks the refusal
@@ -2025,7 +2102,7 @@ impl HostCalls {
 
         let (response_len, _call_error_code, err_code) = memory::decode_cleat_call_result(result);
         if err_code != 0 {
-            let err_msg = memory::read_result(&resp_buf, response_len);
+            let err_msg = memory::host_message_or(&resp_buf, response_len, format!("cleat_call_heartbeat(service=\"{}\", operation=\"{}\") failed: host error code {}.", service, operation, err_code));
             return (String::new(), Some(err_msg));
         }
         let resp = memory::read_result(&resp_buf, response_len);
@@ -2048,12 +2125,15 @@ impl HostCalls {
 
     /// Record a non-deterministic computation result in event history on first
     /// execution, returning the cached result on replay. Mirrors Go's SideEffect.
+    ///
+    /// The value was computed BEFORE the host could be asked, so this cannot stop the computation running again on replay (the host now
+    /// returns the recorded value instead of failing the replay). To freeze a value, use [`Self::side_effect_with`] (cleat#4113).
     pub fn side_effect(&self, computed_result: &str) -> Result<String, String> {
-        let mut out_buf = vec![0u8; memory::OUT_BUF_SIZE as usize];
+        let mut out_buf = vec![0u8; memory::out_buf_cap() as usize];
         let result = unsafe {
             imports::cleat_side_effect(
                 computed_result.as_ptr(), computed_result.len() as u32,
-                out_buf.as_mut_ptr(), memory::OUT_BUF_SIZE,
+                out_buf.as_mut_ptr(), memory::out_buf_cap(),
             )
         };
         // Bit 31 before any field. IMPROVEMENT-PLAN 3.300.
@@ -2069,12 +2149,57 @@ impl HostCalls {
     }
 
     /// Typed version of side_effect using serde for serialization/deserialization.
+    ///
+    /// Takes an already computed value, so it cannot freeze anything: the computation ran before the host could be asked. Prefer
+    /// [`Self::side_effect_typed_with`].
     pub fn side_effect_typed<T: serde::Serialize, R: serde::de::DeserializeOwned>(
         &self, computed: &T,
     ) -> Result<R, String> {
         let input_json = serde_json::to_string(computed).map_err(|e| format!("serialize input: {}", e))?;
         let result_json = self.side_effect(&input_json)?;
         serde_json::from_str(&result_json).map_err(|e| format!("deserialize result: {}", e))
+    }
+
+    /// Ask the host whether the history already holds the value of the side effect at this step (cleat#4113, ABI 2.43a).
+    ///
+    /// `Ok(Some(v))`: it does, the step is consumed, and the caller must NOT run its function or call [`Self::side_effect`].
+    /// `Ok(None)`: nothing is recorded and nothing changed. `Err`: a refused call (the workflow is stopping) or a replay divergence.
+    pub fn side_effect_recorded(&self) -> Result<Option<String>, String> {
+        let mut out_buf = vec![0u8; memory::out_buf_cap() as usize];
+        let result = unsafe {
+            imports::cleat_side_effect_recorded(out_buf.as_mut_ptr(), memory::out_buf_cap())
+        };
+        // Bit 31 before any field: a fresh lookup in a stopped workflow is refused so the function never runs.
+        if stop_requested(result) {
+            return Err("cleat: host refused this call -- the workflow is running its defer phase".to_string());
+        }
+        let (out_len, status) = memory::decode_simple_result(result);
+        match status {
+            0 => Ok(Some(memory::read_result(&out_buf, out_len))),
+            2 => Ok(None),
+            code => Err(memory::host_message_or(&out_buf, out_len, format!("side_effect_recorded() failed: host status {}.", code))),
+        }
+    }
+
+    /// Freeze a value: call `f` once, on first execution, and record its result; on every replay return the recorded value WITHOUT calling
+    /// `f` (cleat#4113). `f` must not make host calls: each consumes a step of the history.
+    ///
+    /// This is [`Self::side_effect`] done in the order that works: ask the host first, compute only if nothing is recorded.
+    pub fn side_effect_with<F: FnOnce() -> String>(&self, f: F) -> Result<String, String> {
+        if let Some(recorded) = self.side_effect_recorded()? {
+            return Ok(recorded);
+        }
+        self.side_effect(&f())
+    }
+
+    /// [`Self::side_effect_with`] with serde on both sides.
+    pub fn side_effect_typed_with<R, F>(&self, f: F) -> Result<R, String>
+    where
+        R: serde::Serialize + serde::de::DeserializeOwned,
+        F: FnOnce() -> R,
+    {
+        let json = self.side_effect_with(|| serde_json::to_string(&f()).unwrap_or_else(|e| format!("\"__serialize_error: {}\"", e)))?;
+        serde_json::from_str(&json).map_err(|e| format!("deserialize result: {}", e))
     }
 
     // ── R1.4: plugin_call_streaming ──────────────────────────────────────
@@ -2084,13 +2209,13 @@ impl HostCalls {
     pub fn plugin_call_streaming(
         &self, plugin_name: &str, function_name: &str, input_json: &str,
     ) -> (String, Option<String>) {
-        let mut resp_buf = vec![0u8; memory::OUT_BUF_SIZE as usize];
+        let mut resp_buf = vec![0u8; memory::out_buf_cap() as usize];
         let result = unsafe {
             imports::cleat_plugin_call_streaming(
                 plugin_name.as_ptr(), plugin_name.len() as u32,
                 function_name.as_ptr(), function_name.len() as u32,
                 input_json.as_ptr(), input_json.len() as u32,
-                resp_buf.as_mut_ptr(), memory::OUT_BUF_SIZE,
+                resp_buf.as_mut_ptr(), memory::out_buf_cap(),
             )
         };
         // The host refuses new work in a defer segment and marks the refusal
@@ -2103,7 +2228,7 @@ impl HostCalls {
 
         let (response_len, _call_error_code, err_code) = memory::decode_cleat_call_result(result);
         if err_code != 0 {
-            let err_msg = memory::read_result(&resp_buf, response_len);
+            let err_msg = memory::host_message_or(&resp_buf, response_len, format!("plugin_call_streaming(plugin=\"{}\", function=\"{}\") failed: host error code {}.", plugin_name, function_name, err_code));
             return (String::new(), Some(err_msg));
         }
         let resp = memory::read_result(&resp_buf, response_len);
@@ -2130,11 +2255,11 @@ impl HostCalls {
     /// output buffer.
     #[cfg(target_arch = "wasm32")]
     pub fn json_parse(&self, json: &str) -> Option<String> {
-        let mut out_buf = vec![0u8; memory::OUT_BUF_SIZE as usize];
+        let mut out_buf = vec![0u8; memory::out_buf_cap() as usize];
         let result = unsafe {
             imports::cleat_json_parse(
                 json.as_ptr(), json.len() as u32,
-                out_buf.as_mut_ptr(), memory::OUT_BUF_SIZE,
+                out_buf.as_mut_ptr(), memory::out_buf_cap(),
             )
         };
         let (written, err_code) = memory::decode_simple_result(result);
@@ -2160,11 +2285,11 @@ impl HostCalls {
     /// output buffer.
     #[cfg(target_arch = "wasm32")]
     pub fn json_stringify(&self, value: &str) -> Option<String> {
-        let mut out_buf = vec![0u8; memory::OUT_BUF_SIZE as usize];
+        let mut out_buf = vec![0u8; memory::out_buf_cap() as usize];
         let result = unsafe {
             imports::cleat_json_stringify(
                 value.as_ptr(), value.len() as u32,
-                out_buf.as_mut_ptr(), memory::OUT_BUF_SIZE,
+                out_buf.as_mut_ptr(), memory::out_buf_cap(),
             )
         };
         let (written, err_code) = memory::decode_simple_result(result);
@@ -2252,6 +2377,28 @@ mod stop_bit_tests {
         assert!(crate::is_suspended(), "stop_requested must route through suspend() so the \
             #[cleat_entry] backstop still ends the segment when a workflow body discards the \
             error half of a tuple return");
+    }
+
+    // cleat_fetch is packed with packSimpleResult (length at bits 32-63), and used to be decoded with
+    // decode_cleat_call_result (length at bits 40-63). Every response under 256 bytes therefore decoded as a ZERO length, so the
+    // guest parsed an empty buffer and reported "parse fetch response: EOF while parsing a value". This test DOCUMENTS the two
+    // layouts and states their difference as an assertion; it does NOT catch a wrapper that uses the wrong decoder (it passes on
+    // the old decoder too), because every wrapper calls an `extern "C"` import that exists only inside a WASM runtime. What goes
+    // red on the old decoder is an end-to-end test of a fetch: tests/typescript/typescript_utilities_test.go.
+    #[test]
+    fn a_simple_result_carries_its_length_at_bits_32_to_63() {
+        for len in [0u32, 1, 40, 255, 256, 1024, 65535] {
+            // What engine/memory.go packSimpleResult(errCode=0, written=len) returns.
+            let packed: i64 = (len as i64) << 32;
+            let (simple_len, err_code) = memory::decode_simple_result(packed);
+            assert_eq!(simple_len, len, "decode_simple_result lost the length of a {}-byte response", len);
+            assert_eq!(err_code, 0);
+
+            // The durable decoder reads bits 40-63, which is len >> 8 -- the defect, stated as an assertion so the two
+            // layouts cannot be confused again without this failing.
+            let (durable_len, _, _) = memory::decode_cleat_call_result(packed);
+            assert_eq!(durable_len, len >> 8, "the durable decoder reads a different field; that is why fetch broke");
+        }
     }
 
     #[test]
@@ -2443,5 +2590,162 @@ mod quorum_conformance {
                 assert_eq!(signal_names, caller_set, "{}: the caller's set was edited", name);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod refused_parameter_tests {
+    //! cleat#4035. Host-side stubs for the externs let the REAL wrappers run in a
+    //! unit test, which is the only way this regression can be asserted: the bug is
+    //! in how each wrapper decodes an error, so a test over a shared helper would
+    //! stay green while any call site reverted.
+    //!
+    //! Every stub writes NOTHING into the caller's buffer and returns errBadParam
+    //! (0xFFFFFFFF_00000001) -- exactly what engine/imports.go returns when its ABI
+    //! wrapper refuses a parameter before the handler runs.
+    //!
+    //! `list_crons` takes no parameter, so it cannot reach that refusal by bad input;
+    //! it is in the table because it decoded the payload the same way and the host
+    //! can still refuse a call it will not serve. The other seven are reached by any
+    //! parameter the wrapper refuses.
+
+    use super::*;
+
+    const ERR_BAD_PARAM: i64 = 0xFFFFFFFF_00000001u64 as i64;
+
+    #[no_mangle]
+    pub extern "C" fn cleat_schedule_cron(
+        _a: *const u8, _b: u32, _c: *const u8, _d: u32, _e: *const u8, _f: u32,
+        _g: *const u8, _h: u32, _out: *mut u8, _out_max: u32,
+    ) -> i64 { ERR_BAD_PARAM }
+
+    #[no_mangle]
+    pub extern "C" fn cleat_list_crons(_out: *mut u8, _out_max: u32) -> i64 { ERR_BAD_PARAM }
+
+    #[no_mangle]
+    pub extern "C" fn cleat_call(
+        _a: *const u8, _b: u32, _c: *const u8, _d: u32, _e: *const u8, _f: u32,
+        _out: *mut u8, _out_max: u32,
+    ) -> i64 { ERR_BAD_PARAM }
+
+    #[no_mangle]
+    pub extern "C" fn cleat_call_retry(
+        _a: *const u8, _b: u32, _c: *const u8, _d: u32, _e: *const u8, _f: u32,
+        _g: i64, _h: i64, _i: i64, _j: i64, _k: *const u8, _l: u32,
+        _out: *mut u8, _out_max: u32,
+    ) -> i64 { ERR_BAD_PARAM }
+
+    #[no_mangle]
+    pub extern "C" fn cleat_call_heartbeat(
+        _a: *const u8, _b: u32, _c: *const u8, _d: u32, _e: *const u8, _f: u32,
+        _g: i64, _out: *mut u8, _out_max: u32,
+    ) -> i64 { ERR_BAD_PARAM }
+
+    #[no_mangle]
+    pub extern "C" fn plugin_call(
+        _a: *const u8, _b: u32, _c: *const u8, _d: u32, _e: *const u8, _f: u32,
+        _out: *mut u8, _out_max: u32,
+    ) -> i64 { ERR_BAD_PARAM }
+
+    #[no_mangle]
+    pub extern "C" fn plugin_call_streaming(
+        _a: *const u8, _b: u32, _c: *const u8, _d: u32, _e: *const u8, _f: u32,
+        _out: *mut u8, _out_max: u32,
+    ) -> i64 { ERR_BAD_PARAM }
+
+    #[no_mangle]
+    pub extern "C" fn cleat_fetch(
+        _a: *const u8, _b: u32, _c: *const u8, _d: u32, _e: *const u8, _f: u32,
+        _g: *const u8, _h: u32, _out: *mut u8, _out_max: u32,
+    ) -> i64 { ERR_BAD_PARAM }
+
+    /// Every call site that decoded the error payload by hand before cleat#4035.
+    /// Each entry returns the wrapper's error text.
+    #[test]
+    fn a_refused_parameter_never_returns_the_unwritten_buffer() {
+        type Case = (&'static str, Box<dyn Fn() -> String>);
+        let cases: Vec<Case> = vec![
+            ("schedule_cron", Box::new(|| {
+                HostCalls.schedule_cron("", "0 0 1 1 *", "", "{}").expect_err("refused")
+            })),
+            ("list_crons", Box::new(|| HostCalls.list_crons().expect_err("refused"))),
+            ("cleat_call", Box::new(|| {
+                HostCalls.cleat_call("", "", "{}").1.expect("refused")
+            })),
+            ("cleat_call_with_retry", Box::new(|| {
+                let r: Result<serde_json::Value, _> = HostCalls.cleat_call_with_host_retry(
+                    "", "", &serde_json::json!({}), &RetryPolicy{max_attempts:1, initial_interval_ms:1, backoff_multiplier:1.0, maximum_interval_ms:1, non_retryable_errors: vec![]});
+                // The MESSAGE, not the Debug form: `{:?}` escapes a NUL as `\0`, which
+                // would slip past the NUL count this table is built on.
+                match r { Err(CallError::Failed(m)) => m, _ => panic!("refused") }
+            })),
+            ("cleat_call_heartbeat", Box::new(|| {
+                HostCalls.cleat_call_heartbeat("", "", "{}", 1000).1.expect("refused")
+            })),
+            ("plugin_call", Box::new(|| {
+                HostCalls.plugin_call("", "", "{}").1.expect("refused")
+            })),
+            ("plugin_call_streaming", Box::new(|| {
+                HostCalls.plugin_call_streaming("", "", "{}").1.expect("refused")
+            })),
+            ("cleat_fetch", Box::new(|| {
+                HostCalls.cleat_fetch("GET", "", "", "").expect_err("refused")
+            })),
+        ];
+
+        // Collect every case rather than stopping at the first: a mutation that reverts
+        // one call site must name THAT call, and a table that panics on the first failure
+        // cannot tell a reader which of the eight came back.
+        let mut failures = Vec::new();
+        for (name, call) in cases {
+            let err = call();
+            let nuls = err.chars().filter(|c| *c == '\0').count();
+            if nuls != 0 {
+                failures.push(format!(
+                    "{name}: the error is {} bytes and {nuls} of them are NUL. The wrapper read an \
+                     unwritten buffer because errBadParam's length field decodes to 4294967295 and \
+                     read_result clamps it to the buffer (cleat#4035).",
+                    err.len()
+                ));
+            } else if !err.contains("host error code 1") {
+                failures.push(format!(
+                    "{name}: with no message from the host the error must name the code, got {err:?}"
+                ));
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "{} of 8 call sites still read the unwritten buffer:\n  {}",
+            failures.len(),
+            failures.join("\n  ")
+        );
+    }
+}
+
+#[cfg(test)]
+mod wait_ms_tests {
+    use super::wait_ms;
+    use std::time::Duration;
+
+    // cleat#4144: a positive wait is never 0 and a huge one never wraps.
+    #[test]
+    fn a_positive_wait_rounds_up_and_is_never_zero() {
+        assert_eq!(wait_ms(Duration::from_nanos(1)), 1);
+        assert_eq!(wait_ms(Duration::from_micros(400)), 1);
+        assert_eq!(wait_ms(Duration::from_millis(1)), 1);
+        assert_eq!(wait_ms(Duration::from_nanos(1_000_001)), 2);
+        assert_eq!(wait_ms(Duration::from_millis(1500)), 1500);
+    }
+
+    #[test]
+    fn zero_stays_zero() {
+        assert_eq!(wait_ms(Duration::ZERO), 0);
+    }
+
+    #[test]
+    fn a_wait_too_long_for_the_host_saturates_instead_of_wrapping() {
+        assert_eq!(wait_ms(Duration::MAX), i64::MAX);
+        // The old expression, for the record: its low 64 bits are not i64::MAX, and are not even positive for this value.
+        assert_ne!(Duration::MAX.as_millis() as i64, i64::MAX);
     }
 }

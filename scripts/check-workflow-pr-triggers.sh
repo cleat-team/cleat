@@ -92,6 +92,59 @@ for p in paths:
                           as_list(pr.get("branches")),
                           types or ["<default: opened, synchronize, reopened>"]))
 
+# SECOND RULE (cleat#3809). Subscribing to `edited` has a cost beyond the extra
+# run: `github.ref` is identical for every pull_request activity type, so an
+# `edited` run for a BODY edit shares a concurrency group with the run it
+# follows, and with `cancel-in-progress` it cancels it. A cancelled run renders
+# as a failure. ci.yml gives such a run its own group (cleat#1688); the two
+# upgrade workflows did not, and on release/v0.6.0 their contexts are required.
+# Any workflow that lists `edited`, cancels in progress, and does not mention
+# `github.event.action == 'edited'` and `!github.event.changes.base` in its group is the same defect. A job-level
+# `concurrency:` block is not read; none exists today.
+import re, yaml
+CARVE_ACTION = re.compile(r"github\.event\.action\s*==\s*'edited'")
+CARVE_BASE = re.compile(r"!\s*github\.event\.changes\.base")
+def has_carve_out(group):
+    # Both halves: without the base test an `edited` that RETARGETS the PR would
+    # also get its own group and could not supersede the run it re-evaluates.
+    return bool(CARVE_ACTION.search(group)) and bool(CARVE_BASE.search(group))
+examined, cancelling, second_failed = 0, [], False
+for p in paths:
+    with open(p) as fh:
+        doc = yaml.safe_load(fh) or {}
+    pr = load_triggers(p).get("pull_request")
+    if not isinstance(pr, dict) or "edited" not in [str(t) for t in as_list(pr.get("types"))]:
+        continue
+    conc = doc.get("concurrency")
+    if not isinstance(conc, dict):
+        continue  # no group, or a bare string group: nothing cancels
+    cancel = conc.get("cancel-in-progress")
+    if cancel is None or cancel is False or str(cancel).strip().lower() == "false":
+        continue  # a literal opt-out; an expression is assumed to cancel
+    examined += 1
+    if not has_carve_out(str(conc.get("group", ""))):
+        cancelling.append(os.path.basename(p))
+
+if examined == 0:
+    print("UNMEASURED: no workflow both lists `edited` and cancels in progress, so "
+          "the second rule examined nothing. ci.yml and the two upgrade workflows "
+          "do today; either that changed or the parse is broken.\n"
+          "(this is a failure of the check, not a finding about cleat)",
+          file=sys.stderr)
+    sys.exit(2)
+
+if cancelling:
+    print(f"{len(cancelling)} of {examined} workflow(s) that list `edited` and cancel "
+          f"in progress let a body edit cancel the run it follows (cleat#3809):\n",
+          file=sys.stderr)
+    for name in cancelling:
+        print(f"    {name}", file=sys.stderr)
+    print("\nGive an `edited` event that did not change the base its own group: "
+          "see the concurrency block in ci.yml, whose group line carries "
+          "`github.event.action == 'edited' && !github.event.changes.base && "
+          "github.run_id`.\n", file=sys.stderr)
+    second_failed = True
+
 if checked == 0:
     print("ERROR: no workflow filters pull_request by branch, so this guard "
           "examined nothing. Either the filters were removed -- in which case "
@@ -110,5 +163,9 @@ if offenders:
           file=sys.stderr)
     sys.exit(1)
 
+if second_failed:
+    sys.exit(1)
+
 print(f"OK: all {checked} branch-filtered workflow(s) trigger on `edited`.")
+print(f"OK: all {examined} workflow(s) that list `edited` and cancel in progress give a body edit its own group.")
 PY

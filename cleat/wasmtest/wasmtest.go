@@ -529,12 +529,17 @@ func defaultResponse(service, operation string) string {
 //   - WASM compilation via `go build`
 //   - Convenience Execute/Replay methods
 type WasmTestEnv struct {
-	t      *testing.T
+	t *testing.T
+	// ctx is the env's lifetime: cancelled by Close, and with NO deadline. A deadline
+	// here was shared by every Execute and Replay the env ever made, so a test with
+	// two heavy calls spent one budget twice. Each call gets its own, from callCtx.
 	ctx    context.Context
 	cancel context.CancelFunc
-	rt     *engine.Runtime
-	caller *mockCaller
-	engine *engine.Engine
+	// callTimeout bounds ONE Execute or Replay. See WithCallTimeout.
+	callTimeout time.Duration
+	rt          *engine.Runtime
+	caller      *mockCaller
+	engine      *engine.Engine
 
 	pluginRegistry *engine.PluginRegistry
 
@@ -570,6 +575,34 @@ func WithDefVersion(v int) WasmTestEnvOption {
 	return func(e *WasmTestEnv) { e.DefVersion = v }
 }
 
+// DefaultCallTimeout bounds one Execute or Replay unless WithCallTimeout says otherwise.
+const DefaultCallTimeout = 30 * time.Second
+
+// WithCallTimeout sets the time ONE Execute or Replay may take, counted from the
+// call and including everything the engine does before the guest starts (for a
+// Python component, compiling it, which the native component path repeats on every
+// call: cleat#3748). The default is DefaultCallTimeout.
+//
+// It is a bound per call, not for the env: the env used to carry one 30s deadline
+// for its whole life, so a test that made two heavy calls (Execute, then Replay of a
+// 19 MB component) shared it, and on a slow runner the second ran with none of it
+// left and was reported as a 1ms instance-timeout trap (cleat#3746).
+//
+// A guest that hangs still fails, after this long; what changes is that a slow
+// first call no longer starves the second.
+func WithCallTimeout(d time.Duration) WasmTestEnvOption {
+	return func(e *WasmTestEnv) { e.callTimeout = d }
+}
+
+// callCtx returns a context for one Execute or Replay, with the env's per-call bound.
+func (e *WasmTestEnv) callCtx() (context.Context, context.CancelFunc) {
+	d := e.callTimeout
+	if d <= 0 {
+		d = DefaultCallTimeout
+	}
+	return context.WithTimeout(e.ctx, d)
+}
+
 // WithPluginRegistry sets the plugin registry for plugin host function dispatch.
 func WithPluginRegistry(pr *engine.PluginRegistry) WasmTestEnvOption {
 	return func(e *WasmTestEnv) { e.pluginRegistry = pr }
@@ -580,7 +613,7 @@ func WithPluginRegistry(pr *engine.PluginRegistry) WasmTestEnvOption {
 func NewWasmTestEnv(t *testing.T, opts ...WasmTestEnvOption) *WasmTestEnv {
 	t.Helper()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithCancel(context.Background())
 
 	rt, err := engine.NewRuntime(ctx, 0, 0)
 	if err != nil {
@@ -592,6 +625,7 @@ func NewWasmTestEnv(t *testing.T, opts ...WasmTestEnvOption) *WasmTestEnv {
 		t:                  t,
 		ctx:                ctx,
 		cancel:             cancel,
+		callTimeout:        DefaultCallTimeout,
 		rt:                 rt,
 		caller:             &mockCaller{},
 		SignalStore:        NewInMemorySignalStore(),
@@ -715,7 +749,9 @@ func (e *WasmTestEnv) BuildWasm(t *testing.T, pkgPath string) []byte {
 func (e *WasmTestEnv) Execute(t *testing.T, wasmBytes []byte, entryPoint string, inputJSON string) (string, []engine.EventRecord, error) {
 	t.Helper()
 
-	result, history, suspended, _, _, err := e.engine.Execute(e.ctx, wasmBytes, entryPoint, json.RawMessage(inputJSON))
+	ctx, cancel := e.callCtx()
+	defer cancel()
+	result, history, suspended, _, _, err := e.engine.Execute(ctx, wasmBytes, entryPoint, json.RawMessage(inputJSON))
 	if err != nil {
 		return "", nil, fmt.Errorf("wasmtest: Execute: %w", err)
 	}
@@ -731,7 +767,9 @@ func (e *WasmTestEnv) Execute(t *testing.T, wasmBytes []byte, entryPoint string,
 func (e *WasmTestEnv) Replay(t *testing.T, wasmBytes []byte, entryPoint string, inputJSON string, history []engine.EventRecord) (string, error) {
 	t.Helper()
 
-	result, _, suspended, _, _, err := e.engine.Replay(e.ctx, wasmBytes, entryPoint, json.RawMessage(inputJSON), history)
+	ctx, cancel := e.callCtx()
+	defer cancel()
+	result, _, suspended, _, _, err := e.engine.Replay(ctx, wasmBytes, entryPoint, json.RawMessage(inputJSON), history)
 	if err != nil {
 		return "", fmt.Errorf("wasmtest: Replay: %w", err)
 	}

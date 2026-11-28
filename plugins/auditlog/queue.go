@@ -124,7 +124,7 @@ type queueState struct {
 	// shutting down). A retry never runs past it.
 	drainDeadline atomic.Int64
 
-	sent      atomic.Int64 // events handed to enqueueAudit
+	sent      atomic.Int64 // events handed to enqueue
 	recorded  atomic.Int64 // events on their chain, including ones a retry found already there
 	lost      [len(lossReasons)]atomic.Int64
 	lastLoss  atomic.Int64 // unix nano of the latest loss, 0 = none
@@ -213,12 +213,12 @@ func newQueuedEvent(tenantID uuid.UUID, userID, method, path string, statusCode 
 	}
 }
 
-// enqueueAudit hands an event to the queue. If there is no queue (a Plugin built directly, not
+// enqueue hands an event to the queue. If there is no queue (a Plugin built directly, not
 // through Init) it writes it now, once. If the queue is full it waits up to enqueue_wait for
 // room, and then gives the event up as lost: a request never waits on the audit log longer than
-// that, however long the database is down.
-func (p *Plugin) enqueueAudit(tenantID uuid.UUID, userID, method, path string, statusCode int, ipAddress, userAgent string, duration time.Duration) {
-	ev := newQueuedEvent(tenantID, userID, method, path, statusCode, ipAddress, userAgent, duration)
+// that, however long the database is down. The event arrives already built, which is how the
+// middleware attaches the metadata a handler noted.
+func (p *Plugin) enqueue(ev queuedAuditEvent) {
 	p.q.sent.Add(1)
 	if p.buffer == nil {
 		p.recordOnce(ev)
@@ -262,7 +262,7 @@ func (p *Plugin) appendEvent(ev queuedAuditEvent, retry bool) error {
 	return p.appendChained(ctx, chainEvent{
 		tenantID: ev.tenantID, userID: ev.userID, method: ev.method, path: ev.path,
 		statusCode: ev.statusCode, ipAddress: ev.ipAddress, userAgent: ev.userAgent,
-		durationMs: int(ev.duration.Milliseconds()), id: ev.id, ts: ev.ts, retry: retry,
+		durationMs: int(ev.duration.Milliseconds()), id: ev.id, ts: ev.ts, retry: retry, metadata: ev.metadata,
 	})
 }
 

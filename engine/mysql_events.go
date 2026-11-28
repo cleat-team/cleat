@@ -236,7 +236,10 @@ func (s *MySQLStore) appendEventsInTxOpts(ctx context.Context, tx *sql.Tx, workf
 			error = IF(@cleat_pending, VALUES(error), error),
 			promise_result = IF(@cleat_pending, VALUES(promise_result), promise_result),
 			promise_error = IF(@cleat_pending, VALUES(promise_error), promise_error),
-			event_type = IF(@cleat_pending, VALUES(event_type), event_type)
+			event_type = IF(@cleat_pending, VALUES(event_type), event_type),
+			-- The answer's own time, under the same frozen guard (cleat#4465): the row keeps the await's START otherwise, and a replay's Now() is
+			-- made from this column. Last, because it only READS @cleat_pending like every line above it.
+			created_at = IF(@cleat_pending, VALUES(created_at), created_at)
 	`)
 	if err != nil {
 		return fmt.Errorf("append events in tx: prepare: %w", err)
@@ -281,13 +284,14 @@ func (s *MySQLStore) appendEventsInTxOpts(ctx context.Context, tx *sql.Tx, workf
 			return fmt.Errorf("append events in tx: exec step %d: %w", rec.Step, err)
 		}
 	}
-	// Increment event_count on workflow_instances so GetEventCount and quota
-	// enforcement have an up-to-date count.
+	// Set event_count on workflow_instances so GetEventCount and quota enforcement
+	// have an up-to-date count: the highest step plus one, not "+ len(recs)" (see
+	// eventCountAfter, cleat#3779).
 	if incrementCount {
 		if _, err := tx.ExecContext(ctx, `
-		UPDATE workflow_instances SET event_count = event_count + ? WHERE id = ? AND tenant_id = ?
-	`, len(recs), workflowID, s.tenantID); err != nil {
-			return fmt.Errorf("append events in tx: increment event_count: %w", err)
+		UPDATE workflow_instances SET event_count = ? WHERE id = ? AND tenant_id = ?
+	`, eventCountAfter(recs), workflowID, s.tenantID); err != nil {
+			return fmt.Errorf("append events in tx: set event_count: %w", err)
 		}
 	}
 
@@ -399,20 +403,6 @@ func (s *MySQLStore) LoadEventHistory(ctx context.Context, workflowID string) ([
 		rec.PromiseResult = promiseResult.String
 		rec.PromiseError = promiseError.String
 
-		// Retroactive redaction on read path.
-		if !s.disableReadRedaction {
-			rec.Request = RedactOnRead(rec.Request)
-			rec.Response = RedactOnRead(rec.Response)
-			rec.Err = RedactOnRead(rec.Err)
-			rec.SignalPayload = RedactOnRead(rec.SignalPayload)
-			rec.ChildInput = RedactOnRead(rec.ChildInput)
-			rec.NewInput = RedactOnRead(rec.NewInput)
-			rec.PluginInput = RedactOnRead(rec.PluginInput)
-			rec.PluginOutput = RedactOnRead(rec.PluginOutput)
-			rec.PromiseResult = RedactOnRead(rec.PromiseResult)
-			rec.PromiseError = RedactOnRead(rec.PromiseError)
-		}
-
 		if payload.Valid {
 			populateFromPayload(&rec, []byte(payload.String))
 		}
@@ -505,20 +495,6 @@ func (s *MySQLStore) LoadEventHistoryPaginated(ctx context.Context, workflowID s
 		rec.PromiseID = promiseID.String
 		rec.PromiseResult = promiseResult.String
 		rec.PromiseError = promiseError.String
-
-		// Retroactive redaction on read path.
-		if !s.disableReadRedaction {
-			rec.Request = RedactOnRead(rec.Request)
-			rec.Response = RedactOnRead(rec.Response)
-			rec.Err = RedactOnRead(rec.Err)
-			rec.SignalPayload = RedactOnRead(rec.SignalPayload)
-			rec.ChildInput = RedactOnRead(rec.ChildInput)
-			rec.NewInput = RedactOnRead(rec.NewInput)
-			rec.PluginInput = RedactOnRead(rec.PluginInput)
-			rec.PluginOutput = RedactOnRead(rec.PluginOutput)
-			rec.PromiseResult = RedactOnRead(rec.PromiseResult)
-			rec.PromiseError = RedactOnRead(rec.PromiseError)
-		}
 
 		if payload.Valid {
 			populateFromPayload(&rec, []byte(payload.String))
@@ -630,7 +606,6 @@ func (s *MySQLStore) StreamEventHistory(ctx context.Context, workflowID string, 
 				rec.PromiseResult = promiseResult.String
 				rec.PromiseError = promiseError.String
 
-				// Decryption must happen BEFORE redaction: redacting ciphertext is meaningless.
 				// The fields below are encrypted by flushEvent when encryption is enabled.
 				// NOTE: On MySQL this block is a forward-compatibility guard only --
 				// encryption is not yet supported and will never be true.
@@ -659,23 +634,6 @@ func (s *MySQLStore) StreamEventHistory(ctx context.Context, workflowID string, 
 					if decrypted, err := s.encryption.DecryptString(tenantForAAD(s.tenantID), rec.PluginOutput); err == nil {
 						rec.PluginOutput = decrypted
 					}
-				}
-
-				// Retroactive redaction on read path: ensure sensitive fields are
-				// redacted even if they were stored before redaction was mandatory.
-				// Redaction runs AFTER decryption (see block above) since redacting
-				// ciphertext would yield meaningless "[REDACTED]" placeholders.
-				if !s.disableReadRedaction {
-					rec.Request = RedactOnRead(rec.Request)
-					rec.Response = RedactOnRead(rec.Response)
-					rec.Err = RedactOnRead(rec.Err)
-					rec.SignalPayload = RedactOnRead(rec.SignalPayload)
-					rec.ChildInput = RedactOnRead(rec.ChildInput)
-					rec.NewInput = RedactOnRead(rec.NewInput)
-					rec.PluginInput = RedactOnRead(rec.PluginInput)
-					rec.PluginOutput = RedactOnRead(rec.PluginOutput)
-					rec.PromiseResult = RedactOnRead(rec.PromiseResult)
-					rec.PromiseError = RedactOnRead(rec.PromiseError)
 				}
 
 				if payload.Valid {
@@ -743,7 +701,7 @@ func (s *MySQLStore) IsHistorySwept(ctx context.Context, workflowID string) (boo
 // ---------------------------------------------------------------------------
 
 // VerifyWorkflowEvents loads all events for a workflow and verifies their
-// integrity by recomputing SHA-256 checksums and comparing them against the
+// integrity by recomputing their xxHash64 checksums and comparing them against the
 // stored checksums. Before the checksum column migration, it loads and
 // computes checksums silently and returns nil.
 func (s *MySQLStore) VerifyWorkflowEvents(ctx context.Context, workflowID string) error {
@@ -751,6 +709,14 @@ func (s *MySQLStore) VerifyWorkflowEvents(ctx context.Context, workflowID string
 	events, err := s.LoadEventHistory(ctx, workflowID)
 	if err != nil {
 		return fmt.Errorf("verify events: load: %w", err)
+	}
+
+	// The compaction state is read before the transaction below opens: it is
+	// loaded on its own connection, and holding two per verification is how a
+	// small pool is exhausted.
+	cs, err := s.LoadCompactionState(ctx, workflowID)
+	if err != nil {
+		return fmt.Errorf("verify events: load compaction state: %w", err)
 	}
 
 	// Try to load stored checksums from the DB. If the column doesn't exist
@@ -786,20 +752,10 @@ func (s *MySQLStore) VerifyWorkflowEvents(ctx context.Context, workflowID string
 		return nil
 	}
 
-	// Recompute and compare checksums with chaining.
-	var prevChecksum string
-	for _, ev := range events {
-		expected, ok := storedChecksums[ev.Step]
-		if !ok || expected == "" {
-			prevChecksum = "" // Missing event breaks the chain
-			continue          // No stored checksum for this step (pre-migration partial data).
-		}
-		actual := computeEventChecksum(ev, prevChecksum)
-		if actual != expected {
-			return fmt.Errorf("verify events: workflow %s step %d: checksum mismatch (expected %s, got %s)",
-				workflowID, ev.Step, expected, actual)
-		}
-		prevChecksum = expected
+	// Recompute and compare checksums with chaining, starting from the
+	// compaction boundary when the run has been compacted (cleat#3837).
+	if err := verifyEventChain(workflowID, events, storedChecksums, cs); err != nil {
+		return err
 	}
 	return nil
 }

@@ -13,7 +13,7 @@ import (
 // A checked-in prebuilt WASM fixture exports every entry point its source
 // declares. cleat#1660.
 //
-// The AssemblyScript prebuilt was five days behind its source and missing an
+// The AssemblyScript prebuilt (a fixture since removed, cleat#4023) was five days behind its source and missing an
 // entry point the source declares -- `bind_multiple_params`, added by #1067 on
 // 2026-09-09 against a binary last built on 2026-09-04. Nothing noticed,
 // because nothing compares the two. Both readers of that binary
@@ -109,28 +109,6 @@ func TestAPrebuiltExportsWhatItsSourceDeclares(t *testing.T) {
 // against sources built to break it rather than against the real fixtures,
 // which happen to pass today.
 func TestTheEntryPointScannerIgnoresProseAboutEntryPoints(t *testing.T) {
-	t.Run("assemblyscript", func(t *testing.T) {
-		const src = `
-// Uses @cleatEntry decorator. The transformer generates the wrapper.
-//
-// @cleatEntry("Retracted")
-// export function removed_entry(h: HostCalls): string { }
-const doc: string = 'call @cleatEntry("InAString")';
-
-@cleatEntry("IgnoredByTheTransform")
-export function real_entry(h: HostCalls, note: string): string {
-  return note;
-}
-
-@cleatEntry()
-export function bare_decorator(h: HostCalls): string { return ""; }
-`
-		got := names(scanAssemblyScriptEntries(src, "synthetic.ts"))
-		want := []string{"bare_decorator", "real_entry"}
-		assertSet(t, got, want,
-			"the AssemblyScript scanner must read declarations and not prose")
-	})
-
 	t.Run("java", func(t *testing.T) {
 		const src = `
 package com.cleat.example;
@@ -158,40 +136,17 @@ public class W {
 	})
 }
 
-// TestTheTwoSDKsNameTheirExportsByOppositeRules pins the fact the comparison
-// above depends on, because getting it wrong is silent in both directions.
+// TestTheJavaSDKNamesItsExportsByTheAnnotationNotTheMethod pins the fact the comparison above depends on, because
+// getting it wrong is silent in both directions.
 //
-// The declarations look alike and mean opposite things:
-//
-//	AssemblyScript  @cleatEntry("CallAllPlugins")            export is call_all_plugins
-//	                export function call_all_plugins(...)    the string is INERT
-//
-//	Java            @CleatEntry(name = "CallAllPlugins")     export is CallAllPlugins
-//	                public static String callAllPlugins(...) the METHOD name is unused
-//
-// In AssemblyScript the transform never reads the decorator's arguments at all
-// -- it only tests that the decorator IS cleatEntry
-// (packages/cleat-as/transform/index.js) and emits
-// `export function ${funcName}`. Measured 2026-09-16: neither "CallAllPlugins"
-// nor "BindMultipleParams" appears anywhere in the committed AssemblyScript
-// binary, which has no custom sections at all.
-//
-// In Java the annotation's name() IS the export, falling back to the method
-// name when empty (crates/cleat-java/src/main/java/cleat/CleatEntryProcessor.java,
-// `exportName = annotation.name(); if (exportName.isEmpty()) exportName =
-// method.getSimpleName()`).
-//
-// A checker that assumed either rule for both languages would pass on one
-// fixture and be wrong about the other -- and wrong PERMISSIVELY, because a
-// name it derives incorrectly is a name it then fails to find a mismatch for.
-func TestTheTwoSDKsNameTheirExportsByOppositeRules(t *testing.T) {
-	as := scanAssemblyScriptEntries(
-		"@cleatEntry(\"DecoratorArgument\")\nexport function function_name(h: HostCalls): string {}\n",
-		"x.ts")
-	if len(as) != 1 || as[0].exportName != "function_name" {
-		t.Errorf("AssemblyScript: export name must come from the FUNCTION, got %v", names(as))
-	}
-
+// In Java the annotation's name() IS the export, falling back to the method name when empty
+// (crates/cleat-java/src/main/java/cleat/CleatEntryProcessor.java, `exportName = annotation.name(); if
+// (exportName.isEmpty()) exportName = method.getSimpleName()`). This test pinned the OPPOSITE rule for AssemblyScript
+// beside it -- there the decorator's string was inert and the function name was the export -- until cleat#4023 removed
+// that SDK. The AssemblyScript half is gone with it; the history is in git. What remains is still worth pinning, since a
+// checker that read the method name here would pass on a fixture whose annotation names differ and be wrong about every
+// one that does, and wrong PERMISSIVELY: a name it derives incorrectly is a name it then fails to find a mismatch for.
+func TestTheJavaSDKNamesItsExportsByTheAnnotationNotTheMethod(t *testing.T) {
 	java := scanJavaEntries(
 		"@CleatEntry(name = \"AnnotationArgument\")\npublic static String methodName(HostCalls h) {}\n",
 		"X.java")
@@ -226,12 +181,6 @@ type prebuiltFixture struct {
 func prebuiltFixtures() []prebuiltFixture {
 	const td = "../tests/plugin-harness/testdata"
 	return []prebuiltFixture{
-		{
-			name:       "assemblyscript",
-			wasmPath:   td + "/asworkflow/prebuilt/workflow.wasm",
-			sourceGlob: td + "/asworkflow/assembly/*.ts",
-			scan:       scanAssemblyScriptEntries,
-		},
 		{
 			name:       "java-teavm",
 			wasmPath:   td + "/javaworkflow/prebuilt/workflow.wasm",
@@ -269,12 +218,6 @@ func (f prebuiltFixture) declaredEntries() ([]entryDecl, error) {
 // ---------------------------------------------------------------------------
 
 var (
-	// @cleatEntry(...) on its own line, then `export function <name>`. The
-	// decorator's argument is deliberately not captured: the transform does
-	// not read it either.
-	asEntryRe = regexp.MustCompile(
-		`(?m)^[ \t]*@cleatEntry\b[^\n]*\n(?:[ \t]*\n)*[ \t]*export[ \t]+function[ \t]+([A-Za-z_$][\w$]*)`)
-
 	// @CleatEntry, optionally with name = "...", then a `public static`
 	// method. The return type is matched loosely because it is irrelevant
 	// here and varies (String, long, void).
@@ -282,15 +225,6 @@ var (
 		`(?m)^[ \t]*@CleatEntry\b[ \t]*(?:\([ \t]*name[ \t]*=[ \t]*"([^"]*)"[ \t]*\))?[ \t]*\n` +
 			`(?:[ \t]*\n)*[ \t]*public[ \t]+static[ \t]+[\w.<>\[\]]+[ \t]+([A-Za-z_$][\w$]*)[ \t]*\(`)
 )
-
-func scanAssemblyScriptEntries(src, path string) []entryDecl {
-	var out []entryDecl
-	for _, m := range asEntryRe.FindAllStringSubmatchIndex(src, -1) {
-		name := src[m[2]:m[3]]
-		out = append(out, entryDecl{exportName: name, where: where(src, path, m[0])})
-	}
-	return out
-}
 
 func scanJavaEntries(src, path string) []entryDecl {
 	var out []entryDecl

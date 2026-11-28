@@ -8,7 +8,7 @@ import (
 
 // TestNonGoMetadataPassesValidate is the regression test for cleat#1077.
 //
-// The Rust, Java and AssemblyScript build paths wrote
+// The Rust, Java and AssemblyScript build paths (the last since removed) wrote
 // `&wasm.Metadata{Language: "..."}` and nothing else, so every other field
 // took its zero value. `cleat deploy` then rejected the binary that
 // `cleat build` had just produced, because runDeploy calls Validate() and
@@ -21,7 +21,7 @@ import (
 // not a field-by-field restatement, which would pass while disagreeing with
 // the thing that actually rejects the binary.
 func TestNonGoMetadataPassesValidate(t *testing.T) {
-	for _, lang := range []string{"rust", "java", "assemblyscript"} {
+	for _, lang := range []string{"rust", "java"} {
 		t.Run(lang, func(t *testing.T) {
 			m := nonGoMetadata(lang, "my_workflow", 3, []string{"place_order"})
 			if err := m.Validate(); err != nil {

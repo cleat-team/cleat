@@ -26,17 +26,27 @@ const DefaultOrgUUID = "00000000-0000-0000-0000-000000000000"
 // tenant) -- a second store type would duplicate NewTenantStoreForDialect's
 // plumbing for no isolation this package needs.
 func (s *TenantStore) CreateOrg(ctx context.Context, name string) (uuid.UUID, error) {
-	// PostgreSQL only, for the same reason CreateTenant is: RETURNING has no
-	// MySQL equivalent and SQL Server spells it OUTPUT, so this needs a
-	// different statement shape per dialect rather than a different table
-	// name, and that shape is not written until something needs it on
-	// another dialect.
-	if s.dialect != DialectPostgres {
-		return uuid.Nil, fmt.Errorf("auth: CreateOrg is not implemented for %s", s.dialect)
+	stmt, err := createOrgStmt(s.dialect)
+	if err != nil {
+		return uuid.Nil, err
 	}
-	var oid uuid.UUID
-	err := s.db.QueryRowContext(ctx,
-		`INSERT INTO admin.orgs (name) VALUES ($1) RETURNING org_id`,
-		name).Scan(&oid)
-	return oid, err
+	// Made here, not returned by the database: see CreateTenant.
+	oid := uuid.New()
+	if _, err := s.db.ExecContext(ctx, stmt, oid.String(), name); err != nil {
+		return uuid.Nil, err
+	}
+	return oid, nil
+}
+
+// createOrgStmt is createTenantStmt's counterpart for admin.orgs. MySQL is
+// refused for the same reason.
+func createOrgStmt(dialect string) (string, error) {
+	switch dialect {
+	case DialectPostgres:
+		return `INSERT INTO admin.orgs (org_id, name) VALUES ($1, $2)`, nil
+	case DialectMSSQL:
+		return `INSERT INTO admin.orgs (org_id, name) VALUES (@p1, @p2)`, nil
+	default:
+		return "", fmt.Errorf("auth: CreateOrg is not supported for %s: multi-tenancy is PostgreSQL and SQL Server only", dialect)
+	}
 }

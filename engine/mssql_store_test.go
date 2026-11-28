@@ -120,9 +120,6 @@ func TestMSSQLStore_NewStoreDefaults(t *testing.T) {
 	if store.encryptSensitivePayloads {
 		t.Fatal("encryptSensitivePayloads should default to false")
 	}
-	if store.disableReadRedaction {
-		t.Fatal("disableReadRedaction should default to false")
-	}
 }
 
 // TestMSSQLStore_NewStoreTaskQueues verifies custom task queue handling.
@@ -166,48 +163,27 @@ func TestMSSQLStore_WithIdempotencyKeyTTL(t *testing.T) {
 	}
 }
 
-// TestMSSQLStore_WithReadRedactionDisabled verifies the redaction toggle.
-func TestMSSQLStore_WithReadRedactionDisabled(t *testing.T) {
-	store := NewMSSQLStore(nil)
-
-	disabled := store.WithReadRedactionDisabled(true)
-	if !disabled.disableReadRedaction {
-		t.Fatal("disableReadRedaction should be true")
-	}
-	if store.disableReadRedaction {
-		t.Fatal("original store was mutated")
-	}
-
-	reEnabled := disabled.WithReadRedactionDisabled(false)
-	if reEnabled.disableReadRedaction {
-		t.Fatal("disableReadRedaction should be false after re-enabling")
-	}
-}
-
-// TestMSSQLStore_WithEncryption verifies the encryption fields behave correctly.
+// TestMSSQLStore_WithEncryption verifies the disabled form behaves correctly.
+// The enabled form is refused for this dialect; that half is pinned, with
+// PostgreSQL as the positive control, in
+// TestEnablingPayloadEncryptionIsRefusedOnADialectThatCannotSeal (cleat#3906).
 func TestMSSQLStore_WithEncryption(t *testing.T) {
 	store := NewMSSQLStore(nil)
 
 	enc := &PayloadEncryption{}
-	encrypted := store.WithEncryption(enc, true)
+	disabled := store.WithEncryption(enc, false)
 
-	if encrypted.encryption != enc {
+	if disabled.encryption != enc {
 		t.Fatal("encryption reference not stored")
 	}
-	if !encrypted.encryptSensitivePayloads {
-		t.Fatal("encryptSensitivePayloads should be true")
+	if disabled.encryptSensitivePayloads {
+		t.Fatal("encryptSensitivePayloads should be false")
 	}
 	if store.encryptSensitivePayloads {
 		t.Fatal("original store was mutated")
 	}
 	if store.encryption != nil {
 		t.Fatal("original store encryption should be nil")
-	}
-
-	// Verify disabling works.
-	disabled := encrypted.WithEncryption(enc, false)
-	if disabled.encryptSensitivePayloads {
-		t.Fatal("encryptSensitivePayloads should be false after disabling")
 	}
 }
 
@@ -403,15 +379,6 @@ func TestMSSQLStoreConfigOptions(t *testing.T) {
 	store := NewMSSQLStore(nil, "default")
 	if store == nil {
 		t.Fatal("NewMSSQLStore returned nil")
-	}
-
-	// WithReadRedactionDisabled
-	s2 := store.WithReadRedactionDisabled(true)
-	if !s2.disableReadRedaction {
-		t.Error("disableReadRedaction should be true")
-	}
-	if store.disableReadRedaction {
-		t.Error("original store should not be mutated by WithReadRedactionDisabled")
 	}
 
 	// WithEncryption
@@ -831,7 +798,7 @@ func TestMSSQLStore_GetWorkflowDef_Success(t *testing.T) {
 	pluginDepsJSON := []byte(`{"plugin1":"v1.0"}`)
 	db := newMockDBForPostgres(t, []mockRowsResult{
 		{match: "FROM workflow_defs", data: [][]driver.Value{
-			{"test-wf", int64(3), wasmBytes, int64(2), int64(1), pluginDepsJSON, createdAt, nil, false, nil, false, "auth"},
+			{"test-wf", int64(3), wasmBytes, nil, int64(2), int64(1), pluginDepsJSON, createdAt, nil, false, nil, false, "auth"}, // nil: library
 		}},
 	}, nil)
 	defer db.Close()
@@ -871,7 +838,7 @@ func TestMSSQLStore_GetWorkflowDef_NilPluginDeps(t *testing.T) {
 	createdAt := time.Now().UTC().Truncate(time.Microsecond)
 	db := newMockDBForPostgres(t, []mockRowsResult{
 		{match: "FROM workflow_defs", data: [][]driver.Value{
-			{"test-wf", int64(1), []byte("wasm"), int64(1), int64(0), nil, createdAt, nil, false, nil, false, "auth"},
+			{"test-wf", int64(1), []byte("wasm"), nil, int64(1), int64(0), nil, createdAt, nil, false, nil, false, "auth"}, // nil: library
 		}},
 	}, nil)
 	defer db.Close()
@@ -998,7 +965,7 @@ func TestMSSQLStore_GetActiveInstanceCountsByVersion_BeginTxError(t *testing.T) 
 func TestMSSQLStore_ResolveTenantFromAPIKey(t *testing.T) {
 	expectedUUID := uuid.New()
 	db := newMockDBForPostgres(t, []mockRowsResult{
-		{match: "FROM admin.tenant_api_keys", data: [][]driver.Value{{expectedUUID.String()}}},
+		{match: "FROM admin.tenant_api_keys", data: [][]driver.Value{{expectedUUID.String(), uuid.New().String()}}},
 	}, nil)
 	defer db.Close()
 
@@ -1009,6 +976,24 @@ func TestMSSQLStore_ResolveTenantFromAPIKey(t *testing.T) {
 	}
 	if got != expectedUUID {
 		t.Errorf("UUID = %v, want %v", got, expectedUUID)
+	}
+}
+
+// ResolveAPIKey returns the key's own id beside the tenant (cleat#3623), parsed from the converted
+// projection. The two ids are different values so a swapped scan cannot pass.
+func TestMSSQLStore_ResolveAPIKey_ReturnsTheKeyIDBesideTheTenant(t *testing.T) {
+	tenant, key := uuid.New(), uuid.New()
+	db := newMockDBForPostgres(t, []mockRowsResult{
+		{match: "FROM admin.tenant_api_keys", data: [][]driver.Value{{tenant.String(), key.String()}}},
+	}, nil)
+	defer db.Close()
+
+	gotTenant, gotKey, err := NewMSSQLStore(db).ResolveAPIKey(context.Background(), []byte("test-key-hash"))
+	if err != nil {
+		t.Fatalf("ResolveAPIKey: %v", err)
+	}
+	if gotTenant != tenant || gotKey != key {
+		t.Errorf("ResolveAPIKey = (%v, %v), want tenant %v and key %v", gotTenant, gotKey, tenant, key)
 	}
 }
 
@@ -2095,7 +2080,7 @@ func TestMSSQLStore_AppendEventHistoryBatch_SuccessMock(t *testing.T) {
 	db := newMockDBForPostgres(t, nil, []mockExecResult{
 		{match: "sp_set_session_context"},
 		{match: "INSERT INTO event_history", affected: 1},
-		{match: "event_count = event_count"},
+		{match: "SET event_count = "},
 	})
 	defer db.Close()
 

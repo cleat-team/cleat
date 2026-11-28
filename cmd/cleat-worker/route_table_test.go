@@ -47,6 +47,8 @@ var apiRoutesTheBinaryMustServe = []struct{ method, path string }{
 	{http.MethodPost, "/api/definitions"},
 	{http.MethodPost, "/api/admin/drain"},
 	{http.MethodPost, "/api/admin/retention/sweep"},
+	{http.MethodGet, "/api/keys"},
+	{http.MethodDelete, "/api/keys/aaaaaaaa-0000-4000-8000-000000000001"},
 
 	// Instance inspection -- api_instances.go.
 	{http.MethodGet, "/api/instances/wf-1"},

@@ -253,7 +253,37 @@ func TestDurableSleep_ZeroDuration(t *testing.T) {
 // DurableCallWithRetry tests.
 // ---------------------------------------------------------------------------
 
-func TestDurableCallWithRetry_Replay(t *testing.T) {
+// TestDurableCallWithRetry_ReplayRefusesARecordedRefusal pins the marker cleat#4032 adds: a refusing segment writes
+// EventTypeCallRetryRefused, and a replay that finds one refuses again.
+//
+// That record is the ONLY thing that can distinguish the two situations a replay can be in. A plain `call` record is
+// written both by a guest's own fallback loop (after a refusal) and by a host-run policy whose first attempt succeeded,
+// and the tenant's budget -- the other candidate -- is writable while a run is in flight.
+func TestDurableCallWithRetry_ReplayRefusesARecordedRefusal(t *testing.T) {
+	s := newTestExecSession()
+	s.isReplay = true
+	s.history = []EventRecord{{
+		Step: 0, EventType: EventTypeCallRetryRefused,
+		Service: "my-svc", Op: "my-op", Request: `{"key":"val"}`,
+	}}
+
+	result := s.DurableCallWithRetry(context.Background(), nil,
+		"my-svc", "my-op", `{"key":"val"}`, 3, 100, 200, 1000, "", 0, 0)
+
+	// The CALL error code is bits 8-15; bits 0-7 are the write error code.
+	if got := byte(result >> 8); got != callErrorRetryPolicyTooLong {
+		t.Errorf("callErrorCode = %d, want callErrorRetryPolicyTooLong (%d): a recorded refusal means the policy was "+
+			"refused when this call was recorded", got, callErrorRetryPolicyTooLong)
+	}
+	if s.stepCount != 1 {
+		t.Errorf("stepCount = %d, want 1: the refusal record is consumed", s.stepCount)
+	}
+}
+
+// TestDurableCallWithRetry_ReplayReplaysAPlainCall is the case a shape-only rule broke: a plain `call` record is what a
+// host-run policy writes when its FIRST attempt succeeds, and the AssemblyScript, Java and Python SDKs have no fallback
+// to catch a refusal here.
+func TestDurableCallWithRetry_ReplayReplaysAPlainCall(t *testing.T) {
 	s := newTestExecSession()
 	s.isReplay = true
 	s.history = []EventRecord{{
@@ -265,12 +295,37 @@ func TestDurableCallWithRetry_Replay(t *testing.T) {
 	result := s.DurableCallWithRetry(context.Background(), nil,
 		"my-svc", "my-op", `{"key":"val"}`, 3, 100, 200, 1000, "", 0, 0)
 
-	errCode := byte(result & 0xFF)
-	if errCode != 0 {
-		t.Errorf("expected errCode 0, got %d", errCode)
+	if got := byte(result & 0xFF); got != 0 {
+		t.Errorf("write errCode = %d, want 0: the recorded call is replayed, not refused", got)
 	}
 	if s.stepCount != 1 {
-		t.Errorf("expected stepCount=1, got %d", s.stepCount)
+		t.Errorf("stepCount = %d, want 1: the recorded call is consumed", s.stepCount)
+	}
+}
+
+// TestDurableCallWithRetry_ReplayResumesAHostLoopRecord is the other side of that decision: `call_attempt_failed`
+// is written only by the host loop, so a replay that finds one resumes the policy rather than refusing it.
+func TestDurableCallWithRetry_ReplayResumesAHostLoopRecord(t *testing.T) {
+	s := newTestExecSession()
+	// The resume path runs the remaining attempts itself, so the session needs a service caller.
+	s.engine.caller = &mockCaller{}
+	s.isReplay = true
+	s.history = []EventRecord{{
+		Step: 0, EventType: EventTypeCallAttemptFailed,
+		Service: "my-svc", Op: "my-op",
+		Request: `{"key":"val"}`, Err: "boom", Attempt: 1,
+	}}
+
+	result := s.DurableCallWithRetry(context.Background(), nil,
+		"my-svc", "my-op", `{"key":"val"}`, 3, 100, 200, 1000, "", 0, 0)
+
+	if got := byte(result >> 8); got == callErrorRetryPolicyTooLong {
+		t.Errorf("the replay REFUSED a policy the host had already run: a call_attempt_failed record means the host "+
+			"loop wrote it, so the policy fits this budget (callErrorCode %d)", got)
+	}
+	// Two steps: the recorded attempt is consumed, and the attempt that now runs and succeeds records its own call event.
+	if s.stepCount != 2 {
+		t.Errorf("stepCount = %d, want 2: the recorded attempt consumed, then the resumed attempt recorded", s.stepCount)
 	}
 }
 
@@ -556,19 +611,149 @@ func TestSideEffect_ReplayMatch(t *testing.T) {
 	}
 }
 
-func TestSideEffect_ReplayMismatch(t *testing.T) {
+// cleat#4113: a side effect FREEZES a value. A replay returns what the history holds even when the guest computed something else, which
+// is the normal case for a value that is not reproducible. This used to fail the replay as "a non-determinism bug" (errCode 1).
+func TestSideEffect_ReplayReturnsTheRecordedValueWhateverTheGuestComputed(t *testing.T) {
 	s := newTestExecSession()
 	s.isReplay = true
 	s.history = []EventRecord{{
 		Step: 0, EventType: EventTypeSideEffect,
 		SideEffectResult: `{"different":"value"}`,
 	}}
+	buf := make([]byte, 256)
 
-	result := s.SideEffect(context.Background(), nil, `{"computed":"result"}`, 0, 0)
+	result := s.SideEffect(ctxWithMem(context.Background(), buf), nil, `{"computed":"result"}`, 0, 256)
 
-	errCode := byte(result)
-	if errCode != 1 {
-		t.Errorf("expected errCode 1 (divergence), got %d", errCode)
+	if errCode := byte(result); errCode != 0 {
+		t.Fatalf("errCode = %d, want 0: a replay must not fail because the guest computed a different value", errCode)
+	}
+	if got := extractStringFromSimplePacked(result, buf); got != `{"different":"value"}` {
+		t.Errorf("replay returned %q, want the recorded value", got)
+	}
+	if s.stepCount != 1 {
+		t.Errorf("stepCount = %d, want 1", s.stepCount)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// SideEffectRecorded (cleat#4113): "is the value for this step already in the history?"
+// ---------------------------------------------------------------------------
+
+func recordedStatus(packed int64) byte { return byte(uint64(packed) & 0xFF) }
+
+// replaying, the record is a side effect: consume it and hand back its value.
+func TestSideEffectRecorded_ReplayOfASideEffectReturnsItsValueAndConsumesTheStep(t *testing.T) {
+	s := newTestExecSession()
+	s.isReplay = true
+	s.history = []EventRecord{{Step: 0, EventType: EventTypeSideEffect, SideEffectResult: `"frozen"`}}
+	buf := make([]byte, 256)
+
+	got := s.SideEffectRecorded(ctxWithMem(context.Background(), buf), nil, 0, 256)
+
+	if recordedStatus(got) != 0 {
+		t.Fatalf("status = %d, want 0 (recorded)", recordedStatus(got))
+	}
+	if v := extractStringFromSimplePacked(got, buf); v != `"frozen"` {
+		t.Errorf("value = %q, want the recorded value", v)
+	}
+	if s.stepCount != 1 {
+		t.Errorf("stepCount = %d, want 1: the lookup must consume the step it answered from", s.stepCount)
+	}
+}
+
+// fresh: nothing is recorded, nothing changes, and no event is written (the SideEffect that follows writes it).
+func TestSideEffectRecorded_FreshRunReportsNotRecordedAndChangesNothing(t *testing.T) {
+	s := newTestExecSession()
+
+	got := s.SideEffectRecorded(context.Background(), nil, 0, 0)
+
+	if recordedStatus(got) != sideEffectNotRecorded {
+		t.Errorf("status = %d, want %d (not recorded)", recordedStatus(got), sideEffectNotRecorded)
+	}
+	if s.stepCount != 0 || len(s.history) != 0 {
+		t.Errorf("stepCount = %d, history = %d events: a lookup on a fresh run must change nothing", s.stepCount, len(s.history))
+	}
+}
+
+// replaying past the end of the history is the replay-to-fresh boundary: not recorded, and the switch is left to SideEffect.
+func TestSideEffectRecorded_PastTheEndOfHistoryReportsNotRecordedAndStaysInReplay(t *testing.T) {
+	s := newTestExecSession()
+	s.isReplay = true
+
+	got := s.SideEffectRecorded(context.Background(), nil, 0, 0)
+
+	if recordedStatus(got) != sideEffectNotRecorded {
+		t.Errorf("status = %d, want %d", recordedStatus(got), sideEffectNotRecorded)
+	}
+	if !s.isReplay {
+		t.Error("the lookup left replay mode; that switch belongs to SideEffect, so a lookup that did it would skip the stop check SideEffect makes")
+	}
+}
+
+// replaying, and the record belongs to another operation: a divergence, and the record is NOT consumed.
+func TestSideEffectRecorded_ADifferentEventIsADivergenceAndIsNotConsumed(t *testing.T) {
+	s := newTestExecSession()
+	s.isReplay = true
+	s.history = []EventRecord{{Step: 0, EventType: EventTypeDurableLog}}
+	buf := make([]byte, 256)
+
+	got := s.SideEffectRecorded(ctxWithMem(context.Background(), buf), nil, 0, 256)
+
+	if recordedStatus(got) != 1 {
+		t.Fatalf("status = %d, want 1 (error)", recordedStatus(got))
+	}
+	if msg := extractStringFromSimplePacked(got, buf); !strings.Contains(msg, "expected side_effect, got") {
+		t.Errorf("message = %q, want a replay divergence naming the event types", msg)
+	}
+	if s.stepCount != 0 {
+		t.Errorf("stepCount = %d, want 0: the record belongs to another operation and must still be there", s.stepCount)
+	}
+}
+
+// A FRESH lookup in a workflow the host has stopped is refused, so the guest's function (which may call an API) is never run for a value the
+// SideEffect after it would refuse to record anyway.
+func TestSideEffectRecorded_AFreshLookupInAStoppedWorkflowIsRefused(t *testing.T) {
+	s := newTestExecSession()
+	s.engine.deferPhase = true
+
+	got := s.SideEffectRecorded(context.Background(), nil, 0, 0)
+
+	if got != callSuspendSentinel {
+		t.Errorf("got %#x, want the stop sentinel", got)
+	}
+	// Control: the same session with the stop lifted answers "not recorded".
+	s.engine.deferPhase = false
+	if r := s.SideEffectRecorded(context.Background(), nil, 0, 0); recordedStatus(r) != sideEffectNotRecorded {
+		t.Errorf("control: status = %d, want not recorded", recordedStatus(r))
+	}
+}
+
+// The workflow that runs its function ONCE across a first run and a replay: ask, and only compute when nothing is recorded.
+func TestSideEffectRecorded_AGuestThatAsksFirstRunsItsFunctionOnceAcrossFirstRunAndReplay(t *testing.T) {
+	calls := 0
+	compute := func() string { calls++; return fmt.Sprintf(`"value-%d"`, calls) }
+	buf := make([]byte, 256)
+	ask := func(s *execSession) string {
+		if r := s.SideEffectRecorded(ctxWithMem(context.Background(), buf), nil, 0, 256); recordedStatus(r) == 0 {
+			return extractStringFromSimplePacked(r, buf)
+		}
+		r := s.SideEffect(ctxWithMem(context.Background(), buf), nil, compute(), 0, 256)
+		return extractStringFromSimplePacked(r, buf)
+	}
+
+	first := newTestExecSession()
+	v1 := ask(first)
+
+	replay := newTestExecSession()
+	replay.isReplay = true
+	replay.history = first.history
+	v2 := ask(replay)
+
+	if calls != 1 {
+		t.Errorf("the function ran %d times across the first run and the replay, want exactly 1", calls)
+	}
+	if v1 != `"value-1"` || v2 != v1 {
+		t.Errorf("first = %q, replay = %q, want the same frozen value", v1, v2)
 	}
 }
 

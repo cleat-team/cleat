@@ -155,13 +155,13 @@ func mssqlReleaseApplock(t *testing.T, ctx context.Context, conn *sql.Conn) {
 // ANY sys.security_policies row, as this used to, made a database with only
 // plugin policies applied -- which migrations/mssql/*.sql never reaches, since
 // core migrations are what add those -- read as "needs cleat_admin", and
-// migration 012 (which creates that role) never runs unless something
-// applied the core schema. Measured in cleat#2226's CI (Plugin Migrations
-// job): that job's MSSQL database only ever runs plugin.RunMigrations with
-// coreMigrations=nil, so it accumulates plugin policies and never
-// dbo.fn_tenant_filter or the cleat_admin role -- a fixture that only ever
-// touches plugin tables through CrossTenantConn does not need either, and
-// must not be made to Fatal over their absence.
+// the role (created by migrations/mssql/001_schema.sql) never exists unless
+// something applied the core schema. Measured in cleat#2226's CI (Plugin
+// Migrations job): that job's MSSQL database only ever runs
+// plugin.RunMigrations with coreMigrations=nil, so it accumulates plugin
+// policies and never dbo.fn_tenant_filter or the cleat_admin role -- a
+// fixture that only ever touches plugin tables through CrossTenantConn does
+// not need either, and must not be made to Fatal over their absence.
 func mssqlHasCoreSecurityPolicies(t *testing.T, db *sql.DB) bool {
 	t.Helper()
 	var n int
@@ -486,6 +486,14 @@ func restoreMSSQLPlainPredicate(t *testing.T, baseDSN string) {
 	if err != nil {
 		t.Fatalf("derive the plain-predicate replay list from %s: %v", dir, err)
 	}
+	// 003 drops the policies it knows by name and then replaces
+	// dbo.fn_tenant_filter, which fails with error 3729 while ANY policy still
+	// references the function -- including one a later migration created
+	// (cleat#3540's TenantFilter_LibraryInstalls). So drop every policy bound to
+	// the function here, the way migrations/mssql/optional/cross_tenant_claim.sql
+	// finds them, and let the replay below recreate them: 003's own, then each later
+	// file that creates one (mssqlPlainPredicateReplayFiles).
+	execMSSQLBatch(t, restoreDB, mssqlDropFilterPoliciesSQL)
 	for _, name := range names {
 		execMSSQLBatchFile(t, restoreDB, filepath.Join(dir, name))
 	}
@@ -528,8 +536,9 @@ func AdminDB(t *testing.T, db *sql.DB, dialect Dialect) *sql.DB {
 }
 
 // requireMSSQLAdminRole fails loudly when the database enforces RLS but has not
-// had migration 012 applied. Falling back to the plain pool here is what would
-// make teardown silently no-op again.
+// had migrations/mssql/001_schema.sql applied, the file that creates the role.
+// Falling back to the plain pool here is what would make teardown silently
+// no-op again.
 func requireMSSQLAdminRole(t *testing.T, db *sql.DB) {
 	t.Helper()
 	var n int
@@ -614,6 +623,28 @@ func applyMSSQLCrossTenantOptIn(t *testing.T, db *sql.DB) {
 	t.Helper()
 	path := filepath.Join(repoRootForMSSQLTestutil(t), "migrations", "mssql", "optional", "cross_tenant_claim.sql")
 	execMSSQLBatchFile(t, db, path)
+}
+
+// mssqlDropFilterPoliciesSQL drops every security policy that has a predicate on
+// dbo.fn_tenant_filter. Dynamic, so a policy added by a migration this file has
+// never heard of is dropped too.
+const mssqlDropFilterPoliciesSQL = `
+DECLARE @sql nvarchar(max) = N'';
+SELECT @sql = @sql + N'DROP SECURITY POLICY ' + QUOTENAME(sch.name) + N'.' + QUOTENAME(sp.name) + N';' + CHAR(10)
+  FROM sys.security_policies AS sp
+  JOIN sys.schemas AS sch ON sch.schema_id = sp.schema_id
+ WHERE EXISTS (SELECT 1 FROM sys.security_predicates AS pred
+                WHERE pred.object_id = sp.object_id
+                  AND pred.predicate_definition LIKE N'%fn_tenant_filter%');
+IF LEN(@sql) > 0 EXEC sp_executesql @sql;
+`
+
+// execMSSQLBatch runs one batch on one connection.
+func execMSSQLBatch(t *testing.T, db *sql.DB, batch string) {
+	t.Helper()
+	if _, err := db.Exec(batch); err != nil {
+		t.Fatalf("exec batch: %v", err)
+	}
 }
 
 // execMSSQLBatchFile runs a .sql file's GO-separated batches over db, in

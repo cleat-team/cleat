@@ -65,7 +65,7 @@ and syscall boundary but not the CPU/wall-clock one.
   (default 30s, `DefaultWasmtimeExecutionTimeout` in
   `engine/wasmtime_options.go`, configurable via `--wasm-instance-timeout`),
   an optional instruction/fuel budget (`--wasm-instruction-limit`), and a
-  linear-memory ceiling (default 32 MiB per module,
+  linear-memory ceiling (default 256 MiB per module,
   `DefaultWasmtimeMemoryLimitBytes`, configurable via `--wasm-memory-max-mb`).
   These bound even a WASM module stuck in a tight loop that never calls back
   into the host — see CLAUDE.md's note that this differs between wasmtime's two
@@ -250,7 +250,9 @@ func MiddlewareWithMux(db *sql.DB) func(http.Handler) http.Handler {
   `error_code`, `error_op`, `cancellation_reason`, `query_state`);
   `workflow_signals.payload`; `workflow_promises.result`/`error_msg`;
   `workflow_update_requests.payload`/`result`/`error_msg`;
-  `workflow_schedules.input`; and `idempotency_keys.error_msg` (cleat#2312).
+  `workflow_schedules.input`; `idempotency_keys.error_msg` (cleat#2312); and
+  `workflow_payloads.compaction_state`, which holds the compacted events' sensitive
+  fields (cleat#3774; v0.4.0 and v0.5.0 wrote it in plaintext, see the CHANGELOG).
   `ListWorkflows`'s `InputContains`/`ErrorContains` substring search is
   refused outright under encryption, rather than silently searching
   ciphertext and reporting a false "no match" -- see

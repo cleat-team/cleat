@@ -260,8 +260,10 @@ func (p *Plugin) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// updated_at is unconditional, so this UPDATE's WHERE id = $.. AND
-	// tenant_id = $.. is always the existence-and-ownership check before the
-	// secret write below, even when routing_key is the only field changing.
+	// tenant_id = $.. is the existence-and-ownership check before the secret
+	// write below, even when routing_key is the only field changing. On MySQL
+	// "0 rows affected" does not by itself mean "no such config" (it counts
+	// rows changed): see the check after the UPDATE.
 	setClauses = append(setClauses, "updated_at = now()")
 	args = append(args, id, tid)
 
@@ -278,8 +280,24 @@ func (p *Plugin) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if rows == 0 {
-		p.writeError(w, 404, "config not found")
-		return
+		// 0 rows is not "no such config" on every dialect. PostgreSQL and SQL Server count the rows
+		// MATCHED; MySQL counts rows CHANGED, and its now() has second precision, so an update that
+		// changes nothing else and lands in the same second as the row's last one assigns the values it
+		// already holds and affects 0 rows for a config that exists (cleat#3550, as cleat#3541). Ask,
+		// rather than infer: a config that is gone, another tenant's, or never existed still answers 404.
+		var one int
+		err := plugin.ScanRow(p.db.QueryRow(r.Context(), `
+			SELECT 1 FROM pd_config WHERE id = $1 AND tenant_id = $2
+		`, id, tid), &one)
+		if errors.Is(err, sql.ErrNoRows) {
+			p.writeError(w, 404, "config not found")
+			return
+		}
+		if err != nil {
+			p.logger.Error("pagerduty: check config exists", "error", err)
+			p.writeError(w, 500, "failed to update config")
+			return
+		}
 	}
 
 	// Secret write happens AFTER the row update confirms id belongs to tid --

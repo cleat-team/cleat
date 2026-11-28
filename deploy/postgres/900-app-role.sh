@@ -10,8 +10,8 @@
 # docker-compose.cluster.yml.
 #
 # Why a separate role at all: every tenant-scoped table has row-level security
-# enabled and FORCEd, and for GetWorkflowByID and ListWorkflows those policies
-# are the only tenant isolation there is. PostgreSQL never applies RLS to a
+# enabled and FORCEd, and for the plain workflow listing and count those
+# policies are the only tenant isolation there is. PostgreSQL never applies RLS to a
 # superuser, and POSTGRES_USER (here, "cleat") is one -- so before this, the
 # policies were bypassed by every connection that ever ran against them.
 #

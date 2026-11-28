@@ -52,13 +52,10 @@ examples/fooddash	func checkPickupStatus
 examples/onboarding	var h
 examples/subscription	var h
 examples/travel	var h
-examples/widget-store-as/host	func runDispatchWorkflow
 internal/plugingen	func isArrayType
 internal/plugingen	func sanitizeIdent
 internal/plugingen	func unique
 monitoring/prometheus	field once
-packages/cleat-as/test_runner	func (*WASMTestEnv).durableJSONParse
-packages/cleat-as/test_runner	func (*WASMTestEnv).durableJSONStringify
 plugins/blobstore	var jsonbContains
 plugins/kafkaconnect	field mux
 wasm	const outBufSize

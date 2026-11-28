@@ -64,7 +64,6 @@ var sdkImportSources = []sdkImportSource{
 	// 2026-09-06 by diffing the SETS, not the counts -- origin/develop 46,
 	// this branch 44, removed exactly those two and added none.
 	{"java", 44, javaDeclaredImports},
-	{"assemblyscript", 45, asDeclaredImports},
 
 	// Go and Python declare nothing themselves, and are covered here by
 	// the tables that decide their import names instead.
@@ -194,18 +193,6 @@ func javaDeclaredImports(t *testing.T, root string) map[string]string {
 	return out
 }
 
-func asDeclaredImports(t *testing.T, root string) map[string]string {
-	t.Helper()
-	p := filepath.Join(root, "packages", "cleat-as", "assembly", "host-calls.ts")
-	src := readFileOrFatal(t, p)
-	out := map[string]string{}
-	re := regexp.MustCompile(`@external\("env",\s*"([^"]+)"\)`)
-	for _, m := range re.FindAllStringSubmatch(src, -1) {
-		out[m[1]] = "packages/cleat-as/assembly/host-calls.ts"
-	}
-	return out
-}
-
 func readFileOrFatal(t *testing.T, path string) string {
 	t.Helper()
 	b, err := os.ReadFile(path)
@@ -308,12 +295,28 @@ var notWorkflowFacing = map[string]bool{
 // SDK cannot reach. SHRINK-ONLY: removing an entry when the binding lands is
 // the point; adding one widens the gap and needs a reason here.
 //
-// Measured 2026-09-07. Note that AssemblyScript, not Go, is the only SDK at
-// full parity -- which is the sort of thing nobody would have guessed, and the
-// reason this direction is worth checking at all.
+// Measured 2026-09-07, when AssemblyScript (since removed from this table), not Go,
+// was the only SDK at full parity -- which is the sort of thing nobody would have
+// guessed, and the reason this direction is worth checking at all.
 var sdkUnreachedBaseline = map[string][]string{
-	// rust and java: deliberately absent, as assemblyscript is. Both bound the
-	// cron trio in 3.242 -- which is what this baseline existed to make
+	// cleat_interrupt_requested (cleat#3922) is bound by ONE guest: the
+	// TypeScript plugin, which polls it from the JavaScript engine's interrupt
+	// handler so a kill can unwind the guest cleanly and the host can then run
+	// its defers.
+	//
+	// It is workflow-facing, not a runtime handshake, so it is recorded here
+	// rather than in notWorkflowFacing above -- it widens the gap, which is
+	// what this baseline exists to make visible. The reason it is a gap and not
+	// a defect: the call is OPTIONAL. A guest that never imports it is
+	// unaffected and keeps the hard kill exactly as before; the poll is what
+	// buys deferred cleanup after a kill, and no other SDK has asked for it.
+	// When one does, delete its entry rather than re-labelling it -- this list
+	// is shrink-only.
+	"rust": {"cleat_interrupt_requested"},
+	"java": {"cleat_interrupt_requested"},
+
+	// rust and java: the cron trio is deliberately absent from their entries above, because both
+	// bound it in 3.242 -- which is what this baseline existed to make
 	// visible, and it worked on its first real use: applying the bindings made
 	// this test fail with "names 3 host export(s) this SDK now reaches", naming
 	// all three.
@@ -374,6 +377,9 @@ var sdkUnreachedBaseline = map[string][]string{
 	// Go therefore has NO real gap left; the four below are all reachable
 	// another way.
 	"go (wasm/usage.go hostFunctions)": {
+		// Optional soft-kill poll, cleat#3922 -- see the note at the top of this
+		// map. Go keeps the hard kill until someone binds it.
+		"cleat_interrupt_requested",
 		// NOT a gap: Go reaches it, just not through the table this scanner
 		// reads. hostFunctions maps an import to a HostCalls METHOD, and
 		// cleat_defer_phase has none -- its caller is the generated defer
@@ -411,6 +417,9 @@ var sdkUnreachedBaseline = map[string][]string{
 	// they share, differing only on cleat_register_query_handler, which is in
 	// notWorkflowFacing above.
 	"python (wasm/component_rewrite.go WitToEnvImport)": {
+		// Optional soft-kill poll, cleat#3922 -- see the note at the top of this
+		// map. Python keeps the hard kill until someone binds it.
+		"cleat_interrupt_requested",
 
 		// The json pair. Not gaps: the
 		// `json` module is in the standard library and engine/lifecycle.go's
@@ -422,16 +431,16 @@ var sdkUnreachedBaseline = map[string][]string{
 		"cleat_json_stringify",
 
 		// A real gap, and the only one here. cleat_start_detached (cleat#1154)
-		// is bound by Go, Rust, Java and AssemblyScript; Python is not, and the
+		// is bound by Go, Rust and Java; Python is not, and the
 		// reason is that it needs more than a table row.
 		//
 		// It returns a STRING, so its WIT cannot be the `-> u64` that
 		// durable-run-detached uses. A core-ABI guest receives the run id
 		// through an out-pointer into its own linear memory; the component
 		// dispatch writes into a HOST buffer, so out-pointers do not survive
-		// the crossing -- that is the same defect stopSurfaces records as OPEN
-		// for durable-await-signals, which is declared with out-pointers and
-		// has therefore never worked on a component. So the Python binding
+		// the crossing -- that is the same defect durable-await-signals had
+		// until cleat#3786 (out-pointers, so it never worked on a component;
+		// it now returns its values). So the Python binding
 		// needs `durable-start-detached: func(...) -> result<string,
 		// call-failure>`, a dispatcher in component_cgo.go, and regenerated
 		// componentize-py bindings -- and regeneration must first reproduce the
@@ -454,34 +463,30 @@ var sdkUnreachedBaseline = map[string][]string{
 		//
 		// The out-pointer shape is why a table row alone would not fix it: an
 		// out-pointer addresses the guest's own linear memory while component
-		// dispatch writes into a HOST buffer. And the wrong-answer mode is not
-		// hypothetical in this family -- durable-await-signals IS declared and
-		// IS bound in Python, so its guest reads whatever sat at
-		// OUTPUT_OFFSET. That is the shape §3.267 records.
+		// dispatch writes into a HOST buffer. And the wrong-answer mode was not
+		// hypothetical in this family -- durable-await-signals WAS declared and
+		// WAS bound in Python, so its guest read whatever sat at
+		// OUTPUT_OFFSET, until cleat#3786. That was the shape §3.267 records.
 		//
 		// THE SAME as cleat_start_detached in the respect that matters here,
 		// not different from it: neither has a WIT declaration of its own, and
-		// neither is bound. What both contrast with is durable-await-signals --
-		// the one call of the three that is declared AND bound, and so the only
-		// one whose guest reads whatever sat at OUTPUT_OFFSET.
+		// neither is bound. What both contrasted with is durable-await-signals --
+		// the one call of the three that was declared AND bound, and so the only
+		// one whose guest read whatever sat at OUTPUT_OFFSET (until cleat#3786).
 		//
 		// stopSurfaces carries reasonNotInTheComponentWorld here, because
-		// cleat_wait_for_event has no WIT declaration of its own to name,
-		// against reasonWitIsStillCoreABI on DurableAwaitSignals. The
+		// cleat_wait_for_event has no WIT declaration of its own to name. The
 		// detached-run site carries neither: it names durable-run-detached, the
 		// declaration cleat_run_detached uses, so cleat_start_detached rides on
 		// it without one of its own. All of it is the out-pointer state
 		// §3.267 records it.
 		//
-		// Bound in Go, Rust, Java and AssemblyScript. pythonUnboundBaseline in
+		// Bound in Go, Rust and Java. pythonUnboundBaseline in
 		// engine/python_wasm_e2e_test.go records the same fact from
 		// python-sdk/cleat_sdk/host_calls.py, deliberately from the other
 		// source; the two move together.
 		"cleat_wait_for_event",
 	},
-
-	// assemblyscript: deliberately absent. It reaches every workflow-facing
-	// export, and an empty entry here would read as "not yet measured".
 }
 
 // TestEverySDKReachesEveryHostExport is the reverse of

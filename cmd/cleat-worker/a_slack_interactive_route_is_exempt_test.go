@@ -43,9 +43,12 @@ import (
 )
 
 func TestSlackInteractiveIsExemptFromBothAuthMiddlewares(t *testing.T) {
-	src, err := os.ReadFile("main.go")
+	// The call sites moved from main() to composeAuthChain in cleat#3555, so the chain a worker
+	// runs is also the chain a test can build. This scan stays a scan, but of the file that now
+	// holds them.
+	src, err := os.ReadFile("auth_chain.go")
 	if err != nil {
-		t.Fatalf("reading main.go: %v", err)
+		t.Fatalf("reading auth_chain.go: %v", err)
 	}
 	body := stripGoComments(string(src))
 
@@ -55,16 +58,16 @@ func TestSlackInteractiveIsExemptFromBothAuthMiddlewares(t *testing.T) {
 	}{
 		{
 			name: "auth.HostBindingMiddlewareWithMux",
-			call: regexp.MustCompile(`auth\.HostBindingMiddlewareWithMux\(authResolver, mux, pluginAuthExemptPatterns\.\.\.\)\(handler\)`),
+			call: regexp.MustCompile(`auth\.HostBindingMiddlewareWithMux\(c\.Domains, mux, pluginAuthExemptPatterns\.\.\.\)\(handler\)`),
 		},
 		{
 			name: "auth.MiddlewareWithMux",
-			call: regexp.MustCompile(`handler = auth\.MiddlewareWithMux\(authResolver, true, mux, pluginAuthExemptPatterns\.\.\.\)\(handler\)`),
+			call: regexp.MustCompile(`handler = auth\.MiddlewareWithMux\(c\.Tenants, true, mux, pluginAuthExemptPatterns\.\.\.\)\(handler\)`),
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if !tc.call.MatchString(body) {
-				t.Fatalf("could not find %s(authResolver, ..., mux, pluginAuthExemptPatterns...)(handler) in main.go -- "+
+				t.Fatalf("could not find %s(..., mux, pluginAuthExemptPatterns...)(handler) in auth_chain.go -- "+
 					"either the wiring was restructured (update the pattern above) or this call site stopped "+
 					"spreading the shared exempt-pattern list, which would let it drift from the other call site "+
 					"exactly as the two hand-copied literals this replaced once could", tc.name)

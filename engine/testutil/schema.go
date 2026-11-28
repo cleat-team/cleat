@@ -135,6 +135,13 @@ var postgresCleanupTables = []string{
 	"queues",
 	"tenant_domains",
 	"tenant_settings",
+	// tenant_library_installs -- cleat#3540. FK'd to nothing and keyed on tenant_id
+	// alone, like the entries above. Without it the bystander's row in
+	// TestEveryTenantOwnedTableIsEmptiedByDropTenant outlives the test and the next
+	// run's seed fails on the primary key. MySQL has no such table (workflow
+	// libraries are PostgreSQL and SQL Server only); the lists must still agree
+	// (TestCleanupTableListsAgree), and an absent table is skipped by existingTables.
+	"tenant_library_installs",
 }
 
 // CleanupPostgresTestData deletes all rows from the cleat test tables.
@@ -786,6 +793,37 @@ func SetupPostgresRLSRole(t *testing.T, db *sql.DB) {
 		// AllowsPublicExposure's falsification found the gap, because the
 		// only test exercising IsTenantSuspended over HTTP uses a mock store.
 		`GRANT SELECT ON admin.tenants TO ` + PostgresRLSTestRole,
+		// The tombstone a dropped tenant leaves (cleat#3552, B3b-2). IsTenantSuspended reads it on every
+		// start, so the application role needs SELECT; the tombstone migration (007_a_dropped_tenant_leaves_a_tombstone.sql) grants cleat_app SELECT, INSERT and
+		// DELETE, and this role models a worker the same RLS applies to, which only ever reads it.
+		`GRANT SELECT ON admin.tenant_tombstones TO ` + PostgresRLSTestRole,
+
+		// READ ONLY on the library schema, which is what migration 005 grants the
+		// real application role: a definition installed from a library reads its
+		// bytes, length and digest from library.members (cleat#3540), and the
+		// application role can read the schema and cannot write it. This role is a
+		// stand-in created after the migrations ran, so it is not in 005's loop and
+		// gets the same grants here. Guarded, because a database that predates 005
+		// has no such schema.
+		// SELECT, INSERT and UPDATE on the plugin-name registry, which is what migration 008
+		// grants the real application role (and DELETE is revoked from it): a worker records
+		// its plugins at registration and the deploy and install checks read them
+		// (cleat#3600). Guarded, because a database that predates 008 has no such table.
+		`DO $$ BEGIN
+			IF to_regclass('admin.registered_plugins') IS NOT NULL THEN
+				EXECUTE 'GRANT SELECT, INSERT, UPDATE ON admin.registered_plugins TO ` + PostgresRLSTestRole + `';
+			END IF;
+			IF to_regclass('admin.plugin_dep_overrides') IS NOT NULL THEN
+				EXECUTE 'GRANT SELECT, INSERT ON admin.plugin_dep_overrides TO ` + PostgresRLSTestRole + `';
+			END IF;
+		END $$;`,
+
+		`DO $$ BEGIN
+			IF EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = 'library') THEN
+				EXECUTE 'GRANT USAGE ON SCHEMA library TO ` + PostgresRLSTestRole + `';
+				EXECUTE 'GRANT SELECT ON ALL TABLES IN SCHEMA library TO ` + PostgresRLSTestRole + `';
+			END IF;
+		END $$;`,
 	}
 	for _, stmt := range stmts {
 		if _, err := db.Exec(stmt); err != nil {

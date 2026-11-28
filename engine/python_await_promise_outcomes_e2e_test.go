@@ -314,3 +314,51 @@ func writeFile(t *testing.T, path, content string) {
 		t.Fatal(err)
 	}
 }
+
+// cleat#4177, through a real Python component: an await_promise that suspended and then timed out left replay at its OWN pending record on
+// every later replay, so the guest's next call ran again, and a promise that settled in between turned the recorded timeout into `resolved`.
+// The guest here is the same fixture as above: it waits, then makes one durable call. The history of the segment that timed out is replayed
+// again, as any later execution of the run would, and the call must not run a second time nor the answer change.
+func TestPythonGuestAwaitPromiseTimeoutIsStillATimeoutOnALaterReplay(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping Python WASM integration test in short mode")
+	}
+	caller := &mockCaller{}
+	store := &mockPromiseStore{status: ""}
+	wasmBytes, eng := pythonEntryEngine(t, awaitOutcomeFixture, "await_outcome", caller, WithPromiseStore(store))
+	ctx := context.Background()
+
+	_, hist, suspended, _, _, err := eng.Execute(ctx, wasmBytes, "await_outcome", awaitOutcomeInput)
+	if err != nil || suspended == nil {
+		t.Fatalf("PRECONDITION FAILED: first segment suspended=%v err=%v, want a suspension at the wait", suspended != nil, err)
+	}
+	for i := range hist {
+		if hist[i].EventType == EventTypeAwaitPromise {
+			hist[i].TimestampMs -= 61_000
+		}
+	}
+	res1, h1, suspended, _, _, err := eng.Replay(ctx, wasmBytes, "await_outcome", awaitOutcomeInput, hist)
+	if err != nil || suspended != nil || len(caller.calls) != 1 {
+		t.Fatalf("PRECONDITION FAILED: the resume past the deadline gave suspended=%v err=%v with %d call(s), want a finished run and 1", suspended != nil, err, len(caller.calls))
+	}
+	if got := decodeAwaitOutcome(t, res1); !got.TimedOut {
+		t.Fatalf("PRECONDITION FAILED: the resume past the deadline gave %+v, want timed_out", got)
+	}
+
+	// A later replay of that history, the promise still pending, then after it settled.
+	for _, settled := range []bool{false, true} {
+		if settled {
+			store.status, store.result = "resolved", "late"
+		}
+		res2, h2, suspended, _, _, err := eng.Replay(ctx, wasmBytes, "await_outcome", awaitOutcomeInput, h1)
+		if err != nil || suspended != nil {
+			t.Fatalf("settled=%v: later replay suspended=%v err=%v", settled, suspended != nil, err)
+		}
+		if got := decodeAwaitOutcome(t, res2); !got.TimedOut || got.Result != "" {
+			t.Errorf("settled=%v: a later replay answered %+v where the original run was told it timed out", settled, got)
+		}
+		if len(caller.calls) != 1 || len(h2) != len(h1) {
+			t.Errorf("settled=%v: a later replay made %d durable call(s) in total (want 1), history %d -> %d events", settled, len(caller.calls), len(h1), len(h2))
+		}
+	}
+}

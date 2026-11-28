@@ -1,0 +1,407 @@
+# ---------------------------------------------------------------------------
+# Upgrade From v0.5.0 (cleat#3735, owner decision D79)
+#
+# 0.6.0 supports an in-place upgrade from 0.5.0 (D79 reverses D18 for 0.5.0 to
+# 0.6.0). This job seeds a database with the PUBLISHED v0.5.0 cleat-worker, kills
+# it with runs in flight, then runs the release candidate against it:
+#
+#   * `--migrate-only` migrates it in place (exit 0), runs every migration since
+#     v0.5.0 and the plugins' migrations (event-triggers, jobqueue, notifications
+#     and scheduler gained steps), leaves every run's event history byte-for-byte
+#     as the seed wrote it, and produces the schema a FRESH release candidate
+#     produces;
+#   * the release candidate then serves it and every run that was in flight
+#     completes: a step that was RUNNING at the kill (reclaimed after its lease),
+#     runs SLEEPING on a timer or WAITING on a signal, parents awaiting a child,
+#     and runs QUEUED and never claimed;
+#   * a control run whose recorded checksums were corrupted must be refused, so a
+#     clean resume of the others proves the history chain was verified.
+#
+# The v0.5.0 artifacts are pinned by sha256 and image digest in
+# scripts/upgrade_from_v040.py (PINS); see the comment there for which commit
+# they were built from and how that was established.
+#
+# WHERE IT RUNS. On a push to a release/** branch, on EVERY pull request whose
+# base is a release/** branch, and on demand. One job per dialect, each its own
+# check: PostgreSQL, SQL Server and MySQL (cleat#3735), and a fourth, SQL Server in a database created
+# under a case-sensitive collation (CS_AS), beside the default-collation one.
+#
+# THE PULL REQUEST TRIGGER IS FOR THE RULESET. Release branches take changes through
+# pull requests, and a required status context that runs only on a push never
+# reports on one, so the PR would sit blocked for ever. Hence `branches:` on the
+# base and NO `paths:` filter: a path filter is how upgrade-from-v040.yml got the
+# same shape, harmless only because that check is not required. This file used to
+# trigger on a pull request to ANY base that touched this workflow, and skipped the
+# job; that trigger is gone (it validated nothing), so a PR to develop runs nothing
+# from here and the file is checked by `scripts/check-workflow-*.{py,sh}`.
+#
+# Making it a REQUIRED check on release branches is a ruleset change and the
+# owner's, not this file's.
+#
+# Exit statuses: 0 passed, 1 a finding, 2 UNMEASURED (the check could not look,
+# which is a failure of the check, not a finding about cleat).
+# ---------------------------------------------------------------------------
+name: Upgrade From v0.5.0
+
+on:
+  push:
+    branches: ["release/**"]
+  pull_request:
+    types: [opened, synchronize, reopened, edited]
+    branches: ["release/**"]
+  workflow_dispatch:
+
+# Keyed on the commit for pushes, so one queued release-branch run is never
+# cancelled by the next push; superseded PR runs are cancelled.
+# scripts/check-workflow-concurrency.sh requires exactly this shape.
+# A title or body edit must not supersede the run it races (cleat#3809, the same
+# defect cleat#1688 fixed in ci.yml). `edited` is subscribed for a BASE change,
+# but it also fires for a body edit, and `github.ref` is identical for every
+# pull_request activity type, so the edited run landed in the push run's group
+# and cancelled it. A cancelled run renders as a failure, and on release/v0.6.0
+# these contexts are required. An `edited` that did not change the base gets
+# its own group (`github.run_id`), so it cancels nothing and the run it raced
+# finishes; it then runs the jobs again, as ci.yml's does. One line on purpose:
+# check-workflow-concurrency.sh reads the single line matching `^\s*group:`.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && (github.event.action == 'edited' && !github.event.changes.base && github.run_id || github.ref) || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  upgrade-from-v050:
+    name: Upgrade From v0.5.0 (PostgreSQL)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+
+    services:
+      postgres:
+        image: mirror.gcr.io/library/postgres:16.14@sha256:95206741a5b214807675e14165369d05b93a9cf692223b616d07cca227e74b0b
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: cleat
+        # 127.0.0.1, not localhost: see engine-race.yml.
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      # An EMPTY database: the seed step migrates it with the v0.5.0 worker.
+      OWNER_DB: postgres://postgres:postgres@127.0.0.1:5432/cleat?sslmode=disable
+      STATE_DIR: ${{ github.workspace }}/.upgrade-state
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Setup Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      - name: Harness self-test
+        run: python3 scripts/upgrade_from_v040.py --self-test
+
+      # CGO on: with it off there is no WASM backend and the worker exits 1
+      # at startup (CLAUDE.md, "Build and test with CGO on"). --verify-backend
+      # turns that into a failure HERE rather than a migration-shaped one below.
+      - name: Build the release candidate's cleat-worker
+        run: |
+          go build -o "$RUNNER_TEMP/cleat-worker-rc" ./cmd/cleat-worker
+          "$RUNNER_TEMP/cleat-worker-rc" -verify-backend
+
+      - name: Seed a database with the published v0.5.0, runs in flight
+        run: |
+          start=$SECONDS
+          python3 scripts/upgrade_from_v040.py seed --from-version v0.5.0 --owner-db "$OWNER_DB" --state-dir "$STATE_DIR"
+          echo "seed_seconds=$((SECONDS - start))" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upgrade in place with the release candidate; every in-flight run completes
+        run: |
+          start=$SECONDS
+          python3 scripts/upgrade_from_v040.py verify --expect upgrade --owner-db "$OWNER_DB" --state-dir "$STATE_DIR" --rc-worker "$RUNNER_TEMP/cleat-worker-rc"
+          echo "verify_seconds=$((SECONDS - start))" >> "$GITHUB_STEP_SUMMARY"
+
+      # include-hidden-files: STATE_DIR is `.upgrade-state`, a hidden directory,
+      # and upload-artifact skips hidden files by default (cleat#3461). `warn`
+      # and not `error`: when an early step fails there is legitimately no
+      # state directory, and a second failure would bury the first.
+      - name: Upload worker logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: upgrade-from-v050-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            .upgrade-state/*.log
+            .upgrade-state/manifest.json
+          include-hidden-files: true
+          retention-days: 14
+          if-no-files-found: warn
+
+  # The same upgrade on SQL Server (cleat#3735, PR 2).  Its own job and its own check name, so a
+  # dialect that breaks is named by the red check and a ruleset can require each on its own.
+  #
+  # WHAT DIFFERS FROM THE PostgreSQL JOB, all of it inside scripts/upgrade_from_v040.py: SQL is read through
+  # scripts/upgrade-from-v040/sqlq (a Go program: the owner login is not exempt from row-level security,
+  # so tenant tables are read with the session's tenant_id set); the org and tenant are inserted with SQL
+  # because v0.5.0's --create-org and --create-tenant are PostgreSQL only; the app login is created the way
+  # deploy/mssql/900-app-role.sh does; and the schema comparison includes column collations, because the
+  # 0.6.0 migrations changed several (D60).
+  upgrade-from-v050-mssql:
+    name: Upgrade From v0.5.0 (SQL Server)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+
+    services:
+      mssql:
+        # Pinned by digest, the same one as every other mssql service in this repo
+        # (tier1-gate.yml has the rationale); scripts/check-workflow-guards.py wants
+        # MSSQL_MEMORY_LIMIT_MB on every one.
+        image: mcr.microsoft.com/mssql/server@sha256:ba4c8329f48fb8f02e1416be6a930ebfd71268caee78aa985f3af4315e457c89
+        env:
+          ACCEPT_EULA: Y
+          MSSQL_SA_PASSWORD: CleatTest123!
+          MSSQL_MEMORY_LIMIT_MB: "2048"
+        options: >-
+          --health-cmd "/opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P 'CleatTest123!' -Q 'SELECT 1' -C"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 15
+          --health-start-period 30s
+          --publish 1433:1433
+
+    env:
+      OWNER_DB: sqlserver://sa:CleatTest123!@127.0.0.1:1433?database=cleat
+      STATE_DIR: ${{ github.workspace }}/.upgrade-state
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Setup Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      # Names the service container, so the self-test's SQL Server cases run here and not only elsewhere.
+      - name: Harness self-test
+        env:
+          UPGRADE_SELFTEST_MSSQL: sqlserver://sa:CleatTest123!@127.0.0.1:1433?database=master
+        run: python3 scripts/upgrade_from_v040.py --self-test
+
+      # An EMPTY database: the seed step migrates it with the v0.5.0 worker.
+      - name: Create the cleat database
+        run: |
+          go run ./scripts/upgrade-from-v040/sqlq -driver sqlserver \
+            -dsn "sqlserver://sa:CleatTest123!@127.0.0.1:1433?database=master" -sql "CREATE DATABASE cleat"
+
+      - name: Build the release candidate's cleat-worker
+        run: |
+          go build -o "$RUNNER_TEMP/cleat-worker-rc" ./cmd/cleat-worker
+          "$RUNNER_TEMP/cleat-worker-rc" -verify-backend
+
+      - name: Seed a database with the published v0.5.0, runs in flight
+        run: |
+          start=$SECONDS
+          python3 scripts/upgrade_from_v040.py seed --from-version v0.5.0 --owner-db "$OWNER_DB" --state-dir "$STATE_DIR"
+          echo "mssql seed_seconds=$((SECONDS - start))" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upgrade in place with the release candidate; every in-flight run completes
+        run: |
+          start=$SECONDS
+          python3 scripts/upgrade_from_v040.py verify --expect upgrade --owner-db "$OWNER_DB" --state-dir "$STATE_DIR" --rc-worker "$RUNNER_TEMP/cleat-worker-rc"
+          echo "mssql verify_seconds=$((SECONDS - start))" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload worker logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: upgrade-from-v050-mssql-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            .upgrade-state/*.log
+            .upgrade-state/manifest.json
+          include-hidden-files: true
+          retention-days: 14
+          if-no-files-found: warn
+
+  # The same upgrade on SQL Server, in a database created under a CASE-SENSITIVE collation (cleat#3735).
+  #
+  # WHY THIS ROW AND NOT ANOTHER: operators create databases under collations of their own, and D60 (the
+  # 0.6.0 collation work) is where an upgrade could break on one. Measured 2026-11-13 on develop 15e27ed5: the
+  # upgrade held under SQL_Latin1_General_CP1_CS_AS and under a _UTF8 collation. Only the first is a row here:
+  # in the upgraded schema the only varchar or char columns are hashes and hex keys, which are ASCII, so a
+  # _UTF8 database exercises almost nothing the default one does not.
+  #
+  # WHAT MAKES IT MEAN SOMETHING, and what to check if it is ever edited:
+  #   * UPGRADE_MSSQL_COLLATION is read by the harness's create_database, which creates the FRESH database the
+  #     upgraded schema is compared with. Without it that database takes the server's default collation, every
+  #     column that follows the collation differs, and this job fails ("251 only in the upgraded database,
+  #     251 only in the fresh one", measured). That failure is the known-positive: the comparison does see a
+  #     collation.
+  #   * the step "Assert the database collation" reads the collation BACK, so a CREATE DATABASE whose clause
+  #     was lost cannot leave a job that tested the default and says it tested another.
+  #
+  # The server's own default collation stays the image's (SQL_Latin1_General_CP1_CI_AS), so the database also
+  # differs from tempdb, which is the situation an operator who sets a collation on one database is in.
+  upgrade-from-v050-mssql-cs-as:
+    name: Upgrade From v0.5.0 (SQL Server, CS_AS)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+
+    services:
+      mssql:
+        # Pinned by digest, the same one as every other mssql service in this repo
+        # (tier1-gate.yml has the rationale); scripts/check-workflow-guards.py wants
+        # MSSQL_MEMORY_LIMIT_MB on every one.
+        image: mcr.microsoft.com/mssql/server@sha256:ba4c8329f48fb8f02e1416be6a930ebfd71268caee78aa985f3af4315e457c89
+        env:
+          ACCEPT_EULA: Y
+          MSSQL_SA_PASSWORD: CleatTest123!
+          MSSQL_MEMORY_LIMIT_MB: "2048"
+        options: >-
+          --health-cmd "/opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P 'CleatTest123!' -Q 'SELECT 1' -C"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 15
+          --health-start-period 30s
+          --publish 1433:1433
+
+    env:
+      OWNER_DB: sqlserver://sa:CleatTest123!@127.0.0.1:1433?database=cleat
+      # Read by scripts/upgrade_from_v040.py: the database below and the fresh one it compares with.
+      UPGRADE_MSSQL_COLLATION: SQL_Latin1_General_CP1_CS_AS
+      STATE_DIR: ${{ github.workspace }}/.upgrade-state
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Setup Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      # Names the service container, so the self-test's SQL Server cases run here and not only elsewhere.
+      - name: Harness self-test
+        env:
+          UPGRADE_SELFTEST_MSSQL: sqlserver://sa:CleatTest123!@127.0.0.1:1433?database=master
+        run: python3 scripts/upgrade_from_v040.py --self-test
+
+      # An EMPTY database: the seed step migrates it with the v0.5.0 worker.
+      - name: Create the cleat database under a case-sensitive collation
+        run: |
+          go run ./scripts/upgrade-from-v040/sqlq -driver sqlserver \
+            -dsn "sqlserver://sa:CleatTest123!@127.0.0.1:1433?database=master" \
+            -sql "CREATE DATABASE cleat COLLATE $UPGRADE_MSSQL_COLLATION"
+
+      # The precondition, printed: what the database is under, read back from the server.
+      - name: Assert the database collation
+        run: |
+          got="$(go run ./scripts/upgrade-from-v040/sqlq -driver sqlserver \
+            -dsn "sqlserver://sa:CleatTest123!@127.0.0.1:1433?database=master" \
+            -sql "SELECT CAST(DATABASEPROPERTYEX(N'cleat', 'Collation') AS varchar(128))")"
+          echo "database collation: $got (want $UPGRADE_MSSQL_COLLATION)"
+          test "$got" = "$UPGRADE_MSSQL_COLLATION"
+
+      - name: Build the release candidate's cleat-worker
+        run: |
+          go build -o "$RUNNER_TEMP/cleat-worker-rc" ./cmd/cleat-worker
+          "$RUNNER_TEMP/cleat-worker-rc" -verify-backend
+
+      - name: Seed a database with the published v0.5.0, runs in flight
+        run: |
+          start=$SECONDS
+          python3 scripts/upgrade_from_v040.py seed --from-version v0.5.0 --owner-db "$OWNER_DB" --state-dir "$STATE_DIR"
+          echo "mssql seed_seconds=$((SECONDS - start))" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upgrade in place with the release candidate; every in-flight run completes
+        run: |
+          start=$SECONDS
+          python3 scripts/upgrade_from_v040.py verify --expect upgrade --owner-db "$OWNER_DB" --state-dir "$STATE_DIR" --rc-worker "$RUNNER_TEMP/cleat-worker-rc"
+          echo "mssql verify_seconds=$((SECONDS - start))" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload worker logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: upgrade-from-v050-mssql-cs-as-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            .upgrade-state/*.log
+            .upgrade-state/manifest.json
+          include-hidden-files: true
+          retention-days: 14
+          if-no-files-found: warn
+
+  # The same upgrade on MySQL (cleat#3735, PR 3), its own job and check name.
+  #
+  # WHAT DIFFERS, all of it inside scripts/upgrade_from_v040.py: MySQL is single-tenant, so there is no
+  # row-level security, no org and tenant to create (v0.5.0 refuses --create-tenant there; the default tenant is
+  # the tenant) and no separate application login; its runs and history live in a schema of their own beside
+  # the database (<database>_<tenant id>), which the harness reads and compares to a fresh core schema; SQL is
+  # read through scripts/upgrade-from-v040/sqlq, because the mysql client is not promised on a runner.
+  upgrade-from-v050-mysql:
+    name: Upgrade From v0.5.0 (MySQL)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+
+    services:
+      mysql:
+        image: mirror.gcr.io/library/mysql:8.4.11@sha256:b3b90af2a6552ae30c266fdb7d5dd55f3afb72404bb78d37fe8a23eb857fd3fb
+        env:
+          MYSQL_ROOT_PASSWORD: cleat
+          # An EMPTY database: the seed step migrates it with the v0.5.0 worker.
+          MYSQL_DATABASE: cleat
+        options: >-
+          --health-cmd "mysqladmin ping -h 127.0.0.1 -u root -pcleat"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 15
+          --health-start-period 60s
+          --publish 3306:3306
+
+    env:
+      OWNER_DB: root:cleat@tcp(127.0.0.1:3306)/cleat?tls=false&parseTime=true
+      STATE_DIR: ${{ github.workspace }}/.upgrade-state
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Setup Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      - name: Harness self-test
+        run: python3 scripts/upgrade_from_v040.py --self-test
+
+      - name: Build the release candidate's cleat-worker
+        run: |
+          go build -o "$RUNNER_TEMP/cleat-worker-rc" ./cmd/cleat-worker
+          "$RUNNER_TEMP/cleat-worker-rc" -verify-backend
+
+      - name: Seed a database with the published v0.5.0, runs in flight
+        run: |
+          start=$SECONDS
+          python3 scripts/upgrade_from_v040.py seed --from-version v0.5.0 --owner-db "$OWNER_DB" --state-dir "$STATE_DIR"
+          echo "mysql seed_seconds=$((SECONDS - start))" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upgrade in place with the release candidate; every in-flight run completes
+        run: |
+          start=$SECONDS
+          python3 scripts/upgrade_from_v040.py verify --expect upgrade --owner-db "$OWNER_DB" --state-dir "$STATE_DIR" --rc-worker "$RUNNER_TEMP/cleat-worker-rc"
+          echo "mysql verify_seconds=$((SECONDS - start))" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload worker logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: upgrade-from-v050-mysql-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            .upgrade-state/*.log
+            .upgrade-state/manifest.json
+          include-hidden-files: true
+          retention-days: 14
+          if-no-files-found: warn

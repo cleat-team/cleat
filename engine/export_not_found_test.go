@@ -6,31 +6,46 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
-	"os"
 	"strings"
 	"testing"
 	"time"
 )
 
-// A missing per-defer export must not be reported as a failed cleanup.
+// The same behaviour against a hand-written guest that looks, to the host, like an SDK-built one: it exports spin_forever (which
+// registers a defer and then loops until the fence stops it), the `__cleat_run_deferred` export every core-module SDK emits, and NO
+// per-defer `cleat_defer_<id>` export. Added next to the AssemblyScript arm so the behaviour is asserted without an AssemblyScript
+// toolchain, or any toolchain (cleat#4023); the two share assertAMissingDeferExportIsNotReportedAsAFailure, so they cannot drift.
 //
-// IMPROVEMENT-PLAN §3.35. The legacy convention is one export per defer, named
-// cleat_defer_<id>, and no guest in any language emits one -- so for every
-// SDK-built guest the fallback pass said "defer execution failed" once per
-// registered defer, about a convention the guest was never expected to follow.
-// After #559 and #560 it could say it immediately AFTER the real cleanup had
-// succeeded, which is the shape that misleads: an operator reads it and
-// concludes their cleanup did not happen when it did.
-func TestAMissingDeferExportIsNotReportedAsAFailure(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping AssemblyScript WASM integration test in short mode")
-	}
+// NOT a Go guest, deliberately: the legacy per-defer fallback pass this test is about runs for the non-Go (direct-export) path, and
+// measured against the fencereentry Go guest it never runs, so there is no log line to be wrong.
+func TestAMissingDeferExportOfAnSDKShapedGuestIsNotReportedAsAFailure(t *testing.T) {
+	assertAMissingDeferExportIsNotReportedAsAFailure(t, mustWat2Wasm(t, spinWithADeferWat))
+}
 
-	wasmBytes, err := os.ReadFile(buildAssemblyScriptWasm(t))
-	if err != nil {
-		t.Fatalf("read AS WASM: %v", err)
-	}
+// spinWithADeferWat registers a defer and spins; its runner export makes the one durable call that ranTheDefer looks for.
+const spinWithADeferWat = `(module
+  (import "env" "cleat_defer" (func $defer (param i32 i32 i32 i32) (result i64)))
+  (import "env" "cleat_call" (func $call (param i32 i32 i32 i32 i32 i32 i32 i32) (result i64)))
+  (memory (export "memory") 1)
+  (data (i32.const 1024) "release the lock")
+  (data (i32.const 1088) "svc")
+  (data (i32.const 1152) "the_fenced_workflows_defer")
+  (data (i32.const 1216) "{}")
+  (func (export "spin_forever") (param i32 i32 i32 i32) (result i64)
+    (drop (call $defer (i32.const 1024) (i32.const 16) (i32.const 2048) (i32.const 64)))
+    (loop $l (br $l))
+    (i64.const 0))
+  (func (export "__cleat_run_deferred") (result i64)
+    (drop (call $call
+      (i32.const 1088) (i32.const 3)
+      (i32.const 1152) (i32.const 26)
+      (i32.const 1216) (i32.const 2)
+      (i32.const 4096) (i32.const 256)))
+    (i64.const 1))
+)`
 
+func assertAMissingDeferExportIsNotReportedAsAFailure(t *testing.T, wasmBytes []byte) {
+	t.Helper()
 	ctx := context.Background()
 	rt, err := NewRuntime(ctx, 0, 0)
 	if err != nil {
@@ -120,28 +135,13 @@ func TestBothBackendsMarkAMissingExport(t *testing.T) {
 	})
 }
 
-// The backend's own records reach the configured logger.
-//
-// IMPROVEMENT-PLAN §3.35. runGuestDefersAfterKill wrote to slog.Default() in
-// all three of its branches, so a worker with a configured handler saw nothing
-// at all about the cleanup of a workflow it had just killed -- not the success
-// line, not "could not be run", not the refuel warning. The backend had no
-// logger field to write to.
-//
-// This is the log an operator has to read to answer "did the lock get
-// released?", and it was the one going somewhere they were not looking. Found
-// while writing TestAMissingDeferExportIsNotReportedAsAFailure, whose first
-// version asserted on this line and could not see it.
-func TestTheBackendLogsToTheConfiguredLogger(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping AssemblyScript WASM integration test in short mode")
-	}
+// The same behaviour against the Go fencereentry guest, which does take the path that logs "ran the defers of a killed workflow".
+func TestTheBackendLogsToTheConfiguredLoggerForAGoGuest(t *testing.T) {
+	assertTheBackendLogsToTheConfiguredLogger(t, fenceReentryWasm(t))
+}
 
-	wasmBytes, err := os.ReadFile(buildAssemblyScriptWasm(t))
-	if err != nil {
-		t.Fatalf("read AS WASM: %v", err)
-	}
-
+func assertTheBackendLogsToTheConfiguredLogger(t *testing.T, wasmBytes []byte) {
+	t.Helper()
 	var logs bytes.Buffer
 	handler := slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
 

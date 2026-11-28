@@ -13,7 +13,10 @@ import (
 	"github.com/google/uuid"
 )
 
-// LoadWASM returns the compiled WASM bytes for a workflow definition.
+// LoadWASM returns the compiled WASM bytes for a workflow definition. For a definition installed from a
+// library the bytes are the library member's, and they are returned only if they hash to the digest the
+// member records: otherwise the result is an *LibraryMemberDigestMismatchError (ErrLibraryMemberDigestMismatch)
+// and no bytes (cleat#3630).
 func (s *MSSQLStore) LoadWASM(ctx context.Context, defName string, defVersion int) ([]byte, error) {
 	// beginTxWithContext, not bare s.db -- cleat#2210: a WithTenant copy
 	// must run under its own tenant's SESSION_CONTEXT, not whatever the
@@ -25,14 +28,32 @@ func (s *MSSQLStore) LoadWASM(ctx context.Context, defName string, defVersion in
 	defer tx.Rollback()
 
 	var wasmBytes []byte
+	var library sql.NullString
 	err = tx.QueryRowContext(ctx, `
-		SELECT wasm_bytes FROM workflow_defs WHERE name = @p1 AND version = @p2 AND tenant_id = @p3
-	`, defName, defVersion, s.tenantID).Scan(&wasmBytes)
+		SELECT wasm_bytes, library FROM workflow_defs WHERE name = @p1 AND version = @p2 AND tenant_id = @p3
+	`, defName, defVersion, s.tenantID).Scan(&wasmBytes, &library)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("wasm not found: %s v%d", defName, defVersion)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("load wasm: %w", err)
+	}
+	if library.Valid {
+		// An installed library definition names an immutable member of a published
+		// library instead of holding bytes (cleat#3540). A second read, only for
+		// such a row, so an ordinary definition never depends on the library schema.
+		var recorded string
+		if err := tx.QueryRowContext(ctx,
+			`SELECT wasm_bytes, wasm_sha256 FROM library.members WHERE library = @p1 AND name = @p2 AND version = @p3`,
+			library.String, defName, defVersion).Scan(&wasmBytes, &recorded); err != nil {
+			return nil, libraryMemberReadError("load wasm", library.String, defName, defVersion, err)
+		}
+		// The bytes are checked against the digest recorded beside them (cleat#3630). ck_members_digest makes
+		// a mismatch impossible while it is enabled and trusted, so this only fires after a table owner
+		// disabled it (NOCHECK) or removed it.
+		if err := verifyLibraryMemberDigest(library.String, defName, defVersion, recorded, wasmBytes); err != nil {
+			return nil, err
+		}
 	}
 	return wasmBytes, nil
 }
@@ -46,14 +67,28 @@ func (s *MSSQLStore) GetWASMLength(ctx context.Context, defName string, defVersi
 	}
 	defer tx.Rollback()
 
-	var length int64
+	var length sql.NullInt64
+	var library sql.NullString
 	// Scoped by tenant: definition names are user-chosen, so one tenant asking
 	// for another's name is ordinary rather than adversarial, and the size of
 	// their compiled WASM is not the caller's to read. IMPROVEMENT-PLAN 3.11.
 	err = tx.QueryRowContext(ctx,
-		`SELECT len(wasm_bytes) FROM workflow_defs WHERE name = @p1 AND version = @p2 AND tenant_id = @p3`,
-		defName, defVersion, s.tenantID).Scan(&length)
-	return length, err
+		`SELECT len(wasm_bytes), library FROM workflow_defs WHERE name = @p1 AND version = @p2 AND tenant_id = @p3`,
+		defName, defVersion, s.tenantID).Scan(&length, &library)
+	if err != nil {
+		return 0, err
+	}
+	if library.Valid {
+		// The member's stored length, checked against its bytes at publish.
+		var memberLength int64
+		if err := tx.QueryRowContext(ctx,
+			`SELECT wasm_length FROM library.members WHERE library = @p1 AND name = @p2 AND version = @p3`,
+			library.String, defName, defVersion).Scan(&memberLength); err != nil {
+			return 0, libraryMemberReadError("get wasm length", library.String, defName, defVersion, err)
+		}
+		return memberLength, nil
+	}
+	return length.Int64, nil
 }
 
 // ListVersions returns all deployed versions of a workflow.
@@ -109,7 +144,7 @@ func (s *MSSQLStore) LoadWorkflowConfig(ctx context.Context, defName string, def
 		SELECT max_history_length FROM workflow_defs WHERE name = @p1 AND version = @p2 AND tenant_id = @p3
 	`, defName, defVersion, s.tenantID).Scan(&maxHistoryLength)
 	if errors.Is(err, sql.ErrNoRows) {
-		return 0, fmt.Errorf("workflow def not found: %s v%d", defName, defVersion)
+		return 0, fmt.Errorf("%w: %s v%d", ErrWorkflowDefNotFound, defName, defVersion)
 	}
 	if err != nil {
 		return 0, fmt.Errorf("load workflow config: %w", err)
@@ -131,7 +166,7 @@ func (s *MSSQLStore) LoadDAGSpec(ctx context.Context, defName string, defVersion
 		SELECT dag_spec FROM workflow_defs WHERE name = @p1 AND version = @p2 AND tenant_id = @p3
 	`, defName, defVersion, s.tenantID).Scan(&raw)
 	if errors.Is(err, sql.ErrNoRows) {
-		return nil, fmt.Errorf("workflow def not found: %s v%d", defName, defVersion)
+		return nil, fmt.Errorf("%w: %s v%d", ErrWorkflowDefNotFound, defName, defVersion)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("load dag_spec: %w", err)
@@ -173,24 +208,39 @@ func (s *MSSQLStore) TraceWorkflow(ctx context.Context, workflowID, traceID stri
 // touched this store, so an expired key authenticated against any host that
 // wires an engine store directly instead of auth.TenantStore. cleat#2370.
 func (s *MSSQLStore) ResolveTenantFromAPIKey(ctx context.Context, keyHash []byte) (uuid.UUID, error) {
-	var tenantIDStr string
-	err := s.db.QueryRowContext(ctx,
-		`SELECT LOWER(CONVERT(NVARCHAR(36), tenant_id)) FROM admin.tenant_api_keys
-		 WHERE key_hash = @p1 AND disabled_at IS NULL AND (expires_at IS NULL OR expires_at > SYSUTCDATETIME())`, keyHash).Scan(&tenantIDStr)
+	tenantID, _, err := s.ResolveAPIKey(ctx, keyHash)
+	return tenantID, err
+}
+
+// ResolveAPIKey is ResolveTenantFromAPIKey plus the key's own id (cleat#3623), the one statement both
+// answer through. It satisfies auth.KeyResolver. BOTH uuid columns are converted in the projection,
+// because SQL Server returns UNIQUEIDENTIFIER in a byte order the uuid package does not scan directly.
+func (s *MSSQLStore) ResolveAPIKey(ctx context.Context, keyHash []byte) (tenantID, keyID uuid.UUID, err error) {
+	var tenantIDStr, keyIDStr string
+	err = s.db.QueryRowContext(ctx,
+		`SELECT LOWER(CONVERT(NVARCHAR(36), tenant_id)), LOWER(CONVERT(NVARCHAR(36), key_id)) FROM admin.tenant_api_keys
+		 WHERE key_hash = @p1 AND disabled_at IS NULL AND (expires_at IS NULL OR expires_at > SYSUTCDATETIME())`, keyHash).Scan(&tenantIDStr, &keyIDStr)
 	if err != nil {
-		return uuid.Nil, err
+		return uuid.Nil, uuid.Nil, err
 	}
-	tenantID, err := uuid.Parse(tenantIDStr)
+	tenantID, err = uuid.Parse(tenantIDStr)
 	if err != nil {
-		return uuid.Nil, fmt.Errorf("resolve tenant: parse uuid: %w", err)
+		return uuid.Nil, uuid.Nil, fmt.Errorf("resolve tenant: parse tenant uuid: %w", err)
 	}
-	return tenantID, nil
+	keyID, err = uuid.Parse(keyIDStr)
+	if err != nil {
+		return uuid.Nil, uuid.Nil, fmt.Errorf("resolve tenant: parse key uuid: %w", err)
+	}
+	return tenantID, keyID, nil
 }
 
 // ListWorkflows returns workflow instances filtered by the given filter parameters.
 // Supported filters: Status, InputContains, ErrorContains, Search.
 // Supports pagination via Offset and Limit (default 100, max 1000).
 func (s *MSSQLStore) ListWorkflows(ctx context.Context, filter WorkflowFilter) ([]WorkflowInstance, error) {
+	if err := queryStateFilterError(filter); err != nil {
+		return nil, err
+	}
 	// beginTxWithContext, not bare s.db -- cleat#2210, same reason as LoadWASM above.
 	tx, err := s.beginTxWithContext(ctx)
 	if err != nil {
@@ -392,6 +442,11 @@ func (s *MSSQLStore) DeployWorkflowDef(ctx context.Context, def *WorkflowDef) er
 	}
 	defer tx.Rollback()
 
+	// cleat#3497: see engine/workflow_def_replacement.go.
+	if err := s.checkWorkflowDefReplacement(ctx, tx, def); err != nil {
+		return err
+	}
+
 	// No ownership check: under (tenant_id, name, version) another tenant's
 	// definition of the same name is a different row. IMPROVEMENT-PLAN 3.77.
 	//
@@ -494,17 +549,27 @@ func (s *MSSQLStore) GetWorkflowDef(ctx context.Context, name string, version in
 	var pluginDepsRaw []byte
 	var entryPointSchemasRaw []byte
 	var wasmBytes []byte
+	var library sql.NullString
 	var createdAt time.Time
 	err = tx.QueryRowContext(ctx, `
-		SELECT name, version, wasm_bytes, abi_version, min_version, plugin_deps, created_at, disabled_at, gc_eligible, entry_point_schemas, input_validation_disabled, exposure
+		SELECT name, version, wasm_bytes, library, abi_version, min_version, plugin_deps, created_at, disabled_at, gc_eligible, entry_point_schemas, input_validation_disabled, exposure
 		FROM workflow_defs WHERE name = @p1 AND version = @p2 AND tenant_id = @p3
-	`, name, version, s.tenantID).Scan(&def.Name, &def.Version, &wasmBytes, &def.ABIVersion,
+	`, name, version, s.tenantID).Scan(&def.Name, &def.Version, &wasmBytes, &library, &def.ABIVersion,
 		&def.MinVersion, &pluginDepsRaw, &createdAt, &def.DisabledAt, &def.GCEligible, &entryPointSchemasRaw, &def.InputValidationDisabled, &def.Exposure)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, fmt.Errorf("get workflow def: %w", err)
+	}
+	if library.Valid {
+		// WorkflowDef.WASMBytes is the code the definition RUNS, wherever it is
+		// stored (see PostgresStore.GetWorkflowDef for why an empty slice is not safe).
+		if err := tx.QueryRowContext(ctx,
+			`SELECT wasm_bytes FROM library.members WHERE library = @p1 AND name = @p2 AND version = @p3`,
+			library.String, name, version).Scan(&wasmBytes); err != nil {
+			return nil, libraryMemberReadError("get workflow def", library.String, name, version, err)
+		}
 	}
 	def.WASMBytes = wasmBytes
 	def.CreatedAt = createdAt
@@ -559,7 +624,8 @@ func (s *MSSQLStore) PurgeWorkflowDef(ctx context.Context, name string, version 
 	return tx.Commit()
 }
 
-// CountActiveInstances returns the number of ready or running instances for a version.
+// CountActiveInstances returns the number of instances of a version that are not settled:
+// ready, running or terminating (cleat#3506).
 func (s *MSSQLStore) CountActiveInstances(ctx context.Context, name string, version int) (int, error) {
 	// beginTxWithContext, not bare s.db -- cleat#2210, same reason as LoadWASM above.
 	tx, err := s.beginTxWithContext(ctx)
@@ -572,7 +638,7 @@ func (s *MSSQLStore) CountActiveInstances(ctx context.Context, name string, vers
 	err = tx.QueryRowContext(ctx, `
 		SELECT COUNT(*) FROM workflow_instances
 		WHERE def_name = @p1 AND def_version = @p2 AND tenant_id = @p3
-		  AND status IN ('ready', 'running')
+		  AND status NOT IN ('done', 'failed', 'dead_lettered', 'terminated', 'cancelled')
 	`, name, version, s.tenantID).Scan(&count)
 	if err != nil {
 		return 0, fmt.Errorf("count active instances: %w", err)
@@ -649,7 +715,7 @@ func (s *MSSQLStore) getActiveInstanceCountsByVersionOnce(ctx context.Context) (
 	rows, err := tx.QueryContext(ctx, `
 		SELECT def_name, def_version, COUNT(*) as cnt
 		FROM workflow_instances
-		WHERE status IN ('ready', 'running')
+		WHERE status NOT IN ('done', 'failed', 'dead_lettered', 'terminated', 'cancelled')
 		  AND tenant_id = @p1
 		GROUP BY def_name, def_version
 	`, s.tenantID)

@@ -109,10 +109,15 @@ type WorkflowStore interface {
 	AppendEventHistoryBatch(ctx context.Context, workflowID string, recs []EventRecord) error
 
 	// VerifyWorkflowEvents loads all events for a workflow and verifies their
-	// integrity by recomputing SHA-256 checksums and comparing them against the
-	// stored checksums (once the event_history.checksum column is migrated).
-	// Before the migration, it loads and computes checksums silently and returns
-	// nil. Returns an error if any checksum mismatch is detected.
+	// integrity by recomputing their xxHash64 checksums and comparing them
+	// against the stored checksums (once the event_history.checksum column is
+	// migrated). The checksum is unkeyed: this detects corruption and says
+	// nothing about tampering. Before the migration, it loads and computes
+	// checksums silently and returns nil. Returns an error if any checksum
+	// mismatch is detected.
+	//
+	// A compacted run's chain starts at its compaction state's PrevChecksum
+	// (cleat#3837), not at an empty predecessor.
 	VerifyWorkflowEvents(ctx context.Context, workflowID string) error
 
 	// LoadWASM returns the compiled WASM bytes for a workflow definition.
@@ -202,6 +207,12 @@ type WorkflowStore interface {
 	// are written.
 	FinalizeWorkflowSegment(ctx context.Context, runID, workerID string, generation int64, newEvents []EventRecord, finalStatus string, result string, errorCode string, errorOp string, queryState map[string]string, nextWakeAt time.Time) error
 
+	// PublishQueryState writes a run's query state WITHOUT ending its segment: the run stays running and assigned to workerID, and nothing else about it changes (cleat#4162).
+	// FinalizeWorkflowSegment writes query state too, but only when an execution RETURNS, and a run HELD through a wait does not return, so without this a client reading the state
+	// (GET .../query) sees nothing the run set before its wait for the whole hold. Fenced exactly like finalize: a run this worker no longer holds is ErrFenceLost and nothing is
+	// written. A nil map writes nothing and returns nil (nothing to say, not "clear it"); a non-nil map REPLACES the stored state, as finalize does.
+	PublishQueryState(ctx context.Context, runID, workerID string, generation int64, queryState map[string]string) error
+
 	// RequestCancellation sets the cancellation flag on a workflow.
 	RequestCancellation(ctx context.Context, workflowID, reason string) error
 
@@ -238,6 +249,17 @@ type WorkflowStore interface {
 	// without creating a duplicate.
 	// tenantID must be a valid UUID; the all-zeros default is accepted
 	// for single-tenant installations without RLS.
+	//
+	// runID is empty in every caller this repository ships, and the store then
+	// generates a canonical lowercase UUID. A caller that chooses one should
+	// keep it lowercase, because whether two ids that differ only by case are
+	// the same run depends on the dialect: on SQL Server and MySQL
+	// workflow_instances.id compares case-insensitively, so a lookup by the
+	// other spelling finds the run and a second insert is refused (a primary
+	// key violation); on PostgreSQL it compares exactly, so the two are
+	// distinct runs. Measured in cleat#3639, against each dialect's catalog
+	// collation. The test pinning the generated side is
+	// TestEveryRunIdAStoreGeneratesIsACanonicalLowercaseUUID.
 	StartNewRun(ctx context.Context, runID, defName string, defVersion int, input json.RawMessage, idempotencyKey string, tenantID string, priority int) (string, bool, error)
 
 	// StartChildWorkflow creates a child workflow instance linked to a parent.
@@ -537,7 +559,8 @@ type WorkflowStore interface {
 	// PurgeWorkflowDef permanently deletes a workflow definition (WASM bytes and all).
 	PurgeWorkflowDef(ctx context.Context, name string, version int) error
 
-	// CountActiveInstances returns the number of running/ready instances for a version.
+	// CountActiveInstances returns the number of instances of a version that are not
+	// settled: ready, running or terminating (cleat#3506).
 	CountActiveInstances(ctx context.Context, name string, version int) (int, error)
 
 	// ResolveLatestVersion resolves the latest version for a named definition.
@@ -547,7 +570,8 @@ type WorkflowStore interface {
 	ValidateVersion(ctx context.Context, defName string, defVersion int) (bool, error)
 
 	// GetActiveInstanceCountsByVersion returns a map of "name:version" -> count for
-	// all workflow definitions that have active instances.
+	// all workflow definitions that have instances that are not settled (see
+	// CountActiveInstances).
 	GetActiveInstanceCountsByVersion(ctx context.Context) (map[string]int, error)
 
 	// RecordWorkflowMemorySample inserts a new memory sample and updates the EWMA summary.

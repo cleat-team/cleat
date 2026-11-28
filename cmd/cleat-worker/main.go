@@ -29,9 +29,11 @@ import (
 	_ "net/http/pprof" //nolint:gosec // G108: registers /debug/pprof on DefaultServeMux, which this worker never serves. The API listener builds its own http.NewServeMux; pprof gets a separate opt-in listener behind --pprof-addr, empty by default. See the comment at the pprof server below.
 	"os"
 	"os/signal"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -181,6 +183,30 @@ func startPluginWorkflow(ctx context.Context, store engine.WorkflowStore, req pl
 	// the wrong session (SQL Server: cleat#2204, cleat#2205 will make that a
 	// rejection too, so this must not rely on it staying permissive).
 	scoped := scopeToTenant(store, req.TenantID)
+
+	// A suspended tenant starts nothing, from a plugin as from the API.
+	// handleStart (server.go) refuses it with a 403; this path used to have no
+	// such check, so a suspended tenant's schedules, event subscriptions and
+	// job queue kept creating runs. They sat `ready` and unclaimed, because
+	// the rotating claim takes its tenants from ListTenantIDs, which omits a
+	// suspended one -- unstartable and uncancellable, and enough to make
+	// "suspended with no unsettled runs" unsatisfiable (cleat#3594).
+	//
+	// Asked of the SCOPED store, as handleStart asks its tenant-scoped one. A
+	// store that declares engine.NoTenantSuspensionMarker (MySQL, which is
+	// single-tenant) is not refused, which is also what handleStart does; a
+	// sharded store answers by asking every shard (cleat#3596); a store that
+	// answers with an ERROR is refused, because an unreadable flag is not a clear
+	// one -- and so is a store that neither answers nor declares the marker,
+	// which this path used to skip without a word.
+	suspended, err := engine.TenantSuspended(ctx, scoped, req.TenantID)
+	if err != nil {
+		return "", fmt.Errorf("start workflow %s: %w", req.DefName, err)
+	}
+	if suspended {
+		return "", fmt.Errorf("start workflow %s: tenant %s is suspended or has been dropped; no new workflows may be started "+
+			"until an operator resumes it", req.DefName, req.TenantID)
+	}
 
 	versions, err := scoped.ListVersions(ctx, req.DefName)
 	if err != nil {
@@ -341,12 +367,22 @@ func signalPluginWorkflow(ctx context.Context, store engine.WorkflowStore, workf
 		scoped = scopeToTenant(store, tid.String())
 	}
 	if err := scoped.DeliverSignal(ctx, workflowID, signalName, payload); err != nil {
-		if errors.Is(err, engine.ErrWorkflowNotFound) {
-			return plugin.ErrWorkflowNotFound
-		}
-		return err
+		return translateSignalDeliveryError(err)
 	}
 	return nil
+}
+
+// translateSignalDeliveryError maps a store's refusal to the plugin vocabulary. A run that is no longer open (cleat#4340) is TERMINAL for a plugin exactly as a missing one is: nothing will ever
+// read a signal sent to it, so a retry cannot succeed and an awaiter registered for it must be dropped (plugins/eventtriggers unregisters on plugin.ErrWorkflowNotFound and retries anything
+// else). It therefore wraps plugin.ErrWorkflowNotFound, and keeps the store's own error in the chain so the message still says which state refused.
+func translateSignalDeliveryError(err error) error {
+	switch {
+	case errors.Is(err, engine.ErrWorkflowNotFound):
+		return plugin.ErrWorkflowNotFound
+	case errors.Is(err, engine.ErrWorkflowNotOpen):
+		return fmt.Errorf("%w: %w", plugin.ErrWorkflowNotFound, err)
+	}
+	return err
 }
 
 // signalPluginWorkflowWithAuth is signalPluginWorkflow plus the
@@ -384,13 +420,10 @@ func signalPluginWorkflowWithAuth(ctx context.Context, store engine.WorkflowStor
 		return err
 	}
 	if !signalCallerAllowed(callers, pluginName) {
-		return fmt.Errorf("signal auth denied: %s not in allowed_signals of %s", pluginName, workflowID)
+		return fmt.Errorf("signal auth denied: %s not in allowed_signals of %s: %w", pluginName, workflowID, plugin.ErrSignalNotAllowed)
 	}
 	if err := scoped.DeliverSignal(ctx, workflowID, signalName, payload); err != nil {
-		if errors.Is(err, engine.ErrWorkflowNotFound) {
-			return plugin.ErrWorkflowNotFound
-		}
-		return err
+		return translateSignalDeliveryError(err)
 	}
 	return nil
 }
@@ -412,7 +445,20 @@ func payloadKeyVersionsFromFlags() payloadKeyVersions {
 }
 
 func main() {
+	// The precompile child. Matched on os.Args[1] BEFORE flag parsing and before anything else main does, so no flag, workflow, HTTP route or environment reaches it: only an exec of this binary with
+	// exactly this first argument does, and the parent that does it is a worker with --component-precompile (see engine.ComponentPrecompile).
+	if len(os.Args) > 1 && os.Args[1] == engine.SerializeComponentArg {
+		os.Exit(engine.RunSerializeComponentChild(os.Args[2:], os.Stdout, os.Stderr))
+	}
+
 	flag.Parse()
+
+	// The residency policy, validated where an operator reads it. On by default (--resident-max-runs is 8; 0 turns it off), and a nonsense policy is refused either way.
+	residencyCfg, residencyErr := residencyConfigFromFlags()
+	if residencyErr != nil {
+		fmt.Fprintln(os.Stderr, residencyErr)
+		os.Exit(1)
+	}
 
 	if err := validateReclaimTimeout(*reclaimTimeout, *heartbeatInterval); err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -423,6 +469,14 @@ func main() {
 		os.Exit(1)
 	}
 	if err := validateHeartbeatMaxConnections(*heartbeatMaxConnections); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	if err := validateQueryStateSearchWindow(*queryStateSearchWindow); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	if err := validateWasmInstanceTimeout(*wasmInstanceTimeout); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
@@ -440,6 +494,16 @@ func main() {
 		os.Exit(runListPlugins(os.Stdout))
 	}
 
+	// Every mode below -- including --migrate-only and --generate-api-key,
+	// which need no backend of their own -- belongs to a worker that is about to
+	// be used to run workflows, and a binary with no wasmtime backend cannot. It
+	// used to find that out much later (the backend is constructed after the
+	// migration and the key mint), so the quick-start got three steps in before
+	// it failed. Refuse now, with what to do about it. cleat#3787.
+	if refuseWithoutWasmtimeBackend(os.Stderr) {
+		os.Exit(1)
+	}
+
 	// Apply CLEAT_CHILD_BINDING_OVERRIDE env var as fallback when the flag is not set.
 	applyChildBindingOverrideEnv()
 
@@ -447,8 +511,12 @@ func main() {
 	resolveDBURL()
 
 	// Set WASM output buffer size before any Runtime is created.
-	engine.OutBufSize = uint32(*wasmOutputBufferSize)
-	engine.MaxWasmStringLen = uint32(*wasmMaxStringLen)
+	applyEngineGlobalsFromFlags()
+	if *wasmMaxResponseBytes < 1 || *wasmMaxResponseBytes > 1<<24-1 {
+		// A result word carries the response length in 24 bits (packDurableCallResult), so a larger value would wrap and report a short response.
+		log.Fatalf("--wasm-max-response-bytes must be between 1 and %d, got %d", 1<<24-1, *wasmMaxResponseBytes)
+	}
+	engine.MaxHostCallResponseBytes = uint32(*wasmMaxResponseBytes)
 
 	workerID := generateWorkerID()
 
@@ -631,8 +699,8 @@ func main() {
 			logger.ErrorContext(context.Background(), "cannot create an org", "worker_id", workerID, "error", tsErr)
 			os.Exit(1)
 		}
-		// auth.CreateOrg refuses on MySQL and SQL Server for the same reason
-		// CreateTenant does -- surfaced as-is, naming the dialect.
+		// auth.CreateOrg refuses MySQL for the same reason CreateTenant does
+		// (single-tenant by decision) -- surfaced as-is, naming the dialect.
 		oid, cErr := store.CreateOrg(context.Background(), *createOrgNamed)
 		if cErr != nil {
 			logger.ErrorContext(context.Background(), "failed to create org", "worker_id", workerID, "name", *createOrgNamed, "error", cErr)
@@ -694,13 +762,26 @@ func main() {
 		if display == "" {
 			display = *createTenantNamed
 		}
-		// auth.CreateTenant refuses on MySQL and SQL Server rather than emitting
-		// PostgreSQL SQL at them. Surfaced as-is: the message names the dialect,
+		// cleat#3772, D82 is NOT enforced here, and an earlier draft did. This is an administrative command,
+		// and its documented use is an owner or superuser DSN: `--create-org` prints exactly that hint, the
+		// tenant-sandbox and B2B scenarios provision this way, and role provisioning below needs it. A
+		// refusal here broke all three in CI. The rule is enforced where a connection SERVES -- the worker's
+		// startup, and POST /api/admin/tenants on a running worker -- so a second tenant created from here
+		// is still refused the moment the same DSN is used to serve.
+		// auth.CreateTenant refuses MySQL, which is single-tenant by decision,
+		// rather than emitting SQL that cannot succeed. Surfaced as-is: the message names the dialect,
 		// which is more useful than anything this layer could add.
 		tid, cErr := store.CreateTenant(context.Background(), *createTenantNamed, display, orgUUID)
 		if cErr != nil {
 			logger.ErrorContext(context.Background(), "failed to create tenant", "worker_id", workerID, "name", *createTenantNamed, "error", cErr)
 			os.Exit(1)
+		}
+		if *driver == "postgres" {
+			if warning, wErr := tenantCreatedWarning(context.Background(), gdb); wErr != nil {
+				logger.WarnContext(context.Background(), "could not check whether this connection bypasses row-level security after creating the tenant", "worker_id", workerID, "error", wErr)
+			} else if warning != "" {
+				logger.WarnContext(context.Background(), warning, "worker_id", workerID)
+			}
 		}
 		// PROVISION THE ROLE, when role isolation is configured. cleat#1307.
 		//
@@ -864,6 +945,10 @@ func main() {
 	shardPoolCount := 0
 
 	var factory engine.StoreFactory
+	// shardMigrationTargets is every shard's database, in shards-file order, captured
+	// where the sharded branch opens them because shardDBs is scoped to that branch and
+	// the migration step below is not. Empty for an unsharded worker. cleat#3718.
+	var shardMigrationTargets []shardMigrationTarget
 	var payloadEncryption *engine.PayloadEncryption
 	// payloadRing is the SAME *engine.ReloadableKeyRing payloadEncryption is
 	// built around, in whichever of the three branches below actually runs
@@ -913,13 +998,7 @@ func main() {
 		}
 		payloadEncryption = pe
 		payloadRing = pring
-		if payloadEncryption != nil {
-			if *encryptionKeyFilePrevious != "" {
-				logger.InfoContext(context.Background(), "encryption at rest enabled for sensitive payload fields, with a previous key for rotation", "worker_id", workerID)
-			} else {
-				logger.InfoContext(context.Background(), "encryption at rest enabled for sensitive payload fields", "worker_id", workerID)
-			}
-		}
+		logPayloadEncryption(logger, workerID, payloadEncryption != nil, *encryptSensitivePayloads, *encryptionKeyFilePrevious != "")
 		// Build stores, DB connections, and closers for each shard.
 		stores := make([]engine.WorkflowStore, len(configs))
 		closers := make([]func() error, len(configs))
@@ -960,6 +1039,7 @@ func main() {
 			sdb.SetConnMaxLifetime(5 * time.Minute)
 
 			shardDBs[i] = sdb
+			shardMigrationTargets = append(shardMigrationTargets, shardMigrationTarget{name: cfg.Name, db: sdb, schema: cfg.Schema})
 			f := engine.NewPostgresStoreFactory(sdb, cfg.Schema)
 			// WithDSN is required by OpenIsolatedStore below (cleat#2195): it
 			// opens its own pool on this DSN rather than reusing sdb, and
@@ -1357,13 +1437,8 @@ func main() {
 				os.Exit(1)
 			}
 			payloadEncryption = pe
-			if payloadEncryption != nil {
-				if *encryptionKeyFilePrevious != "" {
-					logger.InfoContext(context.Background(), "encryption at rest enabled for sensitive payload fields, with a previous key for rotation", "worker_id", workerID)
-				} else {
-					logger.InfoContext(context.Background(), "encryption at rest enabled for sensitive payload fields", "worker_id", workerID)
-				}
-			}
+			// Not logged here: the duplicate load below logs the state, and logging
+			// in both printed the same line twice (cleat#3589).
 		}
 
 		// Propagate encryption to the store factory.
@@ -1394,13 +1469,7 @@ func main() {
 			}
 			payloadEncryption = pe
 			payloadRing = pring
-			if payloadEncryption != nil {
-				if *encryptionKeyFilePrevious != "" {
-					logger.InfoContext(context.Background(), "encryption at rest enabled for sensitive payload fields, with a previous key for rotation", "worker_id", workerID)
-				} else {
-					logger.InfoContext(context.Background(), "encryption at rest enabled for sensitive payload fields", "worker_id", workerID)
-				}
-			}
+			logPayloadEncryption(logger, workerID, payloadEncryption != nil, *encryptSensitivePayloads, *encryptionKeyFilePrevious != "")
 		}
 
 		// Propagate encryption to the store factory.
@@ -1695,8 +1764,11 @@ func main() {
 		// cleat#1992. Both adapters are safe on a nil target -- secretStore is
 		// never nil (see where it is built, above) but has no usable master key
 		// when secretRing is nil, and payloadEncryption is a plain nil
-		// *engine.PayloadEncryption when --encrypt-sensitive-payloads is off.
-		// Every method on both then returns a clear "not configured" error
+		// *engine.PayloadEncryption when --encryption-key-file is not set. It is
+		// NOT nil when only the key file is set: the key loads regardless of
+		// --encrypt-sensitive-payloads (cleat#2308), so plugins get a working
+		// plugin.Payloads from the key file alone while the engine seals nothing
+		// (cleat#3589). When it is nil, every method on both returns a clear "not configured" error
 		// rather than panicking, which is what lets these be assigned
 		// unconditionally instead of behind an if.
 		Secrets:           engine.NewPluginSecrets(secretStore),
@@ -1758,6 +1830,34 @@ func main() {
 	}
 	refuseForeignChain("database", migrator)
 
+	// EVERY SHARD (cleat#3718). The runner above is the admin shard's, or --migrate-db's.
+	// A sharded worker has one database per shard and used to migrate only that one, so
+	// `--migrate-only` exited 0 with the other shards empty. Each of the others gets its
+	// own runner on its own connection and its own schema, and its chain is checked here,
+	// with the rest, before anything is changed: a refusal on shard 3 must not leave shard
+	// 1 migrated. Plugin migrations stay on the admin shard, where the plugin tables live
+	// (docs/reference/worker-config.md, --shards-file).
+	type shardRunner struct {
+		name string
+		r    *migration.Runner
+	}
+	var otherShards []shardRunner
+	for i, t := range shardMigrationTargets {
+		if i == 0 {
+			continue // the admin shard: migrator, above
+		}
+		r := migration.NewRunner(t.db, migration.Dialect(factory.Dialect()), *migrationsDir).
+			WithFS(migrationsOverrideFS()).
+			WithLockTimeout(*migrationLockTimeout).
+			WithSchema(t.schema)
+		refuseForeignChain("shard "+t.name, r)
+		otherShards = append(otherShards, shardRunner{name: t.name, r: r})
+	}
+	if *migrateDBURL != "" && len(otherShards) > 0 && (*migrateOnly || *migrateOnStart) {
+		logger.WarnContext(context.Background(), "--migrate-db names the first shard's migration connection only; the other shards are migrated through their own conn_str in the shards file, so that login needs DDL rights too",
+			"worker_id", workerID, "other_shards", len(otherShards))
+	}
+
 	// For MySQL, the factory creates a per-tenant database that needs its own
 	// copy of the schema, migrated or verified exactly as the shared one is.
 	// Its chain is checked here too, before the shared database is migrated, so
@@ -1799,6 +1899,13 @@ func main() {
 			plugin.WithSchema(*schemaName)); err != nil {
 			logger.ErrorContext(context.Background(), "plugin database migrations failed — check plugin logs for details", "worker_id", workerID, "error", err)
 			os.Exit(1)
+		}
+		for _, sh := range otherShards {
+			if err := sh.r.Run(ctx); err != nil {
+				logger.ErrorContext(context.Background(), "core database migrations failed on shard "+sh.name+" — the shards before it are migrated and this one and any after it are not; check that its login has CREATE/ALTER privileges", "worker_id", workerID, "shard", sh.name, "error", err)
+				os.Exit(1)
+			}
+			logger.InfoContext(context.Background(), "shard migrated", "worker_id", workerID, "shard", sh.name)
 		}
 	} else if err := verifySchema(ctx, migrator, migrateDB, plugin.Dialect(factory.Dialect()), plugList,
 		*schemaName, func(msg string, args ...any) {
@@ -1881,6 +1988,7 @@ func main() {
 		PID:              os.Getpid(),
 		Concurrency:      *concurrency,
 		ConnectionBudget: *clusterConnectionBudgetFlag,
+		Plugins:          loadedPluginNames(plugList),
 	}, func(msg string) {
 		logger.WarnContext(context.Background(), msg, "worker_id", workerID)
 	}); err != nil {
@@ -1917,10 +2025,25 @@ func main() {
 
 	// Now that the schema (and its policies) exist, check that the *runtime*
 	// connection is actually subject to them. See engine.CheckRLSEnforced:
-	// GetWorkflowByID and ListWorkflows have no application-level tenant
-	// filter, so on a connection that bypasses RLS they return every tenant's
-	// data. Every configuration cleat shipped connected as a superuser.
-	if *driver == "postgres" && *rlsCheck != "off" {
+	// The plain workflow listing and count are scoped by row-level security
+	// alone, so on a connection that bypasses RLS a plain list returns every
+	// tenant's data. Every configuration cleat shipped connected as a superuser.
+	//
+	// cleat#3772, owner decision D82: a connection that is not subject to the policies and would serve
+	// MORE THAN ONE tenant refuses to start, whatever --require-auth and -rls-check say. The check runs
+	// under -rls-check=off too, because the guard is not the warning that flag silences: it is what stops
+	// two tenants sharing a connection that keeps them apart by nothing (cleat#3740). One tenant is the
+	// single-tenant laptop configuration the tutorial documents, and still starts.
+	// rlsBypassReasons and rlsBypassRole are what the check below found, kept
+	// so the dispatch loop can notice a second tenant appearing AFTER startup --
+	// the window the startup refusal cannot close (cleat#3773). Empty reasons
+	// means this connection is subject to the policies (or that could not be
+	// determined), and nothing below may act on that.
+	var (
+		rlsBypassReasons []engine.RLSBypassReason
+		rlsBypassRole    string
+	)
+	if *driver == "postgres" {
 		reasons, rErr := engine.CheckRLSEnforced(ctx, db)
 		switch {
 		case rErr != nil:
@@ -1929,12 +2052,36 @@ func main() {
 			// worker continues.
 			logger.WarnContext(context.Background(), "could not verify row-level security enforcement", "worker_id", workerID, "error", rErr)
 		case len(reasons) == 0:
-			logger.InfoContext(context.Background(), "row-level security is enforced on this connection", "worker_id", workerID)
-		case *rlsCheck == "require" || (*rlsCheck == "auto" && *requireAuth):
-			logger.ErrorContext(context.Background(), "refusing to start: "+engine.FormatRLSBypass(reasons), "worker_id", workerID)
-			os.Exit(1)
+			if *rlsCheck != "off" {
+				logger.InfoContext(context.Background(), "row-level security is enforced on this connection", "worker_id", workerID)
+			}
 		default:
-			logger.WarnContext(context.Background(), engine.FormatRLSBypass(reasons), "worker_id", workerID)
+			rlsBypassReasons = reasons
+			if role, roleErr := engine.CurrentRole(ctx, db); roleErr == nil {
+				rlsBypassRole = role
+			}
+			// FAILS OPEN when the tenants cannot be counted, as the check beside it does when it cannot tell
+			// whether the connection bypasses (above), and for the same reason: refusing on an inconclusive
+			// read makes a database hiccup fatal. It matters only where nothing below would refuse anyway
+			// (--require-auth=false, or -rls-check=off), and only for a role that bypasses row-level security
+			// yet cannot read admin.tenants -- a superuser or the table owner can always count. POST
+			// /api/admin/tenants fails closed (500) instead, because there a refusal costs one request and
+			// not a restart loop. Reviewer's note on #3780, left as a choice rather than an accident.
+			if refusal, cErr := multiTenantRefusalFor(ctx, db, reasons, false); cErr != nil {
+				logger.WarnContext(context.Background(), "could not count tenants, so the refusal of a bypassing connection that serves more than one was not applied", "worker_id", workerID, "error", cErr)
+			} else if refusal != nil {
+				logger.ErrorContext(context.Background(), refusal.Message(), "worker_id", workerID)
+				os.Exit(1)
+			}
+			switch {
+			case *rlsCheck == "off":
+				// Skipped, as it always was, for the single-tenant case.
+			case *rlsCheck == "require" || (*rlsCheck == "auto" && *requireAuth):
+				logger.ErrorContext(context.Background(), "refusing to start: "+engine.FormatRLSBypass(reasons), "worker_id", workerID)
+				os.Exit(1)
+			default:
+				logger.WarnContext(context.Background(), engine.FormatRLSBypass(reasons), "worker_id", workerID)
+			}
 		}
 	}
 
@@ -2149,28 +2296,12 @@ func main() {
 	// former wazero fallback was removed rather than kept as a degraded
 	// option -- it could not fence a compute-bound guest, so silently
 	// running on it was a safety-relevant degradation no operator asked for.
-	//
-	// Bound wasmtime execution: epoch interruption (wall-clock, primary
-	// defense against a runaway workflow hanging the worker — see
-	// IMPROVEMENT-PLAN.md 1.5) and StoreLimits (memory/table/instance
-	// ceilings), plus optional fuel-based instruction metering when
-	// --wasm-instruction-limit is set.
-	wasmtimeMemoryLimitBytes := int64(0) // 0 => wasmtimeBackend applies its own default
-	if *wasmMemoryMaxMB > 0 {
-		wasmtimeMemoryLimitBytes = int64(*wasmMemoryMaxMB) * 1024 * 1024
-	}
-	wt, wasmtimeErr := engine.NewWasmtimeBackend(ctx,
-		engine.WithWasmtimeExecutionTimeout(*wasmInstanceTimeout),
-		engine.WithWasmtimeInstructionLimit(uint64(*wasmInstructionLimit)),
-		engine.WithWasmtimeMemoryLimits(wasmtimeMemoryLimitBytes, 0, 0),
-		engine.WithWasmtimeDeferBudget(*wasmDeferBudget),
-		engine.WithWasmtimeModuleCacheMaxEntries(*wasmModuleCacheMaxEntries),
-		engine.WithWasmtimeModuleCacheMaxBytes(int64(*wasmModuleCacheMaxMB)<<20),
-		// Without this the backend writes to slog.Default(), and this worker's
-		// configured handler never sees the one record that says whether a
-		// KILLED workflow's defers ran. See WithWasmtimeLogger.
-		engine.WithWasmtimeLogger(logger),
-	)
+	// The options it is built with are wasmtimeOptionsFromFlags.
+	wt, wasmtimeErr := engine.NewWasmtimeBackend(ctx, append(wasmtimeOptionsFromFlags(logger),
+		// Counts each component a failed precompile child sent back to this worker to compile itself (cleat_component_precompile_fallbacks_total).
+		engine.WithWasmtimeComponentPrecompileFallbackHook(func(reason string) {
+			metricsInstance.RecordComponentPrecompileFallback(context.Background(), reason)
+		}))...)
 	if wasmtimeErr != nil {
 		logger.ErrorContext(context.Background(), "wasmtime backend failed to initialize; wasmtime is the only WASM backend cleat has, there is no fallback", "worker_id", workerID, "error", wasmtimeErr)
 		os.Exit(1)
@@ -2188,14 +2319,16 @@ func main() {
 	}
 
 	var wasmtimeBackend engine.WasmBackend = wt
-	logger.InfoContext(context.Background(), "wasmtime backend registered for Go WASM", "worker_id", workerID, "instance_timeout", *wasmInstanceTimeout, "wall_clock_ceiling", *wasmWallClockCeiling, "instruction_limit", *wasmInstructionLimit, "memory_limit_bytes", wasmtimeMemoryLimitBytes, "defer_budget", *wasmDeferBudget)
+	logger.InfoContext(context.Background(), "wasmtime backend registered for Go WASM", "worker_id", workerID, "instance_timeout", *wasmInstanceTimeout, "wall_clock_ceiling", *wasmWallClockCeiling, "instruction_limit", *wasmInstructionLimit, "memory_limit_bytes", wasmtimeMemoryLimitBytes(*wasmMemoryMaxMB), "defer_budget", *wasmDeferBudget)
 
 	// Start PostgreSQL NOTIFY listener for low-latency dispatch wake-up.
 	var notifyCh chan struct{}
 	var closeNotify func()
+	var residentForNudge atomic.Pointer[engine.ResidentSet]
 	if *driver == "postgres" && *notifyChannel != "" {
 		notifyCh = make(chan struct{}, 1)
-		closeNotify = startNotifyListener(*dbURL, *notifyChannel, notifyCh, logger)
+		// The resident set is built later in main (it needs the worker), so the listener reaches it through a pointer set then. Nil until then, and Nudge is nil-safe.
+		closeNotify = startNotifyListener(*dbURL, *notifyChannel, notifyCh, func() { residentForNudge.Load().Nudge() }, logger)
 		defer closeNotify()
 	}
 
@@ -2373,12 +2506,18 @@ func main() {
 	}
 
 	w := &Worker{
-		Metrics:                          metricsInstance,
-		id:                               workerID,
-		logger:                           logger,
-		store:                            store,
-		heartbeatStore:                   heartbeatStore,
-		storeTenantID:                    defaultTenantID,
+		Metrics:          metricsInstance,
+		id:               workerID,
+		logger:           logger,
+		store:            store,
+		heartbeatStore:   heartbeatStore,
+		storeTenantID:    defaultTenantID,
+		rlsBypassReasons: rlsBypassReasons,
+		rlsBypassRole:    rlsBypassRole,
+		exitFunc:         os.Exit,
+		countTenantsForIsolation: func(ctx context.Context) (int, error) {
+			return engine.CountTenants(ctx, db)
+		},
 		storeFactory:                     factory,
 		taskQueues:                       taskQueues,
 		claimAcrossTenants:               *claimAcrossTenants,
@@ -2482,16 +2621,34 @@ func main() {
 	// of database contact either, and its reaper must not act on anyone
 	// else's staleness until it has.
 	w.lastDBTrouble.Store(time.Now().UnixNano())
+	w.startedAt = time.Now()
 
 	// Initialize memory-aware concurrency controller.
 	monitor := NewMemoryMonitor(*memoryCheckInterval)
 	monitor.logger = logger
+	// Say what the backstop is measuring against, once: --memory-soft-limit and --memory-hard-limit are fractions of this total (cleat#4431).
+	if mi := monitor.Read(); mi.Source != "" {
+		logger.Info("memory monitor", "source", mi.Source, "total_mib", mi.TotalBytes>>20, "used_mib", mi.UsedBytes>>20,
+			"soft_limit", *memorySoftLimit, "hard_limit", *memoryHardLimit)
+	}
 	mc := NewMemoryController(monitor, store, workerID, *concurrency, *memorySoftLimit, *memoryHardLimit)
 	mc.logger = logger
 	if err := mc.LoadEstimates(ctx, defaultTenantID); err != nil {
 		logger.WarnContext(context.Background(), "failed to load memory estimates", "worker_id", workerID, "error", err)
 	}
 	w.memoryController = mc
+	residencyCfg.Pressure = mc.Pressure
+	residencyCfg.Metrics = metricsInstance
+	resident, residentErr := engine.NewResidentSet(residencyCfg)
+	if residentErr != nil {
+		logger.ErrorContext(context.Background(), "residency is misconfigured", "worker_id", workerID, "error", residentErr)
+		os.Exit(1)
+	}
+	w.resident = resident
+	residentForNudge.Store(resident)
+	// A held run pins the compiled code it executes even after the cache evicts it, so when the cache evicts a module or component every held run of it is sent back:
+	// a hold never outlives its code's cache entry (engine.ResidentSet.EvictCode). Backends made per execution share the cache, so the root backend is enough.
+	resident.AttachToCodeCache(wt)
 	metricsInstance.RecordDesiredConcurrency(context.Background(), int64(*concurrency))
 	globalWorker = w
 
@@ -2511,17 +2668,31 @@ func main() {
 	}
 	// Start HTTP API server if configured.
 
+	// cleat#3772, D82: POST /api/admin/tenants refuses to create a tenant on a connection that is not
+	// subject to row-level security. PostgreSQL only: it is the one dialect where the connection can
+	// bypass the policies (SQL Server's apply to every principal, and MySQL is tenant-per-database).
+	var creationGuard tenantCreationGuard
+	if *driver == "postgres" && db != nil {
+		creationGuard = newTenantCreationGuard(db)
+	}
+
 	if *apiAddr != "" {
 		api := &apiServer{
-			store:                store,
-			worker:               w,
-			maxBodySize:          *maxBodySize,
-			maxPriorityMagnitude: *maxPriorityMagnitude,
-			db:                   db,
-			factory:              factory,
-			taskQueues:           taskQueues,
-			requireAuth:          *requireAuth,
-			streamHub:            streamHub,
+			store:                  store,
+			worker:                 w,
+			maxBodySize:            *maxBodySize,
+			maxDefinitionBodySize:  *maxDefinitionBodySize,
+			maxPriorityMagnitude:   *maxPriorityMagnitude,
+			queryStateSearchWindow: *queryStateSearchWindow,
+			db:                     db,
+			factory:                factory,
+			taskQueues:             taskQueues,
+			requireAuth:            *requireAuth,
+			streamHub:              streamHub,
+			provisioner:            tenantProvisionerFor(*driver, store, authResolver),
+			tenantCreationGuard:    creationGuard,
+			schema:                 *schemaName,
+			keys:                   authResolver,
 
 			maxStreamPollReaders: *maxStreamPollReadersFlag,
 			streamPollInterval:   *streamPollIntervalFlag,
@@ -2590,6 +2761,7 @@ func main() {
 		}
 
 		// Wrap with auth middleware if --require-auth is true.
+		var chain *authChain // set under --require-auth; nil means authentication is off
 		if *requireAuth {
 			// S6: these plugin endpoints are meant to be called by
 			// parties who cannot present a cleat API key -- an external
@@ -2644,30 +2816,23 @@ func main() {
 						"worker_id", workerID, "error", err)
 					os.Exit(1)
 				}
-				handler = auth.HostBindingMiddlewareWithMux(authResolver, mux, pluginAuthExemptPatterns...)(handler)
 			}
 
-			handler = auth.MiddlewareWithMux(authResolver, true, mux, pluginAuthExemptPatterns...)(handler)
-
-			// WS-4's addition to WS-3's file, declared as WORKSTREAM.md asks:
-			// leaving this unwired is worse than the cross-stream edit, because
-			// an operator key that no middleware recognises is a credential the
-			// operator can mint, copy and present, and that is answered "invalid
-			// or revoked API key" on every route. cleat#2169.
+			// The order the layers go in, and why, is composeAuthChain's doc comment
+			// (auth_chain.go). It is a function so that the chain a worker runs is the chain a
+			// test runs: until cleat#3555 it was written out here, and an operator key was
+			// authenticated by the outermost layer and then refused by the tenant layer behind it.
+			// Installed under --require-auth: with authentication off nothing is gated, so there is
+			// no decision for the operator layer to make.
 			//
-			// OUTERMOST, and applied after the line above so that it is. It has
-			// to be outside auth.MiddlewareWithMux: that one resolves the key
-			// against admin.tenant_api_keys and 401s everything else, so an
-			// operator key would be refused as a bad TENANT key before anything
-			// could tell it apart. Being outside also keeps an operator request
-			// out of HostBindingMiddlewareWithMux -- correct rather than
-			// incidental, since host binding stops one tenant's key being used
-			// against another tenant's domain and an operator has no domain.
-			//
-			// Installed with the rest of the auth chain, under --require-auth:
-			// with authentication off nothing is gated, so there is no decision
-			// for this to make.
-			handler = auth.OperatorMiddleware(operatorResolver)(handler)
+			// Only DESCRIBED here; composeRequestChain installs it below, together with the
+			// --tenant-resolver wrapper that must go outside it (cleat#3577).
+			chain = &authChain{
+				Tenants:          authResolver,
+				Operators:        operatorResolver,
+				Domains:          authResolver,
+				RequireHostMatch: *requireHostMatch,
+			}
 
 			// If no API keys exist, auto-generate one for the default tenant.
 			//
@@ -2723,20 +2888,9 @@ func main() {
 			logger.WarnContext(context.Background(), "authentication disabled", "worker_id", workerID)
 		}
 
-		// Tenant resolver middleware.
-		if strings.HasPrefix(*tenantResolver, "header:") {
-			headerName := strings.TrimPrefix(*tenantResolver, "header:")
-			prev := handler
-			handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if tidStr := r.Header.Get(headerName); tidStr != "" {
-					if tid, err := uuid.Parse(tidStr); err == nil {
-						ctx := auth.WithTenantID(r.Context(), tid)
-						r = r.WithContext(ctx)
-					}
-				}
-				prev.ServeHTTP(w, r)
-			})
-		}
+		// Authentication, then the tenant resolver OUTSIDE it. One function, so the order a worker
+		// runs is the order the tests measure (cleat#3577); see composeRequestChain.
+		handler = composeRequestChain(handler, mux, chain, *tenantResolver)
 
 		// Create rate limiters and wrap handler.
 		// A rate-limit of 0 disables IP-based rate limiting.
@@ -3040,4 +3194,130 @@ func flushRetryWindowAdvice(flushWindow, reclaim, heartbeat time.Duration) strin
 			"and a retry that succeeds after that loses its fence. Raise --reclaim-timeout to at least "+
 			"%v to make the extra retrying reachable, or ignore this if nothing else reaps for this deployment.",
 		flushWindow, window, flushWindow)
+}
+
+// applyEngineGlobalsFromFlags sets the engine's two package-level knobs from their flags: the WASM output buffer and the maximum string length. They have no
+// option path (the engine reads them from package variables), so this is the only place a worker applies them. It is a function, called unconditionally from
+// main, so that a test can run the same code main runs: until cleat#4212 these were two bare assignments in a function no test executes, which is how a
+// 32 KiB override of the engine's 1 MiB survived unnoticed (cleat#4171).
+func applyEngineGlobalsFromFlags() {
+	engine.OutBufSize = uint32(*wasmOutputBufferSize)
+	engine.MaxWasmStringLen = uint32(*wasmMaxStringLen)
+}
+
+// wasmtimeOptionsFromFlags is every option the worker builds its wasmtime backend with, taken from the flags.
+//
+// Bound wasmtime execution: epoch interruption (wall-clock, primary defense against a runaway workflow hanging the worker -- see IMPROVEMENT-PLAN.md 1.5)
+// and StoreLimits (memory/table/instance ceilings), plus optional fuel-based instruction metering when --wasm-instruction-limit is set.
+// The memory limit is the flag's value, or the engine's default (256 MiB) for 0: see wasmtimeMemoryLimitBytes.
+func wasmtimeOptionsFromFlags(logger *slog.Logger) []engine.WasmtimeOption {
+	return append(append(componentPrecompileOptionFromFlags(logger), compileHeadroomOptionFromFlags(logger)...), []engine.WasmtimeOption{
+		engine.WithWasmtimeExecutionTimeout(*wasmInstanceTimeout),
+		engine.WithWasmtimeInstructionLimit(uint64(*wasmInstructionLimit)),
+		engine.WithWasmtimeMemoryLimits(wasmtimeMemoryLimitBytes(*wasmMemoryMaxMB), 0, 0),
+		engine.WithWasmtimeDeferBudget(*wasmDeferBudget),
+		engine.WithWasmtimeModuleCacheMaxEntries(*wasmModuleCacheMaxEntries),
+		engine.WithWasmtimeModuleCacheMaxBytes(int64(*wasmModuleCacheMaxMB) << 20),
+		// Without this the backend writes to slog.Default(), and this worker's
+		// configured handler never sees the one record that says whether a
+		// KILLED workflow's defers ran. See WithWasmtimeLogger.
+		engine.WithWasmtimeLogger(logger),
+	}...)
+}
+
+// componentPrecompileOptionFromFlags compiles components in a child process unless --component-precompile=false (ON by default since 0.6.0). The child is THIS binary, found with
+// os.Executable and resolved once, here, to an absolute path: never a PATH lookup, so it is guaranteed to be the same build and the same engine-config code. If the path cannot be resolved the
+// feature is left off and says so; the worker compiles in-process, as it always did.
+func componentPrecompileOptionFromFlags(logger *slog.Logger) []engine.WasmtimeOption {
+	if !*componentPrecompile {
+		return nil
+	}
+	exe, err := os.Executable()
+	if err == nil {
+		exe, err = filepath.EvalSymlinks(exe)
+	}
+	if err != nil || !filepath.IsAbs(exe) {
+		logger.Warn("--component-precompile is on but the worker's own executable could not be resolved to an absolute path; compiling in-process", "error", err)
+		return nil
+	}
+	if msg := oomGroupWarning(readOOMGroup()); msg != "" {
+		logger.Warn(msg)
+	}
+	var total uint64
+	if mi := NewMemoryMonitor(*memoryCheckInterval).Read(); mi.Source != "" {
+		total = mi.TotalBytes
+	}
+	parallel, reason, err := resolvePrecompileParallel(*componentPrecompileParallel, total)
+	if err != nil {
+		logger.Warn("--component-precompile is on but its parallel setting is not usable; compiling in-process", "error", err)
+		return nil
+	}
+	logger.Info("component precompile in a child process is ON", "parallel_compilation", parallel, "why", reason, "child", exe)
+	return []engine.WasmtimeOption{engine.WithWasmtimeComponentPrecompile(engine.ComponentPrecompile{
+		Executable:          exe,
+		Timeout:             *componentPrecompileTimeout,
+		RefusalWindow:       *componentPrecompileRefusalWindow,
+		MemoryLimitBytes:    total,
+		ParallelCompilation: parallel,
+	})}
+}
+
+// cgroupOOMGroupPath says whether an out-of-memory kill takes the whole cgroup (1) or one process (0).
+const cgroupOOMGroupPath = "/sys/fs/cgroup/memory.oom.group"
+
+func readOOMGroup() (string, error) {
+	b, err := os.ReadFile(cgroupOOMGroupPath)
+	return string(b), err
+}
+
+// oomGroupWarning is the warning --component-precompile owes when the container's out-of-memory kill is per-cgroup. The refusal path assumes the kernel kills the child and leaves the worker;
+// under memory.oom.group=1 it kills every process in the cgroup, the worker included, so the child's death is not survivable and nothing in the worker can protect it. Measured on Docker, where the
+// file reads 0 (cleat-review3 on #4398); that Kubernetes sets it to 1 by default on cgroup v2 (and that the kubelet's singleProcessOOMKill restores per-process kills) is from its documentation and
+// was NOT measured here. An unreadable file (no cgroup v2, not Linux) says nothing: the caller gets "".
+func oomGroupWarning(content string, readErr error) string {
+	if readErr != nil || strings.TrimSpace(content) != "1" {
+		return ""
+	}
+	return "--component-precompile is on, and this container's memory.oom.group is 1: an out-of-memory kill takes EVERY process in the cgroup, this worker included, so a killed " +
+		"compile child is not survivable and the worker's refusal cannot protect it. The flag lowers the steady state only; the memory limit must hold the compile peak"
+}
+
+// precompileParallelFloorBytes is the memory limit under which the precompile child compiles with parallel_compilation off. Measured on one machine (cleat-77,
+// component-compile-config-2026-11-23): the Python compile's high-water was +490 MiB parallel and +265 MiB not, so under 1 GiB the parallel peak plus the worker's
+// baseline leaves little headroom. It is a default for a judgement, not a measured threshold; --component-precompile-parallel overrides it.
+const precompileParallelFloorBytes = 1 << 30
+
+// resolvePrecompileParallel turns --component-precompile-parallel into the child's setting and says why, so the log names the reason. totalBytes is the worker's memory limit as the
+// memory monitor reads it (the cgroup limit, else the host's), 0 if it could not be read.
+func resolvePrecompileParallel(mode string, totalBytes uint64) (parallel bool, why string, err error) {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "true":
+		return true, "set by --component-precompile-parallel=true", nil
+	case "false":
+		return false, "set by --component-precompile-parallel=false", nil
+	case "auto", "":
+		switch {
+		case totalBytes == 0:
+			return true, "auto: the memory limit could not be read, so the default (parallel) applies", nil
+		case totalBytes < precompileParallelFloorBytes:
+			return false, fmt.Sprintf("auto: the memory limit is %d MiB, under 1 GiB, so the child compiles without parallelism to lower its peak", totalBytes>>20), nil
+		default:
+			return true, fmt.Sprintf("auto: the memory limit is %d MiB, at least 1 GiB", totalBytes>>20), nil
+		}
+	}
+	return false, "", fmt.Errorf("--component-precompile-parallel=%q: want auto, true or false", mode)
+}
+
+// wasmtimeMemoryLimitBytes is the per-store memory limit to hand the wasmtime backend, in bytes: the flag's value, or the engine's own default
+// for 0 (so what is logged and what is enforced are the same number, never an ambiguous 0).
+//
+// A stock worker passes the flag's default, which is engine.DefaultWasmtimeMemoryLimitBytes (256 MiB, cleat#4171). This used to pass
+// a limit only when the flag was explicitly SET, because the flag's old default (32) was not a decision and passing it would have pinned
+// a C# guest to 32 MiB, under the 52 MiB it needs to start; the engine raised the default for C# through a per-language floor. The
+// default is now above every runtime's minimum, so the floor and the gate were both removed.
+func wasmtimeMemoryLimitBytes(mb int) int64 {
+	if mb > 0 {
+		return int64(mb) * 1024 * 1024
+	}
+	return engine.DefaultWasmtimeMemoryLimitBytes
 }

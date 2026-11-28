@@ -25,7 +25,7 @@ and compilation.
 | Flag | Default | Description |
 |------|---------|-------------|
 | `-o <dir>` | temp dir | Output directory for generated WASM and auxiliary files |
-| `--target <name>` | `go` | Compilation target: `go` (standard Go toolchain, fully implemented), `rust`, `java`, `assemblyscript`, or `python` |
+| `--target <name>` | `go` | Compilation target: `go` (standard Go toolchain, fully implemented), `rust`, `java`, or `python` |
 | `--entry <file:func>` | `""` | Entry point in `file.py:func_name` format (Python target only) |
 | `--json` | `false` | Output diagnostics as JSON to stdout (progress goes to stderr) |
 
@@ -74,6 +74,7 @@ Upload a compiled WASM workflow to the database.
 |------|---------|-------------|
 | `--name <name>` | derived from WASM metadata or filename | Workflow name |
 | `--task-queue <queue>` | `default` | Task queue (e.g. `default`, `gpu`, `high-memory`) |
+| `--force` | off | Replace the WASM of a version that has open runs and different bytes (see below) |
 
 > Corrected 2026-08-09: this table previously also listed a `--namespace`
 > flag. `runDeploy` in `cmd/cleat/main.go` only defines `--name` and
@@ -85,6 +86,28 @@ Upload a compiled WASM workflow to the database.
 
 Requires `--db` or `CLEAT_DATABASE_URL`. In dry-run mode (no DB configured),
 prints what would be deployed.
+
+**Redeploying a version.** The version comes from the artifact's stamp, and
+`cleat build` stamps `1` unless given `--version`. Redeploying a version whose
+bytes are identical is a no-op. Redeploying a version with **different** bytes is
+refused while any run of that version is still open, because a run replays its
+recorded history under whatever bytes the version holds, and replacing them under
+a live run can make it diverge. The error names the version and the number of open
+runs. Build with a higher `--version` and deploy that, so the open runs keep the
+code they started on, or pass `--force` to replace the bytes on purpose.
+`deploy-workflow` takes the same `--force`, and the worker's upload API answers `409` for the same refusal (it has no force
+option). `cleatctl deploy workflow` always assigns the next version, so it cannot
+hit this. cleat#3497.
+
+**When a running worker picks up replaced bytes.** A worker keeps each definition it
+has loaded in memory (and, with `--wasm-cache-dir`, on disk) and checks it against the
+database. A replacement of a different length is noticed on the next task, because the
+length is compared every time. A replacement of the **same length** is noticed by
+comparing a SHA-256 of the stored bytes, which the worker asks for at most once every
+5 seconds per definition, so after `--force` (or any replacement) a worker **may run
+the previous bytes for up to about 5 seconds**. A worker that cannot reach the database
+keeps serving what it has. The interval is a fixed constant of the worker, not a flag
+(cleat#3516).
 
 Example:
 
@@ -155,6 +178,7 @@ Validate a workflow package without compiling.
 | `--lang <name>` | auto-detected | Language target: `go`, `rust`, `java`, `as`, `python` |
 | `--json` | `false` | Output results as JSON |
 | `--ci` | `false` | Output in GitHub Actions annotation format (takes precedence over `--json`) |
+| `--channel <name>` | none | Go only. Child version resolution channel, as for `cleat build`. Only `frozen` changes the verdict: it refuses a child whose name is not a compile-time constant |
 
 Auto-detection checks for `go.mod`, `Cargo.toml`, `build.gradle.kts`,
 `build.gradle`, `.py` files, or `package.json` (in that order).
@@ -163,6 +187,29 @@ Example:
 
     cleat vet ./testdata/basic/
     cleat vet --lang rust --ci ./my-crate/
+
+**Run it before you push a Go workflow.** The checks that `cleat build` enforces on
+Go source (for example E008, E009, the HostCalls threading check and the W002
+floating-point warning) are not run by `go build`, `go vet` or `go test`, so a
+workflow can pass all three and still be rejected by `cleat build`. `cleat vet
+<package-path>` runs that analysis without compiling. For a Go package it gives the
+same verdict on the analysis as `cleat build`: `cleat vet`, `cleat build` and
+`cleat build --json` agree on the closure errors, the threading check and the
+refusals that read the source's declarations: a `//cleat:exposure` that names two
+classes or one that is not `auth`, `public` or `internal`, and, with
+`--channel frozen`, a child it cannot pin (see
+[Which child names the build can pin](../explanation/workflow-versioning.md);
+cleat#3524). It exits 1 on any of them and 0 otherwise; warnings such as W002
+are printed and do not change the exit status. In CI, `--ci` writes GitHub
+annotations. Pass the same `--channel` you build with: without `--channel frozen`
+`cleat vet` cannot know the build will pin children.
+
+`cleat build` refuses all of these before it compiles anything, so a refused build
+leaves no `.wasm` (and no generated files) in its `-o` directory.
+
+A clean `cleat vet` does not promise that `cleat build` will succeed. `cleat build`
+then generates code and compiles the WASM, either of which can fail, and resolves
+child versions against the lock file or the database.
 
 ---
 
@@ -282,9 +329,16 @@ Resolve and pin child workflow versions for reproducible builds.
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--db <conn>` | `CLEAT_DATABASE_URL` | PostgreSQL connection string |
-| `--update` | `false` | Re-resolve all child versions from database (reads existing lock file) |
+| `--update` | `false` | Without a package, re-resolve every child named in the existing lock file. With a package, the same as without `--update`. |
 
 Writes a `cleat.lock` file with pinned child workflow versions.
+
+`cleat lock <package>` resolves the children the build can see in that package and
+**keeps every other entry in an existing lock as it was**, so a child started from an
+imported package that you listed by hand stays pinned at the version you chose.
+`cleat lock --update` with no package re-resolves **every** name in the lock, including
+those, and prints `Changed <name>: vA -> vB` for each version it moves. Neither removes
+an entry: delete a stale one from `cleat.lock` by hand. (cleat#3521)
 
 Example:
 

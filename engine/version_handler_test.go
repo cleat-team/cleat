@@ -675,6 +675,42 @@ func TestRegisterVersionHandler_PurgeStoreError(t *testing.T) {
 	}
 }
 
+// cleat#3547: a deprecate or purge that gave up waiting for the cross-shard lock is a conflict with a
+// write in flight, not a server fault. The other store errors above stay 500, which is the control.
+type versionHandlerLockedStore struct{ *stubWorkflowStore }
+
+func (m *versionHandlerLockedStore) MarkVersionDeprecated(_ context.Context, name string, version int, deprecated bool) error {
+	return fmt.Errorf("wrapped: %w", &WorkflowDefDeployInProgressError{Name: name, Version: version, Waited: time.Second})
+}
+
+func (m *versionHandlerLockedStore) PurgeWorkflowDef(_ context.Context, name string, version int) error {
+	return fmt.Errorf("wrapped: %w", &WorkflowDefDeployInProgressError{Name: name, Version: version, Waited: time.Second})
+}
+
+func TestRegisterVersionHandler_DeprecateAndPurgeBehindTheCrossShardLockAreConflicts(t *testing.T) {
+	store := &versionHandlerLockedStore{stubWorkflowStore: &stubWorkflowStore{}}
+	mux := http.NewServeMux()
+	RegisterVersionHandler(mux, StaticVersionStore(store))
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	for _, verb := range []string{"deprecate", "purge"} {
+		resp, err := http.Post(server.URL+"/api/versions/wf-test/1/"+verb, "application/json", nil)
+		if err != nil {
+			t.Fatalf("POST %s: %v", verb, err)
+		}
+		var body map[string]string
+		_ = json.NewDecoder(resp.Body).Decode(&body)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusConflict {
+			t.Errorf("%s behind the lock: HTTP %d, want 409 (body %v)", verb, resp.StatusCode, body)
+		}
+		if !strings.Contains(body["error"], "Nothing was written") {
+			t.Errorf("%s: the 409 body %q does not say nothing was written", verb, body["error"])
+		}
+	}
+}
+
 func TestRegisterVersionHandler_GCStoreError(t *testing.T) {
 	store := &versionHandlerErrorStore{stubWorkflowStore: &stubWorkflowStore{}}
 	mux := http.NewServeMux()

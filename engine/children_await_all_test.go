@@ -38,8 +38,8 @@ func (f *fakeChildResultStore) ResolveVersionByTag(context.Context, string, stri
 // TestAwaitAllChildrenCarriesEachChildsResult pins the reason to fan out at all.
 //
 // The recorded event's Response is the assertion target rather than the guest's
-// buffer, and deliberately: it is the DURABLE artifact. freshAwaitAllChildren
-// writes it to the guest and replayAwaitAllChildren hands the same bytes back
+// buffer, and deliberately: it is the DURABLE artifact. awaitAllChildrenStep's Fresh
+// writes it to the guest and its Decode hands the same bytes back
 // on every later replay, so a Response missing a child's result is missing it
 // permanently. Asserting on the write to the module would test only the first
 // of those two paths, and a nil module (which every host-call test here passes)

@@ -34,7 +34,7 @@ describe('api.ts Authorization header', () => {
   it('sends no Authorization header (opts unchanged) when no token is stored', async () => {
     mockFetchOk([]);
     await listWorkflows();
-    expect(globalThis.fetch).toHaveBeenCalledWith('/api/workflows', undefined);
+    expect(globalThis.fetch).toHaveBeenCalledWith('/api/workflows?redact=true', undefined);
   });
 
   it('sends Authorization: Bearer <token> on a GET call when a token is stored', async () => {
@@ -42,7 +42,7 @@ describe('api.ts Authorization header', () => {
     mockFetchOk([]);
     await listWorkflows();
     const [url, opts] = (globalThis.fetch as any).mock.calls[0];
-    expect(url).toBe('/api/workflows');
+    expect(url).toBe('/api/workflows?redact=true');
     expect(opts.headers).toEqual({ Authorization: 'Bearer cleat_sk_test123' });
   });
 

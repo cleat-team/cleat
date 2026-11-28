@@ -24,6 +24,7 @@ gitflow is defined by the merge graph, so the method is not a matter of taste:
 | Hop | Method | Why |
 |-----|--------|-----|
 | `feature/*` -> `develop` | **Squash** | Keeps develop's history one commit per change. |
+| `fix/*`, `bugfix/*` -> `release/*` | **Merge commit** | A squash leaves `Claude-Stream:` outside the final paragraph, git stops reading it as a trailer, and that commit then fails `Stream Trailer Check` on the release PR to `main` with nothing left to amend (cleat#3496). If a squash is unavoidable, edit its message so the trailer stays in the last paragraph. |
 | `release/*` -> `main` | **Merge commit** | `main` must descend from the released history. |
 | `main` -> `develop` | **Merge commit** | Carries the tag back with the version bump; the only merge that makes the tag an ancestor of `develop`. |
 | `hotfix/*` -> `main` | **Merge commit** | Same as a release. |
@@ -50,6 +51,17 @@ So **the two rows above whose whole point is the second parent — `main -> deve
 and `hotfix/* -> develop` — cannot be merged as written.** The queue squashes
 them, and `bypass_actors` is empty, so nobody can step around it. The `-> main`
 rows are unaffected: `main` carries no ruleset and the dropdown governs there.
+
+The `fix/*` -> `release/*` row is a convention for the same reason: the
+**`release branches`** ruleset (`25901002`, `release/**`) has no merge queue, and
+its pull-request rule allows `merge`, `squash` and `rebase`, so the merger
+chooses. Re-derive it, because that is the whole basis for the row:
+
+```bash
+gh api repos/cleat-team/cleat/rulesets/25901002 \
+  --jq '.rules[]|select(.type=="pull_request")|.parameters.allowed_merge_methods'
+# -> ["merge","squash","rebase"]                        (2026-10-28)
+```
 
 Rebase merging is disabled. Re-derive the repo-wide settings with:
 
@@ -240,6 +252,10 @@ Cleat follows [Semantic Versioning](https://semver.org/) (MAJOR.MINOR.PATCH).
 | **MINOR** | New features without breaking existing APIs | `1.0.0` -> `1.1.0` | Backward compatible; new functionality available |
 | **PATCH** | Bug fixes, security patches, documentation | `1.0.0` -> `1.0.1` | No behavioral changes for correct code |
 
+**Before 1.0 the table is the intent, not a guarantee.** A `0.x` MINOR release can change
+behaviour, and has: 0.5.0 requires a fresh database. Each release's UPGRADE NOTES at the top
+of `CHANGELOG.md` say what a step requires; `SECURITY.md` says the same about support.
+
 ### What constitutes a breaking change (MAJOR bump)
 
 - **WASM boundary**: adding, removing, or changing the signature of any host
@@ -282,19 +298,26 @@ Cleat follows [Semantic Versioning](https://semver.org/) (MAJOR.MINOR.PATCH).
 
 ## Support tiers
 
+While cleat is on `0.x`, only the latest minor release is supported. This is
+the same policy as `SECURITY.md`.
+
 | Release | Support |
 |---------|---------|
 | Latest minor | Full support: bug fixes and security patches |
-| Previous minor | Security patches only |
-| Older releases | No support -- upgrade to a supported version |
+| Previous minor | No support -- upgrade to the latest minor |
+| Older releases | No support -- upgrade to the latest minor |
 
-Only the latest minor version receives patches. Users on older versions must
-upgrade to receive fixes.
+Only the latest minor version receives patches, security patches included.
+Users on any earlier minor must upgrade to receive fixes. Before 1.0 a minor
+release can change behaviour, so read the UPGRADE NOTES at the top of
+`CHANGELOG.md` and `docs/operations/upgrading.md` before you upgrade.
 
-Example: if `v1.3.0` is the latest release:
-- `v1.3.x` receives bug fixes and security patches
-- `v1.2.x` receives security patches only
-- `v1.1.x` and earlier receive no updates
+Example: if `v0.6.0` is the latest release:
+- `v0.6.x` receives bug fixes and security patches
+- `v0.5.x` and earlier receive no updates
+
+A patch policy for the previous minor may be revisited when cleat reaches 1.0.
+No such policy exists today, and none is promised.
 
 ## Deprecation policy
 
@@ -375,9 +398,9 @@ That grep will not find the Homebrew formula, which is Ruby — but as of
 cleat#2068 nothing here needs to bump it by hand.
 
 **That grep is not the SDK version check, and does not stand in for one
-(cleat#2454).** It reaches one of the six places an SDK version lives — the
+(cleat#2454).** It reaches one of the places an SDK version lives — the
 Rust metadata stamper, via `--include="*.rs"` — and is structurally blind to
-the Python, Java and AssemblyScript ones, and to `pyproject.toml`, because
+the Python and Java ones, and to `pyproject.toml`, because
 none of those carry a bare `vX.Y.Z` in a `.go`/`.rs`/`.mod` file. Verify SDK
 version agreement with the script written for exactly this:
 
@@ -402,8 +425,8 @@ the tag — `::error::tag vX.Y.Z (version X.Y.Z) does not match
 pyproject.toml's version ...`, failing the job before any upload runs. A
 mismatch here is not a warning to notice later; it is a failed release. See
 `CONTRIBUTING.md`'s "SDK versions: which numbers are load-bearing" for why
-the Python version is load-bearing while the three inert `0.1.0`s (Rust,
-Java, AssemblyScript) are deliberately left alone.
+the Python version is load-bearing while the two inert `0.1.0`s (Rust,
+Java) are deliberately left alone.
 
 ### Releasing a Homebrew formula bump — now automatic
 
@@ -565,13 +588,38 @@ helm install cleat oci://ghcr.io/cleat-team/charts/cleat --version X.Y.Z
 
 ### 4. Run multi-database tests
 
-Run the WorkflowStore test suite against all three supported backends to verify
-that no regressions were introduced:
+Run the database-backed tests against all three supported backends, in one
+invocation, to verify that no regressions were introduced:
 
 ```bash
-# Requires MySQL and SQL Server running locally or via Docker.
+# Requires PostgreSQL, MySQL and SQL Server running locally or via Docker, with
+# all three DSNs exported. There are no defaults, on purpose: an unset DSN skips
+# its dialect and the suite still prints ok, so the script exits 2 instead.
+# The DSNs are in WORKSTREAM.md.
+export CLEAT_TEST_POSTGRES=... CLEAT_TEST_MYSQL=... CLEAT_TEST_MSSQL=...
 make test-all-dbs
 ```
+
+Start from freshly created databases: a database a previous run used holds rows
+that fail a later run on MySQL and SQL Server (cleat#3474).
+
+The script's exit `0` means every test that ran passed. `1` is a finding. `2`
+means the check could not establish what it was measuring (a DSN unset or not
+connecting, a package pattern matching nothing); that is a failure of the check,
+not a finding about the tree. Under `make`, any failure shows as make's own exit
+`2`; the script's code is on the `make: *** [test-all-dbs] Error N` line. Read the summary it prints rather than the exit
+status alone: the test-failure, package-failure, `build failed` and timeout
+counts, and the **skip names**. No remaining skip should be an unset or
+unreachable DSN. It is a long run, dominated by `./engine/...` against SQL Server;
+budget for it rather than waiting on the clock.
+
+It does not run `./tests/exhaustion` or `./tests/cluster`, which need a running
+worker cluster, and it does not apply the CI skip budget, because that budget
+describes CI jobs rather than this run. CI's cluster job covers those two suites.
+
+Until cleat#3457 this step named a `make` target that ran `go test
+./internal/host/...`, a path that had not existed since commit 3eeb74e moved it to
+`engine/`, and failed on every leg. A release run before that fix cannot have used it.
 
 Verify that all three migration directories are in sync:
 

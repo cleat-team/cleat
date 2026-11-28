@@ -84,6 +84,10 @@ set -uo pipefail
 set +e
 
 cd "$(git rev-parse --show-toplevel)" || exit 2
+# retry_transient: a transient proxy/registry error in `docker build` or `docker compose up`
+# is retried, anything else is not (cleat#3586).
+# shellcheck source=scripts/lib/retry-transient.sh
+source scripts/lib/retry-transient.sh
 
 EXAMPLE_DIR="examples/integration-hub"
 README="$EXAMPLE_DIR/README.md"
@@ -277,14 +281,14 @@ if [[ "$DIALECT" != "postgres" ]]; then
 fi
 
 echo "==> building the worker image from this checkout"
-if ! docker build -t "$WORKER_IMAGE" . >/tmp/ih-docker-build.log 2>&1; then
+if ! retry_transient /tmp/ih-docker-build.log docker build -t "$WORKER_IMAGE" .; then
   echo "FAIL: docker build of the repository's Dockerfile" >&2
   tail -25 /tmp/ih-docker-build.log >&2
   exit 1
 fi
 
 echo "==> docker compose up"
-if ! "${COMPOSE[@]}" up -d >/tmp/ih-compose-up.log 2>&1; then
+if ! retry_transient /tmp/ih-compose-up.log "${COMPOSE[@]}" up -d; then
   echo "FAIL: docker compose up" >&2
   tail -30 /tmp/ih-compose-up.log >&2
   exit 1

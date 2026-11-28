@@ -35,11 +35,17 @@ import (
 // skipped. Making that read work made wfMeta non-nil, and 0 then disagreed with
 // the def_version a deploy records (cleat deploy prefers the stamp, and its own
 // --version defaults to 1), so every Python run was released as "version_check"
-// on claim and looped forever without ever running. Rust, Java and
-// AssemblyScript get the same value from nonGoMetadata.
-func pythonStampEnv(workflowVersion int, entryPoints, channel string) map[string]string {
+// on claim and looped forever without ever running. Rust and Java
+// get the same value from nonGoMetadata.
+func pythonStampEnv(workflowName string, workflowVersion int, entryPoints, channel string) map[string]string {
 	env := map[string]string{
 		"CLEAT_WORKFLOW_VERSION": strconv.Itoa(workflowVersion),
+	}
+	// stamp_metadata.py defaults the name to "unknown", and `cleat deploy` printed
+	// `Workflow: unknown v1` for every Python workflow where a Go one prints its
+	// own name (cleat#3792). The name is the one the output file is given.
+	if workflowName != "" {
+		env["CLEAT_WORKFLOW_NAME"] = workflowName
 	}
 	// Only set when there is something to say: build_wasm.py treats an empty
 	// value as absent, and an entry point name derived from a failed schema
@@ -53,6 +59,39 @@ func pythonStampEnv(workflowVersion int, entryPoints, channel string) map[string
 	return env
 }
 
+// pythonBuildFailureMessage is what `cleat build --target python` tells the reader when the build script did not produce a component. It is a function of the
+// error so the choice between its three messages can be tested without a Python toolchain, and the choice is the point: each failure is something else.
+//
+//   - No build script anywhere is an environment problem, and its own message says how to fix it.
+//   - A build the script REFUSED, because the installed componentize-py is not the measured version (cleat#4383), has already said what to do on stderr,
+//     with the pip command and the override. Nothing was compiled, so the advice below is wrong for it and would send the reader to their own source.
+//   - Anything else is a compile that ran and failed, and the advice is about the workflow file.
+func pythonBuildFailureMessage(err error) string {
+	switch {
+	case wasm.IsPythonBuildScriptNotFound(err):
+		return fmt.Sprintf("Error: %v\n", err)
+	case wasm.IsPythonComponentizeVersionRefused(err):
+		return "Error: cleat build refused to compile with this componentize-py (see above); nothing was built.\n"
+	default:
+		return fmt.Sprintf("Error: componentize-py failed: %v\n", err) +
+			"Make sure the Python file has a @cleat_entry decorated function.\n" +
+			"Check that (1) the Python file has valid syntax, (2) the @cleat_entry function exists and is not async, (3) all imports are available.\n"
+	}
+}
+
+// applyAllowUnmeasuredComponentizePy turns --allow-unmeasured-componentize-py into the environment variable build_wasm.py reads, and refuses the flag on a
+// target it does not apply to rather than ignoring it: a flag that is accepted and does nothing reads as a build that was checked (cleat#4383). It is a
+// function of its inputs and sets the variable only when asked, so a variable the caller already exported is left as they set it.
+func applyAllowUnmeasuredComponentizePy(allow bool, target string) error {
+	if !allow {
+		return nil
+	}
+	if target != wasm.PythonTarget {
+		return fmt.Errorf("--allow-unmeasured-componentize-py applies only to --target python, not --target %s", target)
+	}
+	return os.Setenv(wasm.AllowUnmeasuredComponentizePyEnv, "1")
+}
+
 // runBuildPython compiles a Python workflow to WASM using componentize-py
 // via the python-sdk/scripts/build_wasm.py helper.
 //
@@ -61,7 +100,8 @@ func pythonStampEnv(workflowVersion int, entryPoints, channel string) map[string
 //   - "file.py"               — a single .py file (auto-detects function)
 //   - "path/to/dir/"          — a directory (looks for .py files)
 //
-// runtime specifies the target WASM runtime: "wasmtime", "wazero", or "" for both.
+// runtime specifies the target WASM runtime: "wasmtime", "wazero", or "" for the component, as for wasmtime
+// (cleat#3818: "" used to mean both formats and warned about wasm-tools on every build).
 func runBuildPython(pattern, outDir, runtime, channel string, workflowVersion int) {
 	pyFile := ""
 	funcName := ""
@@ -154,8 +194,7 @@ func runBuildPython(pattern, outDir, runtime, channel string, workflowVersion in
 	// Determinism gate. runBuild early-returns here before reaching analyze(),
 	// so a Python workflow compiled to a deployable artifact with no
 	// determinism checking at all (cleat#1770). Rust landed in #1784, Java in
-	// #1791; AssemblyScript needed none, because its transform already runs
-	// inside the compile.
+	// #1791.
 	//
 	// It runs BEFORE the componentize-py lookup for the same reason as the Rust
 	// and Java gates run before their toolchain lookups: a workflow with
@@ -192,7 +231,7 @@ func runBuildPython(pattern, outDir, runtime, channel string, workflowVersion in
 	// Check for componentize-py on PATH.
 	if _, err := exec.LookPath("componentize-py"); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: componentize-py not found.\n")
-		fmt.Fprintf(os.Stderr, "Install componentize-py: pip install componentize-py\n")
+		fmt.Fprintf(os.Stderr, "Install componentize-py: pip install componentize-py==0.25.1\n")
 		fmt.Fprintf(os.Stderr, "Or follow instructions at: https://github.com/bytecodealliance/componentize-py\n")
 		os.Exit(1)
 	}
@@ -263,15 +302,13 @@ func runBuildPython(pattern, outDir, runtime, channel string, workflowVersion in
 	// computation; that computation is a separate python3 process
 	// (cleat_sdk.jsonschema_emitter) that does not read it, so setting it here
 	// instead changes nothing.
-	for k, v := range pythonStampEnv(workflowVersion, entryPointName, channel) {
+	for k, v := range pythonStampEnv(name, workflowVersion, entryPointName, channel) {
 		os.Setenv(k, v)
 		defer os.Unsetenv(k)
 	}
 
 	if err := wasm.BuildPythonWasmWithRuntime(entry, wasmOutput, runtime, false); err != nil {
-		fmt.Fprintf(os.Stderr, "Error: componentize-py failed: %v\n", err)
-		fmt.Fprintf(os.Stderr, "Make sure the Python file has a @cleat_entry decorated function.\n")
-		fmt.Fprintf(os.Stderr, "Check that (1) the Python file has valid syntax, (2) the @cleat_entry function exists and is not async, (3) all imports are available.\n")
+		fmt.Fprint(os.Stderr, pythonBuildFailureMessage(err))
 		os.Exit(1)
 	}
 

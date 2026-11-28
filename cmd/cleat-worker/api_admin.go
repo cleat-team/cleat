@@ -46,6 +46,41 @@ func (s *apiServer) handleAdminRoutes(w http.ResponseWriter, r *http.Request) {
 func (s *apiServer) handleAdminRoutesForTenant(w http.ResponseWriter, r *http.Request) {
 	rest := strings.TrimPrefix(r.URL.Path, "/api/admin/tenants/")
 	tenant, tail, ok := strings.Cut(rest, "/")
+	if ok && tenant != "" && tail == "confirm" {
+		// cleat#3552: the last step of the provisioning handshake. Not an instance route, so it
+		// is dispatched before the instance-prefix check below would 404 it.
+		s.handleConfirmProvisionedTenant(w, r, tenant)
+		return
+	}
+	if ok && tenant != "" && tail == "drop-plan" {
+		// cleat#3552, B3b-1b: what a drop would remove, read-only. Not an instance route either.
+		s.handleTenantDropPlan(w, r, tenant)
+		return
+	}
+	if ok && tenant != "" && (tail == "suspend" || tail == "resume") {
+		// cleat#3552, B3a: the step a drop requires first. Dispatched here for the same reason as
+		// confirm: it is not an instance route.
+		s.handleSetTenantSuspended(w, r, tenant, tail == "suspend")
+		return
+	}
+	if ok && tenant != "" && tail == "recovery-key" {
+		// cleat#3578: an operator mints a key for a tenant that has locked itself out. Admin-only; the
+		// handler and the scope gate both say so. Not an instance route either.
+		s.handleRecoveryKey(w, r, tenant)
+		return
+	}
+	if ok && tenant != "" && tail == "tombstone" {
+		// cleat#3552, B3b-2b: the one act that lets a dropped id be provisioned again. Admin-only; the
+		// handler and the scope gate both say so. Not an instance route either.
+		s.handleDeleteTombstone(w, r, tenant)
+		return
+	}
+	if !ok && tenant != "" && r.Method == http.MethodDelete {
+		// cleat#3552, B3b-2: DELETE /api/admin/tenants/{tenant}. The only route with no tail, so it is
+		// told apart by having none; any other method on a bare tenant id is the 404 it always was.
+		s.handleDropTenant(w, r, tenant)
+		return
+	}
 	if !ok || tenant == "" || !strings.HasPrefix(tail, "instances/") {
 		s.writeError(w, 404, "not found")
 		return
@@ -215,7 +250,7 @@ func (s *apiServer) adminTargetStore(w http.ResponseWriter, r *http.Request, id,
 	}
 	wf, err := st.GetWorkflowByID(r.Context(), id)
 	if err != nil {
-		s.writeError(w, 500, err.Error())
+		s.writeAccessCheckUnavailable(w, r, "the run", err) // cleat#3866: not the driver's text, and retryable
 		return nil, false
 	}
 	if wf == nil {
@@ -226,6 +261,13 @@ func (s *apiServer) adminTargetStore(w http.ResponseWriter, r *http.Request, id,
 		// oracle for which workflow IDs are real.
 		s.writeError(w, 404, "not found")
 		return nil, false
+	}
+	// The workflow exists in this tenant's store, so this is the tenant the operation acts on.
+	// Said AFTER the lookup, not when the store is opened: opening a store for a tenant does not
+	// show the tenant exists, and the audit log would start a chain for any UUID in a URL.
+	// A no-op unless the audit log is listening (cleat#3559).
+	if tid, err := uuid.Parse(namedTenant); err == nil {
+		auth.NoteAuditTarget(r.Context(), tid)
 	}
 	return st, true
 }
@@ -245,7 +287,7 @@ func (s *apiServer) scopedStoreForTenant(w http.ResponseWriter, r *http.Request,
 	}
 	st, err := s.openTenantStore(r, tenant)
 	if err != nil {
-		s.writeError(w, http.StatusInternalServerError, err.Error())
+		s.writeStoreError(w, r, err)
 		return nil, false
 	}
 	return st, true
@@ -288,7 +330,7 @@ func (s *apiServer) callerOwnsTarget(w http.ResponseWriter, r *http.Request, id 
 	// job for attackers and for everybody else equally.
 	wf, err := st.GetWorkflowByID(r.Context(), id)
 	if err != nil {
-		s.writeError(w, 500, err.Error())
+		s.writeAccessCheckUnavailable(w, r, "the run", err) // cleat#3866: not the driver's text, and retryable
 		return nil, false
 	}
 	// EqualFold, not ==. A UUID is case-insensitive by definition, and SQL
@@ -304,6 +346,11 @@ func (s *apiServer) callerOwnsTarget(w http.ResponseWriter, r *http.Request, id 
 		s.writeError(w, 404, "not found")
 		return nil, false
 	}
+	// The tenant whose store this just confirmed the workflow in. For an operator request that is
+	// the tenant the header: resolver put in the context -- the id-only routes name none in their
+	// path -- and the audit log needs it to keep the row on the chain it was on before the operator
+	// was attributed (cleat#3559).
+	auth.NoteAuditTarget(r.Context(), caller)
 	return st, true
 }
 
@@ -345,7 +392,7 @@ func (s *apiServer) handleAdminForceComplete(w http.ResponseWriter, r *http.Requ
 
 	op := operatorFromContext(r)
 	if err := engine.ForceComplete(r.Context(), st, id, req.Generation, op, req.Result); err != nil {
-		s.handleAdminOpError(w, err)
+		s.handleAdminOpError(w, r, err)
 		return
 	}
 
@@ -369,7 +416,7 @@ func (s *apiServer) handleAdminForceFail(w http.ResponseWriter, r *http.Request,
 
 	op := operatorFromContext(r)
 	if err := engine.ForceFail(r.Context(), st, id, req.Generation, op, req.ErrorMsg, req.ErrorCode); err != nil {
-		s.handleAdminOpError(w, err)
+		s.handleAdminOpError(w, r, err)
 		return
 	}
 
@@ -400,7 +447,7 @@ func (s *apiServer) handleAdminResolveStep(w http.ResponseWriter, r *http.Reques
 
 	op := operatorFromContext(r)
 	if err := engine.ResolveStep(r.Context(), st, id, step, req.Response, op); err != nil {
-		s.handleAdminOpError(w, err)
+		s.handleAdminOpError(w, r, err)
 		return
 	}
 
@@ -422,7 +469,7 @@ func (s *apiServer) handleAdminReReplay(w http.ResponseWriter, r *http.Request, 
 
 	op := operatorFromContext(r)
 	if err := engine.ReReplay(r.Context(), st, id, req.Generation, op); err != nil {
-		s.handleAdminOpError(w, err)
+		s.handleAdminOpError(w, r, err)
 		return
 	}
 
@@ -457,7 +504,7 @@ func (s *apiServer) handleAdminReReplay(w http.ResponseWriter, r *http.Request, 
 // The default is still 500, and that is the point of classifying: an
 // unclassified error is a genuine server fault, not a refusal nobody got round
 // to labelling.
-func (s *apiServer) handleAdminOpError(w http.ResponseWriter, err error) {
+func (s *apiServer) handleAdminOpError(w http.ResponseWriter, r *http.Request, err error) {
 	msg := err.Error()
 	switch {
 	case errors.Is(err, engine.ErrAdminOpNotImplemented):
@@ -474,7 +521,9 @@ func (s *apiServer) handleAdminOpError(w http.ResponseWriter, err error) {
 	case errors.Is(err, engine.ErrAdminBadRequest):
 		s.writeError(w, 400, msg)
 	default:
-		s.writeError(w, 500, msg)
+		// Not `writeError(w, 500, msg)`: msg is err.Error(), so this was the driver's text under another name,
+		// which the whole-message guard cannot see through an assignment (cleat#3883).
+		s.writeStoreError(w, r, err)
 	}
 }
 

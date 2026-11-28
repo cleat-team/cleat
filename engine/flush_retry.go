@@ -108,6 +108,7 @@ func retryFlushUntilDeadline(ctx context.Context, window time.Duration, op strin
 // the whole window on every subsequent step of a zombie's segment.
 func errFlushRetryPointless(err error) bool {
 	return errors.Is(err, ErrFenceLost) ||
+		errors.Is(err, ErrEventQuotaExceeded) ||
 		errors.Is(err, context.Canceled) ||
 		errors.Is(err, context.DeadlineExceeded)
 }

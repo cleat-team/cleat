@@ -870,20 +870,22 @@ DROP SECURITY POLICY %[1]s`, policy)
 // works around it by dropping every policy first, which it can do because it
 // owns them all. A plugin migration owns only its own tables and cannot know
 // what else is bound to the engine's function. Binding plugin policies to the
-// engine's predicate would therefore make migration 012 -- which does
-// CREATE OR ALTER dbo.fn_tenant_filter -- fail on any database with plugins
-// installed.
+// engine's predicate would therefore make migrations/mssql/003_procedures.sql
+// -- which does CREATE OR ALTER dbo.fn_tenant_filter -- fail on any database
+// with plugins installed.
 const mssqlPluginTenantFilter = "fn_plugin_tenant_filter"
 
 // applyTenantScopingMSSQL installs a security policy per declared table.
 // cleat#1552.
 //
-// THE PREDICATE CARRIES NO ADMIN DISJUNCT. migration 012 added
+// THE PREDICATE CARRIES NO ADMIN DISJUNCT. The opt-in
+// migrations/mssql/optional/cross_tenant_claim.sql adds
 // `OR IS_ROLEMEMBER(N'cleat_admin') = 1` to the engine's predicate, and #1491
-// measured what that costs: a query that does not carry its own tenant equality
-// loses its seek and scans. cleat#1541 is removing it. Plugin tables are not
-// adopting it on the way past -- the cross-tenant key below serves the same
-// purpose, and is tested once per query rather than once per row.
+// measured what that costs: a query that does not carry its own tenant
+// equality loses its seek and scans. cleat#1541 removed it from the shipped
+// predicate. Plugin tables are not adopting it on the way past -- the
+// cross-tenant key below serves the same purpose, and is tested once per query
+// rather than once per row.
 //
 // THE SECOND KEY IS THE SWEEP BYPASS, mirroring PostgreSQL's cleat.cross_tenant
 // GUC. SQL Server has no SET ROLE, so PostgreSQL's newer `TO cleat_sweep`

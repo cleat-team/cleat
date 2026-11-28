@@ -315,6 +315,12 @@ type WorkflowDef struct {
 	// endpoint-set cap would stay, silently mis-tuning the version it was not
 	// chosen for. See cleat#889.
 	MaxHistoryLength int `json:"max_history_length,omitempty"`
+	// ReplaceUnderOpenRuns lets DeployWorkflowDef replace the WASM of a
+	// (tenant, name, version) whose bytes differ while runs of that version are
+	// still open. Off by default, and deliberately: a run replays its history under
+	// the bytes the definition holds, so this is a hot-fix a person chose, never
+	// something a default can reach. cleat#3497. Not part of the wire form.
+	ReplaceUnderOpenRuns bool `json:"-"`
 }
 
 // EntryPointSchema is one entry point's build-time-computed JSON Schema
@@ -730,14 +736,31 @@ type UpdateRequestInfo struct {
 	WorkflowID string `json:"workflow_id"`
 	// RequestID identifies this request. UpdateName does NOT: cleat#1416 made a
 	// name reusable, so a workflow can hold several requests that share one.
-	RequestID  string    `json:"request_id"`
-	UpdateName string    `json:"update_name"`
-	Payload    string    `json:"payload"`
-	PromiseID  string    `json:"promise_id,omitempty"`
-	Status     string    `json:"status"`
-	Result     string    `json:"result,omitempty"`
-	ErrorMsg   string    `json:"error_msg,omitempty"`
-	CreatedAt  time.Time `json:"created_at"`
+	RequestID  string `json:"request_id"`
+	UpdateName string `json:"update_name"`
+
+	// Payload is the CALLER'S BYTES, handed to the update handler as sent. A
+	// value that is not JSON arrives as it was passed (cleat#3903), which is why
+	// the readers run it through decodeJSONPayload: that unwraps a JSON string
+	// and returns its content verbatim, rather than re-serializing it.
+	Payload string `json:"payload"`
+
+	PromiseID string `json:"promise_id,omitempty"`
+	Status    string `json:"status"`
+
+	// Result is JSON TEXT handed onward, NOT the caller's bytes: it is
+	// compacted (canonical spacing) and a string result KEEPS its quotes, so a
+	// caller can always unmarshal it. The readers therefore compact
+	// (compactJSONString) rather than unwrap -- the same convention GetPromise
+	// uses (cleat#3807, cleat#3929).
+	//
+	// DO NOT "make Payload and Result consistent". They sit side by side and
+	// their contracts differ: unwrapping a result would turn `"yes"` into
+	// `yes`, which is not JSON. See Payload's comment for the other half.
+	Result string `json:"result,omitempty"`
+
+	ErrorMsg  string    `json:"error_msg,omitempty"`
+	CreatedAt time.Time `json:"created_at"`
 }
 
 // WorkflowMemoryStats holds distribution statistics for per-definition memory usage.
@@ -824,6 +847,22 @@ type WorkflowFilter struct {
 	// tile without double-counting a row on the boundary.
 	StartedAfter  time.Time
 	StartedBefore time.Time
+
+	// QueryState selects runs by what they published (cleat#3775): every key here must be published
+	// by the run with exactly this value. An empty map is no filter. At most MaxQueryStateFilterPairs
+	// pairs, ANDed; any more is ErrQueryStateFilterTooManyPairs.
+	//
+	// It is equality on strings and not a search: a run's query state is a map[string]string. On
+	// PostgreSQL it compiles to `query_state @> '{"key":"value",...}'`, the containment form, so an
+	// index an operator adds with `USING gin (query_state jsonb_path_ops)` is used with no change here.
+	// There is none by default, on purpose: the index taxes every write on a table most deployments
+	// never search (docs/how-to/find-a-run.md has the numbers). On a worker running
+	// --encrypt-sensitive-payloads the column is ciphertext, so ListWorkflows and CountWorkflows refuse
+	// the filter with ErrQueryStateFilterUnavailableUnderEncryption rather than answering "no match".
+	// GET /api/workflows answers it anyway, in the worker, over a window of recent runs, through
+	// QueryStateWindowSearcher (query_state_window.go) -- that is not these two methods' job, because its
+	// answer carries what it covered and a []WorkflowInstance cannot.
+	QueryState map[string]string
 }
 
 // RoutingRule represents a traffic-splitting rule for A/B testing.

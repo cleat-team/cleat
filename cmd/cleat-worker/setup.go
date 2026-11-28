@@ -40,18 +40,48 @@ import (
 // WASM LRU cache
 // ---------------------------------------------------------------------------
 
+// wasmBlob is one distinct set of WASM bytes held by the cache, and how many
+// entries hold it.
+//
+// digest is the SHA-256 of bytes AS THE WORKER COMPUTED IT, never a value the
+// store reported. That is the safeguard on sharing: a blob is looked up by the
+// hash of what the worker itself holds, so a corrupt row, or a digest column that
+// disagrees with its bytes, can only ever produce an entry whose bytes are its
+// own, and cannot place wrong bytes in front of another tenant's key. Whether the
+// store AGREES with those bytes is a separate question, answered per entry by
+// wasmLRUEntry.digest and checkedAt.
+type wasmBlob struct {
+	digest string
+	bytes  []byte
+	refs   int
+}
+
 // wasmLRUEntry is stored in container/list for LRU ordering.
 type wasmLRUEntry struct {
-	key   string
-	bytes []byte
+	key  string
+	blob *wasmBlob
+	// digest is the SHA-256 the store last agreed these bytes have, and
+	// checkedAt is when. Both are zero for an entry put without them, which
+	// loadWASM treats as "not yet verified" (cleat#3516). They belong to the
+	// ENTRY, not the blob: two tenants holding one blob are revalidated against
+	// their own rows.
+	digest    string
+	checkedAt time.Time
 }
 
 // wasmLRUCache is a bounded LRU cache for WASM byte slices keyed by
-// "defName:version". Evicts LRU when entry count or total bytes exceeded.
+// "tenant/defName:version". Evicts LRU when entry count or total bytes exceeded.
+//
+// BYTES ARE SHARED BY CONTENT (cleat#3540). N tenants that installed one library
+// version, or deployed identical bytes, are N entries over ONE blob, and the byte
+// budget counts each distinct blob once. Before, each key held its own copy, so a
+// library installed by 1000 tenants cost 1000 copies of up to ~19MB and the
+// budget evicted real work to hold duplicates.
 type wasmLRUCache struct {
 	mu       sync.Mutex
 	list     *list.List
 	index    map[string]*list.Element
+	blobs    map[string]*wasmBlob
 	maxBytes int64
 	maxEnts  int
 }
@@ -60,6 +90,7 @@ func newWasmLRUCache(maxEntries, maxMB int) *wasmLRUCache {
 	return &wasmLRUCache{
 		list:     list.New(),
 		index:    make(map[string]*list.Element),
+		blobs:    make(map[string]*wasmBlob),
 		maxEnts:  maxEntries,
 		maxBytes: int64(maxMB) * 1024 * 1024,
 	}
@@ -70,31 +101,110 @@ func (c *wasmLRUCache) get(key string) ([]byte, bool) {
 	defer c.mu.Unlock()
 	if elem, ok := c.index[key]; ok {
 		c.list.MoveToFront(elem)
-		return elem.Value.(*wasmLRUEntry).bytes, true
+		return elem.Value.(*wasmLRUEntry).blob.bytes, true
 	}
 	return nil, false
 }
 
+// put stores data under key. It hashes data to find the blob that shares it, so
+// every caller gets the sharing, at the cost of one SHA-256 on a miss.
 func (c *wasmLRUCache) put(key string, data []byte) {
+	c.putDigested(key, data, engine.WASMDigest(data))
+}
+
+// putDigested is put for a caller that has already hashed data. digest MUST be
+// the SHA-256 of data computed by this process: it names the blob, and a digest
+// that was merely reported by the store would let wrong bytes be shared. Both
+// callers in this file (adoptWASM, and loadWASM's disk path, which compares the
+// store's digest with engine.WASMDigest of the bytes before putting them) pass
+// the worker's own hash.
+func (c *wasmLRUCache) putDigested(key string, data []byte, digest string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if elem, ok := c.index[key]; ok {
 		c.list.MoveToFront(elem)
-		elem.Value.(*wasmLRUEntry).bytes = data
+		e := elem.Value.(*wasmLRUEntry)
+		old := e.blob
+		e.blob = c.internLocked(digest, data)
+		c.releaseLocked(old)
+		e.digest, e.checkedAt = "", time.Time{}
 		return
 	}
-	for c.list.Len() >= c.maxEnts || c.sizeBytesLocked()+int64(len(data)) > c.maxBytes {
+	// Room for the new entry. What it costs in bytes depends on whether its blob is
+	// already held, and evicting can change that answer, so it is asked each time
+	// round. The Len() > 0 guard is for an entry larger than the whole budget: with
+	// nothing left to evict the loop could not make progress, and it is held anyway.
+	for c.list.Len() > 0 && (c.list.Len() >= c.maxEnts || c.sizeBytesLocked()+c.costLocked(digest, len(data)) > c.maxBytes) {
 		c.evictLocked()
 	}
-	entry := &wasmLRUEntry{key: key, bytes: data}
-	elem := c.list.PushFront(entry)
-	c.index[key] = elem
+	blob := c.internLocked(digest, data)
+	entry := &wasmLRUEntry{key: key, blob: blob}
+	c.index[key] = c.list.PushFront(entry)
 }
 
+// costLocked is the bytes a new entry for (digest, n) adds to the budget: nothing
+// if its blob is already held.
+func (c *wasmLRUCache) costLocked(digest string, n int) int64 {
+	if _, held := c.blobs[digest]; held {
+		return 0
+	}
+	return int64(n)
+}
+
+// internLocked returns the blob for digest, creating it from data if no entry
+// holds it, and counts one more holder.
+func (c *wasmLRUCache) internLocked(digest string, data []byte) *wasmBlob {
+	b, ok := c.blobs[digest]
+	if !ok {
+		b = &wasmBlob{digest: digest, bytes: data}
+		c.blobs[digest] = b
+	}
+	b.refs++
+	return b
+}
+
+// releaseLocked drops one holder, and the blob with the last of them.
+func (c *wasmLRUCache) releaseLocked(b *wasmBlob) {
+	b.refs--
+	if b.refs <= 0 {
+		delete(c.blobs, b.digest)
+	}
+}
+
+// putVerified stores data with the digest the store agreed it had at `at`. digest
+// must be the worker's own hash of data (see putDigested); the two call sites
+// compare it with the store's before relying on it.
+func (c *wasmLRUCache) putVerified(key string, data []byte, digest string, at time.Time) {
+	c.putDigested(key, data, digest)
+	c.markChecked(key, digest, at)
+}
+
+// markChecked records that the store held the bytes with this digest at `at`.
+func (c *wasmLRUCache) markChecked(key, digest string, at time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if elem, ok := c.index[key]; ok {
+		e := elem.Value.(*wasmLRUEntry)
+		e.digest, e.checkedAt = digest, at
+	}
+}
+
+// verification returns what markChecked recorded for key, zero values if none.
+func (c *wasmLRUCache) verification(key string) (digest string, checkedAt time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if elem, ok := c.index[key]; ok {
+		e := elem.Value.(*wasmLRUEntry)
+		return e.digest, e.checkedAt
+	}
+	return "", time.Time{}
+}
+
+// sizeBytesLocked is the bytes held, each distinct blob counted once.
 func (c *wasmLRUCache) sizeBytesLocked() int64 {
 	var total int64
-	for e := c.list.Front(); e != nil; e = e.Next() {
-		total += int64(len(e.Value.(*wasmLRUEntry).bytes))
+	for _, b := range c.blobs {
+		total += int64(len(b.bytes))
 	}
 	return total
 }
@@ -107,8 +217,9 @@ func (c *wasmLRUCache) sizeBytesLocked() int64 {
 // Reuses sizeBytesLocked rather than tracking a running total, because a
 // running total is a second source of truth for a number this already computes
 // and would drift silently on any future eviction path that forgot to update
-// it. The walk is over at most --wasm-cache-max-entries elements, once per
-// memory tick.
+// it. The walk is over at most --wasm-cache-max-entries blobs, once per memory
+// tick. Bytes are the DISTINCT bytes held, so entries can exceed what the bytes
+// figure divided by a module's size would suggest: that gap is the sharing.
 func (c *wasmLRUCache) stats() (entries int, bytes int64) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -120,6 +231,7 @@ func (c *wasmLRUCache) evictLocked() {
 		entry := elem.Value.(*wasmLRUEntry)
 		delete(c.index, entry.key)
 		c.list.Remove(elem)
+		c.releaseLocked(entry.blob)
 	}
 }
 
@@ -127,8 +239,10 @@ func (c *wasmLRUCache) remove(key string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if elem, ok := c.index[key]; ok {
+		entry := elem.Value.(*wasmLRUEntry)
 		delete(c.index, key)
 		c.list.Remove(elem)
+		c.releaseLocked(entry.blob)
 	}
 }
 
@@ -1752,7 +1866,7 @@ func resolvePayloadKeyVersion(direct, file, flagName string, def int) (int, erro
 // can be unit tested without a process exiting out from under the test.
 //
 // Called once, in main.go, AFTER the migrate-or-verify block (the table this
-// checks is itself migration 008) and before a non-migrate-only worker does
+// checks is created by the baseline schema, migrations/postgres/001_schema.sql) and before a non-migrate-only worker does
 // anything else -- a --migrate-only job exits before reaching this point and
 // never needs to answer the question, and checking any earlier would refuse
 // a worker on a database that is merely not yet migrated, for the wrong
@@ -1989,6 +2103,11 @@ type Worker struct {
 	// pool; it does not address a GC pause or a network path to the
 	// database degraded for this worker only, which #2009 covers instead.
 	//
+	// It carries every tenant's beat, not only the worker's own: another
+	// tenant's runs use it re-scoped with WithTenant (heartbeatStoreForTenant),
+	// on PostgreSQL and SQL Server. MySQL and a sharded store cannot be
+	// re-scoped and use `store`'s pool for other tenants' beats (cleat#3571).
+	//
 	// Nil falls back to `store`, so a Worker built without one (tests, or
 	// --heartbeat-max-connections=0) behaves exactly as before.
 	heartbeatStore engine.WorkflowStore
@@ -1997,6 +2116,40 @@ type Worker struct {
 	// dispatch, heartbeat and scheduler loops, which are worker-level and stay
 	// on it.
 	storeTenantID string
+
+	// rlsBypassReasons is what main()'s startup check found: empty when this
+	// connection is subject to row-level security (or when that could not be
+	// determined), non-empty when every read on it sees every tenant's rows.
+	//
+	// It exists for the window the startup refusal cannot close. #3772 refuses
+	// to START on such a connection when the database holds more than one
+	// tenant, but a tenant can appear afterwards -- direct SQL, or
+	// `--create-tenant` on an owner DSN, which is the documented provisioning
+	// path -- and a worker already running would keep serving both until it
+	// restarted. The dispatch loop checks at the TOP of every tick, at the cost of
+	// one count query per tick paid only on a connection like this one
+	// (cleat#3773). rlsBypassRole is the role the startup check connected as,
+	// only for that message.
+	//
+	// Both are empty for a worker that never ran the check (non-PostgreSQL
+	// drivers, tests), which is what makes the guard inert there.
+	rlsBypassReasons []engine.RLSBypassReason
+	rlsBypassRole    string
+
+	// exitFunc ends the process when the runtime tenant-isolation failure is
+	// found. It is os.Exit in production; a test substitutes it so the decision
+	// is observable without killing the test binary (cleat#3773).
+	exitFunc func(int)
+
+	// countTenantsForIsolation answers "how many tenants does this database
+	// hold", counting SUSPENDED ones, exactly as the startup refusal does. main()
+	// binds it to engine.CountTenants over the connection the startup check used.
+	//
+	// It is called on every dispatch tick, but ONLY when rlsBypassReasons is
+	// non-empty -- that is, on a connection where serving two tenants is the
+	// failure D82 refuses at startup. A worker subject to the policies never
+	// calls it and pays nothing (cleat#3773).
+	countTenantsForIsolation func(context.Context) (int, error)
 
 	// storeFactory opens a store scoped to a particular tenant. Execution uses
 	// it; the loops above do not.
@@ -2317,6 +2470,32 @@ type Worker struct {
 	// it has had any chance to prove otherwise.
 	lastHeartbeatOK atomic.Int64
 
+	// groupHeartbeatOK is lastHeartbeatOK for every tenant other than the
+	// worker's own (cleat#3566): the UnixNano of the last beat that the
+	// tenant's own store answered, keyed by tenant id. A tenant's runs are
+	// presumed lost on THEIR group's silence (heartbeatPresumedLostFor), not on
+	// another tenant's, so one tenant's pool being down does not make the
+	// worker refuse new durable calls for every run it holds. A group never
+	// answered starts from the earliest claim among its runs (claimedAfter),
+	// and the entry is dropped when a tick sees none of its runs.
+	groupHeartbeatOK sync.Map // map[tenantID]int64
+
+	// heartbeatTickMu serialises heartbeatAndFenceInFlight. The heartbeat loop was its only caller and never overlapped itself; a held run's claim check (claimStillMine) is
+	// a second, so two ticks can now be asked for at once. They must not run together: a check has to be answered by a tick that STARTED after the check was asked (a tick
+	// that began before the wake cannot have seen a terminate that landed before it), and two ticks storing lastHeartbeatOK out of order would move it backwards.
+	heartbeatTickMu sync.Mutex
+
+	// claimedAfter is, per (workflow id, generation) in flight, an instant at or
+	// BEFORE the claim that produced it: the start of the dispatch iteration that
+	// made the claim call. A group's clock is seeded from the earliest of its
+	// runs' values, because the reaper reclaims at claim + reclaimAfter and a
+	// clock seeded any later (the first heartbeat tick, which is up to a
+	// heartbeat interval after the claim) would presume the run lost after the
+	// reaper may already have taken it -- the "longer window" that
+	// heartbeatPresumedLost's doc rules out. Keyed by generation so a same-worker
+	// re-claim's registration is never torn down by its predecessor's.
+	claimedAfter sync.Map // map[engine.GenerationKey]int64
+
 	// lastDBTrouble is the UnixNano of this worker's most recent database
 	// round trip -- on the heartbeat OR the reaper path -- that failed or
 	// did not return before dbCallDeadline. The reaper's own counterpart to
@@ -2335,6 +2514,18 @@ type Worker struct {
 	// worker's heartbeat would have to lapse before being called dead.
 	// cleat#2005.
 	lastDBTrouble atomic.Int64
+
+	// dbTroubleSeen is set the first time recordDBTrouble runs, and never
+	// cleared. lastDBTrouble is SEEDED to the start time (see its doc), so a
+	// reaper tick inside the first reclaimAfter() window is closed by the gate
+	// whether or not anything has gone wrong; this is what tells a start-up
+	// tick from one that follows a real failure. cleat#3792.
+	dbTroubleSeen atomic.Bool
+
+	// startedAt is when this worker was constructed; the zero value (test
+	// constructors) means "no start-up window", so the gate behaves as it always
+	// did. See startingUp.
+	startedAt time.Time
 
 	// lastDBContactOK is the UnixNano of this worker's most recent CONFIRMED
 	// successful, bounded database round trip -- heartbeat (busy, via
@@ -2397,8 +2588,16 @@ type Worker struct {
 	internalDefsRefreshed sync.Map
 
 	// Compaction settings.
-	Metrics                 *prometheus.Metrics
-	compactionThreshold     int
+	Metrics             *prometheus.Metrics
+	compactionThreshold int
+	// compactionSkips is the per-worker memory of runs whose sealed compaction
+	// state this worker could not open (cleat#3853). It is built on first use
+	// by compactionSkipSetFor, so every construction path has one.
+	compactionSkips     *compactionSkipSet
+	compactionSkipsOnce sync.Once
+	// nowFunc is the clock compactionSkips uses. Nil means time.Now; tests set
+	// it to advance the skip window without sleeping.
+	nowFunc                 func() time.Time
 	compactionInterval      time.Duration
 	retentionInterval       time.Duration
 	stallThreshold          time.Duration
@@ -2428,7 +2627,10 @@ type Worker struct {
 	versionGCMinVersions int
 	versionGCMaxAge      time.Duration
 
-	memoryController                 *MemoryController
+	memoryController *MemoryController
+	// resident holds a run through a wait that is due soon instead of suspending it (cleat#4162). It is built for every worker and is a no-op unless
+	// --resident-max-runs is above zero, so the drain and pressure paths below call it without asking whether it is on.
+	resident                         *engine.ResidentSet
 	maxRetries                       int
 	memorySampleRetention            int
 	retentionDays                    int
@@ -2552,6 +2754,51 @@ func (w *Worker) runWasStopped(wf *engine.WorkflowInstance) bool {
 	return w.shuttingDown() || w.runIsFenced(wf.ID, wf.Generation)
 }
 
+// loadCompactionStateOrRelease reads a run's compaction state, and reports false
+// when the run was released instead because the state could not be read.
+//
+// THE RUN MUST NOT BE REPLAYED WITHOUT IT, whatever the error. Compaction
+// deletes the events it summarises from event_history in the transaction that
+// writes the state (PostgresStore.CompactHistory), so after it the prefix of the
+// history exists only in that column, and replaying the tail alone diverges from
+// what the run already did. This used to log a warning and carry on with a nil
+// state for every error (cleat#3774); it is the same rule the history load above
+// follows, which is why the three branches mirror it:
+//
+//   - a connection error: the database is down, release and retry.
+//   - ErrPayloadDecryption: this worker's key ring cannot open the state and one
+//     that holds the right key can, so the run goes back to the queue for it.
+//   - a stopped worker or a fenced-out run: released, not failed (cleat#2942).
+//
+// Anything else (a state that does not unmarshal, a query that failed) is logged
+// at ERROR and the run is returned to the queue with a backoff. It is not failed
+// terminally: nothing here says the run is wrong, only that this attempt could
+// not read what it needs, and a retry is the only thing that can change that.
+func (w *Worker) loadCompactionStateOrRelease(store interface {
+	LoadCompactionState(ctx context.Context, workflowID string) (*engine.CompactionState, error)
+}, wf *engine.WorkflowInstance) (*engine.CompactionState, bool) {
+	cs, err := store.LoadCompactionState(w.ctx, wf.ID)
+	if err == nil {
+		return cs, true
+	}
+	if isConnectionError(err) {
+		w.logger.WarnContext(context.Background(), "DB down loading compaction state", "worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID)
+		w.releaseWorkflow(wf)
+		return nil, false
+	}
+	if errors.Is(err, engine.ErrPayloadDecryption) {
+		w.releaseForAnotherWorker(wf, fmt.Sprintf("compaction state load: %v", err), "compaction_state_decrypt")
+		return nil, false
+	}
+	if w.releaseIfStopped(wf, "compaction state load", err) {
+		return nil, false
+	}
+	w.logger.ErrorContext(context.Background(), "failed to load compaction state; not replaying without it, returning the run to the queue",
+		"worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID, "error", err)
+	w.returnToQueueAfterBackoff(wf)
+	return nil, false
+}
+
 // releaseIfStopped releases wf and reports whether it did, when this execution
 // was stopped rather than broken. Callers invoke it from an error path, before
 // recording any failure: a stopped execution's error describes the stopping,
@@ -2597,6 +2844,8 @@ const shutdownTailDuration = 2 * time.Second
 // call.
 func (w *Worker) gracefulShutdown(grace time.Duration, force <-chan struct{}) string {
 	w.draining.Store(true)
+	// A held run is in flight, so a drain that waited for it would wait for its wake. Send every one back and refuse any that follows (cleat#4162).
+	w.resident.Drain()
 	deadline := time.NewTimer(grace)
 	defer deadline.Stop()
 	tick := time.NewTicker(50 * time.Millisecond)
@@ -3051,6 +3300,8 @@ func (w *Worker) dispatchLoop() {
 				w.draining.Store(true)
 				w.logger.InfoContext(w.ctx, "shutdown signal received; draining in-flight workflows", "worker_id", w.id)
 			}
+			// Idempotent, and here as well as in gracefulShutdown because a cordon (POST /api/admin/drain) drains without it (cleat#2285).
+			w.resident.Drain()
 			inflight := 0
 			w.inflight.Range(func(_, _ any) bool { inflight++; return true })
 			if inflight == 0 {
@@ -3066,6 +3317,18 @@ func (w *Worker) dispatchLoop() {
 		}
 
 		w.healthTracker.recordRun("dispatch")
+
+		// cleat#3773. HERE, at the top of the tick, and not in a claim path:
+		// the claim loop is only reached when there is free capacity (so a
+		// worker saturated with long runs would never look), and
+		// --claim-across-tenants=false never enters claimRotating at all while
+		// still reading across tenants on a bypassing connection. The guard
+		// returns on its first line unless the startup check recorded a bypass
+		// reason, so a worker subject to the policies pays nothing.
+		if w.checkRuntimeTenantIsolation() {
+			return
+		}
+
 		// Memory-aware tick: read system memory, compute pressure, adjust concurrency.
 		w.memoryController.Tick(w.ctx)
 		state := w.memoryController.State()
@@ -3075,6 +3338,11 @@ func (w *Worker) dispatchLoop() {
 		w.Metrics.RecordConcurrencyLimit(w.ctx, int64(state.DynamicConcurrency))
 		w.Metrics.SetMemoryPressure(w.ctx, state.Pressure)
 		w.Metrics.SetScalingPressure(w.ctx, state.ScalingPressure)
+		// At the memory HARD limit a held run is the cheapest thing to give back: sending it back returns the stop the host would have returned anyway.
+		// Between the soft and hard limit nothing new is held (the set asks the controller) but what is held stays. A no-op when residency is off.
+		if state.Pressure >= 1.0 {
+			w.resident.EvictAll(engine.ResidentEvictedPressure)
+		}
 		for key, bytes := range w.memoryController.DefEstimates() {
 			w.Metrics.RecordWorkflowMemoryEstimate(w.ctx, key.tenantID, key.defName, bytes)
 		}
@@ -3287,6 +3555,7 @@ func (w *Worker) dispatchLoop() {
 			w.logger.InfoContext(w.ctx, "claimed workflow", "worker_id", w.id, "workflow_id", wf.ID, "def_name", wf.DefName, "def_version", wf.DefVersion)
 			w.Metrics.RecordDispatchLatency(w.ctx, time.Since(wf.CreatedAt), "")
 
+			w.claimedAfter.Store(engine.GenerationKey{WorkflowID: wf.ID, Generation: wf.Generation}, pollStart.UnixNano())
 			w.inflight.Store(wf.ID, wf)
 			w.wg.Add(1)
 			go w.executeWorkflow(wf)
@@ -3326,6 +3595,7 @@ type execRegistration struct {
 // generation (cleat#2942).
 func (w *Worker) deregisterExecution(wf *engine.WorkflowInstance, reg *execRegistration) {
 	w.inflight.CompareAndDelete(wf.ID, wf)
+	w.claimedAfter.Delete(engine.GenerationKey{WorkflowID: wf.ID, Generation: wf.Generation})
 	w.fencedRuns.CompareAndDelete(wf.ID, wf.Generation)
 	w.execCancel.CompareAndDelete(wf.ID, reg)
 }
@@ -3591,11 +3861,9 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 	}
 
 	// ---- Load compaction state if present ----
-	var compactionState *engine.CompactionState
-	compactionState, err = execStore.LoadCompactionState(w.ctx, wf.ID)
-	if err != nil {
-		w.logger.WarnContext(context.Background(), "failed to load compaction state", "worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID, "error", err)
-		compactionState = nil
+	compactionState, ok := w.loadCompactionStateOrRelease(execStore, wf)
+	if !ok {
+		return
 	}
 
 	// wasmtime is the only WASM backend cleat has (w.wasmtimeBackend is
@@ -3731,7 +3999,7 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 		// for why decision 1 has to be checked here rather than left to
 		// execCtx cancellation.
 		engine.WithCanStartNewWork(func() bool {
-			return !w.heartbeatPresumedLost() && !w.runIsFenced(wf.ID, wf.Generation)
+			return !w.heartbeatPresumedLostFor(wf.TenantID) && !w.runIsFenced(wf.ID, wf.Generation)
 		}),
 		// cleat#2020: w.ctx is cancelled on SIGINT/SIGTERM (main.go's signal
 		// handler) and on the watchdog's poison-pill exit (w.cancel() in
@@ -3844,6 +4112,24 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 	}
 	if compactionState != nil {
 		engineOpts = append(engineOpts, engine.WithCompactionState(compactionState))
+		// A state compacted before cleat#3837 has no PrevChecksum, so the chain
+		// can only be restarted from the first retained row's own stored
+		// checksum. Newer states carry the anchor and need no read.
+		if compactionState.PrevChecksum == "" && len(history) > 0 {
+			if r, ok := execStore.(engine.EventChecksumReader); ok {
+				sum, err := r.StoredEventChecksum(w.ctx, wf.ID, history[0].Step)
+				if err != nil {
+					if w.releaseIfStopped(wf, "compaction tail checksum", err) {
+						return
+					}
+					w.logger.ErrorContext(context.Background(), "failed to read the first retained event's checksum; returning the run to the queue",
+						"worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID, "error", err)
+					w.returnToQueueAfterBackoff(wf)
+					return
+				}
+				engineOpts = append(engineOpts, engine.WithCompactionTailChecksum(sum))
+			}
+		}
 		w.logger.InfoContext(context.Background(), "loaded compaction state", "worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID, "compacted_step", compactionState.CompactedStep)
 	}
 	// When replaying, validate version compatibility between the old
@@ -3950,6 +4236,14 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 	deferPhase := wf.PendingTerminalStatus != ""
 	if deferPhase {
 		engineOpts = append(engineOpts, engine.WithDeferPhase())
+		// A segment whose recorded outcome is a FAILURE is, for a component guest, the second phase of a run that was killed
+		// with its defers owed (markKilledRunForItsDefers), or of a child failed by a terminating parent. Both stop at the
+		// last stoppable event, which is what lets a body killed in a loop reach its defers (cleat#4079). The engine arms it
+		// for a component guest only; a core module's segment is unchanged. A terminate's or cancel's segment is not a
+		// failure and keeps stopping at its frontier.
+		if wf.PendingTerminalStatus == "failed" || wf.PendingTerminalStatus == "dead_lettered" {
+			engineOpts = append(engineOpts, engine.WithStopAtLastStoppable())
+		}
 	}
 	if f := w.workflowFetcherFor(caller); f != nil {
 		engineOpts = append(engineOpts, engine.WithFetcher(f))
@@ -3958,6 +4252,24 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 		// reads it, because a static reachability test passes with this block
 		// present and never run (cleat-review, cleat#3404).
 		w.logger.Debug("cleat_fetch is enabled for this execution", "workflow_id", wf.ID)
+	}
+	// Residency: only when it is on, so a worker that has not enabled it does not even read the guest's metadata for it. The handle carries what a wait
+	// is not told (which run, which language, how long its history is), and nil, which is what an off set hands out, changes nothing.
+	if w.resident.Enabled() {
+		engineOpts = append(engineOpts, engine.WithResidency(w.resident.ForRun(engine.ResidentRunInfo{
+			WorkflowID: wf.ID,
+			Language:   wasm.DetectLanguage(wasmBytes),
+			CodeKey:    engine.CodeID(wasmBytes),
+			EventCount: len(history),
+			// Without this nothing is held (engine.WithResidency): a held run has to be able to prove it still owns its claim before it goes back to the guest.
+			ClaimCheck: func(ctx context.Context) error { return w.claimStillMine(ctx, wf) },
+			// A held run never returns to the worker, and query state is written only when an execution returns, so what the guest set before its wait would be invisible to a
+			// client for the whole hold. This writes it at hold admission, fenced like the finalize it stands in for; a failure refuses the hold and the suspension writes it
+			// (cleat#4162, the AI agent platform scenario).
+			PublishState: func(ctx context.Context, state map[string]string) error {
+				return execStore.PublishQueryState(ctx, wf.ID, w.id, wf.Generation, state)
+			},
+		})))
 	}
 	eng := engine.NewEngine(nil, caller, engineOpts...)
 	eng.Metrics = w.Metrics
@@ -4015,6 +4327,21 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 		return
 	}
 	if err != nil {
+		// The engine could not read the limits this run must run under, so the
+		// guest never ran (cleat#3565). Nothing happened to the workflow: it is
+		// released with a backoff, not failed, and not finalized as a defer
+		// segment would be. Before the deferPhase branch for that reason -- an
+		// unrun cleanup is not a lost one.
+		if errors.Is(err, engine.ErrLimitsUnavailable) {
+			w.releaseForLimitsUnavailable(wf, err)
+			return
+		}
+		// A component the precompile child could not compile for want of memory: the guest never ran, so this is not the workflow's failure either. Released with the
+		// refusal's own retry-after, so it is not claimed again every few seconds and does not respawn a child that was just killed.
+		if errors.Is(err, engine.ErrComponentCompileRefused) {
+			w.releaseForComponentCompileRefused(wf, err)
+			return
+		}
 		if deferPhase {
 			// A defer segment that could not run is still a terminate that
 			// has to complete. The outcome was decided and recorded before
@@ -4042,6 +4369,12 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 			errorOp = ce.Op
 		}
 		errMsg := err.Error()
+		// A COMPONENT guest that was killed with defers still owed cannot run them in this process, so the run goes through
+		// a defer segment on a fresh instance instead of being failed here (cleat#4079). Nothing else changes for a run
+		// that owes no defers, a core module, or a guest that failed through its own entry point.
+		if w.markKilledRunForItsDefers(wf, eng, errMsg, errorCode, errorOp, history, resultHistory, queryState) {
+			return
+		}
 		// resultHistory, not history: the exhaustion that ended this workflow
 		// was recorded by the segment that just ran, so it is only in the
 		// post-execution history. Passing the pre-execution `history` here
@@ -4057,12 +4390,11 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 	// Collect new events (if any) so the same slice is available to all branches.
 	var newEvents []engine.EventRecord
 	if len(resultHistory) > len(history) {
+		// Persisted as the engine produced them. Redaction is applied where data
+		// leaves the system, not here (cleat#3581); the loop that used to redact
+		// Request and Response at this point was also not the protection it read
+		// as, because events are flushed before the segment ends (cleat#3584).
 		newEvents = resultHistory[len(history):]
-		// Redact sensitive fields in new events before persisting.
-		for i := range newEvents {
-			newEvents[i].Request = engine.Redact(newEvents[i].Request)
-			newEvents[i].Response = engine.Redact(newEvents[i].Response)
-		}
 	}
 
 	// A defer segment ends by applying the outcome its first phase recorded,
@@ -4078,8 +4410,21 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 	if suspended != nil && suspended.Reason == "continue_as_new" {
 		// ContinueAsNew: atomically append events, create a new run, and
 		// complete the current one — all in a single database transaction.
-		w.logger.InfoContext(context.Background(), "continue_as_new: starting new run", "worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID)
-		newRunID, err := execStore.ContinueAsNew(w.ctx, wf.ID, w.id, wf.Generation, wf.DefName, wf.DefVersion, json.RawMessage(suspended.NewInput), newEvents, result, queryState, wf.Priority)
+		nextVersion, refusal, vErr := continuationVersion(w.ctx, execStore, wf, suspended.NewVersion)
+		if vErr != nil {
+			// A failed READ says nothing about the version. Release the run so a claim replays the segment and
+			// asks again, rather than failing a workflow over a transient store error.
+			w.logger.ErrorContext(context.Background(), "continue_as_new: could not check the requested version; releasing the run", "worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID, "requested_version", suspended.NewVersion, "error", vErr)
+			w.returnToQueueAfterBackoff(wf)
+			return
+		}
+		if refusal != "" {
+			w.logger.ErrorContext(context.Background(), "continue_as_new refused: requested version unavailable", "worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID, "requested_version", suspended.NewVersion, "current_version", wf.DefVersion)
+			w.recordTerminalFailure(wf, workflowStartTime, refusal, engine.ErrPermanent.String(), "")
+			return
+		}
+		w.logger.InfoContext(context.Background(), "continue_as_new: starting new run", "worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID, "next_version", nextVersion)
+		newRunID, err := execStore.ContinueAsNew(w.ctx, wf.ID, w.id, wf.Generation, wf.DefName, nextVersion, json.RawMessage(suspended.NewInput), newEvents, result, queryState, wf.Priority)
 		if errors.Is(err, engine.ErrFenceLost) {
 			// Normal and expected under reaping: another worker now owns
 			// this workflow (this one was reaped as stale and reclaimed).
@@ -4247,6 +4592,40 @@ func (w *Worker) heartbeatBatchStore() engine.WorkflowStore {
 	return w.store
 }
 
+// heartbeatStoreForTenant is the store a run of another tenant is beaten
+// through (cleat#3571). With an isolated heartbeat pool it is that pool,
+// re-scoped to the tenant with WithTenant: a copy that shares the pool and
+// carries a different tenant id, so it costs no connection and
+// --heartbeat-max-connections still bounds everything the heartbeat holds. Before
+// this the other tenant's beat went through storeForTenant, which is the
+// EXECUTION pool, so the isolation covered the worker's own tenant's runs and
+// not the others'.
+//
+// Only the two stores that supply the tenant on every transaction are re-scoped.
+// PostgreSQL sets cleat.tenant_id per transaction (beginTxWithRLS) and SQL Server
+// asserts SESSION_CONTEXT per transaction (beginTxWithContext), so one pooled
+// connection can carry a different tenant's beat each call. MySQL's tenant is the
+// database the pool was opened on and a sharded store routes by tenant, so
+// neither can be re-scoped here, and neither is helped: they fall through to
+// storeForTenant, as does a worker with no isolated pool.
+//
+// What a re-scoped beat leaves behind on SQL Server was measured on the shipped
+// driver (2026-11-12): the session context it set is gone when the pooled
+// connection is next used, and is visible on that connection until then. Nothing
+// here depends on that, because HeartbeatBatchFenced asserts its tenant at the
+// start of every transaction, but a plain statement run on this pool would depend
+// on it, so heartbeatBatchStore is held to being the only reader of heartbeatStore
+// (TestTheHeartbeatPoolIsUsedOnlyThroughHeartbeatBatchStore).
+func (w *Worker) heartbeatStoreForTenant(tenantID string) (engine.WorkflowStore, func(), error) {
+	switch s := w.heartbeatStore.(type) {
+	case *engine.PostgresStore:
+		return s.WithTenant(tenantID), func() {}, nil
+	case *engine.MSSQLStore:
+		return s.WithTenant(tenantID), func() {}, nil
+	}
+	return w.storeForTenant(tenantID)
+}
+
 // heartbeatAndFenceInFlight heartbeats every run this worker's OWN goroutines
 // are currently executing, fenced individually per (run, generation) rather
 // than in the single unfenced statement BatchHeartbeat used to issue.
@@ -4268,13 +4647,31 @@ func (w *Worker) heartbeatBatchStore() engine.WorkflowStore {
 // that matters for how soon this worker's own reaper (and every other
 // worker's) trusts it again after a stall.
 func (w *Worker) heartbeatAndFenceInFlight() bool {
+	w.heartbeatTickMu.Lock()
+	defer w.heartbeatTickMu.Unlock()
+	tickStart := time.Now()
 	var runs []engine.GenerationKey
+	byTenant := map[string][]engine.GenerationKey{}
+	// groupSince is the earliest claimedAfter among a group's runs, or tickStart
+	// for a run registered without one: the instant a group's clock starts from
+	// if it has never been answered.
+	groupSince := map[string]int64{}
 	w.inflight.Range(func(key, value any) bool {
 		wf, ok := value.(*engine.WorkflowInstance)
 		if !ok {
 			return true
 		}
-		runs = append(runs, engine.GenerationKey{WorkflowID: wf.ID, Generation: wf.Generation})
+		gk := engine.GenerationKey{WorkflowID: wf.ID, Generation: wf.Generation}
+		runs = append(runs, gk)
+		group := w.heartbeatGroupFor(wf.TenantID)
+		byTenant[group] = append(byTenant[group], gk)
+		since := tickStart.UnixNano()
+		if v, ok := w.claimedAfter.Load(gk); ok && v.(int64) < since {
+			since = v.(int64)
+		}
+		if cur, ok := groupSince[group]; !ok || since < cur {
+			groupSince[group] = since
+		}
 		return true
 	})
 	if len(runs) == 0 {
@@ -4293,53 +4690,142 @@ func (w *Worker) heartbeatAndFenceInFlight() bool {
 		// idle must not let its reaper act on staleness while idle either --
 		// failing closed, not open. It still reaps normally once it has
 		// in-flight work of its own, via the busy path below.
-		if pinger, ok := w.store.(engine.DBPinger); ok {
-			if err := w.probeBoundedCall(pinger.PingDB); err != nil {
-				w.recordDBTrouble()
-				w.Metrics.RecordBackgroundLoop(w.ctx, "heartbeat", "error")
-				if isConnectionError(err) {
-					w.logger.WarnContext(w.ctx, "idle heartbeat ping failed: DB appears down", "worker_id", w.id)
-				} else {
-					w.logger.ErrorContext(w.ctx, "idle heartbeat ping error", "worker_id", w.id, "error", err)
-				}
-				return false
-			}
-			w.recordDBContactOK()
+		if !w.pingOwnStore() {
+			w.Metrics.RecordBackgroundLoop(w.ctx, "heartbeat", "error")
+			return false
 		}
 		w.lastHeartbeatOK.Store(time.Now().UnixNano())
 		w.Metrics.RecordBackgroundLoop(w.ctx, "heartbeat", "ok")
 		return true
 	}
 
+	// ONE CALL PER TENANT, each through that tenant's own store (cleat#3566).
+	//
+	// HeartbeatBatchFenced reads workflow_leases, which is FORCE ROW LEVEL
+	// SECURITY on PostgreSQL and a security policy on SQL Server, and the tenant
+	// it sees is a property of the store instance, not of the call. This used to
+	// send every in-flight run, of every tenant, through the worker's own store,
+	// so a run of any OTHER tenant was invisible to it: reported lost at its
+	// first beat, its heartbeat_at never renewed, its next durable call refused
+	// by the fence, and the run released and re-claimed instead of finishing. A
+	// run of the worker's own tenant was unaffected, which is why a suite that
+	// runs the default tenant, or a role that bypasses the policy, never saw it.
+	//
+	// The worker's own tenant uses heartbeatBatchStore(), cleat#2009's isolated
+	// heartbeat pool. Every other tenant uses the same pool re-scoped to that
+	// tenant (heartbeatStoreForTenant), so a burst of execution traffic cannot
+	// queue ANY tenant's beat; where there is no such pool, or the dialect cannot
+	// re-scope one, it falls back to storeForTenant, as executeWorkflow does for
+	// the same run (cleat#3571).
+	//
+	// A group that cannot be asked says nothing about its own runs, exactly as a
+	// failed call said nothing before: it is logged, recorded as trouble, and its
+	// runs are not fenced. The other groups' verdicts are still real and are
+	// applied, so one tenant's pool being down does not stop the fence for the
+	// rest. The call counts as landed only if every group was answered.
+	//
 	// Bounded so a stalled connection is recorded as trouble instead of
 	// silently outliving the stall -- see dbCallDeadline's doc. A database
 	// that merely delays rather than refuses (cleat#2005's docker-pause
 	// reproduction) never returns a connection error at all; only a
 	// deadline catches that shape.
 	var lost []string
-	err := w.probeBoundedCall(func(hbCtx context.Context) error {
-		var err error
-		lost, err = w.heartbeatBatchStore().HeartbeatBatchFenced(hbCtx, w.id, runs)
-		return err
-	})
-	if err != nil {
-		w.recordDBTrouble()
-		w.Metrics.RecordBackgroundLoop(w.ctx, "heartbeat", "error")
-		if isConnectionError(err) {
-			w.logger.WarnContext(w.ctx, "HeartbeatBatchFenced failed: DB appears down", "worker_id", w.id)
-		} else {
-			w.logger.ErrorContext(w.ctx, "HeartbeatBatchFenced error", "worker_id", w.id, "error", err)
+	allAnswered := true
+	// answeredAt is the instant each answered group's call BEGAN. A clock is
+	// stamped with that and not with the time the loop finished: the store
+	// vouched for the lease as of the call, and stamping later would credit it
+	// with up to one dbCallDeadline per group still ahead of it in the loop.
+	answeredAt := map[string]int64{}
+	for _, group := range heartbeatGroupOrder(byTenant) {
+		groupRuns := byTenant[group]
+		callStart := time.Now().UnixNano()
+		hbStore, release := w.heartbeatBatchStore(), func() {}
+		if group != "" {
+			var openErr error
+			hbStore, release, openErr = w.heartbeatStoreForTenant(group)
+			if openErr != nil {
+				// Not recordDBTrouble: this is one tenant's pool, and what
+				// lastDBTrouble guards is whether THIS worker can trust a
+				// staleness reading from its own store. The worker's own group
+				// (or the idle ping) says that.
+				allAnswered = false
+				w.logger.ErrorContext(w.ctx, "heartbeat: no store for a tenant's in-flight runs; they are not fenced this tick",
+					"worker_id", w.id, "tenant_id", group, "runs", len(groupRuns), "error", openErr)
+				continue
+			}
 		}
-		// A failed heartbeat tells us nothing about which runs are lost --
-		// only that we could not ask. Cancelling on an error here would
-		// stop every in-flight execution on a single transient DB blip.
-		// cleat#2008 decision 2 (stand down after sustained failure) is the
-		// deliberately separate, slower response to this case.
-		return false
+		var groupLost []string
+		err := w.probeBoundedCall(func(hbCtx context.Context) error {
+			var err error
+			groupLost, err = hbStore.HeartbeatBatchFenced(hbCtx, w.id, groupRuns)
+			return err
+		})
+		release()
+		if err != nil {
+			allAnswered = false
+			if group == "" {
+				w.recordDBTrouble()
+			}
+			if isConnectionError(err) {
+				w.logger.WarnContext(w.ctx, "HeartbeatBatchFenced failed: DB appears down", "worker_id", w.id, "tenant_id", group)
+			} else {
+				w.logger.ErrorContext(w.ctx, "HeartbeatBatchFenced error", "worker_id", w.id, "tenant_id", group, "error", err)
+			}
+			// A failed heartbeat tells us nothing about which runs are lost --
+			// only that we could not ask. Cancelling on an error here would
+			// stop every in-flight execution on a single transient DB blip.
+			// cleat#2008 decision 2 (stand down after sustained failure) is the
+			// deliberately separate, slower response to this case.
+			continue
+		}
+		lost = append(lost, groupLost...)
+		answeredAt[group] = callStart
 	}
-	w.recordDBContactOK()
-	w.lastHeartbeatOK.Store(time.Now().UnixNano())
-	w.Metrics.RecordBackgroundLoop(w.ctx, "heartbeat", "ok")
+
+	// What each answer is evidence of. The worker-wide readings
+	// (lastHeartbeatOK, lastDBContactOK) say whether THIS worker's own store can
+	// be reached, so they move on the own group's answer -- or, when none of the
+	// in-flight runs is the worker's own, on the idle ping the loop makes with
+	// nothing to beat. A tenant's answer moves only that tenant's reading.
+	// Letting any group's failure hold the worker-wide reading back made one
+	// tenant's unopenable store refuse new durable calls for every run, including
+	// runs whose own beat had landed (cleat#3566 review).
+	if _, hasOwn := byTenant[""]; hasOwn {
+		if at, ok := answeredAt[""]; ok {
+			w.recordDBContactOK()
+			w.lastHeartbeatOK.Store(at)
+		}
+	} else {
+		pingStart := time.Now().UnixNano()
+		if w.pingOwnStore() {
+			w.lastHeartbeatOK.Store(pingStart)
+		}
+	}
+	for group := range byTenant {
+		if group == "" {
+			continue
+		}
+		if at, ok := answeredAt[group]; ok {
+			w.groupHeartbeatOK.Store(group, at)
+		} else {
+			// A group never answered starts its clock at the earliest claim among
+			// its runs, so a tenant whose very first beat fails is presumed lost
+			// at claim + reclaimAfter, when the reaper may take it, and not at
+			// first tick + reclaimAfter.
+			w.groupHeartbeatOK.LoadOrStore(group, groupSince[group])
+		}
+	}
+	w.groupHeartbeatOK.Range(func(k, _ any) bool {
+		if _, present := byTenant[k.(string)]; !present {
+			w.groupHeartbeatOK.Delete(k)
+		}
+		return true
+	})
+	if allAnswered {
+		w.Metrics.RecordBackgroundLoop(w.ctx, "heartbeat", "ok")
+	} else {
+		w.Metrics.RecordBackgroundLoop(w.ctx, "heartbeat", "error")
+	}
 
 	// cleat#2942: the generations as SENT, kept so the fence's WARN below can
 	// print the generation the store judged against beside the one it reads
@@ -4403,7 +4889,99 @@ func (w *Worker) heartbeatAndFenceInFlight() bool {
 		w.fencedRuns.Store(id, sentGen)
 		reg.cancel()
 	}
-	return true
+	return allAnswered
+}
+
+// errClaimLost is what a held run's claim check returns when the store no longer has the run assigned to this execution.
+var errClaimLost = errors.New("the run is no longer assigned to this execution")
+
+// errClaimUnknown is what it returns when the question could not be answered: the heartbeat did not land for every group, or this worker has no way to ask.
+var errClaimUnknown = errors.New("the store could not confirm that the run is still assigned to this execution")
+
+// claimStillMine is the engine's ClaimCheck for a held run (cleat#4162, PR 2c): asked every time the hold ends and before control goes back to the guest, it answers whether the
+// store still has THIS execution assigned to this worker.
+//
+// IT RUNS THE HEARTBEAT, and does not ask the store itself, for two reasons that are the same reason. "Lost" then means exactly what it means to the heartbeat and does exactly
+// what the heartbeat does (the run is marked fenced, so its next durable call is refused, and its execution is cancelled), because it is the heartbeat. And the heartbeat pool
+// is used from one place only (TestTheHeartbeatPoolIsUsedOnlyThroughHeartbeatBatchStore, cleat#3571): a second caller of its accessors is a second user of a pool whose
+// connections carry another tenant's session context on SQL Server, which that guard exists to refuse.
+//
+// WHY IT IS NOT LEFT TO THE HEARTBEAT'S TICKER. A terminate, a cancel or a reclaim bumps the lease's generation and clears assigned_to, and the ticker reports the run lost at
+// its next tick, up to --heartbeat later. A SUSPENDED run cannot act in that interval: there is no claim for it to win. A held one can, if its timer fires first, and measured on a
+// real worker (a_terminated_held_run_does_not_act_test.go) it did, reaching the outbound call after the terminate had committed.
+//
+// WHAT IT RETURNS. nil: the tick landed for every group and did not fence this run. errClaimLost: the run is fenced (by this tick or an earlier one). errClaimUnknown: the tick did
+// not land for every group, which includes a tenant's store this worker could not open and a different tenant's unreachable pool, so it can over-report unknown and never
+// under-report it. Unknown suspends WITHOUT the run being marked fenced: the heartbeat does not cancel on an error, because one blip would stop every execution, and here the one
+// thing at stake is a run that will be replayed if the suspension stands, so the safe reading and the cheap one agree. A run that was in fact fine costs one replay.
+func (w *Worker) claimStillMine(ctx context.Context, wf *engine.WorkflowInstance) error {
+	fenced := func() bool {
+		v, ok := w.fencedRuns.Load(wf.ID)
+		return ok && v.(int64) == wf.Generation
+	}
+	// THE CHECK ANSWERS FOR THIS EXECUTION, NOT FOR ITS RUN ID. The tick sends and fences whatever w.inflight holds for an ID, and claiming stores by ID alone, so a
+	// successor this SAME worker claimed (a store hand-off it won back before its next tick) replaces the held execution there: the tick then heartbeats the
+	// successor, never fences this one, and a check that read only the fence marker would call it still mine, so its outbound call could go out beside the
+	// successor's. The store's generation fence hides that for writes, not for a call. Absent or another generation means it is no longer the registered
+	// execution, which is lost. (cleat-review3 on #4276: held at generation 3, a successor registered at 4, the check answered nil.) Read again after the tick,
+	// because a claim can land while the tick is in flight.
+	superseded := func() bool {
+		v, ok := w.inflight.Load(wf.ID)
+		cur, isWf := v.(*engine.WorkflowInstance)
+		return !ok || !isWf || cur.Generation != wf.Generation
+	}
+	lostBecause := func() string {
+		switch {
+		case fenced():
+			return "terminated, cancelled or reclaimed while held"
+		case superseded():
+			return "replaced by a newer execution of the same run on this worker"
+		}
+		return ""
+	}
+	sendBack := func(why string) error {
+		w.logger.WarnContext(ctx, "a held run no longer holds its claim at its wake ("+why+"); it is suspended instead of resumed",
+			"worker_id", w.id, "workflow_id", wf.ID, "def_name", wf.DefName, "generation", wf.Generation)
+		return errClaimLost
+	}
+	if why := lostBecause(); why != "" {
+		return sendBack(why) // the ticker already learned of it, or a successor replaced this execution
+	}
+	landed := w.heartbeatAndFenceInFlight()
+	if why := lostBecause(); why != "" {
+		return sendBack(why)
+	}
+	if !landed {
+		w.logger.WarnContext(ctx, "a held run could not revalidate its claim; it is suspended instead of resumed",
+			"worker_id", w.id, "workflow_id", wf.ID, "def_name", wf.DefName)
+		return errClaimUnknown
+	}
+	return nil
+}
+
+// heartbeatGroupFor names the group a run's heartbeat belongs to: "" for the
+// worker's own tenant, which heartbeatBatchStore serves, and the tenant id for
+// every other, which heartbeatStoreForTenant serves. It tracks storeForTenant's own first
+// condition (a second copy of that rule is how the two come apart), because the
+// group is only right if the store it selects is the store that run's lease row
+// is visible through. cleat#3566.
+func (w *Worker) heartbeatGroupFor(tenantID string) string {
+	if w.storeFactory == nil || tenantID == "" || tenantID == w.storeTenantID {
+		return ""
+	}
+	return tenantID
+}
+
+// heartbeatGroupOrder is the groups of byTenant in a fixed order, the worker's
+// own first: the order is not load-bearing, but a map's is random and a log or a
+// test that depends on which tenant was asked first should not be flaky.
+func heartbeatGroupOrder(byTenant map[string][]engine.GenerationKey) []string {
+	groups := make([]string, 0, len(byTenant))
+	for g := range byTenant {
+		groups = append(groups, g)
+	}
+	sort.Strings(groups)
+	return groups
 }
 
 // reclaimAfter is how long a run may go without a heartbeat before another
@@ -4454,6 +5032,47 @@ func (w *Worker) heartbeatPresumedLost() bool {
 	return time.Since(last) > w.reclaimAfter()
 }
 
+// heartbeatPresumedLostFor is heartbeatPresumedLost for one tenant's runs
+// (cleat#3566). The worker's own tenant is the worker-wide reading. Any other
+// tenant is its own group's: a tenant whose store has not answered a beat for
+// reclaimAfter() is one whose runs another worker may now take, and nobody
+// else's silence says anything about it. A tenant not yet seen by a tick has no
+// reading of its own, so it takes the worker-wide one, whose seed is "now".
+func (w *Worker) heartbeatPresumedLostFor(tenantID string) bool {
+	group := w.heartbeatGroupFor(tenantID)
+	if group == "" {
+		return w.heartbeatPresumedLost()
+	}
+	if v, ok := w.groupHeartbeatOK.Load(group); ok {
+		return time.Since(time.Unix(0, v.(int64))) > w.reclaimAfter()
+	}
+	return w.heartbeatPresumedLost()
+}
+
+// pingOwnStore asks the worker's own store whether it can be reached, as the
+// heartbeat does when it has nothing of the worker's own tenant to beat. It
+// records the outcome as DB trouble or confirmed contact. A store that does not
+// implement DBPinger (every test double today) is deliberately NOT treated as
+// clean, and reports true, as the idle path always has: recordDBContactOK is
+// called only after a REAL successful probe.
+func (w *Worker) pingOwnStore() bool {
+	pinger, ok := w.store.(engine.DBPinger)
+	if !ok {
+		return true
+	}
+	if err := w.probeBoundedCall(pinger.PingDB); err != nil {
+		w.recordDBTrouble()
+		if isConnectionError(err) {
+			w.logger.WarnContext(w.ctx, "idle heartbeat ping failed: DB appears down", "worker_id", w.id)
+		} else {
+			w.logger.ErrorContext(w.ctx, "idle heartbeat ping error", "worker_id", w.id, "error", err)
+		}
+		return false
+	}
+	w.recordDBContactOK()
+	return true
+}
+
 // runIsFenced reports whether THIS generation of this run has had its own fenced
 // heartbeat report it lost -- decision 1, scoped to one run rather than every run
 // this worker holds. See fencedRuns' doc comment for why this, and not execCtx
@@ -4487,7 +5106,21 @@ func (w *Worker) runIsFenced(workflowID string, generation int64) bool {
 // writes at once, itself included. See lastDBTrouble and reapingIsSafe.
 // cleat#2005.
 func (w *Worker) recordDBTrouble() {
+	w.dbTroubleSeen.Store(true)
 	w.lastDBTrouble.Store(time.Now().UnixNano())
+}
+
+// startingUp reports whether a closed reaper gate is only the start-up grace
+// period: no database trouble has been recorded, and the worker is younger than
+// twice its reclaim window. The bound is what keeps this from hiding a gate
+// that never opens for a reason other than trouble (lastDBContactOK never
+// confirmed, GAP3 in recordReapSkip's doc): past the window the tick is counted
+// and warned about exactly as before. cleat#3792.
+func (w *Worker) startingUp() bool {
+	if w.startedAt.IsZero() || w.dbTroubleSeen.Load() {
+		return false
+	}
+	return time.Since(w.startedAt) < 2*w.reclaimAfter()
 }
 
 // recordDBContactOK marks this worker's own database contact as having just
@@ -5176,34 +5809,59 @@ func (e *stallSuppressionEpisode) evaluate(shape engine.StaleSetShape, reclaimAf
 // one shard of a MultiShard one.
 type reapUnit struct {
 	// name is the shard name for a MultiShard store, "" for a plain one.
-	name  string
-	store engine.WorkflowStore
+	name string
+	// tenant is "" for the worker's own tenant and the tenant's id for another
+	// tenant's store (cleat#3570).
+	tenant string
+	store  engine.WorkflowStore
 }
 
-// logLabel is what reapOnce logs and tags the suspected-stall metric with.
-func (u reapUnit) logLabel() string {
+// shardLabel is the shard alone, "default" for a plain store. It is what the
+// suspected-stall metric is tagged with, and deliberately carries no tenant: a
+// tenant id is an unbounded label.
+func (u reapUnit) shardLabel() string {
 	if u.name == "" {
 		return "default"
 	}
 	return u.name
 }
 
-// reapUnits enumerates what reapOnce processes this tick. A MultiShard
-// store (ShardedStore) yields one unit per shard, so cleat#2006's
-// suspected-stall suppression -- and any per-call failure -- is decided
-// independently per shard: one stalled shard must not pause reclaiming on
-// a healthy sibling, and a healthy majority must not mask a genuinely
-// stalled minority. A plain store yields exactly one unit.
-func (w *Worker) reapUnits() []reapUnit {
-	ms, ok := w.store.(engine.MultiShard)
+// logLabel is what reapOnce logs: the shard, with the tenant in front when it is
+// not the worker's own.
+func (u reapUnit) logLabel() string {
+	if u.tenant == "" {
+		return u.shardLabel()
+	}
+	return u.tenant + "/" + u.shardLabel()
+}
+
+// episodeKey names the unit's cleat#2006 suppression episode. The worker's own
+// units keep the bare shard name they have always had.
+func (u reapUnit) episodeKey() string {
+	if u.tenant == "" {
+		return u.name
+	}
+	return u.tenant + "/" + u.name
+}
+
+// reapUnitsOf enumerates what reapOnce processes this tick for one store: the
+// worker's own (tenant "") or one tenant's. A MultiShard store (ShardedStore)
+// yields one unit per shard, so cleat#2006's suspected-stall suppression -- and
+// any per-call failure -- is decided independently per shard: one stalled shard
+// must not pause reclaiming on a healthy sibling, and a healthy majority must
+// not mask a genuinely stalled minority. A plain store yields exactly one unit.
+// A tenant's store from the sharded factory is a ShardedStore scoped to that
+// tenant, so it yields one unit per shard like the worker's own.
+func (w *Worker) reapUnitsOf(store engine.WorkflowStore, tenant string) []reapUnit {
+	ms, ok := store.(engine.MultiShard)
 	if !ok {
-		return []reapUnit{{store: w.store}}
+		return []reapUnit{{tenant: tenant, store: store}}
 	}
 	names := ms.ShardNames()
 	units := make([]reapUnit, 0, len(names))
 	for _, name := range names {
-		if store, ok := ms.ShardStore(name); ok {
-			units = append(units, reapUnit{name: name, store: store})
+		if shard, ok := ms.ShardStore(name); ok {
+			units = append(units, reapUnit{name: name, tenant: tenant, store: shard})
 		}
 	}
 	return units
@@ -5635,44 +6293,23 @@ func (w *Worker) reapUnitOnce(unit reapUnit, staleTimeout time.Duration) (int, e
 	return n, err
 }
 
-// reapOnce is one reaper tick, extracted from reaperLoop so a test can drive
-// it directly without a ticker. cleat#2005.
-func (w *Worker) reapOnce() {
-	reaperStart := time.Now()
-
-	// THE GRACE PERIOD. A stale heartbeat_at only proves a run's holder is
-	// dead if THIS worker could have seen a fresh one arrive -- see
-	// reapingIsSafe's doc. Skipping here, before ever calling
-	// ReapStaleInstances, is what cleat#2005's reproduction had nothing
-	// doing: the reaper reclaimed its own worker's live run 56ms after a
-	// database stall ended, because nothing distinguished "the holder died"
-	// from "my own observation of every worker just went dark, briefly,
-	// including of myself".
-	if !w.reapingIsSafe() {
-		skips := w.recordReapSkip()
-		w.logger.WarnContext(w.ctx, "Reaper: skipping this tick -- recent database trouble on this worker, waiting out the recovery grace period before trusting a stale heartbeat",
-			"worker_id", w.id, "reclaim_after", w.reclaimAfter(), "consecutive_skips", skips)
-		w.Metrics.RecordBackgroundLoop(w.ctx, "reaper", "skipped")
-		w.Metrics.SetBackgroundLoopDuration(w.ctx, "reaper", time.Since(reaperStart).Seconds())
-		return
-	}
-
-	// Bounded for the same reason heartbeatAndFenceInFlight's call is: a
-	// call already in flight from before a stall began would otherwise
-	// return SUCCESS the moment the database responds, with the stale
-	// predicate satisfied by the stall's own duration -- see
-	// dbCallDeadlineFor's doc. The gate above cannot protect against a call
-	// that passed it before the stall was detectable; this can.
-	staleTimeout := w.reclaimAfter()
-	missedBeat := missedBeatThreshold(w.heartbeatInterval)
-
-	// One unit per shard for a MultiShard store, or one plain unit -- see
-	// reapUnits' doc. Processed independently: cleat#2006's suspected-stall
-	// suppression, and any failure, on one unit must not affect a healthy
-	// sibling's reclaim this tick.
-	var reaped int
+// reapStore is one reap pass over one tenant's store: one unit per shard for a
+// MultiShard store, or one plain unit -- see reapUnitsOf's doc. tenant is "" for the
+// worker's own store and the tenant's id for another tenant's (cleat#3570).
+//
+// Units are processed independently: cleat#2006's suspected-stall suppression,
+// and any failure, on one unit must not affect a healthy sibling's reclaim this
+// tick. It returns how many runs it reclaimed, whether ANY unit was suppressed
+// this tick (suspected stall, its sticky continuation, or a probe that failed
+// closed), and the last unit failure. It decides nothing about what a failure
+// means for the worker: that is the caller's, because a failure on the worker's
+// own store is evidence about the worker's database contact and a failure on
+// one tenant's store is not.
+func (w *Worker) reapStore(store engine.WorkflowStore, tenant string, staleTimeout, missedBeat time.Duration) (int, bool, error) {
 	var lastErr error
-	for _, unit := range w.reapUnits() {
+	var reaped int
+	var anySuppressed bool
+	for _, unit := range w.reapUnitsOf(store, tenant) {
 		suppressed := false
 		if detector, ok := unit.store.(engine.DBStallDetector); ok {
 			var shape engine.StaleSetShape
@@ -5699,7 +6336,7 @@ func (w *Worker) reapOnce() {
 					"worker_id", w.id, "shard", unit.logLabel(), "error", shapeErr)
 				suppressed = true
 			} else {
-				episode := w.stallEpisodeFor(unit.name)
+				episode := w.stallEpisodeFor(unit.episodeKey())
 				decision := episode.evaluate(shape, staleTimeout, time.Now())
 				if decision.BoundHit {
 					w.logger.WarnContext(w.ctx, "Reaper: suspected-database-stall suppression bound reached -- reclaiming despite a stall-shaped stale set; this may be a genuine mass worker failure rather than a database stall",
@@ -5711,12 +6348,13 @@ func (w *Worker) reapOnce() {
 					w.logger.WarnContext(w.ctx, "Reaper: stale set looks like a suspected database stall, not dead workers -- deferring reclaim by one tick",
 						"worker_id", w.id, "shard", unit.logLabel(), "running", shape.Running, "missed_beat", shape.MissedBeat,
 						"missed_beat_distinct_assigned_to", shape.MissedBeatDistinctAssignedTo)
-					w.Metrics.RecordSuspectedDBStall(w.ctx, attribute.String("shard", unit.logLabel()))
+					w.Metrics.RecordSuspectedDBStall(w.ctx, attribute.String("shard", unit.shardLabel()))
 					suppressed = true
 				}
 			}
 		}
 		if suppressed {
+			anySuppressed = true
 			continue
 		}
 		n, err := w.reapUnitOnce(unit, staleTimeout)
@@ -5725,6 +6363,115 @@ func (w *Worker) reapOnce() {
 			lastErr = err
 		}
 	}
+	return reaped, anySuppressed, lastErr
+}
+
+// reapOtherTenants is the reaper's pass over every tenant other than the
+// worker's own, through that tenant's own store (cleat#3570).
+//
+// ReapStaleInstances carries no tenant predicate; what it can see is whatever
+// the row-level-security policy (PostgreSQL) or security policy (SQL Server)
+// admits for the store's tenant. The reaper used to run through w.store only, so
+// a crashed worker's run of any OTHER tenant was invisible to every survivor:
+// measured with two workers as cleat_app, the run stayed `running` on the dead
+// worker with a frozen heartbeat_at for as long as it was watched, while a run of
+// the survivor's own tenant was reclaimed within the window. The claim,
+// the schedule loop and, since cleat#3566, the heartbeat already visit each
+// tenant; the reaper is the one that carries the consequence of not doing so.
+//
+// A role that sees every tenant's rows was considered and rejected: it is a
+// standing privilege to defend, and the per-tenant enumeration already exists.
+//
+// A tenant's failure is that tenant's, and is not the worker's database trouble:
+// it is logged and counted, it does not call recordDBTrouble or recordReapSkip
+// (which keep THIS worker's reaper in grace), and the other tenants are still
+// reaped. A worker's own store failing is what says the database is in trouble,
+// and that is decided before this runs.
+//
+// Returns how many runs it reclaimed. It does nothing for a worker that cannot
+// serve other tenants (no factory, a store that cannot list them, or
+// --claim-across-tenants off): its own tenant was all it ever reaped.
+func (w *Worker) reapOtherTenants(staleTimeout, missedBeat time.Duration) int {
+	if !w.claimAcrossTenants {
+		return 0
+	}
+	var reaped, failedTenants int
+	var firstErr error
+	sweep, err := w.forEachOtherTenantStore(func(tenantID string, st engine.WorkflowStore) {
+		n, _, rerr := w.reapStore(st, tenantID, staleTimeout, missedBeat)
+		reaped += n
+		if w.maxReclaimPerTick > 0 && n >= w.maxReclaimPerTick {
+			w.logger.WarnContext(w.ctx, "Reaper: hit the per-tick reclaim limit for a tenant; more of its instances remain stale",
+				"worker_id", w.id, "tenant_id", tenantID, "count", n, "limit", w.maxReclaimPerTick)
+		}
+		if rerr != nil {
+			failedTenants++
+			if firstErr == nil {
+				firstErr = fmt.Errorf("tenant %s: %w", tenantID, rerr)
+			}
+		}
+	})
+	if err != nil {
+		if !errors.Is(err, errRotatingClaimUnavailable) {
+			w.logger.ErrorContext(w.ctx, "Reaper: could not list tenants; other tenants' stale runs were not reaped this tick",
+				"worker_id", w.id, "error", err)
+		}
+		return 0
+	}
+	if sweep.OpenFailed > 0 || failedTenants > 0 {
+		w.logger.WarnContext(w.ctx, "Reaper: some tenants could not be reaped this tick; their stale runs wait for the next",
+			"worker_id", w.id, "tenants", sweep.Visited, "open_failed", sweep.OpenFailed, "reap_failed", failedTenants,
+			"first_open_error", sweep.FirstErr, "first_reap_error", firstErr)
+	}
+	return reaped
+}
+
+// reapOnce is one reaper tick, extracted from reaperLoop so a test can drive
+// it directly without a ticker. cleat#2005.
+func (w *Worker) reapOnce() {
+	reaperStart := time.Now()
+
+	// THE GRACE PERIOD. A stale heartbeat_at only proves a run's holder is
+	// dead if THIS worker could have seen a fresh one arrive -- see
+	// reapingIsSafe's doc. Skipping here, before ever calling
+	// ReapStaleInstances, is what cleat#2005's reproduction had nothing
+	// doing: the reaper reclaimed its own worker's live run 56ms after a
+	// database stall ended, because nothing distinguished "the holder died"
+	// from "my own observation of every worker just went dark, briefly,
+	// including of myself".
+	if !w.reapingIsSafe() {
+		if w.startingUp() {
+			// Nothing has gone wrong: a new worker has not yet proven a clean
+			// reclaim window, so it does not reclaim anyone's run. That is the
+			// gate working, and it used to say "recent database trouble" and
+			// then warn that the worker "has not reclaimed a stale run in a
+			// while" on a healthy first start (cleat#3792). Not counted as a
+			// skip: the streak alarm is for a gate that stays closed.
+			w.logger.InfoContext(w.ctx, "Reaper: a new worker waits out its start-up grace period before reclaiming stale runs; nothing is wrong",
+				"worker_id", w.id, "reclaim_after", w.reclaimAfter())
+			w.Metrics.RecordBackgroundLoop(w.ctx, "reaper", "skipped")
+			w.Metrics.SetBackgroundLoopDuration(w.ctx, "reaper", time.Since(reaperStart).Seconds())
+			return
+		}
+		skips := w.recordReapSkip()
+		w.logger.WarnContext(w.ctx, "Reaper: skipping this tick -- recent database trouble on this worker, waiting out the recovery grace period before trusting a stale heartbeat",
+			"worker_id", w.id, "reclaim_after", w.reclaimAfter(), "consecutive_skips", skips)
+		w.Metrics.RecordBackgroundLoop(w.ctx, "reaper", "skipped")
+		w.Metrics.SetBackgroundLoopDuration(w.ctx, "reaper", time.Since(reaperStart).Seconds())
+		return
+	}
+
+	// Bounded for the same reason heartbeatAndFenceInFlight's call is: a
+	// call already in flight from before a stall began would otherwise
+	// return SUCCESS the moment the database responds, with the stale
+	// predicate satisfied by the stall's own duration -- see
+	// dbCallDeadlineFor's doc. The gate above cannot protect against a call
+	// that passed it before the stall was detectable; this can.
+	staleTimeout := w.reclaimAfter()
+	missedBeat := missedBeatThreshold(w.heartbeatInterval)
+
+	// The worker's own tenant first, through w.store, exactly as before.
+	reaped, ownSuppressed, lastErr := w.reapStore(w.store, "", staleTimeout, missedBeat)
 	if lastErr != nil {
 		w.recordDBTrouble()
 		skips := w.recordReapSkip()
@@ -5739,6 +6486,24 @@ func (w *Worker) reapOnce() {
 	}
 	w.consecutiveReapSkips.Store(0)
 	w.recordDBContactOK()
+	// The worker's own tenant reaped cleanly; now every other tenant's runs
+	// (cleat#3570). After, and only if, the own pass succeeded: a failure there is
+	// the worker's own database trouble, which says nothing is safe to reclaim.
+	//
+	// And NOT when the own pass suppressed any unit this tick. cleat#2006's
+	// suppression decides that the stale set looks like a database stall and not
+	// dead workers, and it needs several distinct holders in scope to say so; a
+	// tenant with one holder never qualifies through its own store, so under the
+	// same stall it would be reclaimed while the own tenant waits. The own
+	// store's verdict is the only whole-database evidence this worker has, so it
+	// gates the rest. (cleat-review on #3574, measured with doubles.)
+	ownReaped := reaped
+	if ownSuppressed {
+		w.logger.WarnContext(w.ctx, "Reaper: the own store's stale set looks like a suspected database stall -- not reaping other tenants this tick either",
+			"worker_id", w.id)
+	} else {
+		reaped += w.reapOtherTenants(staleTimeout, missedBeat)
+	}
 	if reaped > 0 {
 		w.logger.InfoContext(w.ctx, "Reaper: reclaimed stale instances", "worker_id", w.id, "count", reaped)
 		w.Metrics.SetBackgroundLoopItemsProcessed(w.ctx, "reaper", int64(reaped))
@@ -5763,9 +6528,9 @@ func (w *Worker) reapOnce() {
 	// there is more to reclaim than one tick can carry. Both want an
 	// operator's attention, and neither is visible from the count
 	// alone. cleat#1320.
-	if w.maxReclaimPerTick > 0 && reaped >= w.maxReclaimPerTick {
+	if w.maxReclaimPerTick > 0 && ownReaped >= w.maxReclaimPerTick {
 		w.logger.WarnContext(w.ctx, "Reaper: hit the per-tick reclaim limit; more instances remain stale",
-			"worker_id", w.id, "count", reaped, "limit", w.maxReclaimPerTick,
+			"worker_id", w.id, "count", ownReaped, "limit", w.maxReclaimPerTick,
 			"hint", "a whole-set stall (a boot migration holding a lock, a failover, a paused volume) ages every heartbeat at once; recovery continues on later ticks")
 	}
 	w.expireDeferPhases()
@@ -5793,22 +6558,74 @@ func (w *Worker) reapOnce() {
 // cannot MARK a phase -- TerminateWorkflow and the DeferPhaseStore pair ship
 // together -- so it has nothing to sweep.
 func (w *Worker) expireDeferPhases() {
-	dps, ok := w.store.(engine.DeferPhaseStore)
-	if !ok {
+	// A worker whose own store cannot sweep has nothing to sweep anywhere: every store
+	// in one process is the same kind, and a kind that cannot expire a phase cannot mark
+	// one either. Not visiting the other tenants also avoids opening each of them for
+	// nothing on every tick.
+	if _, ok := w.store.(engine.DeferPhaseStore); !ok {
 		return
+	}
+	if w.expireDeferPhasesOf(w.store, "") {
+		w.expireDeferPhasesOfOtherTenants()
+	}
+}
+
+// expireDeferPhasesOf sweeps one store, logging as the sweep always did, and
+// reports whether the sweep ran without error (a store with no defer-phase
+// support has nothing to sweep and counts as having run). tenantID is empty for the worker's
+// own store and the tenant otherwise.
+func (w *Worker) expireDeferPhasesOf(st engine.WorkflowStore, tenantID string) bool {
+	dps, ok := st.(engine.DeferPhaseStore)
+	if !ok {
+		return true
 	}
 	n, err := dps.ExpireDeferPhases(w.ctx)
 	if err != nil {
 		if isConnectionError(err) {
-			w.logger.WarnContext(w.ctx, "Defer-phase deadline sweep: DB appears down", "worker_id", w.id)
+			w.logger.WarnContext(w.ctx, "Defer-phase deadline sweep: DB appears down", "worker_id", w.id, "tenant_id", tenantID)
 		} else {
-			w.logger.ErrorContext(w.ctx, "Defer-phase deadline sweep error", "worker_id", w.id, "error", err)
+			w.logger.ErrorContext(w.ctx, "Defer-phase deadline sweep error", "worker_id", w.id, "tenant_id", tenantID, "error", err)
 		}
-		return
+		return false
 	}
 	if n > 0 {
 		w.logger.WarnContext(w.ctx, "Defer-phase deadline sweep: terminated workflows whose cleanup did not finish in time",
-			"worker_id", w.id, "count", n)
+			"worker_id", w.id, "tenant_id", tenantID, "count", n)
+	}
+	return true
+}
+
+// expireDeferPhasesOfOtherTenants runs the same sweep through each other
+// tenant's own store (cleat#3572). ExpireDeferPhases is scoped to its store's
+// tenant, so through the worker's own store alone a terminating run of any
+// other tenant was never expired: its deadline passed and it stayed in
+// 'terminating', and the only worker that could end it was one whose own tenant
+// it was.
+//
+// Unlike the stale-run reaper this needs no stall guard. It decides from a
+// deadline the database recorded, not from a heartbeat this worker may have
+// failed to observe, so a stall of this worker's view cannot make it wrong.
+//
+// A tenant's failure is logged by expireDeferPhasesOf and does not mean the
+// worker's own database is in trouble, so nothing here records it as such.
+// Gated on --claim-across-tenants like the other cross-tenant reapers.
+func (w *Worker) expireDeferPhasesOfOtherTenants() {
+	if !w.claimAcrossTenants {
+		return
+	}
+	sweep, err := w.forEachOtherTenantStore(func(tenantID string, st engine.WorkflowStore) {
+		w.expireDeferPhasesOf(st, tenantID)
+	})
+	if err != nil {
+		if !errors.Is(err, errRotatingClaimUnavailable) {
+			w.logger.ErrorContext(w.ctx, "Defer-phase deadline sweep: could not list tenants; other tenants' phases were not swept this tick",
+				"worker_id", w.id, "error", err)
+		}
+		return
+	}
+	if sweep.OpenFailed > 0 {
+		w.logger.WarnContext(w.ctx, "Defer-phase deadline sweep: some tenants could not be opened this tick; their phases wait for the next",
+			"worker_id", w.id, "tenants", sweep.Visited, "open_failed", sweep.OpenFailed, "first_open_error", sweep.FirstErr)
 	}
 }
 
@@ -5918,26 +6735,90 @@ func (w *Worker) concurrencyKeyReaperLoop() {
 			return
 		case <-ticker.C:
 			w.healthTracker.recordRun("concurrency_key_reaper")
-			ckStart := time.Now()
-			reaped, err := w.store.ReapExpiredConcurrencyKeys(w.ctx)
-			if err != nil {
-				if isConnectionError(err) {
-					w.logger.WarnContext(w.ctx, "Concurrency key reaper: DB appears down", "worker_id", w.id)
-				} else {
-					w.logger.ErrorContext(w.ctx, "Concurrency key reaper error", "worker_id", w.id, "error", err)
-				}
-				w.Metrics.RecordBackgroundLoop(w.ctx, "concurrency_key_reaper", "error")
-				w.Metrics.SetBackgroundLoopDuration(w.ctx, "concurrency_key_reaper", time.Since(ckStart).Seconds())
-				continue
-			}
-			if reaped > 0 {
-				w.logger.InfoContext(w.ctx, "Concurrency key reaper: removed expired keys", "worker_id", w.id, "count", reaped)
-				w.Metrics.SetBackgroundLoopItemsProcessed(w.ctx, "concurrency_key_reaper", reaped)
-			}
-			w.Metrics.RecordBackgroundLoop(w.ctx, "concurrency_key_reaper", "ok")
-			w.Metrics.SetBackgroundLoopDuration(w.ctx, "concurrency_key_reaper", time.Since(ckStart).Seconds())
+			w.reapConcurrencyKeysOnce()
 		}
 	}
+}
+
+// reapConcurrencyKeysOnce is one tick of concurrencyKeyReaperLoop, extracted so
+// a test can drive it without a ticker, as reapOnce is for the stale-run reaper.
+func (w *Worker) reapConcurrencyKeysOnce() {
+	ckStart := time.Now()
+	reaped, err := w.store.ReapExpiredConcurrencyKeys(w.ctx)
+	if err != nil {
+		if isConnectionError(err) {
+			w.logger.WarnContext(w.ctx, "Concurrency key reaper: DB appears down", "worker_id", w.id)
+		} else {
+			w.logger.ErrorContext(w.ctx, "Concurrency key reaper error", "worker_id", w.id, "error", err)
+		}
+		w.Metrics.RecordBackgroundLoop(w.ctx, "concurrency_key_reaper", "error")
+		w.Metrics.SetBackgroundLoopDuration(w.ctx, "concurrency_key_reaper", time.Since(ckStart).Seconds())
+		return
+	}
+	// The other tenants, each through its own store (cleat#3572). Only after the
+	// worker's own store answered: a failure of THIS worker's database stops the
+	// tick above, and everything below is about other tenants.
+	reaped += w.reapConcurrencyKeysOfOtherTenants()
+	if reaped > 0 {
+		w.logger.InfoContext(w.ctx, "Concurrency key reaper: removed expired keys", "worker_id", w.id, "count", reaped)
+		w.Metrics.SetBackgroundLoopItemsProcessed(w.ctx, "concurrency_key_reaper", reaped)
+	}
+	w.Metrics.RecordBackgroundLoop(w.ctx, "concurrency_key_reaper", "ok")
+	w.Metrics.SetBackgroundLoopDuration(w.ctx, "concurrency_key_reaper", time.Since(ckStart).Seconds())
+}
+
+// reapConcurrencyKeysOfOtherTenants frees the concurrency keys, queue holders and
+// rate tokens of every tenant other than the worker's own, through that tenant's
+// own store.
+//
+// ReapExpiredConcurrencyKeys scopes itself to its store's tenant (an explicit
+// tenant_id predicate, and row-level security besides), and the loop ran it
+// through the worker's own store only. A key whose run had finished but whose
+// post-commit release had failed (releaseWorkflowResources is best-effort by
+// design) was therefore never freed for any tenant but the worker's own, and a
+// new run of that tenant under the same key was refused on every poll until the
+// key's seven-day backstop expired. Measured as cleat_app, cleat#3572. The claim,
+// the schedule loop, the heartbeat (cleat#3566) and the stale-run reaper
+// (cleat#3570) already visit each tenant; this is the same enumeration.
+//
+// A tenant's failure is that tenant's, and is not the worker's database trouble:
+// it is logged and counted, and the other tenants are still reaped. Nothing here
+// calls recordDBTrouble or recordReapSkip, which mean "this worker's database is
+// in trouble" and hold this worker's stale-run reaper in grace.
+//
+// Returns how many rows it removed. It does nothing for a worker that cannot
+// serve other tenants (no factory, a store that cannot list them, or
+// --claim-across-tenants off): its own tenant was all it ever reaped.
+func (w *Worker) reapConcurrencyKeysOfOtherTenants() int64 {
+	if !w.claimAcrossTenants {
+		return 0
+	}
+	var reaped int64
+	var failedTenants int
+	var firstErr error
+	sweep, err := w.forEachOtherTenantStore(func(tenantID string, st engine.WorkflowStore) {
+		n, rerr := st.ReapExpiredConcurrencyKeys(w.ctx)
+		reaped += n
+		if rerr != nil {
+			failedTenants++
+			if firstErr == nil {
+				firstErr = fmt.Errorf("tenant %s: %w", tenantID, rerr)
+			}
+		}
+	})
+	if err != nil {
+		if !errors.Is(err, errRotatingClaimUnavailable) {
+			w.logger.ErrorContext(w.ctx, "Concurrency key reaper: could not list tenants; other tenants' keys were not reaped this tick",
+				"worker_id", w.id, "error", err)
+		}
+		return 0
+	}
+	if sweep.OpenFailed > 0 || failedTenants > 0 {
+		w.logger.WarnContext(w.ctx, "Concurrency key reaper: some tenants could not be reaped this tick; their keys wait for the next",
+			"worker_id", w.id, "tenants", sweep.Visited, "open_failed", sweep.OpenFailed, "reap_failed", failedTenants,
+			"first_open_error", sweep.FirstErr, "first_reap_error", firstErr)
+	}
+	return reaped
 }
 
 func (w *Worker) scheduleLoop() {
@@ -6284,61 +7165,183 @@ func (w *Worker) metricsSweepLoop() {
 			return
 		case <-ticker.C:
 			w.healthTracker.recordRun("metrics_sweep")
-			sweepStart := time.Now()
-			failed := 0
-
-			if n, err := ms.CountStalledWorkflows(w.ctx, w.stallThreshold); err != nil {
-				failed++
-				w.logger.ErrorContext(w.ctx, "metrics sweep: count stalled workflows", "worker_id", w.id, "error", err)
-			} else {
-				w.Metrics.SetWorkflowsStuck(w.ctx, int64(n))
-			}
-
-			if n, err := ms.CountEventHistoryTotal(w.ctx); err != nil {
-				failed++
-				w.logger.ErrorContext(w.ctx, "metrics sweep: count event history", "worker_id", w.id, "error", err)
-			} else {
-				w.Metrics.SetEventHistoryRowCount(w.ctx, int64(n))
-			}
-
-			if b, err := ms.EstimateEventHistorySize(w.ctx); err != nil {
-				failed++
-				w.logger.ErrorContext(w.ctx, "metrics sweep: estimate event history size", "worker_id", w.id, "error", err)
-			} else {
-				// Empty workflow name: the gauge is labelled per workflow but
-				// pg_total_relation_size is whole-table, so there is no name to
-				// give it. "" is the established unlabelled value here --
-				// RecordDispatchLatency passes it for the same reason. Making
-				// this per-workflow would mean a size query per definition,
-				// which is the cost this estimator exists to avoid.
-				w.Metrics.SetEventHistorySize(w.ctx, b, "")
-			}
-
-			if n, err := ms.CountActiveConcurrencyKeys(w.ctx); err != nil {
-				failed++
-				w.logger.ErrorContext(w.ctx, "metrics sweep: count active concurrency keys", "worker_id", w.id, "error", err)
-			} else {
-				w.Metrics.SetConcurrencyKeysTotal(w.ctx, int64(n))
-			}
-
-			// The leading indicator, on the same sweep as the total it sits
-			// beside. Both come from the same table, so asking twice here costs
-			// one extra query rather than a second loop.
-			if n, err := ms.CountConcurrencyKeysExpiringSoon(w.ctx, w.keyExpiryWindow); err != nil {
-				failed++
-				w.logger.ErrorContext(w.ctx, "metrics sweep: count concurrency keys expiring soon", "worker_id", w.id, "error", err)
-			} else {
-				w.Metrics.SetConcurrencyKeysExpiringSoon(w.ctx, int64(n))
-			}
-
-			status := "ok"
-			if failed > 0 {
-				status = "error"
-			}
-			w.Metrics.RecordBackgroundLoop(w.ctx, "metrics_sweep", status)
-			w.Metrics.SetBackgroundLoopDuration(w.ctx, "metrics_sweep", time.Since(sweepStart).Seconds())
+			w.metricsSweepOnce(ms)
 		}
 	}
+}
+
+// The gauges metricsSweepOnce publishes, in the order it computes them.
+const (
+	gaugeStuck = iota
+	gaugeEventRows
+	gaugeEventSize
+	gaugeKeysTotal
+	gaugeKeysExpiring
+	gaugeCount
+)
+
+var gaugeNames = [gaugeCount]string{
+	"count stalled workflows", "count event history", "estimate event history size",
+	"count active concurrency keys", "count concurrency keys expiring soon",
+}
+
+// metricsSweepOnce is one tick of metricsSweepLoop, extracted so a test can drive
+// it without a ticker.
+//
+// FOUR OF THE FIVE GAUGES ARE TENANT-SCOPED COUNTS (an explicit tenant_id
+// predicate each), and the sweep ran them through the worker's own store only, so
+// on a worker that serves other tenants every one of them described one tenant
+// (cleat#3572). They are now the SUM over every tenant the worker serves, each
+// counted through that tenant's own store under its own row-level security. The
+// fifth, the event history SIZE, is pg_total_relation_size of the whole table on
+// the plain pool: it is the same figure whichever store asks, already covers every
+// tenant, and is taken from the worker's own store ONLY -- summing it across
+// tenants would multiply it by the tenant count.
+//
+// A PARTIAL SUM MUST NOT BE PUBLISHED AS THE TOTAL. A count gauge is published only
+// when every query that feeds it answered, for the worker's own tenant and for
+// every other tenant, and the tenant list was read and every tenant's store opened.
+// (The size depends on none of that and is published whenever the worker's own
+// query answered.) A gap in the tenants, a tenant's failed query or a store that
+// cannot answer leaves the PREVIOUS value standing (as a failed own query always did: not publishing is
+// not the same as publishing zero), logs it, and counts the pass as "incomplete"
+// in the background-loop counter, so a stale total is visible. There is no
+// per-tenant label: the series count stays what it was.
+//
+// Every query still runs for every tenant it can: one failing gauge does not stop
+// the others, and one tenant failing does not stop the rest being counted, because
+// the gauges it did not touch are still complete.
+func (w *Worker) metricsSweepOnce(ms MetricsStore) {
+	sweepStart := time.Now()
+	var vals [gaugeCount]int64
+	var ownOK, crossOK [gaugeCount]bool
+	for g := range ownOK {
+		ownOK[g], crossOK[g] = true, true
+	}
+	ownFailed := 0
+
+	// query runs one gauge's query against one store; the caller adds the answer
+	// to the gauge's running total.
+	query := func(st MetricsStore, g int) (int64, error) {
+		switch g {
+		case gaugeStuck:
+			n, err := st.CountStalledWorkflows(w.ctx, w.stallThreshold)
+			return int64(n), err
+		case gaugeEventRows:
+			n, err := st.CountEventHistoryTotal(w.ctx)
+			return int64(n), err
+		case gaugeEventSize:
+			return st.EstimateEventHistorySize(w.ctx)
+		case gaugeKeysTotal:
+			n, err := st.CountActiveConcurrencyKeys(w.ctx)
+			return int64(n), err
+		default:
+			n, err := st.CountConcurrencyKeysExpiringSoon(w.ctx, w.keyExpiryWindow)
+			return int64(n), err
+		}
+	}
+
+	for g := 0; g < gaugeCount; g++ {
+		n, err := query(ms, g)
+		if err != nil {
+			ownOK[g] = false
+			ownFailed++
+			w.logger.ErrorContext(w.ctx, "metrics sweep: "+gaugeNames[g], "worker_id", w.id, "error", err)
+			continue
+		}
+		vals[g] = n
+	}
+
+	// The other tenants, only if the worker serves them. A gap in WHICH tenants were
+	// counted taints every gauge; a tenant's own failure taints only the gauge that
+	// failed.
+	gap := false
+	var firstErr error
+	if w.claimAcrossTenants {
+		sweep, err := w.forEachOtherTenantStore(func(tenantID string, st engine.WorkflowStore) {
+			tms, isMetrics := st.(MetricsStore)
+			for g := 0; g < gaugeCount; g++ {
+				if g == gaugeEventSize {
+					continue // whole-table, taken from the worker's own store only
+				}
+				if !isMetrics {
+					crossOK[g] = false
+					if firstErr == nil {
+						firstErr = fmt.Errorf("tenant %s: its store does not implement MetricsStore", tenantID)
+					}
+					continue
+				}
+				n, qerr := query(tms, g)
+				if qerr != nil {
+					crossOK[g] = false
+					if firstErr == nil {
+						firstErr = fmt.Errorf("tenant %s: %s: %w", tenantID, gaugeNames[g], qerr)
+					}
+					continue
+				}
+				vals[g] += n
+			}
+		})
+		switch {
+		case err != nil && errors.Is(err, errRotatingClaimUnavailable):
+			// This worker serves its own tenant only: the sum IS the own value.
+		case err != nil:
+			gap = true
+			firstErr = err
+		case sweep.OpenFailed > 0:
+			gap = true
+			if firstErr == nil {
+				firstErr = sweep.FirstErr
+			}
+		}
+	}
+
+	// The whole-table size does not depend on which tenants were counted, so a gap
+	// in them neither holds it back nor makes a pass incomplete: it is published
+	// whenever the worker's own query answered.
+	crossIncomplete := gap
+	published := 0
+	for g := 0; g < gaugeCount; g++ {
+		if g != gaugeEventSize && !crossOK[g] {
+			crossIncomplete = true
+		}
+		if !ownOK[g] || (g != gaugeEventSize && (!crossOK[g] || gap)) {
+			continue
+		}
+		published++
+		switch g {
+		case gaugeStuck:
+			w.Metrics.SetWorkflowsStuck(w.ctx, vals[g])
+		case gaugeEventRows:
+			w.Metrics.SetEventHistoryRowCount(w.ctx, vals[g])
+		case gaugeEventSize:
+			// Empty workflow name: the gauge is labelled per workflow but
+			// pg_total_relation_size is whole-table, so there is no name to
+			// give it. "" is the established unlabelled value here --
+			// RecordDispatchLatency passes it for the same reason. Making
+			// this per-workflow would mean a size query per definition,
+			// which is the cost this estimator exists to avoid.
+			w.Metrics.SetEventHistorySize(w.ctx, vals[g], "")
+		case gaugeKeysTotal:
+			w.Metrics.SetConcurrencyKeysTotal(w.ctx, vals[g])
+		case gaugeKeysExpiring:
+			w.Metrics.SetConcurrencyKeysExpiringSoon(w.ctx, vals[g])
+		}
+	}
+	if crossIncomplete {
+		w.logger.WarnContext(w.ctx, "metrics sweep: other tenants could not all be counted, so the totals that depend on them keep their previous value this pass",
+			"worker_id", w.id, "published", published, "of", gaugeCount, "first_error", firstErr)
+	}
+
+	status := "ok"
+	switch {
+	case ownFailed > 0:
+		status = "error"
+	case crossIncomplete:
+		status = "incomplete"
+	}
+	w.Metrics.RecordBackgroundLoop(w.ctx, "metrics_sweep", status)
+	w.Metrics.SetBackgroundLoopDuration(w.ctx, "metrics_sweep", time.Since(sweepStart).Seconds())
 }
 
 func (w *Worker) compactionLoop() {
@@ -6353,24 +7356,105 @@ func (w *Worker) compactionLoop() {
 			return
 		case <-ticker.C:
 			w.healthTracker.recordRun("compaction")
-			compStart := time.Now()
-			candidates, err := w.store.GetCompactionCandidates(w.ctx, w.compactionThreshold, 10)
-			if err != nil {
-				w.logger.ErrorContext(w.ctx, "compaction: error finding candidates", "worker_id", w.id, "error", err)
-				w.Metrics.RecordBackgroundLoop(w.ctx, "compaction", "error")
-				w.Metrics.SetBackgroundLoopDuration(w.ctx, "compaction", time.Since(compStart).Seconds())
-				continue
-			}
-			for _, wfID := range candidates {
-				if err := engine.CompactWorkflowHistory(w.ctx, w.store, wfID, w.compactionThreshold, w.Metrics); err != nil {
-					w.logger.ErrorContext(w.ctx, "compaction error", "worker_id", w.id, "workflow_id", wfID, "error", err)
-				}
-			}
-			w.Metrics.RecordBackgroundLoop(w.ctx, "compaction", "ok")
-			w.Metrics.SetBackgroundLoopDuration(w.ctx, "compaction", time.Since(compStart).Seconds())
-			w.Metrics.SetBackgroundLoopItemsProcessed(w.ctx, "compaction", int64(len(candidates)))
+			w.compactOnce()
 		}
 	}
+}
+
+// compactionCandidatesPerTick bounds how many workflows one store compacts in one
+// tick. It is per STORE, so a pass over N tenants compacts up to N times this.
+const compactionCandidatesPerTick = 10
+
+// compactOnce is one tick of compactionLoop, extracted so a test can drive it
+// without a ticker.
+//
+// GetCompactionCandidates and CompactWorkflowHistory scope themselves to their
+// store's tenant, and the loop ran them through the worker's own store only, so a
+// workflow of any other tenant never compacted however long its history grew
+// (cleat#3572). The other tenants are compacted through their own stores, after
+// the worker's own answered; the candidates found through a tenant's store are
+// compacted through the SAME store, because compacting one through another
+// tenant's would find nothing.
+func (w *Worker) compactOnce() {
+	compStart := time.Now()
+	candidates, err := w.compactStoreOnce(w.storeTenantID, w.store)
+	if err != nil {
+		w.logger.ErrorContext(w.ctx, "compaction: error finding candidates", "worker_id", w.id, "error", err)
+		w.Metrics.RecordBackgroundLoop(w.ctx, "compaction", "error")
+		w.Metrics.SetBackgroundLoopDuration(w.ctx, "compaction", time.Since(compStart).Seconds())
+		return
+	}
+	others := w.sweepOtherTenants("compaction", func(_ context.Context, tenantID string, st engine.WorkflowStore) (int64, error) {
+		n, err := w.compactStoreOnce(tenantID, st)
+		return int64(n), err
+	})
+	w.Metrics.RecordBackgroundLoop(w.ctx, "compaction", "ok")
+	w.Metrics.SetBackgroundLoopDuration(w.ctx, "compaction", time.Since(compStart).Seconds())
+	w.Metrics.SetBackgroundLoopItemsProcessed(w.ctx, "compaction", int64(candidates)+others)
+}
+
+// compactStoreOnce finds one store's candidates and compacts each, returning how
+// many it ATTEMPTED -- not how many it fetched, and not how many compacted. The
+// caller publishes this as items processed, and a fetched-but-skipped run was not
+// processed: with ten remembered runs the over-fetch returns twenty and attempts
+// ten, and reporting twenty would say the loop did twice the work it did. A
+// failure to compact one workflow is logged and does not stop the rest; only
+// failing to FIND candidates is returned.
+//
+// cleat#3853: a run whose sealed compaction state this worker cannot open is
+// remembered and left out of the batch for compactionSkipWindow. The candidate
+// query cannot know which key the worker holds, so it offers such a run on every
+// tick, and enough of them fill the batch and starve every other run. The
+// over-fetch below is what lets the batch be filled from the runs BEHIND the
+// remembered ones; it is capped (compactionSkipBatchCap), so the starvation is
+// reduced rather than eliminated, and a capped pass in which every fetched
+// candidate was skipped is counted separately as the signal that it happened.
+func (w *Worker) compactStoreOnce(tenant string, st engine.WorkflowStore) (int, error) {
+	skips := w.compactionSkipSetFor()
+	skips.prune()
+	want := compactionCandidatesPerTick + skips.size(tenant)
+	limit := want
+	capped := want > compactionSkipBatchCap
+	if capped {
+		limit = compactionSkipBatchCap
+	}
+	candidates, err := st.GetCompactionCandidates(w.ctx, w.compactionThreshold, limit)
+	if err != nil {
+		return 0, err
+	}
+	attempts, skippedHere := 0, 0
+	for _, wfID := range candidates {
+		if attempts >= compactionCandidatesPerTick {
+			break
+		}
+		if skips.skipped(tenant, wfID) {
+			skippedHere++
+			continue
+		}
+		attempts++
+		if err := engine.CompactWorkflowHistory(w.ctx, st, wfID, w.compactionThreshold, w.Metrics); err != nil {
+			// ONLY a decryption failure is remembered. A connection failure or a
+			// stopped worker is transient, and remembering it would park a healthy
+			// run for compactionSkipWindow. The whole error is matched, never a
+			// message: a full key rotation fails at GetWorkflowByID and a mixed row
+			// at LoadCompactionState, and both mean the same thing here.
+			if errors.Is(err, engine.ErrPayloadDecryption) {
+				if skips.remember(tenant, wfID) {
+					w.Metrics.RecordBackgroundLoop(w.ctx, "compaction", "sealed_skipped")
+					w.logger.WarnContext(w.ctx, "compaction: this worker cannot open the run's compaction state; leaving it out of the batch until the key is available",
+						"worker_id", w.id, "workflow_id", wfID, "tenant_id", tenant,
+						"skipped_for", compactionSkipWindow.String(), "error", err)
+				}
+			} else {
+				w.logger.ErrorContext(w.ctx, "compaction error", "worker_id", w.id, "workflow_id", wfID, "error", err)
+			}
+		}
+	}
+	w.Metrics.SetBackgroundLoopItemsProcessed(w.ctx, "compaction_skipped", int64(skips.sizeAll()))
+	if capped && len(candidates) > 0 && skippedHere == len(candidates) {
+		w.Metrics.RecordBackgroundLoop(w.ctx, "compaction", "skip_cap_hit")
+	}
+	return attempts, nil
 }
 
 func (w *Worker) memoryReloadLoop() {
@@ -6668,6 +7752,43 @@ func (w *Worker) runVersionGCSweep() {
 		"min_versions_to_keep", opts.MinVersionsToKeep,
 		"max_version_age", opts.MaxVersionAge.String(),
 	)
+	w.runVersionGCSweepOfOtherTenants(opts)
+}
+
+// runVersionGCSweepOfOtherTenants runs the same collection through each other
+// tenant's own store (cleat#3708). The three statements GarbageCollectVersions
+// issues carry no tenant predicate -- row-level security is what scopes them -- so
+// through the worker's own store alone every other tenant kept every old version
+// for ever, with the flag on.
+//
+// What makes this safe to widen is the same thing that makes it narrow today: each
+// pass runs as THAT tenant, so the definitions it can see, the active-instance
+// counts that protect a version in use, and the rows it deletes are that tenant's.
+// Through a role that bypasses the policy the own pass already spans every tenant,
+// and these passes then re-read what is already gone and delete nothing, at the
+// cost of one more scan per tenant per interval.
+//
+// A tenant whose pass lists or counts nothing is a pass that found nothing; one
+// whose list or count FAILS is skipped for this interval, since GarbageCollect
+// Versions refuses to delete on a count it could not take. Per-version purge
+// failures are reported as that tenant's failure and do not stop the rest. Gated on
+// --claim-across-tenants like the other cross-tenant loops, and a no-op for MySQL
+// and a sharded store, neither of which can list tenants.
+func (w *Worker) runVersionGCSweepOfOtherTenants(opts engine.GCOptions) {
+	removed := w.sweepOtherTenants("version gc", func(ctx context.Context, _ string, st engine.WorkflowStore) (int64, error) {
+		res, err := engine.GarbageCollectVersions(ctx, st, opts)
+		if err != nil {
+			return 0, err
+		}
+		if len(res.Errors) > 0 {
+			return int64(res.VersionsRemoved), fmt.Errorf("%d version(s) could not be purged, first: %w", len(res.Errors), res.Errors[0])
+		}
+		return int64(res.VersionsRemoved), nil
+	})
+	if removed > 0 {
+		w.logger.InfoContext(w.ctx, "version gc swept other tenants",
+			"worker_id", w.id, "versions_removed", removed)
+	}
 }
 
 // retentionSweepResult reports what one sweep did, per arm.
@@ -6840,16 +7961,26 @@ func (w *Worker) previewRetentionSweepWindow(retentionDays, completedWorkflowRet
 // of retentionLoop so it is callable directly from a test without waiting on
 // the loop's 24-hour ticker.
 func (w *Worker) runRetentionSweep(retentionDays, completedWorkflowRetentionDays, deadLetterRetentionDays int) {
-	// ONE clock reading for the whole sweep. Each arm used to call time.Now()
-	// itself, so the three cutoffs differed by microseconds -- harmless in
-	// effect, but they describe one retention window and a test asserting they
-	// agree should not have to tolerate a gap. Reading the clock once removes
-	// the question rather than widening an assertion around it.
-	sweptAt := time.Now()
+	w.runRetentionSweepAt(time.Now(), retentionDays, completedWorkflowRetentionDays, deadLetterRetentionDays)
+}
+
+// runRetentionSweepAt is runRetentionSweep with the clock supplied, so a test can
+// age every row without writing a timestamp into a table.
+func (w *Worker) runRetentionSweepAt(sweptAt time.Time, retentionDays, completedWorkflowRetentionDays, deadLetterRetentionDays int) {
+	// ownFailed is set when any arm failed against the worker's own store, which is
+	// what keeps the sweep off the other tenants: see retentionOfOtherTenants.
+	ownFailed := false
+	// ONE clock reading for the whole sweep, taken by the caller as sweptAt. Each
+	// arm used to call time.Now() itself, so the three cutoffs differed by
+	// microseconds -- harmless in effect, but they describe one retention window
+	// and a test asserting they agree should not have to tolerate a gap. Reading
+	// the clock once removes the question rather than widening an assertion
+	// around it.
 	if retentionDays > 0 {
 		cutoff := sweptAt.Add(-time.Duration(retentionDays) * 24 * time.Hour)
 		deleted, err := w.store.DeleteExpiredEvents(w.ctx, cutoff)
 		if err != nil {
+			ownFailed = true
 			w.logger.ErrorContext(w.ctx, "retention: error deleting expired events", "worker_id", w.id, "error", err)
 		} else if deleted > 0 {
 			w.Metrics.RecordEventsDeleted(w.ctx, deleted)
@@ -6874,6 +8005,7 @@ func (w *Worker) runRetentionSweep(retentionDays, completedWorkflowRetentionDays
 		cutoff := sweptAt.Add(-time.Duration(retentionDays) * 24 * time.Hour)
 		cleared, err := w.store.ClearExpiredCompactionState(w.ctx, cutoff)
 		if err != nil {
+			ownFailed = true
 			w.logger.ErrorContext(w.ctx, "retention: clear expired compaction state", "worker_id", w.id, "error", err)
 		} else if cleared > 0 {
 			w.Metrics.RecordCompactionStateCleared(w.ctx, cleared)
@@ -6885,6 +8017,7 @@ func (w *Worker) runRetentionSweep(retentionDays, completedWorkflowRetentionDays
 		cutoff := sweptAt.Add(-time.Duration(completedWorkflowRetentionDays) * 24 * time.Hour)
 		deleted, err := w.store.DeleteCompletedWorkflows(w.ctx, cutoff)
 		if err != nil {
+			ownFailed = true
 			w.logger.ErrorContext(w.ctx, "retention: error deleting completed workflows", "worker_id", w.id, "error", err)
 		} else if deleted > 0 {
 			w.Metrics.RecordWorkflowsPurged(w.ctx, deleted)
@@ -6909,13 +8042,91 @@ func (w *Worker) runRetentionSweep(retentionDays, completedWorkflowRetentionDays
 		cutoff := sweptAt.Add(-time.Duration(deadLetterRetentionDays) * 24 * time.Hour)
 		deleted, err := w.store.DeleteDeadLetteredWorkflows(w.ctx, cutoff)
 		if err != nil {
+			ownFailed = true
 			w.logger.ErrorContext(w.ctx, "retention: delete dead-lettered workflows", "worker_id", w.id, "error", err)
 		} else if deleted > 0 {
 			w.logger.InfoContext(w.ctx, "retention: deleted dead-lettered workflows",
 				"worker_id", w.id, "count", deleted, "older_than", cutoff)
 		}
 	}
+	// The other tenants, each through its own store (cleat#3572), after the
+	// worker's own arms and only if none of them failed: a failure of THIS
+	// worker's database stops the sweep here, and everything below is about other
+	// tenants.
+	if !ownFailed {
+		w.retentionOfOtherTenants(sweptAt, retentionDays, completedWorkflowRetentionDays, deadLetterRetentionDays)
+	}
 	w.Metrics.SetRetentionLastRunTimestamp(w.ctx, time.Now().Unix())
+}
+
+// retentionOfOtherTenants applies the same retention arms, with the same flags and
+// the same cutoffs, to every tenant other than the worker's own, each through that
+// tenant's own store.
+//
+// The arms scope themselves to their store's tenant (an explicit tenant_id
+// predicate, and row-level security besides), and the loop ran them through the
+// worker's own store only. Every tenant but that one therefore kept its event
+// history, its compaction state and, with the opt-in flags, its completed and
+// dead-lettered runs without limit: --retention-days is ON BY DEFAULT, so on a
+// worker serving other tenants the default was not being applied to them.
+// Measured as cleat_app, cleat#3572.
+//
+// THE FLAGS ARE THE OPERATOR'S, NOT THE TENANT'S, and no per-tenant retention
+// setting exists (cleat#3707). Applying them to every tenant is what a dedicated
+// worker for that tenant would do. It also means that when workers of one
+// deployment run DIFFERENT retention flags, the SHORTEST window wins for every
+// tenant they all serve: any worker that serves a tenant deletes on its own
+// schedule.
+//
+// The arms are independent, as in the sweep for the worker's own store: one
+// failing for a tenant does not stop that tenant's other arms or any other tenant.
+// What was removed is counted across tenants into the same counters, with no
+// per-tenant label.
+func (w *Worker) retentionOfOtherTenants(sweptAt time.Time, retentionDays, completedWorkflowRetentionDays, deadLetterRetentionDays int) {
+	var events, cleared, completed, deadLettered int64
+	w.sweepOtherTenants("retention", func(ctx context.Context, _ string, st engine.WorkflowStore) (int64, error) {
+		var first error
+		note := func(err error) {
+			if err != nil && first == nil {
+				first = err
+			}
+		}
+		if retentionDays > 0 {
+			cutoff := sweptAt.Add(-time.Duration(retentionDays) * 24 * time.Hour)
+			n, err := st.DeleteExpiredEvents(ctx, cutoff)
+			events += n
+			note(err)
+			n, err = st.ClearExpiredCompactionState(ctx, cutoff)
+			cleared += n
+			note(err)
+		}
+		if completedWorkflowRetentionDays > 0 {
+			n, err := st.DeleteCompletedWorkflows(ctx, sweptAt.Add(-time.Duration(completedWorkflowRetentionDays)*24*time.Hour))
+			completed += n
+			note(err)
+		}
+		if deadLetterRetentionDays > 0 {
+			n, err := st.DeleteDeadLetteredWorkflows(ctx, sweptAt.Add(-time.Duration(deadLetterRetentionDays)*24*time.Hour))
+			deadLettered += n
+			note(err)
+		}
+		return 0, first
+	})
+	if events > 0 {
+		w.Metrics.RecordEventsDeleted(w.ctx, events)
+		w.logger.InfoContext(w.ctx, "retention: deleted expired event rows of other tenants", "worker_id", w.id, "count", events)
+	}
+	if cleared > 0 {
+		w.Metrics.RecordCompactionStateCleared(w.ctx, cleared)
+		w.logger.InfoContext(w.ctx, "retention: cleared compaction state of other tenants", "worker_id", w.id, "count", cleared)
+	}
+	if completed > 0 {
+		w.Metrics.RecordWorkflowsPurged(w.ctx, completed)
+		w.logger.InfoContext(w.ctx, "retention: deleted completed workflow rows of other tenants", "worker_id", w.id, "count", completed)
+	}
+	if deadLettered > 0 {
+		w.logger.InfoContext(w.ctx, "retention: deleted dead-lettered workflows of other tenants", "worker_id", w.id, "count", deadLettered)
+	}
 }
 
 func (w *Worker) memoryCleanupLoop(maxSamples int) {
@@ -6930,23 +8141,37 @@ func (w *Worker) memoryCleanupLoop(maxSamples int) {
 			return
 		case <-ticker.C:
 			w.healthTracker.recordRun("memory_cleanup")
-			mcStart := time.Now()
-			deleted, err := w.store.CleanupMemorySamples(w.ctx, maxSamples)
-			if err != nil {
-				w.logger.ErrorContext(w.ctx, "memory cleanup error", "worker_id", w.id, "error", err)
-				w.Metrics.RecordBackgroundLoop(w.ctx, "memory_cleanup", "error")
-			} else if deleted > 0 {
-				w.logger.InfoContext(w.ctx, "memory cleanup: removed old samples", "worker_id", w.id, "count", deleted)
-			}
-			if err == nil {
-				w.Metrics.RecordBackgroundLoop(w.ctx, "memory_cleanup", "ok")
-				if deleted > 0 {
-					w.Metrics.SetBackgroundLoopItemsProcessed(w.ctx, "memory_cleanup", deleted)
-				}
-			}
-			w.Metrics.SetBackgroundLoopDuration(w.ctx, "memory_cleanup", time.Since(mcStart).Seconds())
+			w.cleanupMemorySamplesOnce(maxSamples)
 		}
 	}
+}
+
+// cleanupMemorySamplesOnce is one tick of memoryCleanupLoop, extracted so a test
+// can drive it without a ticker.
+//
+// RecordWorkflowMemory persists each sample to the store of the tenant the
+// workflow belongs to (see memory_sample_is_persisted_to_the_workflows_tenant_test.go),
+// and this loop trimmed only the worker's own tenant's, so every other tenant's
+// workflow_memory_samples grew without bound (cleat#3572). The other tenants are
+// trimmed through their own stores, after the worker's own answered.
+func (w *Worker) cleanupMemorySamplesOnce(maxSamples int) {
+	mcStart := time.Now()
+	deleted, err := w.store.CleanupMemorySamples(w.ctx, maxSamples)
+	if err != nil {
+		w.logger.ErrorContext(w.ctx, "memory cleanup error", "worker_id", w.id, "error", err)
+		w.Metrics.RecordBackgroundLoop(w.ctx, "memory_cleanup", "error")
+		w.Metrics.SetBackgroundLoopDuration(w.ctx, "memory_cleanup", time.Since(mcStart).Seconds())
+		return
+	}
+	deleted += w.sweepOtherTenants("memory cleanup", func(ctx context.Context, _ string, st engine.WorkflowStore) (int64, error) {
+		return st.CleanupMemorySamples(ctx, maxSamples)
+	})
+	if deleted > 0 {
+		w.logger.InfoContext(w.ctx, "memory cleanup: removed old samples", "worker_id", w.id, "count", deleted)
+		w.Metrics.SetBackgroundLoopItemsProcessed(w.ctx, "memory_cleanup", deleted)
+	}
+	w.Metrics.RecordBackgroundLoop(w.ctx, "memory_cleanup", "ok")
+	w.Metrics.SetBackgroundLoopDuration(w.ctx, "memory_cleanup", time.Since(mcStart).Seconds())
 }
 
 // updateDispatchLoop and dispatchPendingUpdates lived here until updates were
@@ -7015,27 +8240,84 @@ func (w *Worker) loadWASM(store engine.WorkflowStore, cacheTenant, defName strin
 	key := cacheTenant + "/" + defName + ":" + strconv.Itoa(defVersion)
 
 	// Check in-memory cache first.
+	//
+	// THE ENTRY IS VALIDATED AGAINST THE STORE'S CONTENT, NOT ITS LENGTH
+	// (cleat#3516). It was validated by length alone, so a replacement of the
+	// same size was served stale for as long as the process lived, and the
+	// deliberate replacement cleat#3497 allows (`--force`) did not take effect
+	// on a worker that had loaded the version.
+	//
+	// The length stays as the check on every hit, because it is cheap (Postgres
+	// answers it from the TOAST header). The digest costs a read of the whole
+	// row, so it is asked for at most once per wasmRevalidateInterval per key.
+	// That interval is the longest a same-length replacement can go unnoticed.
+	memoryWasStale := false
 	if cached, ok := w.wasmCache.get(key); ok {
 		dbLen, err := store.GetWASMLength(w.ctx, defName, defVersion)
-		if err == nil {
-			if dbLen == int64(len(cached)) {
+		switch {
+		case err != nil:
+			// The store cannot be asked, so serve what we have, as before.
+			w.Metrics.RecordWasmCacheHit(w.ctx)
+			return cached, nil
+		case dbLen != int64(len(cached)):
+			w.logger.InfoContext(w.ctx, "WASM cache stale, reloading", "worker_id", w.id, "key", key, "reason", "length")
+			w.wasmCache.remove(key)
+			memoryWasStale = true
+		default:
+			digest, checkedAt := w.wasmCache.verification(key)
+			now := time.Now()
+			if digest != "" && now.Sub(checkedAt) < wasmRevalidateInterval {
 				w.Metrics.RecordWasmCacheHit(w.ctx)
 				return cached, nil
 			}
-			w.logger.InfoContext(w.ctx, "WASM cache stale, reloading", "worker_id", w.id, "key", key)
-		} else {
-			w.Metrics.RecordWasmCacheHit(w.ctx)
-			return cached, nil
+			stored, loaded, derr := w.storedWASMDigest(store, defName, defVersion)
+			if derr != nil {
+				w.Metrics.RecordWasmCacheHit(w.ctx)
+				return cached, nil
+			}
+			if digest == "" {
+				digest = engine.WASMDigest(cached)
+			}
+			if stored == digest {
+				w.wasmCache.markChecked(key, digest, now)
+				w.Metrics.RecordWasmCacheHit(w.ctx)
+				return cached, nil
+			}
+			w.logger.InfoContext(w.ctx, "WASM cache stale, reloading", "worker_id", w.id, "key", key, "reason", "content")
+			w.wasmCache.remove(key)
+			memoryWasStale = true
+			if loaded != nil {
+				return w.adoptWASM(key, cacheTenant, defName, defVersion, loaded), nil
+			}
 		}
-		w.wasmCache.remove(key)
 	}
 
 	// Check disk cache before going to the database.
-	if w.wasmDiskCache != nil {
+	//
+	// The disk index maps (tenant, name, version) to the hash of the bytes
+	// that were stored when it was written, so it survives a replacement and
+	// answers with the old bytes. It is therefore checked against the store
+	// before it is trusted. The check is a read of the whole row, once per
+	// memory miss, which is the price of not downloading the bytes it would
+	// replace. If the store cannot be asked, the disk bytes are served, as
+	// they were before. It is skipped when the memory entry was just found
+	// stale: the index still names the same old bytes, and asking again would
+	// hash the row a second time to be told so.
+	if w.wasmDiskCache != nil && !memoryWasStale {
 		if cached := w.wasmDiskCache.LookupDef(cacheTenant, defName, defVersion); cached != nil {
 			w.Metrics.RecordWasmCacheMiss(w.ctx)
-			w.wasmCache.put(key, cached)
-			return cached, nil
+			stored, loaded, derr := w.storedWASMDigest(store, defName, defVersion)
+			switch {
+			case derr != nil:
+				w.wasmCache.put(key, cached)
+				return cached, nil
+			case stored == engine.WASMDigest(cached):
+				w.wasmCache.putVerified(key, cached, stored, time.Now())
+				return cached, nil
+			case loaded != nil:
+				return w.adoptWASM(key, cacheTenant, defName, defVersion, loaded), nil
+			}
+			w.logger.InfoContext(w.ctx, "WASM disk cache stale, reloading", "worker_id", w.id, "key", key)
 		}
 	}
 
@@ -7046,13 +8328,38 @@ func (w *Worker) loadWASM(store engine.WorkflowStore, cacheTenant, defName strin
 		return nil, err
 	}
 
-	// Store to disk cache for future restarts.
+	return w.adoptWASM(key, cacheTenant, defName, defVersion, wasmBytes), nil
+}
+
+// wasmRevalidateInterval is how often a cached definition is compared with the
+// store by content. A variable so a test can set it to zero.
+var wasmRevalidateInterval = 5 * time.Second
+
+// storedWASMDigest returns the digest of the bytes the store holds for a
+// definition. A store that can hash in the database does so; any other is asked
+// for the bytes, which are returned too so a mismatch does not read them twice.
+func (w *Worker) storedWASMDigest(store engine.WorkflowStore, defName string, defVersion int) (digest string, loaded []byte, err error) {
+	if d, ok := store.(engine.WASMDigester); ok {
+		digest, err = d.GetWASMDigest(w.ctx, defName, defVersion)
+		return digest, nil, err
+	}
+	loaded, err = store.LoadWASM(w.ctx, defName, defVersion)
+	if err != nil {
+		return "", nil, err
+	}
+	return engine.WASMDigest(loaded), loaded, nil
+}
+
+// adoptWASM files bytes just read from the store in both caches, with the
+// digest of what was read, and returns them.
+func (w *Worker) adoptWASM(key, cacheTenant, defName string, defVersion int, wasmBytes []byte) []byte {
+	// Store to disk cache for future restarts. StoreDef repoints the index at
+	// these bytes, which is what makes a replacement outlive a restart.
 	if w.wasmDiskCache != nil {
 		w.wasmDiskCache.StoreDef(cacheTenant, defName, defVersion, wasmBytes)
 	}
-
-	w.wasmCache.put(key, wasmBytes)
-	return wasmBytes, nil
+	w.wasmCache.putVerified(key, wasmBytes, engine.WASMDigest(wasmBytes), time.Now())
+	return wasmBytes
 }
 
 func (w *Worker) waitForDB() {
@@ -7214,10 +8521,82 @@ func (w *Worker) notifyTerminal(wf *engine.WorkflowInstance, finalStatus string)
 // Extracted so it can be tested as a rule rather than mirrored in a test file:
 // a copy of a rule passes happily after the rule changes.
 func classifyTerminalErrorCode(errorCode string, deadLettered bool) string {
-	if deadLettered && errorCode == engine.ErrUnknown.String() {
+	// "timeout" is replaced too, and "unknown" is not the only code that gets
+	// it: the engine labels a workflow-deadline expiry timeout (cleat#3752), but a
+	// run dead-lettered because its last call exhausted its retries was routed on
+	// THAT, and the dead-letter queue is triaged by the reason it routed there.
+	// The deadline is the terminal cause only when nothing more specific was
+	// already recorded.
+	if deadLettered && (errorCode == engine.ErrUnknown.String() || errorCode == engine.ErrTimeout.String()) {
 		return engine.ErrRetriesExhausted.String()
 	}
 	return errorCode
+}
+
+// classifyTerminalFailure decides whether a terminal failure is dead-lettered and what error code it carries. One
+// function for the immediate write (writeTerminalFailure) and the two-phase mark (markKilledRunForItsDefers), so a run
+// that owes defers is classified exactly as one that does not.
+func classifyTerminalFailure(errorCode string, eligibleForDLQ bool, history []engine.EventRecord) (string, bool) {
+	deadLettered := eligibleForDLQ && endedOnAnExhaustedCall(history)
+	return classifyTerminalErrorCode(errorCode, deadLettered), deadLettered
+}
+
+// markKilledRunForItsDefers routes a failed COMPONENT run that was killed with its defers still owed through a defer
+// segment, and reports whether it did (cleat#4079). On true the caller writes nothing more: the run is 'terminating', its
+// outcome and error are recorded, and it will be claimed again to run its cleanup on a fresh instance.
+//
+// Why it exists. A killed component instance is trapped and cannot be re-entered, and a fresh instance does not hold the
+// closures, so the cleanup can only run by REPLAYING the run's history on a new instance and stopping at its last stoppable
+// event (engine.WithStopAtLastStoppable), which is a defer segment. The two-phase transition already carries one: mark the
+// outcome now, run the segment, then FinalizeDeferPhase applies the outcome.
+//
+// The outcome is classified here, once, by the same rule as an immediate failure (classifyTerminalFailure), so a killed run
+// that exhausted a call and was then killed in a loop is still dead-lettered, and keeps its retention.
+//
+// It returns false, and the caller falls back to the immediate terminal write, when the engine says the run owes nothing, the
+// store cannot mark a defer phase, or the mark failed for a reason other than a lost fence. In the last case the run still
+// fails, as it did before; only the cleanup is lost, and the log says so.
+func (w *Worker) markKilledRunForItsDefers(wf *engine.WorkflowInstance, eng *engine.Engine, errMsg, errorCode, errorOp string, history, resultHistory []engine.EventRecord, queryState map[string]string) bool {
+	if eng == nil || !eng.KilledWithDefersOwed() || w.shuttingDown() {
+		return false
+	}
+	st, release := w.storeFor(wf)
+	defer release()
+	ctx := context.Background()
+
+	dps, ok := st.(engine.DeferPhaseFailureMarker)
+	if !ok {
+		w.logger.WarnContext(ctx, "a killed run owes defers but its store cannot mark a defer phase; failing it without the cleanup",
+			"worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID)
+		return false
+	}
+
+	errorCode, deadLettered := classifyTerminalFailure(errorCode, true, resultHistory)
+	status := "failed"
+	if deadLettered {
+		status = "dead_lettered"
+	}
+	var held []engine.EventRecord
+	if len(resultHistory) > len(history) {
+		held = resultHistory[len(history):]
+	}
+
+	err := dps.MarkFailureForDeferPhase(ctx, wf.ID, w.id, wf.Generation, engine.DeferPhaseFailure{
+		Status: status, ErrorMsg: errMsg, ErrorCode: errorCode, ErrorOp: errorOp, QueryState: queryState,
+	}, held)
+	if errors.Is(err, engine.ErrFenceLost) {
+		w.logger.DebugContext(ctx, "killed run: fence lost, the run was reassigned to another worker",
+			"worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID)
+		return true
+	}
+	if err != nil {
+		w.logger.ErrorContext(ctx, "could not mark a killed run for its defer phase; failing it without the cleanup",
+			"worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID, "error", err)
+		return false
+	}
+	w.logger.InfoContext(ctx, "a killed run owes defers; marked for a defer segment on a fresh instance",
+		"worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID, "outcome", status, "events_written", len(held))
+	return true
 }
 
 // writeTerminalFailure writes a workflow's terminal failure, to the dead-letter
@@ -7304,8 +8683,6 @@ func (w *Worker) writeTerminalFailure(wf *engine.WorkflowInstance, errMsg, error
 	// the failure to a specific call. cleat#979 is why that had to go: it made
 	// retention depend on the workflow author wrapping with %w. See
 	// endedOnAnExhaustedCall for what replaced it and what it cannot tell.
-	deadLettered = eligibleForDLQ && endedOnAnExhaustedCall(history)
-
 	// ...and the same fact classifies the failure, which it did not before:
 	// error_code was ALWAYS "unknown" on this path. cleat#1009.
 	//
@@ -7328,7 +8705,9 @@ func (w *Worker) writeTerminalFailure(wf *engine.WorkflowInstance, errMsg, error
 	// reads retries_exhausted, and the panic path -- which passes
 	// eligibleForDLQ=false because a recovered panic is a crash rather than a
 	// call that ran out of attempts -- keeps its own code.
-	errorCode = classifyTerminalErrorCode(errorCode, deadLettered)
+	// Both of the facts above, from the one function the two-phase mark also calls (classifyTerminalFailure), so a run that owes
+	// defers is classified exactly as one that does not.
+	errorCode, deadLettered = classifyTerminalFailure(errorCode, eligibleForDLQ, history)
 
 	var err error
 	if deadLettered {
@@ -7496,11 +8875,89 @@ func (w *Worker) releaseForAnotherWorker(wf *engine.WorkflowInstance, reason, op
 		"def_name", wf.DefName, "def_version", wf.DefVersion,
 		"check", op, "reason", reason)
 
+	w.returnToQueueAfterBackoff(wf)
+}
+
+// releaseForLimitsUnavailable returns a run to the queue because the engine
+// could not read its limits (engine.ErrLimitsUnavailable, cleat#3565), with the
+// same backoff an unservable run gets. The two differ in what they say: that
+// run needs a worker that can serve it, and this one needs the database to
+// answer a query, so the message must not send an operator looking for a
+// missing worker.
+//
+// ERROR, rate-limited per run: every release of this kind is an execution that
+// was refused rather than run under a bound it did not choose, and a
+// deployment whose settings table stays unreadable stops running work here --
+// which has to be visible.
+func (w *Worker) releaseForLimitsUnavailable(wf *engine.WorkflowInstance, cause error) {
+	ctx := context.Background()
+	const op = "limits_unavailable"
+	if w.Metrics != nil {
+		w.Metrics.RecordWorkflowRelease(ctx, op)
+	}
+	level := slog.LevelDebug
+	if w.shouldWarnUnservable(wf.ID, op, time.Now()) {
+		level = slog.LevelError
+	}
+	w.logger.Log(ctx, level,
+		"could not read this workflow's limits; returning it to the queue rather than running it under the worker's own",
+		"worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID,
+		"def_name", wf.DefName, "def_version", wf.DefVersion, "error", cause)
+	w.returnToQueueAfterBackoff(wf)
+}
+
+// releaseForComponentCompileRefused returns a run to the queue because the precompile child that would have compiled its component was killed, almost certainly by the container's
+// memory limit (engine.ErrComponentCompileRefused). The guest never ran, so there is no outcome to record; the run is released, not failed, and it may be served by a worker with more
+// memory. It is released for the refusal's retry-after, which is also how long THIS worker refuses to start another child for that component.
+//
+// ERROR, rate-limited per run, and counted on cleat_workflow_releases_total{check="component_compile_refused"} with the memory limit, the compile mode and the reason (child_killed, or low_headroom for an in-process compile the container had no memory left for) as labels: a deployment
+// whose limit is too small for its component stops running that workflow here, and has to be able to see it.
+func (w *Worker) releaseForComponentCompileRefused(wf *engine.WorkflowInstance, cause error) {
+	ctx := context.Background()
+	const op = "component_compile_refused"
+	var ref *engine.ComponentCompileRefusedError
+	retryAfter := time.Duration(0)
+	attrs := []attribute.KeyValue{}
+	if errors.As(cause, &ref) {
+		retryAfter = ref.RetryAfter
+		// STRINGS: the text exposition renders a label value with AsString, which is empty for an int or bool attribute.
+		attrs = append(attrs, attribute.String("memory_limit_mib", strconv.FormatUint(ref.MemoryLimitBytes>>20, 10)),
+			attribute.String("parallel_compilation", strconv.FormatBool(ref.ParallelCompilation)),
+			attribute.String("reason", ref.ReasonLabel()))
+	}
+	if w.Metrics != nil {
+		w.Metrics.RecordWorkflowRelease(ctx, op, attrs...)
+	}
+	level := slog.LevelDebug
+	if w.shouldWarnUnservable(wf.ID, op, time.Now()) {
+		level = slog.LevelError
+	}
+	w.logger.Log(ctx, level,
+		"could not compile this workflow's component for want of memory; returning it to the queue rather than failing it",
+		"worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID,
+		"def_name", wf.DefName, "def_version", wf.DefVersion, "retry_after", retryAfter.Round(time.Second), "error", cause)
+	w.returnToQueueAfter(wf, retryAfter)
+}
+
+// returnToQueueAfterBackoff is the release both of the above end in: next_wake_at
+// goes forward by the unservable backoff, so a run nothing can serve right now
+// costs one claim-and-release per interval across the pool rather than a spin.
+func (w *Worker) returnToQueueAfterBackoff(wf *engine.WorkflowInstance) {
+	w.returnToQueueAfter(wf, 0)
+}
+
+// returnToQueueAfter releases wf with next_wake_at forward by the LONGER of the unservable backoff and at: a caller that knows how long a retry is pointless for says so, and the
+// shared backoff is the floor so nothing releases with none.
+func (w *Worker) returnToQueueAfter(wf *engine.WorkflowInstance, at time.Duration) {
+	ctx := context.Background()
 	st, release := w.storeFor(wf)
 	defer release()
 	backoff := w.unservableBackoff
 	if backoff <= 0 {
 		backoff = defaultUnservableBackoff
+	}
+	if at > backoff {
+		backoff = at
 	}
 	err := st.ReleaseWorkflow(ctx, wf.ID, w.id, wf.Generation, time.Now().Add(backoff))
 	if errors.Is(err, engine.ErrFenceLost) {
@@ -7622,10 +9079,6 @@ func (w *Worker) finishDeferPhase(wf *engine.WorkflowInstance, execStore engine.
 	var newEvents []engine.EventRecord
 	if len(resultHistory) > len(history) {
 		newEvents = resultHistory[len(history):]
-		for i := range newEvents {
-			newEvents[i].Request = engine.Redact(newEvents[i].Request)
-			newEvents[i].Response = engine.Redact(newEvents[i].Response)
-		}
 	}
 
 	err := dps.FinalizeDeferPhase(ctx, wf.ID, w.id, wf.Generation, newEvents)
@@ -7659,6 +9112,17 @@ func (w *Worker) finishDeferPhase(wf *engine.WorkflowInstance, execStore engine.
 	// sweep, marked 'abandoned' rather than its real outcome. cleat#1976.
 	w.notifyTerminal(wf, wf.PendingTerminalStatus)
 
+	// A failure applied through the two-phase path is counted the way the immediate write counts it
+	// (recordTerminalFailureWithHistory), which it never reached. That was invisible while only a terminate, a cancel and a
+	// child of a terminating parent came through here; a killed component run (cleat#4079) is the first ordinary failure,
+	// and without this it would drop out of the failed and dead-lettered counts. Side effect: a 'failed' outcome from a
+	// force-fail or a terminating parent is counted now too, where it was not.
+	if wf.PendingTerminalStatus == "failed" || wf.PendingTerminalStatus == "dead_lettered" {
+		w.Metrics.RecordWorkflowFailed(ctx, wf.DefName, "")
+		if wf.PendingTerminalStatus == "dead_lettered" {
+			w.Metrics.RecordWorkflowsDeadLettered(ctx)
+		}
+	}
 	w.Metrics.RecordWorkflowDuration(ctx, time.Since(startedAt), wf.DefName, wf.PendingTerminalStatus, "")
 	w.logger.InfoContext(ctx, "defer phase complete; terminal outcome applied",
 		"worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID,
@@ -8356,4 +9820,36 @@ func checkRequiredDeploymentSecrets(ctx context.Context, plugins []*plugin.Loade
 		}
 	}
 	return nil
+}
+
+// continuationVersion decides which workflow version the run that follows a continue_as_new starts on.
+//
+// requested is the suspension's NewVersion: continue_as_new_versioned asks for a version, the plain form leaves
+// it 0, and 0 means "stay on the version this run is on". Until cleat#4041 the worker read wf.DefVersion
+// unconditionally, so the request was recorded, replayed and compacted and then ignored: a chain asked to move to
+// version 2 ended on version 1 and completed normally, with no error anywhere.
+//
+// A version that cannot serve the next run is REFUSED, loudly and naming the version (refusal != ""). It never
+// falls back to the current version: a long-lived chain that asked to migrate and silently did not is exactly the
+// defect this fixes. ValidateVersion is false for an undeployed version and for a deprecated one, the same
+// refusal the start route gives. The caller checks before ContinueAsNew so that nothing is written: that call
+// appends the segment's events and completes the old run in one transaction, and a refusal has to leave all of
+// it undone rather than half done.
+//
+// err is a failed READ of the definition, which says nothing about the version; the caller releases the run so a
+// later claim replays the segment and asks again.
+func continuationVersion(ctx context.Context, st interface {
+	ValidateVersion(ctx context.Context, defName string, defVersion int) (bool, error)
+}, wf *engine.WorkflowInstance, requested int) (version int, refusal string, err error) {
+	if requested == 0 || requested == wf.DefVersion {
+		return wf.DefVersion, "", nil
+	}
+	ok, err := st.ValidateVersion(ctx, wf.DefName, requested)
+	if err != nil {
+		return 0, "", err
+	}
+	if !ok {
+		return 0, fmt.Sprintf("continue_as_new: version %d of %q was requested for the next run but is not deployed (or is deprecated); the run is failed rather than continued on version %d", requested, wf.DefName, wf.DefVersion), nil
+	}
+	return requested, "", nil
 }

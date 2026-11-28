@@ -28,7 +28,7 @@ import (
 // # Why it is not LoadEventHistory
 //
 // LoadEventHistory reads the WHOLE history -- 31 columns, every event type,
-// decrypt and redact per row -- and has no step predicate, so polling it costs
+// decrypt per row -- and has no step predicate, so polling it costs
 // the whole run on every tick. Measured on postgres 16, three runs, 20 reps,
 // against runs of 100 / 1000 / 5000 chunk rows:
 //
@@ -86,17 +86,16 @@ func clampStreamChunkTailLimit(limit int) int {
 
 // scanStreamChunkRows turns the five columns every dialect selects into records.
 //
-// decryptAndRedactEventRecord is not optional and is the reason this is shared
-// rather than written three times: plugin_output is an ENCRYPTED and REDACTED
-// field on the ordinary read path, so a tail that skipped it would serve
-// ciphertext to a client that had been getting plaintext -- or worse, serve a
-// secret that RedactOnRead exists to remove. The chunk's index and finish flag
+// decryptEventRecord is not optional and is the reason this is shared
+// rather than written three times: plugin_output is an ENCRYPTED field on the
+// ordinary read path, so a tail that skipped it would serve ciphertext to a
+// client that had been getting plaintext. The chunk's index and finish flag
 // live in the payload JSON, which is itself encrypted, so populateFromPayload
 // runs on the decrypted text exactly as it does in LoadEventHistory.
 //
 // The two closures are what differ per dialect and the reason this takes them
 // rather than a store: PostgreSQL encrypts these fields and its payload column,
-// MySQL and SQL Server encrypt neither and only redact. Passing the store would
+// MySQL and SQL Server encrypt neither. Passing the store would
 // hide that difference behind an interface; passing the two steps makes each
 // call site state which treatment its rows get.
 func scanStreamChunkRows(
@@ -181,18 +180,7 @@ func (s *MySQLStore) LoadStreamChunksAfter(ctx context.Context, workflowID strin
 	}
 	defer rows.Close()
 
-	return scanStreamChunkRows(rows, workflowID, s.redactStreamChunk, identityPayload)
-}
-
-// redactStreamChunk applies this store's read-path treatment to one chunk.
-//
-// Redaction only: MySQL stores these fields in the clear -- LoadEventHistory
-// does the same, and a decrypt step here would be a treatment the write path
-// never applied.
-func (s *MySQLStore) redactStreamChunk(rec *EventRecord, _ string) {
-	if !s.disableReadRedaction {
-		rec.PluginOutput = RedactOnRead(rec.PluginOutput)
-	}
+	return scanStreamChunkRows(rows, workflowID, noRecordTreatment, identityPayload)
 }
 
 // LoadStreamChunksAfter implements StreamChunkTailReader.
@@ -223,16 +211,13 @@ func (s *MSSQLStore) LoadStreamChunksAfter(ctx context.Context, workflowID strin
 	}
 	defer rows.Close()
 
-	return scanStreamChunkRows(rows, workflowID, s.redactStreamChunk, identityPayload)
+	return scanStreamChunkRows(rows, workflowID, noRecordTreatment, identityPayload)
 }
 
-// redactStreamChunk applies this store's read-path treatment to one chunk.
-// Redaction only, for the same reason as MySQL's.
-func (s *MSSQLStore) redactStreamChunk(rec *EventRecord, _ string) {
-	if !s.disableReadRedaction {
-		rec.PluginOutput = RedactOnRead(rec.PluginOutput)
-	}
-}
+// noRecordTreatment is the record step for a store that neither encrypts nor
+// transforms these fields: MySQL and SQL Server. Nothing redacts on the way out
+// of a store; redaction is applied where data leaves the system (egress.go).
+func noRecordTreatment(*EventRecord, string) {}
 
 // identityPayload is the payload step for a store that does not encrypt it.
 func identityPayload(s string) string { return s }

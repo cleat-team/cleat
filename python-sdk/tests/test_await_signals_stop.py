@@ -1,113 +1,123 @@
-"""A stop is not a timeout.
+"""A stop is not a timeout, and a received signal is not its length.
 
 ``DurableAwaitSignals`` is one of the host's nine stop sites: a fresh await
 inside a defer segment would leave a terminated workflow waiting for a signal
 instead of finishing its cleanup, so ``stopBeforeNewWork`` returns
 ``callSuspendSentinel`` (``engine/signaller.go``).
 
-That sentinel is bit 31, and the await-signals layout puts its timed-out flag at
-bits 16-31. Decoding the word before testing the sentinel therefore yields
-``timed_out=True, err_code=0`` -- an ordinary, unremarkable result -- and the
-workflow runs on past a stop it was told to obey. IMPROVEMENT-PLAN 3.202.
-"""
+That sentinel is bit 31, and the packed layout this import used to return put
+its timed-out flag at bits 16-31, so decoding the word before testing the
+sentinel yielded ``timed_out=True, err_code=0`` -- an ordinary result -- and the
+workflow ran on past a stop it was told to obey (IMPROVEMENT-PLAN 3.202).
 
-import ast
-import inspect
-import pathlib
+The import is now ``result<signal-outcome, call-failure>`` (cleat#3786): the
+stop is ``err(call-failure.suspended)``, a case of the return type rather than a
+bit inside a word, so there is nothing left to test in a particular order. These
+tests pin what the guest sees for each case. What reaches the guest through a
+REAL component is pinned by ``engine/python_await_signals_e2e_test.go``; this
+file cannot, because outside a component the import is a stub.
+"""
 
 import pytest
 
+import cleat_sdk.host_calls as hc
 from cleat_sdk.host_calls import HostCalls, SuspendSentinel
-from cleat_sdk.memory import (
-    CALL_SUSPEND_SENTINEL,
-    SUSPEND_SENTINEL,
-    decode_await_signals_result,
-)
 
 
-class TestTheSentinelWouldOtherwiseReadAsAnOrdinaryTimeout:
-    """The arithmetic first, so the behavioural test below has a stated why."""
+class _Signal:
+    def __init__(self, name: str, payload: str) -> None:
+        self.name = name
+        self.payload = payload
 
-    def test_the_stop_sentinel_decodes_as_a_timeout(self) -> None:
-        sig_name_len, payload_len, timed_out, err_code = decode_await_signals_result(
-            CALL_SUSPEND_SENTINEL
-        )
-        # Every field reads as an ordinary "nothing arrived in time".
-        assert (sig_name_len, payload_len) == (0, 0)
-        assert timed_out is True
-        assert err_code == 0
 
-    def test_it_is_not_the_other_sentinel(self) -> None:
-        """The two are easy to conflate; only one of them was being tested for."""
-        assert CALL_SUSPEND_SENTINEL != SUSPEND_SENTINEL
-        assert CALL_SUSPEND_SENTINEL == 1 << 31
-        assert SUSPEND_SENTINEL == 1 << 62
+class _Failed:
+    def __init__(self, code: int, message: str) -> None:
+        self.value = type("CallError", (), {"code": code, "message": message})()
+
+
+def _raising(failure: object):
+    def call(*_a: object, **_k: object) -> object:
+        err = hc._WitErr()
+        err.value = failure
+        raise err
+
+    return call
+
+
+def _await(monkeypatch: pytest.MonkeyPatch, fn) -> object:
+    monkeypatch.setattr("cleat_sdk.host_calls._import_cleat_await_signals", fn)
+    return HostCalls().await_signals_ms(["approve"], 1000)
 
 
 class TestAwaitSignalsObeysAStop:
-    def test_a_stop_unwinds_rather_than_returning_a_timeout(self) -> None:
-        hc = HostCalls()
-        with (
-            pytest.MonkeyPatch.context() as mp,
-            pytest.raises(SuspendSentinel),
-        ):
-            mp.setattr(
-                "cleat_sdk.host_calls._import_cleat_await_signals",
-                lambda *a, **k: CALL_SUSPEND_SENTINEL,
-            )
-            hc.await_signals_ms(["approve"], 1000)
+    def test_a_stop_unwinds_rather_than_returning_a_timeout(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        with pytest.raises(SuspendSentinel):
+            _await(monkeypatch, _raising(hc._CallFailureSuspended()))
 
-    def test_a_real_timeout_still_returns_a_timed_out_result(self) -> None:
-        """The guard must not swallow the case it resembles."""
-        hc = HostCalls()
-        # timed-out flag set at bit 16, sentinel clear.
-        real_timeout = 1 << 16
-        assert real_timeout & CALL_SUSPEND_SENTINEL == 0
-        with pytest.MonkeyPatch.context() as mp:
-            mp.setattr(
-                "cleat_sdk.host_calls._import_cleat_await_signals",
-                lambda *a, **k: real_timeout,
-            )
-            result = hc.await_signals_ms(["approve"], 1000)
+    def test_a_host_failure_raises_and_is_not_a_timeout(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        with pytest.raises(hc.CleatCallError) as exc:
+            _await(monkeypatch, _raising(_Failed(0, "signal too large")))
+        assert "signal too large" in str(exc.value)
+
+    def test_a_real_timeout_still_returns_a_timed_out_result(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The stop must not swallow the case it resembles."""
+        result = _await(monkeypatch, lambda *a, **k: hc._SignalOutcomeTimedOut())
         assert result.timed_out is True
         assert result.name == ""
+        assert result.payload == ""
 
 
-class TestTheSentinelIsTestedBeforeTheWordIsDecoded:
-    """Order is the contract, so assert on order, not merely on presence.
+class TestAwaitSignalsReturnsWhatWasDelivered:
+    def test_name_and_payload_come_through_exactly(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        sent = _Signal("go", '{"approved":true}')
+        result = _await(monkeypatch, lambda *a, **k: hc._SignalOutcomeReceived(sent))
+        assert result.timed_out is False
+        assert (result.name, result.payload) == ("go", '{"approved":true}')
 
-    A source-level check because the ordering cannot be observed from outside:
-    both orders raise for a bare sentinel, and only a word carrying a sentinel
-    AND a field distinguishes them at runtime -- which the host does not
-    currently produce for this layout. Asserting on the source is honest about
-    that rather than inventing a value to prove it with.
-    """
+    def test_an_empty_payload_is_empty_not_missing(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        result = _await(monkeypatch, lambda *a, **k: hc._SignalOutcomeReceived(_Signal("ping", "")))
+        assert (result.name, result.payload, result.timed_out) == ("ping", "", False)
 
-    def test_raise_if_stopped_precedes_the_decode(self) -> None:
-        src = inspect.getsource(HostCalls.await_signals_ms)
-        tree = ast.parse(src.lstrip())
-        calls = [
-            n.func.id
-            for n in ast.walk(tree)
-            if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
-        ]
-        assert "_raise_if_stopped" in calls, "await_signals_ms does not test the stop sentinel"
-        assert "decode_await_signals_result" in calls
-        assert calls.index("_raise_if_stopped") < calls.index("decode_await_signals_result"), (
-            "the stop sentinel must be tested before the result word is decoded: "
-            "bit 31 lands inside this layout's timed-out field"
-        )
+    def test_the_import_is_called_with_the_names_and_a_timeout_and_nothing_else(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """No pointers: a component host cannot write through one (cleat#3786)."""
+        seen: list[tuple] = []
 
-    def test_the_sentinel_test_is_a_mask_not_an_equality(self) -> None:
-        """``result == SENTINEL`` misses a sentinel packed beside a field."""
-        src = pathlib.Path(
-            inspect.getsourcefile(HostCalls) or ""
-        ).read_text()
-        fn = next(
-            n
-            for n in ast.parse(src).body
-            if isinstance(n, ast.FunctionDef) and n.name == "_raise_if_stopped"
-        )
-        assert any(
-            isinstance(n, ast.BinOp) and isinstance(n.op, ast.BitAnd) for n in ast.walk(fn)
-        ), "_raise_if_stopped must test by mask (&), not by whole-word equality"
+        def record(*args: object) -> object:
+            seen.append(args)
+            return hc._SignalOutcomeTimedOut()
+
+        _await(monkeypatch, record)
+        assert seen == [('["approve"]', 1000)]
+
+    def test_an_unexpected_return_type_is_an_error_not_a_signal(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The packed word an old host would send must not be read as a signal."""
+        with pytest.raises(TypeError, match="signal-outcome"):
+            _await(monkeypatch, lambda *a, **k: 42)
+
+
+class TestGetScopeReturnsTheScope:
+    def test_the_record_is_returned_as_a_pair(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        scope = type("Scope", (), {"object_type": "order", "instance_key": "o-1"})()
+        monkeypatch.setattr("cleat_sdk.host_calls._import_get_scope", lambda: scope)
+        assert HostCalls().get_scope() == ("order", "o-1")
+
+    def test_no_scope_is_a_pair_of_empty_strings(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        scope = type("Scope", (), {"object_type": "", "instance_key": ""})()
+        monkeypatch.setattr("cleat_sdk.host_calls._import_get_scope", lambda: scope)
+        assert HostCalls().get_scope() == ("", "")
+
+    def test_the_import_takes_no_arguments(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The four output pointers were the defect: a component host cannot honour them."""
+        scope = type("Scope", (), {"object_type": "t", "instance_key": "k"})()
+        monkeypatch.setattr("cleat_sdk.host_calls._import_get_scope", lambda: scope)
+        HostCalls().get_scope()  # a lambda taking none would raise TypeError on any argument

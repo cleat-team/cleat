@@ -45,6 +45,11 @@ var ErrTenantNotFound = errors.New("auth: tenant not found")
 type TenantStore struct {
 	db      *sql.DB
 	dialect string
+
+	// afterTombstonePrecheck, when set, runs in ProvisionTenant between the early tombstone check and
+	// everything that follows. It exists so a test can drop a tenant in exactly that gap; it is nil in
+	// production and nothing outside this package can set it.
+	afterTombstonePrecheck func()
 }
 
 // NewTenantStore creates a TenantStore for PostgreSQL.
@@ -89,22 +94,41 @@ func NewTenantStoreForDialect(db *sql.DB, dialect string) (*TenantStore, error) 
 // a microservice maps to a tenant, an org groups a customer's tenants and
 // is the billing and ownership entity.
 func (s *TenantStore) CreateTenant(ctx context.Context, name, displayName string, orgID uuid.UUID) (uuid.UUID, error) {
-	// PostgreSQL only, and it says so rather than emitting PostgreSQL SQL to
-	// another database. RETURNING is the obstacle: MySQL has no equivalent and
-	// SQL Server spells it OUTPUT, so this needs a different statement shape
-	// per dialect rather than a different table name. It DOES have a
-	// production caller now -- cmd/cleat-worker's --create-tenant flag,
-	// cleat#1114 -- so a silent PostgreSQL fallback here would not be an
-	// inert gap, it would be the exact failure this file was fixed for,
-	// reaching a real deployment.
-	if s.dialect != DialectPostgres {
-		return uuid.Nil, fmt.Errorf("auth: CreateTenant is not implemented for %s", s.dialect)
+	stmt, err := createTenantStmt(s.dialect)
+	if err != nil {
+		return uuid.Nil, err
 	}
-	var tid uuid.UUID
-	err := s.db.QueryRowContext(ctx,
-		`INSERT INTO admin.tenants (name, display_name, org_id) VALUES ($1, $2, $3) RETURNING tenant_id`,
-		name, displayName, orgID).Scan(&tid)
-	return tid, err
+	// The id is made here rather than returned by the database. That is what
+	// lets this run on SQL Server: PostgreSQL's RETURNING has no MySQL
+	// equivalent and SQL Server spells it OUTPUT, so a statement that asks the
+	// database for the id needs a different shape per dialect. One that
+	// supplies it needs only a different placeholder (cleat#3552). It is also
+	// the shape a caller-chosen id needs, so that is a parameter away.
+	tid := uuid.New()
+	// String(), not the uuid.UUID: SQL Server's driver is handed the text form
+	// and converts it to a uniqueidentifier, as seedTenant in this package's
+	// tests already does.
+	if _, err := s.db.ExecContext(ctx, stmt, tid.String(), name, displayName, orgID.String()); err != nil {
+		return uuid.Nil, err
+	}
+	return tid, nil
+}
+
+// createTenantStmt returns the INSERT for a dialect. A function so the shapes
+// can be asserted without a database, like createAPIKeyStmt below.
+//
+// MySQL is refused, not given a shape: it is single-tenant by decision
+// (tiers.yaml, which also says where it is enforced: a database constraint would reject
+// a second tenant anyway), so a statement for it would be one that cannot succeed.
+func createTenantStmt(dialect string) (string, error) {
+	switch dialect {
+	case DialectPostgres:
+		return `INSERT INTO admin.tenants (tenant_id, name, display_name, org_id) VALUES ($1, $2, $3, $4)`, nil
+	case DialectMSSQL:
+		return `INSERT INTO admin.tenants (tenant_id, name, display_name, org_id) VALUES (@p1, @p2, @p3, @p4)`, nil
+	default:
+		return "", fmt.Errorf("auth: CreateTenant is not supported for %s: multi-tenancy is PostgreSQL and SQL Server only", dialect)
+	}
 }
 
 // CreateAPIKey creates an API key for a tenant, with no expiry and no OAuth
@@ -232,29 +256,41 @@ func createAPIKeyStmt(dialect string) (stmt string, needsKeyID bool) {
 // wrote keys to the base database and read them from the tenant's, and every
 // authenticated request 401'd. See cleat#866.
 func (s *TenantStore) ResolveTenantFromAPIKey(ctx context.Context, keyHash []byte) (uuid.UUID, error) {
+	tenantID, _, err := s.ResolveAPIKey(ctx, keyHash)
+	return tenantID, err
+}
+
+// ResolveAPIKey is ResolveTenantFromAPIKey plus the key's own id (cleat#3623), which the middleware
+// records as the request's subject. It is the one statement for both: ResolveTenantFromAPIKey answers
+// through it, so the tenant and the key id can never come from two lookups that disagree, and the
+// expiry and disabled clauses below are written once.
+func (s *TenantStore) ResolveAPIKey(ctx context.Context, keyHash []byte) (tenantID, keyID uuid.UUID, err error) {
 	// SQL Server returns UNIQUEIDENTIFIER in a byte order the uuid package does
-	// not scan directly, so the column is converted in the projection and parsed
-	// here -- the same shape as MSSQLStore.ResolveTenantFromAPIKey
-	// (engine/mssql_deployment.go:122). engine's TestMSSQLUUIDColumnsAreConverted
-	// InProjections enforces this across the tree and caught the first version
-	// of this function, which selected the raw column.
+	// not scan directly, so BOTH columns are converted in the projection and parsed
+	// here -- the same shape as MSSQLStore.ResolveAPIKey (engine/mssql_deployment.go).
+	// engine's TestMSSQLUUIDColumnsAreConvertedInProjections enforces this across
+	// the tree and caught the first version of this function, which selected the
+	// raw column.
 	if s.dialect == DialectMSSQL {
-		var raw string
-		if err := s.db.QueryRowContext(ctx, resolveAPIKeyStmt(s.dialect), keyHash).Scan(&raw); err != nil {
-			return uuid.Nil, err
+		var rawTenant, rawKey string
+		if err := s.db.QueryRowContext(ctx, resolveAPIKeyStmt(s.dialect), keyHash).Scan(&rawTenant, &rawKey); err != nil {
+			return uuid.Nil, uuid.Nil, err
 		}
-		tenantID, err := uuid.Parse(raw)
+		tenantID, err := uuid.Parse(rawTenant)
 		if err != nil {
-			return uuid.Nil, fmt.Errorf("resolve tenant from api key: parse uuid: %w", err)
+			return uuid.Nil, uuid.Nil, fmt.Errorf("resolve tenant from api key: parse tenant uuid: %w", err)
 		}
-		return tenantID, nil
+		keyID, err := uuid.Parse(rawKey)
+		if err != nil {
+			return uuid.Nil, uuid.Nil, fmt.Errorf("resolve tenant from api key: parse key uuid: %w", err)
+		}
+		return tenantID, keyID, nil
 	}
 
-	var tenantID uuid.UUID
-	if err := s.db.QueryRowContext(ctx, resolveAPIKeyStmt(s.dialect), keyHash).Scan(&tenantID); err != nil {
-		return uuid.Nil, err
+	if err := s.db.QueryRowContext(ctx, resolveAPIKeyStmt(s.dialect), keyHash).Scan(&tenantID, &keyID); err != nil {
+		return uuid.Nil, uuid.Nil, err
 	}
-	return tenantID, nil
+	return tenantID, keyID, nil
 }
 
 // resolveAPIKeyStmt mirrors createAPIKeyStmt: same table per dialect, same
@@ -271,11 +307,11 @@ func resolveAPIKeyStmt(dialect string) string {
 	case DialectMySQL:
 		// No admin schema: schema and database are one namespace in MySQL, and
 		// the keys live in the base database the DSN names.
-		return `SELECT tenant_id FROM tenant_api_keys WHERE key_hash = ? AND disabled_at IS NULL AND (expires_at IS NULL OR expires_at > NOW(6))`
+		return `SELECT tenant_id, key_id FROM tenant_api_keys WHERE key_hash = ? AND disabled_at IS NULL AND (expires_at IS NULL OR expires_at > NOW(6))`
 	case DialectMSSQL:
-		return `SELECT LOWER(CONVERT(NVARCHAR(36), tenant_id)) FROM admin.tenant_api_keys WHERE key_hash = @p1 AND disabled_at IS NULL AND (expires_at IS NULL OR expires_at > SYSUTCDATETIME())`
+		return `SELECT LOWER(CONVERT(NVARCHAR(36), tenant_id)), LOWER(CONVERT(NVARCHAR(36), key_id)) FROM admin.tenant_api_keys WHERE key_hash = @p1 AND disabled_at IS NULL AND (expires_at IS NULL OR expires_at > SYSUTCDATETIME())`
 	default:
-		return `SELECT tenant_id FROM admin.tenant_api_keys WHERE key_hash = $1 AND disabled_at IS NULL AND (expires_at IS NULL OR expires_at > now())`
+		return `SELECT tenant_id, key_id FROM admin.tenant_api_keys WHERE key_hash = $1 AND disabled_at IS NULL AND (expires_at IS NULL OR expires_at > now())`
 	}
 }
 

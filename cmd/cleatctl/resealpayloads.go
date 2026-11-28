@@ -78,6 +78,7 @@ type resealStats struct {
 	Current    int // already the newest form: nothing to do
 	NotCipher  int // values that are not ciphertext at all (plaintext, or "")
 	Unreadable int // values that open in no form -- reported, never touched
+	Raced      int // values a worker changed between the read and the write -- left as they are, for a re-run
 }
 
 // resealPayloads is the whole of the sweep, separated from flag parsing so a
@@ -393,7 +394,7 @@ func runResealPayloads(ctx context.Context, db *sql.DB, args []string) {
 	// that the database is not converted. Combined across event_history and
 	// the six tables above: a loop driving this to a clean exit needs one
 	// signal, not two to check separately.
-	if st.Unreadable > 0 || tableTotal.Unreadable > 0 ||
+	if st.Unreadable > 0 || tableTotal.Unreadable > 0 || tableTotal.Raced > 0 ||
 		(*dryRun && (st.Older > 0 || tableTotal.Older > 0)) {
 		osExit(1)
 		return
@@ -409,6 +410,9 @@ func printResealReport(st resealStats, verb string) {
 	fmt.Printf("already current:    %d\n", st.Current)
 	fmt.Printf("not ciphertext:     %d\n", st.NotCipher)
 	fmt.Printf("unreadable:         %d\n", st.Unreadable)
+	if st.Raced > 0 {
+		fmt.Printf("changed since read: %d (a worker wrote them first; nothing was overwritten -- run the sweep again)\n", st.Raced)
+	}
 	if st.Unreadable > 0 {
 		// A non-zero count is not automatically a broken rotation. A value is
 		// reported unreadable and left untouched, and the count includes

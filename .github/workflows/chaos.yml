@@ -1,0 +1,345 @@
+# ---------------------------------------------------------------------------
+# Fault-injection harness (cleat#4169): tests/chaos
+#
+# For every step boundary of a scripted workflow, inject a fault (SIGKILL then reclaim, SIGKILL then terminate, a refused event write, a signal
+# arriving while the worker is dead) against a real cleat-worker and a real PostgreSQL, and compare what a recording service received with a
+# fault-free run. See tests/chaos/README.md.
+#
+# Two tiers, as decided for 0.6.0:
+#   chaos-sample  a SEEDED random sample, bounded to a few minutes, on every pull request that touches the replay machinery.
+#   chaos-full    every boundary x every fault, on a schedule and on demand. This is the pre-release sweep and a 0.6.0 gate.
+#
+# A REQUIRED CHECK: Chaos sample
+# Required on develop since 2026-11-23 (cleat#4169; tiers.yaml's required_contexts block says why, and `Chaos sample relevance` and `Chaos full sweep` are
+# deliberately NOT required). It runs on every PR that touches the replay machinery, and it is the check that replays a run after a crash and compares it
+# with a fault-free one.
+#
+# WHY IT CAN BE REQUIRED, which it could not before #4404. A required check must REPORT on every pull request and on every merge-queue entry, and a
+# workflow-level `on.pull_request.paths` filter means the workflow does not run at all for a PR that touches none of those paths, so the check would
+# be pending forever on a docs-only PR. Now:
+#   pull_request   `Chaos sample` ALWAYS reports. The `changes` job reads the PR's diff (scripts/chaos-sample-relevant.sh holds the path list, the old
+#                  `paths:` list unchanged); when nothing relevant changed the sample is SKIPPED, which a required check accepts. A diff that cannot
+#                  be read, or an empty one, runs the sample.
+#   merge_group    `Chaos sample` is SKIPPED, and that is a decision, not an oversight: the pull-request run already gated this content, and a
+#                  seven-minute sample per queue entry would serialize behind each other. What the skip does NOT cover is the interaction between
+#                  entries in one merge group, which the sample therefore does not test. `Chaos full sweep` never runs on merge_group (87 minutes).
+#   schedule, workflow_dispatch   unchanged.
+#
+# A failure prints the seed, the script and the fault, and a one-line command that replays exactly that case.
+# ---------------------------------------------------------------------------
+name: Chaos
+
+run-name: >-
+  ${{ github.event.pull_request.title || github.event.head_commit.message || github.ref_name }}${{ github.event.action && format(' [{0}]', github.event.action) || '' }}
+
+on:
+  pull_request:
+    branches: [main, develop, "release/**"]
+    # `edited` is required: it is the activity type a BASE CHANGE fires (scripts/check-workflow-pr-triggers.sh).
+    types: [opened, synchronize, reopened, edited]
+    # NO `paths:` FILTER, deliberately: see the READY TO BE REQUIRED block above. The path list lives in scripts/chaos-sample-relevant.sh.
+  # Reports `Chaos sample` as skipped on the merge-queue commit; see the block above for why that is the decision. `types` is the default,
+  # spelled out so a reader sees it is the one a merge queue sends.
+  merge_group:
+    types: [checks_requested]
+  schedule:
+    # Every night at 03:30 UTC.
+    - cron: "30 3 * * *"
+  workflow_dispatch:
+    inputs:
+      seed:
+        description: "Seed for the generated scripts"
+        required: false
+        default: "1"
+      mode:
+        description: "sample (bounded) or full (every boundary x every fault) run the Chaos full sweep job; pr-sample runs the Chaos sample job exactly as a pull request does, with `seed` standing in for the PR number"
+        type: choice
+        options:
+          - full
+          - sample
+          - pr-sample
+        required: false
+        default: "full"
+      resident_max_runs:
+        description: "Start every worker with --resident-max-runs N (cleat#4162), to sweep at a value other than the product default (8 since 0.6.0). Empty passes nothing, so the workers run the product default, which is how 0.6.0 ships."
+        required: false
+        default: ""
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && (github.event.action == 'edited' && !github.event.changes.base && github.run_id || github.ref) || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  # Does this pull request touch the replay machinery? Only a pull request has a diff to read. Its output feeds `Chaos sample`'s `if`, and EVERY way this job
+  # can fail to answer leaves that output empty, which `Chaos sample` reads as "run it": a detector that broke must never turn the sample off.
+  changes:
+    name: Chaos sample relevance
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      relevant: ${{ steps.diff.outputs.relevant }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # A pull request is checked out as its MERGE commit: parent 1 is the base's tip, parent 2 the PR head. Two commits is enough to see both.
+          fetch-depth: 2
+      - name: The detector's own known positives and negatives
+        run: bash scripts/chaos-sample-relevant.sh --self-test
+      - name: Does the diff touch what the sample guards?
+        id: diff
+        run: |
+          set -euo pipefail
+          # `--no-renames`: a file moved OUT of a relevant directory is a change to it, so both the old and the new path are listed.
+          git diff --name-only --no-renames HEAD^1 HEAD > changed-files.txt
+          echo "changed files: $(wc -l < changed-files.txt)"
+          relevant=$(bash scripts/chaos-sample-relevant.sh < changed-files.txt)
+          echo "relevant=${relevant}" >> "$GITHUB_OUTPUT"
+          echo "relevant=${relevant}"
+
+  chaos-sample:
+    name: Chaos sample
+    needs: changes
+    # A pull request whose diff is not known to be irrelevant, or a dispatch with mode=pr-sample: the SAME job, the same command line, runner image and
+    # service container, with the seed taken from the `seed` input where there is no PR number. It exists so the sample can be run at a seed of our choosing
+    # (cleat#4169's stability window counts distinct seeds, and a seed is a PR number, so re-pushing one PR adds none). No other event reaches the steps:
+    # a merge_group entry, or a pull request that changed nothing relevant, reports this job SKIPPED.
+    #
+    # `!cancelled()` is load-bearing: `changes` is skipped on a dispatch, and a job that `needs` a skipped job is skipped too unless its condition names a
+    # status function (measured on cleat#3959, see ci.yml's edit-gate). `!= 'false'` and not `== 'true'`: an empty output (the detector failed) runs the sample.
+    if: ${{ !cancelled() && ((github.event_name == 'pull_request' && needs.changes.outputs.relevant != 'false') || (github.event_name == 'workflow_dispatch' && github.event.inputs.mode == 'pr-sample')) }}
+    runs-on: ubuntu-latest
+    # The sample is sized to finish in about seven minutes (measured: 24 runs took 3m05s in the first CI run, cleat#4188; 60 is ~7 min); the step's own go test -timeout is 20m, so a hung worker reaches its goroutine dump
+    # before this cap.
+    timeout-minutes: 30
+    services:
+      postgres:
+        # See tier1-engine's postgres service in ci.yml for the pin rationale.
+        image: mirror.gcr.io/library/postgres:16.14@sha256:95206741a5b214807675e14165369d05b93a9cf692223b616d07cca227e74b0b
+        env:
+          POSTGRES_USER: cleat
+          POSTGRES_PASSWORD: cleat
+          POSTGRES_DB: cleat
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      # An OWNER DSN: the harness creates its own database and applies the schema as owner, as tests/crash does.
+      CLEAT_CRASH_DB: postgres://cleat:cleat@localhost:5432/cleat?sslmode=disable
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      # The flake log's parser has a known-positive (a real failing job log); a parser that silently found nothing would make the stability call
+      # meaningless, so it is checked here on every run.
+      - name: Failed-case parser and flake-log self-tests
+        run: |
+          python3 scripts/chaos-failed-cases.py --self-test
+          python3 scripts/chaos-flake-log.py --self-test
+      # ONE go test process: the worker build and the database migration cost ~50 s and happen once per process, so the whole sample runs in this
+      # single invocation (setup-go's cache keeps the Go build cache between jobs). The seed is the PR number, so each PR samples differently and
+      # a re-run of the same PR repeats. A failure prints the seed, the script and a one-line command that replays it.
+      # The configuration is set as step env and echoed from it, so the line in the log is what the test run was given, not a restatement of it: a
+      # dispatched run counts toward the stability window only if this line reads the seed that was asked for, SAMPLE=60 and SCRIPTS=4.
+      - name: Seeded sample
+        # A STEP timeout below the job's, and above go test's own: go test -timeout 20m fires first for a hang inside a test and dumps its goroutines to the log; this fires for a
+        # hang go test cannot reach (cleat#4432: one run sat in this step for 35 minutes, was cancelled at the job's 30-minute limit plus the 5-minute cancellation grace, and
+        # left NO log at all, so nothing could say why). A step the runner stops while the runner is alive still lets the `if: always()` upload below run; a job-level cancel
+        # does not, so the artifact and the diagnosis step were never reached. tests/guards pin the ordering go test < step < job.
+        timeout-minutes: 25
+        env:
+          CLEAT_CHAOS_SEED: ${{ github.event.pull_request.number || github.event.inputs.seed }}
+          CLEAT_CHAOS_MODE: sample
+          CLEAT_CHAOS_SAMPLE: "60"
+          CLEAT_CHAOS_SCRIPTS: "4"
+          # An input reaches the script only as a variable, never as ${{ }} text inside it: an expression is substituted BEFORE the shell parses the
+          # script, so an input containing a quote or `$(...)` would become shell.
+          RESIDENT_INPUT: ${{ github.event.inputs.resident_max_runs }}
+        run: |
+          set -euo pipefail
+          echo "chaos-sample config: event=${GITHUB_EVENT_NAME} CLEAT_CHAOS_SEED=${CLEAT_CHAOS_SEED} CLEAT_CHAOS_MODE=${CLEAT_CHAOS_MODE} CLEAT_CHAOS_SAMPLE=${CLEAT_CHAOS_SAMPLE} CLEAT_CHAOS_SCRIPTS=${CLEAT_CHAOS_SCRIPTS} CLEAT_CHAOS_RESIDENT_MAX_RUNS='${CLEAT_CHAOS_RESIDENT_MAX_RUNS:-}'"
+          # This job does not take the residency input (it runs the product default, which is the point); refuse it rather than ignore it silently.
+          test -z "${RESIDENT_INPUT}" || { echo "::error::resident_max_runs is not an input of the sample job; leave it empty with mode=pr-sample"; exit 1; }
+          [[ "${CLEAT_CHAOS_SEED}" =~ ^[0-9]+$ ]] || { echo "::error::the seed must be a non-negative integer (a pull request number or the seed input); got '${CLEAT_CHAOS_SEED}'"; exit 1; }
+          # A resource sampler (cleat#4432), to a FILE and not to this step's output: the flake log reads go test -json events out of the failed job log, and a line that is
+          # not one is noise there, but a copy of one would be counted twice. Every 30 s: memory, the root disk, load and the largest processes. If the runner dies mid-step
+          # nothing survives; if it lives (a step timeout, a cancel) the next step prints the tail, and the artifact carries the whole file.
+          : > chaos-sample-resources.log
+          (
+            while true; do
+              {
+                echo "--- $(date -u +%FT%TZ)"
+                free -m | sed -n '1,2p'
+                df -h / | tail -n 1
+                echo "load: $(cut -d' ' -f1-3 /proc/loadavg)"
+                ps -eo pid,rss,etimes,comm --sort=-rss | head -n 8
+              } >> chaos-sample-resources.log 2>&1 || true
+              sleep 30
+            done
+          ) >/dev/null 2>&1 &
+          sampler=$!
+          # The loop's own `sleep` is a child that outlives a kill of the loop; stop it too.
+          trap 'pkill -P "${sampler}" 2>/dev/null || true; kill "${sampler}" 2>/dev/null || true' EXIT
+          go test -json -tags chaos -count=1 -timeout 20m ./tests/chaos -run 'TestChaosSeeded' 2>&1 | tee chaos-sample.log
+      # What the machine looked like, when the sample did not succeed and the runner is still there to say. It prints ONLY machine facts, never a line of chaos-sample.log: that
+      # file is go test -json, and a copy of its events in this log would be counted a second time by scripts/chaos-flake-log.py. It sets no continue-on-error (scripts/
+      # check-workflow-guards.py refuses one in a required job: it would let a step fail without failing the check) and needs none: it runs only when the job is already failing
+      # or cancelled, its commands are written never to fail, and its own timeout is short so that a diagnosis cannot hold the job as the sample did.
+      - name: Diagnose a sample that did not succeed
+        if: ${{ failure() || cancelled() }}
+        timeout-minutes: 3
+        run: |
+          echo "::group::resource samples, the last 120 lines"
+          tail -n 120 chaos-sample-resources.log || echo "(no resource log: the Seeded sample step never started)"
+          echo "::endgroup::"
+          echo "::group::kernel messages naming an out-of-memory kill"
+          { sudo -n dmesg -T 2>/dev/null || dmesg -T 2>/dev/null || true; } | grep -iE 'out of memory|oom-kill|killed process' | tail -n 20 || true
+          echo "::endgroup::"
+          echo "::group::machine now"
+          free -m || true
+          df -h / || true
+          ps -eo pid,rss,etimes,comm --sort=-rss | head -n 15 || true
+          echo "::endgroup::"
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: chaos-sample-logs
+          path: |
+            chaos-sample.log
+            chaos-sample-resources.log
+          retention-days: 14
+
+  chaos-full:
+    name: Chaos full sweep
+    # POSITIVE: exactly the two events that mean "run the sweep". This used to be written as a negation (`!= pull_request` and not a pr-sample dispatch),
+    # which would have started an 87-minute sweep on every merge-queue entry the moment `merge_group` was added to `on:`.
+    if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.event.inputs.mode != 'pr-sample')
+    runs-on: ubuntu-latest
+    timeout-minutes: 340
+    services:
+      postgres:
+        image: mirror.gcr.io/library/postgres:16.14@sha256:95206741a5b214807675e14165369d05b93a9cf692223b616d07cca227e74b0b
+        env:
+          POSTGRES_USER: cleat
+          POSTGRES_PASSWORD: cleat
+          POSTGRES_DB: cleat
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      CLEAT_CRASH_DB: postgres://cleat:cleat@localhost:5432/cleat?sslmode=disable
+      CHAOS_SEED: ${{ github.event.inputs.seed || '1' }}
+      CHAOS_MODE: ${{ github.event.inputs.mode || 'full' }}
+      # A COPY of tier1-gate.yml's pin, for the Python component row below. The provenance note and the bump procedure are written there; bump both together.
+      WASM_TOOLS_VERSION: "1.255.0"
+      WASM_TOOLS_SHA256: "a62237f4731c45f665f1115cad39acaeec02963cbc848c9473ab033eed837072"
+      # Read by tests/chaos startWorker (residencyFlags). Empty means "pass nothing", so a scheduled run is unchanged.
+      CLEAT_CHAOS_RESIDENT_MAX_RUNS: ${{ github.event.inputs.resident_max_runs || '' }}
+    steps:
+      # Both numeric inputs reach the harness as environment variables; refuse anything but an integer before a 340-minute job spends a minute on it.
+      - name: Validate the dispatch inputs
+        env:
+          SEED_VALUE: ${{ github.event.inputs.seed || '1' }}
+          RESIDENT_VALUE: ${{ github.event.inputs.resident_max_runs }}
+        run: |
+          set -euo pipefail
+          [[ "${SEED_VALUE}" =~ ^[0-9]+$ ]] || { echo "::error::seed must be a non-negative integer; got '${SEED_VALUE}'"; exit 1; }
+          [[ -z "${RESIDENT_VALUE}" || "${RESIDENT_VALUE}" =~ ^[0-9]+$ ]] || { echo "::error::resident_max_runs must be empty or a non-negative integer; got '${RESIDENT_VALUE}'"; exit 1; }
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - name: Every fixed scenario, every boundary, every fault
+        run: |
+          set -euo pipefail
+          go test -json -tags chaos -count=1 -timeout 120m ./tests/chaos -skip 'TestChaosSeeded' 2>&1 | tee chaos-fixed.log
+      # The Python guest: without these steps CI never runs it, and the slow-service case (which only bites on the component path) could not fail.
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Install componentize-py and the Python SDK
+        run: |
+          pip install --upgrade pip
+          bash scripts/install-componentize-py.sh
+          pip install -e python-sdk
+      - name: Python guest, kill-and-reclaim and the slow-service call
+        run: |
+          set -euo pipefail
+          CLEAT_CHAOS_GUEST=python CLEAT_CHAOS_SCENARIO=calls go test -json -tags chaos -count=1 -timeout 60m ./tests/chaos \
+            -run 'TestChaosSigkillThenReclaimAtEveryBoundary|TestChaosASlowServiceCallIsNotKilledByTheInstanceTimeout|TestChaosSigkillWhileAHeldRunSleepsThenReclaim|TestChaosTheDeployedScriptGuestIsTheLanguageThatWasAskedFor' 2>&1 | tee chaos-python.log
+          # `go test -run` that selects nothing exits 0, so a renamed row would leave this step green having run nothing. Require the pass event of the two rows added for the Python arm.
+          for row in TestChaosSigkillWhileAHeldRunSleepsThenReclaim TestChaosTheDeployedScriptGuestIsTheLanguageThatWasAskedFor; do
+            grep -E "\"Action\":\"pass\",\"Package\":\"[^\"]*\",\"Test\":\"${row}\"" chaos-python.log > /dev/null \
+              || { echo "::error::the Python row ${row} reported no pass: the -run pattern selected nothing, it failed, or it never finished"; exit 1; }
+          done
+      - name: Seeded scripts
+        run: |
+          set -euo pipefail
+          CLEAT_CHAOS_SEED="$CHAOS_SEED" CLEAT_CHAOS_MODE="$CHAOS_MODE" CLEAT_CHAOS_SCRIPTS=8 \
+            go test -json -tags chaos -count=1 -timeout 180m ./tests/chaos -run 'TestChaosSeeded' 2>&1 | tee chaos-seeded.log
+      # The Python COMPONENT row under "Timing rows" below needs wasm-tools, and nothing here installed it: componentize-py is a pip package and wasm-tools is not. That row
+      # declares CLEAT_REQUIRE_TOOLCHAINS=python so a missing tool fails it, and so it failed on the first nightly that ran it (2026-11-22, run 44981307897: "missing:
+      # wasm-tools") while a comment claimed the toolchain "was installed above". Same fetch as tier1-gate.yml: the retrying, sha256-verified script, not a bare curl.
+      # No actions/cache here: this runs once a night, and the script's own retry window is what protects it. It sits RIGHT BEFORE the row that needs it, and runs even if an earlier
+      # sweep step failed (like that row), so a release-download outage cannot also skip the Python guest and seeded steps above.
+      - name: Install wasm-tools
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          tarball="${RUNNER_TEMP}/wasm-tools.tar.gz"
+          unpacked="${RUNNER_TEMP}/wasm-tools-unpacked"
+          bash scripts/fetch-wasm-tools.sh "${tarball}"
+          mkdir -p "${unpacked}"
+          tar xzf "${tarball}" -C "${unpacked}" --strip-components=1
+          sudo mv "${unpacked}/wasm-tools" /usr/local/bin/wasm-tools
+          wasm-tools --version
+      # Timing-dependent rows that must not gate a pull request. They sit behind the `timing` build tag (so the Tier 1 gate, which counts a skip as a failure,
+      # never sees them as skipped: they are not compiled there), and they size their work from a measurement on the machine, so a heavily loaded runner can end
+      # one PRECONDITION FAILED. That is an honest "this measured nothing", never a pass, and it belongs here and not in a required job. Runs even if an earlier
+      # sweep step failed, so a red sweep cannot hide it.
+      - name: Timing rows (build tag timing)
+        if: ${{ !cancelled() }}
+        env:
+          # The component twin compiles a Python guest, and its toolchain (componentize-py and wasm-tools) is installed by the two steps above. Declared so that a missing tool FAILS the row instead of skipping it:
+          # a skip here would read as a pass.
+          CLEAT_REQUIRE_TOOLCHAINS: python
+        run: |
+          set -euo pipefail
+          go test -json -tags timing -count=1 -timeout 30m ./engine/ \
+            -run 'TestAHeldWaitRestartsTheExecutionFenceOnRealWasmtime|TestPythonAHeldWaitRestartsTheExecutionFenceOnAComponent' 2>&1 | tee chaos-timing.log
+          # `go test -run` that selects nothing exits 0 ("no tests to run"), so a renamed test would leave this step green having run nothing. Require EACH row's pass event.
+          for row in TestAHeldWaitRestartsTheExecutionFenceOnRealWasmtime TestPythonAHeldWaitRestartsTheExecutionFenceOnAComponent; do
+            grep -E "\"Action\":\"pass\",\"Package\":\"[^\"]*\",\"Test\":\"${row}\"" chaos-timing.log > /dev/null \
+              || { echo "::error::the timing row ${row} reported no pass: the -run pattern selected nothing, or it never finished"; exit 1; }
+          done
+      # cleat#4306, the gate PR 3 (residency on by default) ships on: a held signal wait must not resume LATER than a suspended one, end to end, at p50 and p99, on real PostgreSQL with the
+      # default NOTIFY listener on. Real worker binaries, three interleaved arms (held, off, and a control with the nudge removed that must come out LATER, so the row can fail). It sits
+      # behind `chaos timing` so no gating job compiles it, and a loaded runner can end it UNMEASURED, which is a failure and never a pass. Its numbers are in the log, not asserted
+      # beyond the comparison: read chaos-held-vs-off.log for N, p50, p99 and the margin.
+      - name: Held vs residency-off timing (tags chaos timing)
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          go test -json -tags 'chaos timing' -count=1 -timeout 30m ./tests/chaos \
+            -run 'TestAHeldSignalWaitResumesNoLaterThanASuspendedOneOnPostgres' 2>&1 | tee chaos-held-vs-off.log
+          # `go test -run` that selects nothing exits 0, so a renamed row would leave this step green having run nothing. Require its pass event.
+          grep -E '"Action":"pass","Package":"[^"]*","Test":"TestAHeldSignalWaitResumesNoLaterThanASuspendedOneOnPostgres"' chaos-held-vs-off.log > /dev/null \
+            || { echo "::error::the held-vs-off timing row reported no pass: the -run pattern selected nothing, it failed, or it never finished"; exit 1; }
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: chaos-full-logs
+          path: chaos-*.log
+          retention-days: 30

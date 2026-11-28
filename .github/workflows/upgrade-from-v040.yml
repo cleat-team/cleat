@@ -44,8 +44,17 @@ on:
 # cancelled by the next push (GitHub keeps one pending run per group, and a
 # cancelled run is a gate that did not run); superseded PR runs are cancelled.
 # scripts/check-workflow-concurrency.sh requires exactly this shape.
+# A title or body edit must not supersede the run it races (cleat#3809, the same
+# defect cleat#1688 fixed in ci.yml). `edited` is subscribed for a BASE change,
+# but it also fires for a body edit, and `github.ref` is identical for every
+# pull_request activity type, so the edited run landed in the push run's group
+# and cancelled it. A cancelled run renders as a failure, and on release/v0.6.0
+# these contexts are required. An `edited` that did not change the base gets
+# its own group (`github.run_id`), so it cancels nothing and the run it raced
+# finishes; it then runs the jobs again, as ci.yml's does. One line on purpose:
+# check-workflow-concurrency.sh reads the single line matching `^\s*group:`.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && (github.event.action == 'edited' && !github.event.changes.base && github.run_id || github.ref) || github.sha }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
@@ -109,6 +118,13 @@ jobs:
       - name: The RC refuses it, and serves a fresh database
         run: python3 scripts/upgrade_from_v040.py verify --owner-db "$OWNER_DB" --state-dir "$STATE_DIR" --rc-worker "$RUNNER_TEMP/cleat-worker-rc"
 
+      # include-hidden-files: STATE_DIR is `.upgrade-state`, a hidden directory,
+      # and upload-artifact skips hidden files by default. Until cleat#3461 this
+      # step found nothing on every run; its log said so at info level, and with
+      # if-no-files-found: ignore no warning annotation marked the step.
+      # `warn` and not `error`: when an early step fails there
+      # is legitimately no state directory, and a second failure would bury the
+      # first.
       - name: Upload worker logs
         if: always()
         uses: actions/upload-artifact@v7
@@ -117,5 +133,6 @@ jobs:
           path: |
             .upgrade-state/*.log
             .upgrade-state/manifest.json
+          include-hidden-files: true
           retention-days: 14
-          if-no-files-found: ignore
+          if-no-files-found: warn

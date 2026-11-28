@@ -61,6 +61,10 @@ type ShardedStore struct {
 	// order and stop once the budget is spent, so a fixed starting point would
 	// drain shard 0 first and starve the tail under sustained load.
 	claimCursor atomic.Uint64
+
+	// defLockWait bounds how long a def deploy queues for the cross-shard deploy lock
+	// (workflow_def_fanout_lock.go). Zero means defaultDefFanOutLockWait; a test sets a short one.
+	defLockWait time.Duration
 }
 
 // SetMetrics hands the metrics instance to every PostgreSQL shard store that
@@ -122,6 +126,41 @@ func (s *ShardedStore) PayloadEncryptionEverEnabled(ctx context.Context) (bool, 
 }
 
 var _ PayloadEncryptionState = (*ShardedStore)(nil)
+
+// IsTenantSuspended implements TenantSuspensionReader by reporting true if ANY shard says the tenant
+// is suspended (cleat#3596).
+//
+// Both start paths decide whether to refuse a suspended tenant with a type assertion on the store they
+// hold. This type used to implement nothing of the kind, so the assertion failed and the check was
+// skipped without a word: on a sharded deployment a suspended tenant could still start work.
+//
+// WHY "ANY": a shard is a database or a schema in a shared one, and nothing here knows which of them
+// carries a given tenant's row (routing is by workflow key, not tenant). Where shards are separate
+// databases each has its own admin.tenants, and asking one would make the answer depend on which; where
+// they share one, every shard answers alike. Reading the flag off all of them and refusing on a single
+// yes is right in both cases.
+// A tenant with no row on any shard is not suspended, matching the single-store reading.
+//
+// AN UNREADABLE FLAG IS NOT A CLEAR ONE. A shard that errors, or whose store neither answers nor declares
+// NoTenantSuspensionMarker, makes this an error rather than "not suspended" (a shard that DOES declare it
+// has no flag to read and counts as not suspended); the start paths turn an error into a refusal. It stops at the
+// first shard that answers yes, so a sibling's failure after that point is not consulted.
+func (s *ShardedStore) IsTenantSuspended(ctx context.Context, tenantID string) (bool, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, sh := range s.shards {
+		suspended, err := TenantSuspended(ctx, sh.Store, tenantID)
+		if err != nil {
+			return false, fmt.Errorf("is tenant suspended: shard %q: %w", sh.Config.Name, err)
+		}
+		if suspended {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+var _ TenantSuspensionReader = (*ShardedStore)(nil)
 
 // NewShardedStore creates a ShardedStore from pre-constructed WorkflowStore
 // instances (one per shard). Each store is already initialized and migrated.
@@ -458,28 +497,32 @@ func (s *ShardedStore) AppendEventHistoryBatch(ctx context.Context, workflowID s
 	return shard.Store.AppendEventHistoryBatch(ctx, workflowID, recs)
 }
 
-// LoadWASM tries each shard (WASM definitions are replicated across all shards).
+// LoadWASM reads the definition's bytes, trying the designated shard first and then the rest.
+// Definitions are replicated to every shard (sharded_store_defs.go), so any shard can answer; the
+// designated one is first so the answer agrees with what a deploy wrote there.
 func (s *ShardedStore) LoadWASM(ctx context.Context, defName string, defVersion int) ([]byte, error) {
 	var lastErr error
-	s.mu.RLock()
-	shards := s.shards
-	s.mu.RUnlock()
+	shards, _ := s.defShards(defName)
 	for _, shard := range shards {
 		wasm, err := shard.Store.LoadWASM(ctx, defName, defVersion)
 		if err == nil {
 			return wasm, nil
+		}
+		// A library member whose bytes do not match their digest (cleat#3630) is a finding about the data,
+		// not a miss: another shard's "not found" must not replace it, and another shard's intact copy must
+		// not quietly stand in for the one that is damaged. It is returned as the shard found it.
+		if errors.Is(err, ErrLibraryMemberDigestMismatch) {
+			return nil, err
 		}
 		lastErr = err
 	}
 	return nil, lastErr
 }
 
-// GetWASMLength returns the byte length of the stored WASM binary.
+// GetWASMLength returns the byte length of the stored WASM binary, designated shard first (see LoadWASM).
 func (s *ShardedStore) GetWASMLength(ctx context.Context, defName string, defVersion int) (int64, error) {
 	var lastErr error
-	s.mu.RLock()
-	shards := s.shards
-	s.mu.RUnlock()
+	shards, _ := s.defShards(defName)
 	for _, shard := range shards {
 		length, err := shard.Store.GetWASMLength(ctx, defName, defVersion)
 		if err == nil {
@@ -490,7 +533,9 @@ func (s *ShardedStore) GetWASMLength(ctx context.Context, defName string, defVer
 	return 0, lastErr
 }
 
-// ListVersions tries each shard (definitions are replicated across shards).
+// ListVersions merges the version lists of every shard. Definitions are replicated to every shard, so
+// the union is normally each shard's own list; it is a union rather than one shard's list so a version
+// that only a partly-applied deploy reached is still visible, and re-deploying it repairs the rest.
 func (s *ShardedStore) ListVersions(ctx context.Context, defName string) ([]int, error) {
 	// Merge version lists from all shards (deduped).
 	seen := make(map[int]bool)
@@ -523,6 +568,15 @@ func (s *ShardedStore) Heartbeat(ctx context.Context, workflowID, workerID strin
 		return false, fmt.Errorf("heartbeat: no shard available -- check shard configuration in CLEAT_SHARD_CONFIG")
 	}
 	return shard.Store.Heartbeat(ctx, workflowID, workerID, generation)
+}
+
+// PublishQueryState goes to the shard that owns the run, as Heartbeat does.
+func (s *ShardedStore) PublishQueryState(ctx context.Context, runID, workerID string, generation int64, queryState map[string]string) error {
+	shard := s.getShard(runID)
+	if shard == nil {
+		return fmt.Errorf("publish query state: no shard available -- check shard configuration in CLEAT_SHARD_CONFIG")
+	}
+	return shard.Store.PublishQueryState(ctx, runID, workerID, generation, queryState)
 }
 
 // HeartbeatBatchFenced groups runs by shard -- routed by WorkflowID, as every
@@ -683,7 +737,31 @@ func (s *ShardedStore) DeliverSignal(ctx context.Context, workflowID, signalName
 	if shard == nil {
 		return fmt.Errorf("deliver_signal: no shard available -- check shard configuration in CLEAT_SHARD_CONFIG")
 	}
-	return shard.Store.DeliverSignal(ctx, workflowID, signalName, payload)
+	// A refusal for a continued run names the end of its chain, and a chain crosses shards routinely, so the shard's own (shard-local) answer is replaced by the cross-shard one (cleat#4340).
+	return withContinuedTo(ctx, shard.Store.DeliverSignal(ctx, workflowID, signalName, payload), s.successorAcrossShards)
+}
+
+// DeliverSignalReceipt routes by workflow ID like its siblings and says where the signal went (cleat#4340). A run's chain is on the shard that holds the run, because a continue inserts the
+// successor on the shard of the run it continues, so forwarding works for a signal addressed to ANY run that shard holds. What it cannot do is reach a successor by ITS OWN id: getShard hashes that
+// id, which names a shard that need not hold the run. That routing is not new and not about signals; see cleat#4340's sharding note.
+func (s *ShardedStore) DeliverSignalReceipt(ctx context.Context, workflowID, signalName, payload, idempotencyKey string) (SignalReceipt, error) {
+	shard := s.getShard(workflowID)
+	if shard == nil {
+		return SignalReceipt{}, fmt.Errorf("deliver_signal: no shard available -- check shard configuration in CLEAT_SHARD_CONFIG")
+	}
+	if rs, ok := shard.Store.(SignalReceiptStore); ok {
+		r, err := rs.DeliverSignalReceipt(ctx, workflowID, signalName, payload, idempotencyKey)
+		return r, withContinuedTo(ctx, err, s.successorAcrossShards)
+	}
+	if idempotencyKey != "" {
+		si, ok := shard.Store.(SignalIdempotencyStore)
+		if !ok {
+			return SignalReceipt{}, fmt.Errorf("shard %q: %T cannot absorb a duplicate signal", shard.Config.Name, shard.Store)
+		}
+		replay, err := si.DeliverSignalIdempotent(ctx, workflowID, signalName, payload, idempotencyKey)
+		return SignalReceipt{DeliveredTo: workflowID, Replay: replay}, withContinuedTo(ctx, err, s.successorAcrossShards)
+	}
+	return SignalReceipt{DeliveredTo: workflowID}, withContinuedTo(ctx, shard.Store.DeliverSignal(ctx, workflowID, signalName, payload), s.successorAcrossShards)
 }
 
 // DeliverSignalIdempotent routes to the shard owning the workflow, like its
@@ -702,7 +780,8 @@ func (s *ShardedStore) DeliverSignalIdempotent(ctx context.Context, workflowID, 
 	if !ok {
 		return false, fmt.Errorf("shard %q: %T cannot absorb a duplicate signal", shard.Config.Name, shard.Store)
 	}
-	return si.DeliverSignalIdempotent(ctx, workflowID, signalName, payload, idempotencyKey)
+	replay, err := si.DeliverSignalIdempotent(ctx, workflowID, signalName, payload, idempotencyKey)
+	return replay, withContinuedTo(ctx, err, s.successorAcrossShards)
 }
 
 // ConsumeSignal routes by workflow ID.
@@ -758,6 +837,9 @@ func (s *ShardedStore) StartNewRunWithConcurrencyKey(ctx context.Context, runID,
 // StartNewRunWithOptions routes like StartNewRun -- by RUN id -- and refuses
 // rather than silently dropping what it cannot record. See StartOptions.
 func (s *ShardedStore) StartNewRunWithOptions(ctx context.Context, runID, defName string, defVersion int, input json.RawMessage, idempotencyKey string, tenantID string, priority int, opts StartOptions) (string, bool, error) {
+	if err := opts.Validate(); err != nil {
+		return "", false, err
+	}
 	if runID == "" {
 		runID = uuid.New().String()
 	}
@@ -823,15 +905,17 @@ func (s *ShardedStore) GetChildResult(ctx context.Context, runID string) (ChildO
 	// local walk sees no successor and answers with run 1's empty result: the
 	// original defect, reappearing on exactly the deployment the per-store fix
 	// looks like it covers.
-	terminal, err := terminalRunID(ctx, runID, s.successorAcrossShards)
-	if err != nil {
-		return ChildOutcome{}, err
-	}
-	shard := s.getShard(terminal)
-	if shard == nil {
-		return ChildOutcome{}, fmt.Errorf("get_child_result: no shard available -- check shard configuration in CLEAT_SHARD_CONFIG")
-	}
-	return shard.Store.GetChildResult(ctx, terminal)
+	//
+	// And ask again AFTER the read (cleat#4069), across shards for the same reason: the shard's own
+	// GetChildResult follows its own successors, but a successor on ANOTHER shard is invisible to it,
+	// so the chain can move to a different shard between this walk and that shard's read.
+	return readChildOutcomeFollowingTheChain(ctx, runID, s.successorAcrossShards, func(ctx context.Context, terminal string) (ChildOutcome, error) {
+		shard := s.getShard(terminal)
+		if shard == nil {
+			return ChildOutcome{}, fmt.Errorf("get_child_result: no shard available -- check shard configuration in CLEAT_SHARD_CONFIG")
+		}
+		return shard.Store.GetChildResult(ctx, terminal)
+	})
 }
 
 // ReapStaleInstances runs on every shard and returns the total reclaimed count.
@@ -1184,12 +1268,10 @@ func (s *ShardedStore) GetDueSchedules(ctx context.Context) ([]Schedule, error) 
 	return all, nil
 }
 
-// LoadWorkflowConfig tries each shard (defs are replicated across shards).
+// LoadWorkflowConfig tries the designated shard first, then the rest (defs are replicated; see LoadWASM).
 func (s *ShardedStore) LoadWorkflowConfig(ctx context.Context, defName string, defVersion int) (int, error) {
 	var lastErr error
-	s.mu.RLock()
-	shards := s.shards
-	s.mu.RUnlock()
+	shards, _ := s.defShards(defName)
 	for _, shard := range shards {
 		maxHistory, err := shard.Store.LoadWorkflowConfig(ctx, defName, defVersion)
 		if err == nil {
@@ -1200,12 +1282,10 @@ func (s *ShardedStore) LoadWorkflowConfig(ctx context.Context, defName string, d
 	return 0, lastErr
 }
 
-// LoadDAGSpec tries each shard (defs are replicated across shards).
+// LoadDAGSpec tries the designated shard first, then the rest (defs are replicated; see LoadWASM).
 func (s *ShardedStore) LoadDAGSpec(ctx context.Context, defName string, defVersion int) (json.RawMessage, error) {
 	var lastErr error
-	s.mu.RLock()
-	shards := s.shards
-	s.mu.RUnlock()
+	shards, _ := s.defShards(defName)
 	for _, shard := range shards {
 		spec, err := shard.Store.LoadDAGSpec(ctx, defName, defVersion)
 		if err == nil {
@@ -1646,29 +1726,6 @@ func (s *ShardedStore) CompleteUpdateRequest(ctx context.Context, workflowID, re
 
 // ---- Version management methods ----
 
-// DeployWorkflowDef delegates to the shard determined by the workflow name.
-func (s *ShardedStore) DeployWorkflowDef(ctx context.Context, def *WorkflowDef) error {
-	shard := s.getShard(def.Name)
-	if shard == nil {
-		return fmt.Errorf("deploy_workflow_def: no shard available -- check shard configuration in CLEAT_SHARD_CONFIG")
-	}
-	return shard.Store.DeployWorkflowDef(ctx, def)
-}
-
-// ListWorkflowDefs queries each shard and aggregates results.
-func (s *ShardedStore) ListWorkflowDefs(ctx context.Context, name string) ([]WorkflowDef, error) {
-	var all []WorkflowDef
-	err := s.forEachShard(func(store WorkflowStore) error {
-		defs, err := store.ListWorkflowDefs(ctx, name)
-		if err != nil {
-			return err
-		}
-		all = append(all, defs...)
-		return nil
-	})
-	return all, err
-}
-
 // GetWorkflowDef delegates to the shard determined by the workflow name.
 func (s *ShardedStore) GetWorkflowDef(ctx context.Context, name string, version int) (*WorkflowDef, error) {
 	shard := s.getShard(name)
@@ -1676,33 +1733,6 @@ func (s *ShardedStore) GetWorkflowDef(ctx context.Context, name string, version 
 		return nil, fmt.Errorf("get_workflow_def: no shard available -- check shard configuration in CLEAT_SHARD_CONFIG")
 	}
 	return shard.Store.GetWorkflowDef(ctx, name, version)
-}
-
-// MarkVersionDeprecated delegates to the shard determined by the workflow name.
-func (s *ShardedStore) MarkVersionDeprecated(ctx context.Context, name string, version int, deprecated bool) error {
-	shard := s.getShard(name)
-	if shard == nil {
-		return fmt.Errorf("mark_version_deprecated: no shard available -- check shard configuration in CLEAT_SHARD_CONFIG")
-	}
-	return shard.Store.MarkVersionDeprecated(ctx, name, version, deprecated)
-}
-
-// PurgeWorkflowDef delegates to the shard determined by the workflow name.
-func (s *ShardedStore) PurgeWorkflowDef(ctx context.Context, name string, version int) error {
-	shard := s.getShard(name)
-	if shard == nil {
-		return fmt.Errorf("purge_workflow_def: no shard available -- check shard configuration in CLEAT_SHARD_CONFIG")
-	}
-	return shard.Store.PurgeWorkflowDef(ctx, name, version)
-}
-
-// CountActiveInstances delegates to the shard determined by the workflow name.
-func (s *ShardedStore) CountActiveInstances(ctx context.Context, name string, version int) (int, error) {
-	shard := s.getShard(name)
-	if shard == nil {
-		return 0, fmt.Errorf("count_active_instances: no shard available -- check shard configuration in CLEAT_SHARD_CONFIG")
-	}
-	return shard.Store.CountActiveInstances(ctx, name, version)
 }
 
 // GetActiveInstanceCountsByVersion queries each shard and aggregates results.
@@ -1873,6 +1903,43 @@ func (s *ShardedStore) CancelWorkflow(ctx context.Context, workflowID, reason st
 		return fmt.Errorf("cancel_workflow: no shard available -- check shard configuration in CLEAT_SHARD_CONFIG")
 	}
 	return shard.Store.CancelWorkflow(ctx, workflowID, reason)
+}
+
+// CancelWorkflowReceipt, TerminateWorkflowReceipt and RequestCancellationReceipt implement SettleReceiptStore by routing to the shard owning the ADDRESSED workflow (cleat#4340). The
+// chain walk happens inside that shard, which holds a run's successor (a continue inserts it on the old run's shard). A shard whose store has no receipt form still does the verb,
+// and its receipt says only that the addressed run was acted on; see the sharding note on #4340: a successor addressed by its OWN id routes by that id's hash and can reach a shard
+// that does not hold it.
+func (s *ShardedStore) CancelWorkflowReceipt(ctx context.Context, workflowID, reason string) (SettleReceipt, error) {
+	shard := s.getShard(workflowID)
+	if shard == nil {
+		return SettleReceipt{}, fmt.Errorf("cancel_workflow: no shard available -- check shard configuration in CLEAT_SHARD_CONFIG")
+	}
+	if rs, ok := shard.Store.(SettleReceiptStore); ok {
+		return rs.CancelWorkflowReceipt(ctx, workflowID, reason)
+	}
+	return SettleReceipt{SettledRun: workflowID}, shard.Store.CancelWorkflow(ctx, workflowID, reason)
+}
+
+func (s *ShardedStore) TerminateWorkflowReceipt(ctx context.Context, workflowID, reason string) (SettleReceipt, error) {
+	shard := s.getShard(workflowID)
+	if shard == nil {
+		return SettleReceipt{}, fmt.Errorf("terminate_workflow: no shard available -- check shard configuration in CLEAT_SHARD_CONFIG")
+	}
+	if rs, ok := shard.Store.(SettleReceiptStore); ok {
+		return rs.TerminateWorkflowReceipt(ctx, workflowID, reason)
+	}
+	return SettleReceipt{SettledRun: workflowID}, shard.Store.TerminateWorkflow(ctx, workflowID, reason)
+}
+
+func (s *ShardedStore) RequestCancellationReceipt(ctx context.Context, workflowID, reason string) (SettleReceipt, error) {
+	shard := s.getShard(workflowID)
+	if shard == nil {
+		return SettleReceipt{}, fmt.Errorf("request_cancellation: no shard available -- check shard configuration in CLEAT_SHARD_CONFIG")
+	}
+	if rs, ok := shard.Store.(SettleReceiptStore); ok {
+		return rs.RequestCancellationReceipt(ctx, workflowID, reason)
+	}
+	return SettleReceipt{SettledRun: workflowID}, shard.Store.RequestCancellation(ctx, workflowID, reason)
 }
 
 // LoadEventHistoryBatch returns event histories for multiple workflow IDs
@@ -2092,16 +2159,36 @@ func (s *ShardedStore) StreamEventHistory(ctx context.Context, workflowID string
 
 // ResolveTenantFromAPIKey looks up a tenant UUID by API key hash across all shards.
 func (s *ShardedStore) ResolveTenantFromAPIKey(ctx context.Context, keyHash []byte) (uuid.UUID, error) {
+	tenantID, _, err := s.ResolveAPIKey(ctx, keyHash)
+	return tenantID, err
+}
+
+// keyIDResolver is what a shard's store offers when it can say which key it resolved. It is the
+// engine-side spelling of auth.KeyResolver's method, repeated here because the two packages import
+// neither each other.
+type keyIDResolver interface {
+	ResolveAPIKey(ctx context.Context, keyHash []byte) (tenantID, keyID uuid.UUID, err error)
+}
+
+// ResolveAPIKey is ResolveTenantFromAPIKey plus the key's own id (cleat#3623), asked of the shards in
+// the same order. A shard whose store cannot name the key still resolves the tenant, with a nil key id,
+// which the middleware reads as "no subject" -- the behaviour before this existed.
+func (s *ShardedStore) ResolveAPIKey(ctx context.Context, keyHash []byte) (tenantID, keyID uuid.UUID, err error) {
 	s.mu.RLock()
 	shards := s.shards
 	s.mu.RUnlock()
 	for _, shard := range shards {
-		tid, err := shard.Store.ResolveTenantFromAPIKey(ctx, keyHash)
-		if err == nil {
-			return tid, nil
+		if kr, ok := shard.Store.(keyIDResolver); ok {
+			if tid, kid, err := kr.ResolveAPIKey(ctx, keyHash); err == nil {
+				return tid, kid, nil
+			}
+			continue
+		}
+		if tid, err := shard.Store.ResolveTenantFromAPIKey(ctx, keyHash); err == nil {
+			return tid, uuid.Nil, nil
 		}
 	}
-	return uuid.Nil, fmt.Errorf("tenant not found for API key")
+	return uuid.Nil, uuid.Nil, fmt.Errorf("tenant not found for API key")
 }
 
 // AdminForceComplete marks a workflow as done, bypassing worker ownership.
@@ -2337,28 +2424,24 @@ func (s *ShardedStore) ServerNow(ctx context.Context, workflowID string) (time.T
 //
 // ShardedStore implemented neither TenantSettingsReader nor RunLimitsReader,
 // which all three dialect stores do. Both are reached by a type assertion
-// that returns silently on failure -- deliberately, per each doc comment: a
-// read failure resolves to the tier above (tenant to operator, run to
-// tenant), and the fallback direction is safe because a tenant's own settings
-// are already clamped to the operator's, so an unreadable override can only
-// end up WIDER than intended, never past the operator's ceiling. Nothing here
-// is a limit escape.
+// that returns silently on failure, and a store that does not implement a
+// reader is read as having no overrides.
 //
-// But "cannot be asked at all" is not "asked and got nothing", and the two
-// were conflated. Every failed READ already logs a warning naming its
-// fallback (tenantSettings, runLimits in engine.go); the missing-capability
-// case logged nothing, because to the `ok` check a ShardedStore looked
-// identical to a store that implements the interface and returned the zero
-// value. The first is recoverable and worth watching for; the second is a
-// permanent property of the deployment shape and was invisible.
+// "Cannot be asked at all" is not "asked and got nothing", and the two were
+// conflated. A failed READ is retried and then fails the execution
+// (ErrLimitsUnavailable, cleat#3565; it used to resolve to the tier above, which
+// is wider than the limit for a tenant that set a tighter one). The
+// missing-capability case logged nothing, because to the `ok` check a
+// ShardedStore looked identical to a store that implements the interface and
+// returned the zero value. The first is recoverable and worth watching for; the
+// second is a permanent property of the deployment shape and was invisible.
 //
-// Neither warning needs its own dedup state. tenant_settings.go and engine.go
-// already gate GetTenantSettings/GetRunLimits behind a sync.Once per Engine,
-// and shardedStoreFactory.OpenStore builds a fresh ShardedStore per request --
-// so each warning fires at most once per request regardless, the same cadence
-// the read-failure warnings already have. GetTenantSettings additionally dedups
-// ACROSS shards within one call, so a store with several incapable shards logs
-// once rather than once per shard.
+// Neither warning needs its own dedup state. ensureLimits (tenant_settings.go)
+// reads each tier once per Engine and keeps a successful read, and
+// shardedStoreFactory.OpenStore builds a fresh ShardedStore per request -- so
+// each warning fires at most once per request. GetTenantSettings additionally
+// dedups ACROSS shards within one call, so a store with several incapable
+// shards logs once rather than once per shard.
 
 // GetTenantSettings has no workflow ID to route by -- the interface reads
 // "the settings row for this store's tenant" and every shard was opened for

@@ -402,20 +402,6 @@ func TestMySQLStore_WithTenant(t *testing.T) {
 	}
 }
 
-func TestMySQLStore_WithReadRedactionDisabled(t *testing.T) {
-	db := newNoopDB(t)
-	defer db.Close()
-
-	store := NewMySQLStore(db)
-	result := store.WithReadRedactionDisabled(true)
-	if !result.disableReadRedaction {
-		t.Error("disableReadRedaction should be true")
-	}
-	if store.disableReadRedaction {
-		t.Error("original store should not be mutated")
-	}
-}
-
 func TestMySQLStore_WithIdempotencyKeyTTL(t *testing.T) {
 	db := newNoopDB(t)
 	defer db.Close()
@@ -437,12 +423,15 @@ func TestMySQLStore_WithEncryption(t *testing.T) {
 
 	store := NewMySQLStore(db)
 	enc := &PayloadEncryption{}
-	result := store.WithEncryption(enc, true)
+	// Enabling is refused on this dialect; that half is pinned, with
+	// PostgreSQL as the positive control, in
+	// TestEnablingPayloadEncryptionIsRefusedOnADialectThatCannotSeal (cleat#3906).
+	result := store.WithEncryption(enc, false)
 	if result.encryption != enc {
 		t.Error("encryption not set")
 	}
-	if !result.encryptSensitivePayloads {
-		t.Error("encryptSensitivePayloads should be true")
+	if result.encryptSensitivePayloads {
+		t.Error("encryptSensitivePayloads should be false")
 	}
 	if store.encryption != nil {
 		t.Error("original store encryption should be nil")

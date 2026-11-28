@@ -11,8 +11,9 @@ grep and GNU grep disagree on exactly those. `re` is the same everywhere.
 
 Usage:
   scripts/sdk-host-call-coverage.py            # report
-  scripts/sdk-host-call-coverage.py --check    # fail if coverage fell below the baseline
+  scripts/sdk-host-call-coverage.py --check    # fail if coverage or the surface differs from the baseline, either way
   scripts/sdk-host-call-coverage.py --update   # rewrite the baseline
+  scripts/sdk-host-call-coverage.py --self-test  # prove --check fails on a stale baseline
 """
 
 from __future__ import annotations
@@ -39,9 +40,15 @@ def _files(globs: list[str]) -> list[Path]:
     return out
 
 
+# Adapter fields that are not a method a workflow calls: the SDK method that needs one calls it on the workflow's behalf, and the usage scan
+# wires it through compositeRequires (wasm/usage.go). Counting them here would put a call nobody can write in the denominator, permanently
+# "uncovered". SideEffectRecorded (cleat#4113) is the lookup HostCallsImpl.SideEffect makes first; SideEffect is the covered method.
+COMPOSITE_ONLY_ADAPTER_FIELDS = {"SideEffectRecorded"}
+
+
 def go_surface() -> set[str]:
     src = _read(ROOT / "wasm" / "adapter_metadata.go")
-    return set(re.findall(r'FieldName:\s*"(\w+)"', src))
+    return set(re.findall(r'FieldName:\s*"(\w+)"', src)) - COMPOSITE_ONLY_ADAPTER_FIELDS
 
 
 def python_surface() -> set[str]:
@@ -84,22 +91,9 @@ def java_surface() -> set[str]:
     )
 
 
-def as_surface() -> set[str]:
-    src = _read(ROOT / "packages" / "cleat-as" / "assembly" / "host-calls.ts")
-    m = re.search(r"^export class HostCalls\b.*?\{", src, re.M | re.S)
-    if not m:
-        return set()
-    rest = src[m.end() :]
-    end = re.search(r"^\}", rest, re.M)
-    body = rest[: end.start()] if end else rest
-    names = set(re.findall(r"^  ([a-zA-Z][A-Za-z0-9]*)\s*\(", body, re.M))
-    return names - {"constructor", "if", "for", "while", "return", "switch", "catch"}
-
-
 # The call pattern below ends `\s*\(`, so it does not match a call that carries
 # an explicit type-argument list between the method name and the paren --
-# `h.cleat_call_with_retry::<Value, Value>(..)` in Rust, `h.method<T>(..)` in
-# AssemblyScript. Measured 2026-09-05 against a loosened pattern over every
+# `h.cleat_call_with_retry::<Value, Value>(..)` in Rust. Measured 2026-09-05 against a loosened pattern over every
 # glob in EXECUTED: zero calls are missed today, so this costs no number. It is
 # recorded because the zero is an accident. The one turbofish call site in the
 # tree is credited anyway, by examples/rust-workflow calling the same method in
@@ -130,11 +124,6 @@ SDKS = {
     "java": (
         java_surface,
         ["examples/java-workflow/**/*.java", "examples/saga-java-port/**/*.java", "tests/plugin-harness/testdata/javaworkflow/**/*.java", "crates/cleat-java/src/test/java/cleat/AllHostCallsCompileTest.java"],
-        lambda n: rf"\b(?:h|host|hc)\.{n}\s*\(",
-    ),
-    "assemblyscript": (
-        as_surface,
-        ["examples/as-workflow/assembly/*.ts", "examples/widget-store-as/assembly/*.ts", "tests/plugin-harness/testdata/asworkflow/assembly/*.ts", "packages/cleat-as/assembly/__compile__/*.ts"],
         lambda n: rf"\b(?:h|host|hc)\.{n}\s*\(",
     ),
 }
@@ -210,7 +199,103 @@ MODES = {
     "--executed",
     "--check-executed",
     "--update-executed",
+    "--self-test",
 }
+
+
+def compare_to_baseline(got: dict, base: dict) -> list[str]:
+    """Every way the measured coverage differs from the committed baseline, as messages.
+
+    Empty means the baseline is exactly current. Pure -- it reads no file -- so --self-test can
+    hand it a baseline that is wrong on purpose.
+    """
+    problems: list[str] = []
+    for name, d in sorted(got.items()):
+        want = base.get(name)
+        if want is None:
+            problems.append(f"{name}: not in the baseline -- add it with --update")
+            continue
+        if d["covered"] < want["covered"]:
+            problems.append(
+                f"{name}: coverage fell {want['covered']} -> {d['covered']} of {d['surface']}. "
+                f"A host call that stopped being exercised is one nothing compiles or runs."
+            )
+        elif d["covered"] > want["covered"]:
+            # A RISE FAILS, for the reason --check-executed's rise fails (read the comment there):
+            # a shrink-only ratchet cannot tell a stale baseline from an accurate one, so the file
+            # fell 10 calls behind on Go (39 recorded, 49 measured) and CI printed "run --update"
+            # on a green run for as long as it took nobody to read it (cleat#4054).
+            problems.append(
+                f"{name}: coverage rose {want['covered']} -> {d['covered']}. That is good news "
+                f"and it has to be recorded, or a later fall back to {want['covered']} passes "
+                f"unnoticed. Run: scripts/sdk-host-call-coverage.py --update"
+            )
+        # THE SURFACE IS COMPARED TOO, in both directions, because `covered` alone cannot see it.
+        # A method added to an SDK and exercised by no fixture lowers the percentage and leaves
+        # `covered` untouched, so java grew 64 -> 74 methods and rust 65 -> 73 under a green check.
+        # A surface that SHRINKS also fails: the recorded denominator then names methods that no
+        # longer exist, and the percentage computed from it is wrong the same way.
+        if d["surface"] != want["surface"]:
+            problems.append(
+                f"{name}: the SDK surface is {d['surface']} methods and the baseline says "
+                f"{want['surface']}. A method that was added or removed has to be recorded. "
+                f"Run: scripts/sdk-host-call-coverage.py --update"
+            )
+    return problems
+
+
+def self_test() -> int:
+    """Known-positives for compare_to_baseline. Reads nothing from the tree.
+
+    A guard whose only evidence is that it passes on a current baseline has not shown it can fail
+    (cleat#4054: this one passed on a baseline ten calls stale). Each case below is a baseline that
+    is wrong in ONE named way, and says which message must name it, so a case cannot pass because a
+    different check happened to fire.
+    """
+    got = {"x": {"surface": 10, "covered": 8}}
+    cases = [
+        ("exact match", {"x": {"surface": 10, "covered": 8}}, None),
+        ("covered rose (baseline lower)", {"x": {"surface": 10, "covered": 6}}, "coverage rose"),
+        ("covered fell (baseline higher)", {"x": {"surface": 10, "covered": 9}}, "coverage fell"),
+        ("surface grew under it (covered equal)", {"x": {"surface": 7, "covered": 8}}, "the SDK surface is 10"),
+        ("surface shrank under it (covered equal)", {"x": {"surface": 13, "covered": 8}}, "the SDK surface is 10"),
+        ("SDK missing from the baseline", {}, "not in the baseline"),
+    ]
+    bad = 0
+    for label, base, want_text in cases:
+        problems = compare_to_baseline(got, base)
+        ok = (not problems) if want_text is None else any(want_text in m for m in problems)
+        # The surface-only cases must fire ONLY the surface message, or the case is testing the other check.
+        if want_text and want_text.startswith("the SDK surface") and any(("coverage rose" in m or "coverage fell" in m) for m in problems):
+            ok = False
+        print(f"  {'ok  ' if ok else 'FAIL'} {label}" + ("" if ok else f"  -> {problems}"))
+        bad += 0 if ok else 1
+    # The -run pattern reader (cleat#4103). Each case names the pattern, the top-level test it is asked about, and what go test does. The
+    # known-positives are the ones the one-regex reading got WRONG; the negative controls show it still says "selects nothing" when that
+    # is true, so the fix cannot have made the guard unable to fail.
+    run_cases = [
+        ("a subtest part is not part of the name", r"^(TestA|TestB)$/^sub$", "TestA", True),
+        ("...for the other alternative", r"^(TestA|TestB)$/^sub$", "TestB", True),
+        ("negative control: a name that does not exist", r"^NoSuchTest$/^sub$", "TestA", False),
+        ("negative control: the right name, anchored away", r"^TestA$/^sub$", "TestAB", False),
+        ("a / inside a character class does not split", r"^Test[a/b]$", "Testa", True),
+        ("a / inside a group does not split", r"^(Test/A)$", "Test/A", True),
+        ("an escaped / does not split", r"^Test\/A$", "Test/A", True),
+        ("a top-level | is a separate alternative with its own elements", r"^TestA$/^x$|^TestB$", "TestB", True),
+        ("...and the first alternative still selects its own", r"^TestA$/^x$|^TestB$", "TestA", True),
+        ("no slash: the whole pattern is the name regex", r"TestA|TestB", "TestB", True),
+        ("negative control: an unmatched name with no slash", r"TestA|TestB", "TestC", False),
+    ]
+    for label, pattern, name, want in run_cases:
+        got = _top_level_selects(pattern, name)
+        ok = got == want
+        print(f"  {'ok  ' if ok else 'FAIL'} -run {label}" + ("" if ok else f"  -> selects({pattern!r}, {name!r}) = {got}, go test says {want}"))
+        bad += 0 if ok else 1
+    if bad:
+        print(f"{bad} self-test case(s) failed: --check cannot be trusted", file=sys.stderr)
+        return 1
+    print("self-test: --check fails on a stale covered (both ways) and a stale surface (both ways); -run patterns are split the way go test splits them")
+    return 0
 
 
 def main() -> int:
@@ -220,6 +305,9 @@ def main() -> int:
         print(f"unknown mode {mode!r}", file=sys.stderr)
         print(f"usage: {sys.argv[0]} [{' | '.join(sorted(MODES))}]", file=sys.stderr)
         return 2
+
+    if mode == "--self-test":
+        return self_test()
 
     # --executed and --check-executed are the A2 modes. They share the ratchet
     # shape of the compile modes above and a SEPARATE baseline key, because the
@@ -338,23 +426,10 @@ def main() -> int:
         print(f"no baseline at {BASELINE}; run --update", file=sys.stderr)
         return 2
     base = json.loads(BASELINE.read_text())
-    failed = False
-    for name, d in sorted(got.items()):
-        want = base.get(name)
-        if want is None:
-            print(f"FAIL {name}: not in the baseline -- add it with --update", file=sys.stderr)
-            failed = True
-            continue
-        if d["covered"] < want["covered"]:
-            print(
-                f"FAIL {name}: coverage fell {want['covered']} -> {d['covered']} of {d['surface']}. "
-                f"A host call that stopped being exercised is one nothing compiles or runs.",
-                file=sys.stderr,
-            )
-            failed = True
-        elif d["covered"] > want["covered"]:
-            print(f"  {name}: coverage rose {want['covered']} -> {d['covered']}; run --update to lock it in")
-    return 1 if failed else 0
+    problems = compare_to_baseline(got, base)
+    for p in problems:
+        print(f"FAIL {p}", file=sys.stderr)
+    return 1 if problems else 0
 
 
 # ---------------------------------------------------------------------------
@@ -507,30 +582,10 @@ EXECUTED = {
             "globs": ["tests/plugin-harness/testdata/hostcallsjava/**/*.java"],
             "test": "TestHostCallsJava",
             "why": "the host-call execution harness, which java was the ONLY SDK not to count. go, rust and "
-                   "assemblyscript all list their own hostcalls* fixture here and java did not, so java's "
+                   "the others list their own hostcalls* fixture here and java did not, so java's "
                    "executed number was measured over a strictly smaller set of sources than its peers' and "
                    "was not comparable to them -- it read 8/70 against rust's 27/70, a difference that was "
                    "mostly about which files the scan opened",
-        },
-    ],
-    "assemblyscript": [
-        {
-            "globs": ["tests/plugin-harness/testdata/asworkflow/assembly/*.ts"],
-            "test": "TestPluginCalls_Wasm_AS",
-            "why": "built by buildASWorkflowWasm and executed",
-        },
-        {
-            "globs": ["examples/as-workflow/assembly/*.ts"],
-            "test": "TestAssemblyScriptWorkflowExecute",
-            "why": "engine/as_workflow_e2e_test.go:30 builds examples/as-workflow and executes it",
-        },
-        # The host-call execution harness (C2, IMPROVEMENT-PLAN 3.406). All 24
-        # wave-1 calls execute here -- unlike Rust, the AssemblyScript SDK
-        # binds both cron imports.
-        {
-            "globs": ["tests/plugin-harness/testdata/hostcallsas/assembly/*.ts"],
-            "test": "TestHostCallsAS",
-            "why": "the host-call execution harness (C2); all 24 wave-1 calls, one invocation each",
         },
     ],
 }
@@ -601,6 +656,52 @@ def _invocations() -> list[tuple[str, str, str | None]]:
     return out
 
 
+def _top_level_patterns(pattern: str) -> list[str]:
+    """The regexes a `go test -run` pattern applies to TOP-LEVEL test names.
+
+    `go test` does not read -run as one regex. It splits it on `/` into one element per level of subtest, ignoring a `/` inside `[]` or
+    `()` and skipping the character after a backslash, and it splits a top-level `|` into separate alternatives, each with its own
+    elements (`splitRegexp` in the standard library's testing/match.go). Only element 0 of each alternative is matched against a top-level
+    name, so `^(TestA|TestB)$/^sub$` selects TestA and TestB, and the `$/^sub$` is the subtest filter and never part of the name's regex.
+
+    Reading the whole string as one regex reported that valid pattern as selecting nothing (cleat#4103), which made this guard unusable
+    for any job that selects a subtest. The subtest part is not checked: subtests cannot be listed statically.
+    """
+    firsts: list[str] = []
+    cur: str | None = None  # the first element of the alternative being read, once it is known
+    start = 0
+    cs = cp = 0
+    i = 0
+    while i < len(pattern):
+        c = pattern[i]
+        if c == "[":
+            cs += 1
+        elif c == "]":
+            cs = max(cs - 1, 0)  # an unmatched ']' is legal
+        elif c == "(" and cs == 0:
+            cp += 1
+        elif c == ")" and cs == 0:
+            cp -= 1
+        elif c == "\\":
+            i += 1
+        elif c == "/" and cs == 0 and cp == 0:
+            if cur is None:
+                cur = pattern[start:i]
+            start = i + 1
+        elif c == "|" and cs == 0 and cp == 0:
+            firsts.append(cur if cur is not None else pattern[start:i])
+            cur = None
+            start = i + 1
+        i += 1
+    firsts.append(cur if cur is not None else pattern[start:])
+    return firsts
+
+
+def _top_level_selects(pattern: str, name: str) -> bool:
+    """Does `go test -run <pattern>` select the top-level test `name`? Raises re.error for an invalid regex."""
+    return any(re.search(p, name) for p in _top_level_patterns(pattern))
+
+
 def _selects(module: str, test: str, invs) -> bool:
     """Is `test`, in Go module `module`, selected by some CI invocation?
 
@@ -634,7 +735,7 @@ def _selects(module: str, test: str, invs) -> bool:
         if pattern is None:
             return True
         try:
-            if re.search(pattern, test):
+            if _top_level_selects(pattern, test):
                 return True
         except re.error:
             continue
@@ -680,7 +781,7 @@ def check_run_patterns_select_something() -> list[str]:
         if pattern is None:
             continue
         try:
-            if any(re.search(pattern, n) for n in names):
+            if any(_top_level_selects(pattern, n) for n in names):
                 continue
         except re.error:
             problems.append(f"{wf}: -run '{pattern}' is not a valid regex")
@@ -719,12 +820,12 @@ LOOSE = {
         "crates/cleat-java/src/main/java/cleat/HostCalls.java",
         r"^    public\s+(?:static\s+)?[\w<>,\[\]\.\s]+?\s+([a-zA-Z][A-Za-z0-9]*)\s*\(",
     ),
-    "assemblyscript": (
-        "packages/cleat-as/assembly/host-calls.ts",
-        r"^  ([a-zA-Z][A-Za-z0-9]*)\s*(?:<[^)]*>)?\s*\(",
-    ),
 }
-_AS_KEYWORDS = {"constructor", "if", "for", "while", "return", "switch", "catch"}
+
+
+# Words the looser parse of a source file can match that are not method names. It subtracted these for every SDK; they were
+# defined for AssemblyScript and the subtraction is harmless for the others.
+_LOOSE_KEYWORDS = {"constructor", "if", "for", "while", "return", "switch", "catch"}
 
 
 def check_surface_extraction() -> list[str]:
@@ -735,7 +836,7 @@ def check_surface_extraction() -> list[str]:
         if not f.exists():
             problems.append(f"{sdk}: {path} is missing; the surface scan has nothing to read")
             continue
-        loose = set(re.findall(pattern, _read(f), re.M)) - _AS_KEYWORDS
+        loose = set(re.findall(pattern, _read(f), re.M)) - _LOOSE_KEYWORDS
         strict = SDKS[sdk][0]()
         missed = loose - strict
         if missed:
@@ -757,7 +858,7 @@ def check_hostcall_fixtures_are_counted() -> list[str]:
     the gap was not about Java. `tests/plugin-harness/testdata/hostcallsjava/`
     existed, was built and executed by TestHostCallsJava, and exercised roughly
     two dozen host calls -- and was simply not in java's EXECUTED globs, where
-    go, rust and assemblyscript all listed their own. Adding it moved java from
+    go and rust listed their own (as did the AssemblyScript SDK, since removed). Adding it moved java from
     8 to 26 with no Java code changed at all.
 
     So the number was never a statement about the SDK. It was a statement about
@@ -777,8 +878,7 @@ def check_hostcall_fixtures_are_counted() -> list[str]:
         if not d.is_dir() or not d.name.startswith("hostcalls"):
             continue
         sdk_key = d.name[len("hostcalls"):]          # hostcallsjava -> java
-        aliases = {"as": "assemblyscript"}
-        sdk = aliases.get(sdk_key, sdk_key)
+        sdk = sdk_key
         if sdk not in EXECUTED:
             continue
         rel = f"tests/plugin-harness/testdata/{d.name}/"

@@ -41,6 +41,9 @@ type testWebhookCfg struct {
 	enabled          bool
 	createdAt        time.Time
 	updatedAt        time.Time
+	// name mirrors webhook_config.name (cleat#3538): nil is a webhook with no name. This fake does not
+	// enforce uniqueness; the real databases do, and plugins/notifications' multidb tests cover it.
+	name *string
 	// deletedAt mirrors webhook_config.deleted_at (cleat#2220). nil means the
 	// row is live; every read path below filters it out once set, matching
 	// the "AND deleted_at IS NULL" production adds to every SELECT and to
@@ -182,7 +185,7 @@ func (c *fakeConn) QueryContext(_ context.Context, query string, args []driver.N
 		c.store.mu.RLock()
 		defer c.store.mu.RUnlock()
 		return c.queryWebhookExists(args)
-	case strings.Contains(query, "SELECT url, tenant_id, secret_configured FROM webhook_config"):
+	case strings.Contains(query, "SELECT url, tenant_id, secret_configured, enabled FROM webhook_config"):
 		c.store.mu.RLock()
 		defer c.store.mu.RUnlock()
 		return c.queryWebhookConfigForDelivery(args)
@@ -242,6 +245,16 @@ func (c *fakeConn) execInsertWebhookConfig(args []driver.NamedValue) (driver.Res
 	if err != nil {
 		return nil, err
 	}
+	// The name is the eighth argument (created_at and updated_at take the sixth and seventh); NULL when the
+	// webhook was created without one.
+	var name *string
+	for _, a := range args {
+		if a.Ordinal == 8 {
+			if v, ok := a.Value.(string); ok {
+				name = &v
+			}
+		}
+	}
 
 	c.store.configs = append(c.store.configs, &testWebhookCfg{
 		tenantID:         tid,
@@ -252,6 +265,7 @@ func (c *fakeConn) execInsertWebhookConfig(args []driver.NamedValue) (driver.Res
 		enabled:          true,
 		createdAt:        now,
 		updatedAt:        now,
+		name:             name,
 	})
 	return &fakeResult{rowsAffected: 1}, nil
 }
@@ -353,6 +367,10 @@ func (c *fakeConn) execUpdateWebhookConfig(args []driver.NamedValue, query strin
 						cfg.enabled = v
 					}
 				}
+			}
+		case strings.Contains(query, "name = $"+ordStr):
+			if v, err := argString(args, ord); err == nil {
+				cfg.name = &v
 			}
 		}
 	}
@@ -510,15 +528,8 @@ func (c *fakeConn) queryTenantLookup(args []driver.NamedValue) (driver.Rows, err
 	if err != nil {
 		return nil, err
 	}
-	hashHex := fmt.Sprintf("%x", keyHash)
-	tid, ok := c.store.apiKeys[hashHex]
-	if !ok {
-		return &fakeRows{columns: []string{"tenant_id"}}, nil
-	}
-	return &fakeRows{
-		columns: []string{"tenant_id"},
-		data:    [][]driver.Value{{tid}},
-	}, nil
+	cols, data := plugintest.APIKeyLookupRows(c.store.apiKeys, keyHash)
+	return &fakeRows{columns: cols, data: data}, nil
 }
 
 func (c *fakeConn) queryWebhookExists(args []driver.NamedValue) (driver.Rows, error) {
@@ -563,14 +574,14 @@ func (c *fakeConn) queryWebhookConfigForDelivery(args []driver.NamedValue) (driv
 		return nil, err
 	}
 
-	columns := []string{"url", "tenant_id", "secret_configured"}
+	columns := []string{"url", "tenant_id", "secret_configured", "enabled"}
 	cfg := findWebhookCfg(c.store.configs, id)
 	if cfg == nil || cfg.deletedAt != nil {
 		return &fakeRows{columns: columns}, nil
 	}
 	return &fakeRows{
 		columns: columns,
-		data:    [][]driver.Value{{cfg.url, cfg.tenantID.String(), cfg.secretConfigured}},
+		data:    [][]driver.Value{{cfg.url, cfg.tenantID.String(), cfg.secretConfigured, cfg.enabled}},
 	}, nil
 }
 
@@ -586,8 +597,10 @@ func (c *fakeConn) queryPendingDeliveries(args []driver.NamedValue) (driver.Rows
 		// wc.deleted_at IS NULL" (background.go, cleat#2220): an INNER join,
 		// not a LEFT one, so a delivery with no matching config row at all --
 		// not just a soft-deleted one -- is excluded too.
+		// AND wc.enabled (cleat#3539): a disabled webhook's deliveries are held,
+		// so they are not due.
 		cfg := findWebhookCfg(c.store.configs, d.webhookID)
-		if cfg == nil || cfg.deletedAt != nil {
+		if cfg == nil || cfg.deletedAt != nil || !cfg.enabled {
 			continue
 		}
 		// The payload must be []byte for driver.Value compatibility.
@@ -622,6 +635,9 @@ func (c *fakeConn) queryDeliveries(args []driver.NamedValue, query string) (driv
 		"id", "webhook_id", "event_type", "payload", "status",
 		"attempt_count", "last_attempt_at", "next_attempt_at",
 		"delivered_at", "response_code", "response_body", "created_at",
+		// Migration 9 (cleat#3612). This store does not model a redelivery: the real route
+		// is exercised against real databases in a_failed_delivery_can_be_redelivered_multidb_test.go.
+		"redelivery_count", "last_redelivered_at", "last_redelivered_by",
 	}
 	var data [][]driver.Value
 	for _, d := range c.store.deliveries {
@@ -666,6 +682,9 @@ func (c *fakeConn) queryDeliveries(args []driver.NamedValue, query string) (driv
 			responseCode,
 			responseBody,
 			d.createdAt,
+			int64(0),
+			nil,
+			nil,
 		})
 	}
 	return &fakeRows{columns: columns, data: data}, nil
@@ -689,7 +708,7 @@ func (c *fakeConn) queryGetWebhook(args []driver.NamedValue) (driver.Rows, error
 		return nil, err
 	}
 
-	columns := []string{"id", "url", "secret_configured", "events", "enabled", "created_at", "updated_at"}
+	columns := []string{"id", "url", "secret_configured", "events", "enabled", "created_at", "updated_at", "name"}
 	for _, cfg := range c.store.configs {
 		if cfg.id == id && cfg.tenantID == tid && cfg.deletedAt == nil {
 			return &fakeRows{
@@ -702,6 +721,7 @@ func (c *fakeConn) queryGetWebhook(args []driver.NamedValue) (driver.Rows, error
 					cfg.enabled,
 					cfg.createdAt,
 					cfg.updatedAt,
+					nameValue(cfg.name),
 				}},
 			}, nil
 		}
@@ -719,7 +739,7 @@ func (c *fakeConn) queryListWebhooks(args []driver.NamedValue) (driver.Rows, err
 		return nil, err
 	}
 
-	columns := []string{"id", "url", "secret_configured", "events", "enabled", "created_at", "updated_at"}
+	columns := []string{"id", "url", "secret_configured", "events", "enabled", "created_at", "updated_at", "name"}
 	var data [][]driver.Value
 	for _, cfg := range c.store.configs {
 		if cfg.tenantID == tid && cfg.deletedAt == nil {
@@ -731,6 +751,7 @@ func (c *fakeConn) queryListWebhooks(args []driver.NamedValue) (driver.Rows, err
 				cfg.enabled,
 				cfg.createdAt,
 				cfg.updatedAt,
+				nameValue(cfg.name),
 			})
 		}
 	}
@@ -740,6 +761,14 @@ func (c *fakeConn) queryListWebhooks(args []driver.NamedValue) (driver.Rows, err
 // ---------------------------------------------------------------------------
 // Argument extractors
 // ---------------------------------------------------------------------------
+
+// nameValue is a webhook's name as the driver returns it: NULL for none.
+func nameValue(name *string) driver.Value {
+	if name == nil {
+		return nil
+	}
+	return *name
+}
 
 func argString(args []driver.NamedValue, ordinal int) (string, error) {
 	for _, a := range args {

@@ -37,10 +37,10 @@
 // deployed clean, imported neither host call, and died on its first task with
 // "the HostCalls runtime was not initialized".
 //
-// Do not "tidy" this into wasm/usage.go's sdkHelperImports table. That route
-// goes through analyzer.SDKDurableHelper, which refuses any receiver whose
-// package is not named "cleat" -- a row for DAG would be written and never
-// consulted. TestARequiredHostCallIsReadFromAnImportedPackage covers this line.
+// Since cleat#3803 the build also reads the bodies of the functions a workflow calls (analyzer.DepHostCalls), so a
+// workflow that calls DAG.Execute gets these two imports that way as well. This line stays: it declares what the
+// package needs whether or not the body scan can attribute a call to it, and
+// TestARequiredHostCallIsReadFromAnImportedPackage reads it by itself.
 //
 //cleat:require ChildWorkflowWithOptions,AwaitAnyChild
 package dagrun

@@ -23,11 +23,9 @@ CI_FILE="${1:-$REPO_ROOT/.github/workflows/ci.yml}"
 # Directories that legitimately need no entry in the test-go matrix.
 #   examples, testdata           — fixtures and demos, not product code
 #   benchmarks, tests            — driven by their own dedicated CI jobs
-#   packages                     — AssemblyScript SDK. NOTE: its Go harness
-#     (packages/cleat-as/test_runner/test_runner.go) is NOT run by any CI job;
-#     the `assemblyscript` job runs `npm test`, which invokes as-pect only.
-#     Exempt here because this guard checks matrix drift, not overall coverage.
-#     Wiring that harness into CI is tracked in IMPROVEMENT-PLAN.md Phase 2.
+#   packages                     — the TypeScript SDK (packages/cleat-ts), which holds
+#     no Go. This entry named the AssemblyScript SDK's Go harness until cleat#4023
+#     removed it; it stays exempt so a Go file added there is a deliberate choice.
 #   scripts                      — scripts/finddeadexports.go is a
 #     //go:build ignore helper invoked by scripts/check-dead-exports.sh via
 #     `go run`, not a package `go build ./...` or `go test ./...` ever
@@ -58,14 +56,26 @@ go_dirs="$(find . -mindepth 2 -name '*.go' -not -path './node_modules/*' \
              -not -path '*/node_modules/*' -not -path './.claude/*' 2>/dev/null |
   sed 's|^\./||' | cut -d/ -f1 | sort -u)"
 
-# The set of directories covered by the matrix. Two forms count:
+# The set of directories covered by the matrix. Three forms count:
 #   path: ./engine/...   -> engine
 #   dir: cleat           -> cleat   (a separate Go module, tested from inside
 #                                    it with `path: ./...`; see ci.yml)
+#   PATHS='./cmd/...'    -> cmd      (a leg of a sharded job that derives its
+#                                    package list in a `case` rather than from a
+#                                    matrix entry -- see test-go-commands, whose
+#                                    two legs must together be ./cmd/... and
+#                                    prove it in the aggregate job). The
+#                                    `PATHS=` prefix is part of the pattern on
+#                                    purpose: EXCLUDE='./cmd/cleat/...' sits on
+#                                    the same line and names what that leg does
+#                                    NOT run, so a bare `./x/...` census would
+#                                    read an exclusion as coverage.
 matrix_dirs="$( {
   grep -oE 'path: .*' "$CI_FILE" |
     grep -oE '\./[A-Za-z0-9_-]+/\.\.\.' |
     sed 's|^\./||; s|/\.\.\.$||'
+  grep -oE "PATHS='\./[A-Za-z0-9_-]+/\.\.\.'" "$CI_FILE" |
+    sed "s|^PATHS='\./||; s|/\.\.\.'$||"
   grep -oE '^[[:space:]]*dir: [A-Za-z0-9_/-]+' "$CI_FILE" |
     sed 's|.*dir: ||'
 } | sort -u)"
@@ -124,8 +134,9 @@ echo "OK: all $count top-level Go package dirs are covered or exempt."
 # tracked in IMPROVEMENT-PLAN.md Phase 2. Removing a name from this list when
 # you wire its suite up must never fail the build; adding one requires saying
 # why here.
-# Empty: every suite under tests/ is now run by a workflow. Keep it that way.
 # Adding a name here requires saying why, immediately below this line.
+#
+# Empty: every suite under tests/ is now run by a workflow (tests/chaos by chaos.yml, cleat#4169). Keep it that way.
 UNWIRED_SUITES=""
 
 unreferenced=""

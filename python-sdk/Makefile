@@ -4,10 +4,10 @@
 # then stamps cleat.metadata custom sections via scripts/stamp_metadata.py.
 #
 # Prerequisites:
-#   pip install componentize-py>=0.12.0
+#   pip install componentize-py==0.25.1   (the one CI tests; python-sdk/componentize-py-requirements.txt)
 #   pip install -e python-sdk/
 #
-# Expected componentize-py version: >= 0.12.0
+# Expected componentize-py version: 0.25.1
 # Check with: componentize-py --version
 
 # Paths
@@ -63,9 +63,11 @@ stamped: $(STAMPED_FILES)
 # Pattern rule: compile a single Python workflow to WASM
 $(OUT_DIR)/%.wasm: $(EXAMPLES)/%.py pyproject.toml $(WIT_DIR)/cleat.wit
 	@mkdir -p $(OUT_DIR)
-	PYTHONPATH=$(PYTHONPATH) componentize-py componentize $< \
-		--wit $(WIT_DIR) \
-		--world $(WORLD) \
+	PYTHONPATH=$(PYTHONPATH) componentize-py \
+		-d $(WIT_DIR) \
+		-w $(WORLD) \
+		componentize $* \
+		-p $(SDK_ROOT) -p $(EXAMPLES) \
 		-o $@
 	@echo "Compiled $< -> $@"
 
@@ -163,7 +165,7 @@ help:
 	@echo "  PLUGIN_DEPS='{"llm":">=1.2.0"}'"
 	@echo ""
 	@echo "Prerequisites:"
-	@echo "  pip install componentize-py>=0.12.0"
+	@echo "  pip install componentize-py==0.25.1"
 	@echo "  pip install -e ."
 	@echo ""
-	@echo "Expected componentize-py version: >= 0.12.0"
+	@echo "Expected componentize-py version: 0.25.1"

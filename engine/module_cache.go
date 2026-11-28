@@ -53,6 +53,7 @@ import (
 //
 //	widget-store (AssemblyScript)      9,496 ->     86,400   9.1x
 //	as-workflow (AssemblyScript)      26,367 ->    141,904   5.4x
+//	(the two AssemblyScript rows are artifacts removed with the SDK, cleat#4023; kept as measured)
 //	rust-workflow (release)          149,027 ->    457,952   3.1x
 //	hostcallsrust (release)          252,411 ->    679,152   2.7x
 //	java-workflow                    299,189 ->    694,184   2.3x
@@ -75,11 +76,21 @@ type moduleLRU struct {
 	maxEnts  int
 	maxBytes int64
 	bytes    int64 // sum of every entry's estimate
+	// onEvict, when set, is called with the key of every entry the LRU EVICTS (not one it replaces or drains), after the lock is released and after the entry's
+	// release ran. A held instance refcounts the code it runs, so eviction alone frees nothing while one is held; this is how the resident set learns that the code
+	// under a held run has left the cache, so that it can send the run back (engine.ResidentSet.EvictCode) and holds never pin evicted code.
+	onEvict func(key string)
 }
 
 type moduleEntry struct {
 	key    string
 	module *wasmtime.Module
+	// held and release are set instead of module for an artifact the cache OWNS A
+	// REFERENCE TO rather than a Go object the garbage collector tracks: a compiled
+	// Component Model component (cleat#3748), a C pointer with an explicit delete.
+	// release drops the cache's own reference and nothing else; see storeHeld.
+	held    any
+	release func()
 	// bytes is the ESTIMATE, not a measurement: CompiledSizeEstimate over the
 	// wasm this module was compiled from. Stored per entry because eviction
 	// has to subtract exactly what insertion added, and recomputing from the
@@ -122,24 +133,45 @@ func (c *moduleLRU) load(key string) (*wasmtime.Module, bool) {
 // back to the count bound alone, which is what a caller with no source length
 // gets rather than a silent zero-cost entry.
 func (c *moduleLRU) store(key string, module *wasmtime.Module, wasmLen int) {
+	var releases []func()
+	var evicted []string
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	est := CompiledSizeEstimate(wasmLen)
 	if elem, ok := c.index[key]; ok {
 		entry := elem.Value.(*moduleEntry)
+		if entry.release != nil {
+			releases = append(releases, entry.release)
+			entry.held, entry.release = nil, nil
+		}
 		c.bytes += est - entry.bytes
 		entry.module = module
 		entry.bytes = est
 		c.list.MoveToFront(elem)
-		return
+	} else {
+		c.index[key] = c.list.PushFront(&moduleEntry{key: key, module: module, bytes: est})
+		c.bytes += est
+		var rel []func()
+		rel, evicted = c.evictLocked()
+		releases = append(releases, rel...)
 	}
-	c.index[key] = c.list.PushFront(&moduleEntry{key: key, module: module, bytes: est})
-	c.bytes += est
+	c.mu.Unlock()
+	runReleases(releases)
+	c.notifyEvicted(evicted)
+}
 
-	// A SINGLE entry over the byte bound is kept, not evicted on insert: the
-	// alternative is a cache that compiles a large artifact, immediately drops
-	// it, and recompiles it on the next call forever. The bound is a target
-	// for the SET, and one oversized member is better held than thrashed.
+// evictLocked drops the least recently used entries until the cache is within
+// BOTH of its bounds, and returns the release functions of the entries that
+// held a reference. The caller runs them AFTER unlocking: a release can free
+// tens of megabytes of compiled code, and doing that under the cache's mutex
+// would stall every lookup behind it.
+//
+// A SINGLE entry over the byte bound is kept, not evicted on insert: the
+// alternative is a cache that compiles a large artifact, immediately drops
+// it, and recompiles it on the next call forever. The bound is a target
+// for the SET, and one oversized member is better held than thrashed.
+func (c *moduleLRU) evictLocked() ([]func(), []string) {
+	var releases []func()
+	var keys []string
 	for c.list.Len() > 1 && (c.list.Len() > c.maxEnts || c.bytes > c.maxBytes) {
 		oldest := c.list.Back()
 		if oldest == nil {
@@ -148,14 +180,142 @@ func (c *moduleLRU) store(key string, module *wasmtime.Module, wasmLen int) {
 		c.list.Remove(oldest)
 		entry := oldest.Value.(*moduleEntry)
 		delete(c.index, entry.key)
+		keys = append(keys, entry.key)
 		c.bytes -= entry.bytes
-		// Deliberately NOT oldest.module.Close(). See the type comment: a
-		// concurrent load may have just handed this module out, and the
-		// instance that holds it keeps it alive on its own.
+		// A MODULE is deliberately NOT closed. See the type comment: a
+		// concurrent load may have just handed it out, and the instance that
+		// holds it keeps it alive on its own. A HELD artifact is released, and
+		// that is safe for the same reason by a different mechanism: every
+		// caller took its own reference under the lock before the entry could be
+		// evicted, so dropping the cache's reference cannot free what a running
+		// execution is using.
+		if entry.release != nil {
+			releases = append(releases, entry.release)
+		}
 	}
 	if c.bytes < 0 {
 		c.bytes = 0
 	}
+	return releases, keys
+}
+
+// has reports whether key is cached. It does not mark the entry used: asking must not change what the cache evicts.
+func (c *moduleLRU) has(key string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	_, ok := c.index[key]
+	return ok
+}
+
+// setOnEvict installs the eviction hook (see onEvict). It takes the lock only to publish the field.
+func (c *moduleLRU) setOnEvict(f func(key string)) {
+	c.mu.Lock()
+	c.onEvict = f
+	c.mu.Unlock()
+}
+
+// notifyEvicted calls the hook once per evicted key. It runs with NO lock held, so a hook may call back into the cache, and after the entries' releases ran.
+func (c *moduleLRU) notifyEvicted(keys []string) {
+	if len(keys) == 0 {
+		return
+	}
+	c.mu.Lock()
+	f := c.onEvict
+	c.mu.Unlock()
+	if f == nil {
+		return
+	}
+	for _, k := range keys {
+		f(k)
+	}
+}
+
+func runReleases(releases []func()) {
+	for _, r := range releases {
+		r()
+	}
+}
+
+// loadHeld returns a NEW reference to the artifact cached under key, taken by
+// acquire while the cache's lock is held, and marks the entry most recently
+// used.
+//
+// The lock is what makes this safe: eviction needs it too, so the cache's own
+// reference cannot be released between finding the entry and acquire taking the
+// caller's. acquire must be cheap, because it runs under the lock; for a
+// component it is a reference-count increment, measured at 21 microseconds.
+func (c *moduleLRU) loadHeld(key string, acquire func(held any) any) (any, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	elem, ok := c.index[key]
+	if !ok {
+		return nil, false
+	}
+	entry := elem.Value.(*moduleEntry)
+	if entry.held == nil {
+		return nil, false
+	}
+	c.list.MoveToFront(elem)
+	return acquire(entry.held), true
+}
+
+// storeHeld inserts an artifact the cache owns one reference to. release drops
+// that reference, and runs when the entry is evicted, replaced or drained,
+// never under the lock. est is its cost against the byte bound, which for a
+// compiled component is CompiledComponentSizeEstimate over its serialized
+// artifact and not an estimate over its wasm's length: a component's wasm is
+// mostly a memory snapshot, so its length does not predict the cost (cleat#4389).
+//
+// The artifacts share the modules' budget on purpose: one entry bound and one
+// byte bound a deployment can size against, not two that add up to twice what it
+// was told.
+func (c *moduleLRU) storeHeld(key string, held any, release func(), est int64) {
+	var releases []func()
+	var evicted []string
+	c.mu.Lock()
+	if elem, ok := c.index[key]; ok {
+		entry := elem.Value.(*moduleEntry)
+		if entry.release != nil {
+			releases = append(releases, entry.release)
+		}
+		c.bytes += est - entry.bytes
+		entry.module, entry.held, entry.release, entry.bytes = nil, held, release, est
+		c.list.MoveToFront(elem)
+	} else {
+		c.index[key] = c.list.PushFront(&moduleEntry{key: key, held: held, release: release, bytes: est})
+		c.bytes += est
+		var rel []func()
+		rel, evicted = c.evictLocked()
+		releases = append(releases, rel...)
+	}
+	c.mu.Unlock()
+	runReleases(releases)
+	c.notifyEvicted(evicted)
+}
+
+// drainHeld releases and removes every held artifact. Modules are left alone,
+// as they always were. It is what a backend's Close calls: a Go-tracked module
+// is reclaimed by the collector, but a held reference is a C allocation that
+// nothing else will free.
+func (c *moduleLRU) drainHeld() {
+	var releases []func()
+	c.mu.Lock()
+	for elem := c.list.Front(); elem != nil; {
+		next := elem.Next()
+		entry := elem.Value.(*moduleEntry)
+		if entry.held != nil {
+			c.list.Remove(elem)
+			delete(c.index, entry.key)
+			c.bytes -= entry.bytes
+			releases = append(releases, entry.release)
+		}
+		elem = next
+	}
+	if c.bytes < 0 {
+		c.bytes = 0
+	}
+	c.mu.Unlock()
+	runReleases(releases)
 }
 
 // estimatedBytes reports the cache's estimated resident cost. It is the

@@ -1,4 +1,7 @@
-# -- Number of worker replicas to run.
+# -- Number of worker replicas to run. Used ONLY when autoscaling.enabled is false.
+# With autoscaling on (the default) the HorizontalPodAutoscaler owns the replica count and the chart does not
+# render it (cleat#3761): a new Deployment starts at 1 and the autoscaler raises it to autoscaling.minReplicas,
+# so set minReplicas to the floor you want, not replicaCount.
 replicaCount: 3
 
 # -- Image configuration for the cleat-worker container.
@@ -98,6 +101,19 @@ migration:
   # -- Seconds before the Job is failed. A first migration onto a large table can be slow.
   activeDeadlineSeconds: 900
 
+# -- Stop-first guard for the 0.5.0 to 0.6.0 upgrade (cleat#3758). TEMPORARY: removed after 0.6.0 (cleat#3759).
+#
+# An upgrade from 0.5.x is stop-first (D79): the migration hook runs BEFORE any pod is replaced, so a plain
+# `helm upgrade` migrates the schema under running 0.5.x workers. The chart refuses that, before the hook,
+# when the live worker Deployment runs an identifiably 0.5.x image (a 0.5, 0.5.N or v0.5.N tag) with replicas
+# above 0 and the image being deployed is not 0.5.x. It does NOT fire for the tag `latest` or a digest-only
+# image (they carry no version), for pods still terminating after a scale to 0, or under `helm template`,
+# `--dry-run` and GitOps renderers (no cluster to look up). See docs/operations/upgrading.md.
+upgrade:
+  # -- Skip the guard and run the unsupported rolling upgrade anyway. Only `true` skips it; any other value,
+  # including the string "false" from a quoted values file or --set-string, leaves the guard on.
+  allowLiveWorkers: false
+
 # -- HTTP API server configuration.
 api:
   # -- Port for the HTTP API, health checks, and metrics endpoint.
@@ -153,22 +169,72 @@ auth:
   # -- Key within existingSecret holding the admin API key.
   existingSecretKey: "admin-api-key"
 
-# -- Container resource requests and limits.
+# -- Container resource requests and limits. The defaults are chosen to WORK, not to be optimal:
+# a worker that is killed or starved by its own limit is a worse default than a pod that asks for
+# more than a small workload needs. Override `resources` to shrink them for a workload you have
+# measured, and SET BOTH `requests` and `limits` for each of cpu and memory: Helm merges your values
+# over these maps, so setting only a limit below the default request (or only a request above the
+# default limit) leaves a request above its limit, which Kubernetes rejects. The chart refuses that at
+# render time with a message that says what to set (templates/_resources-guard.tpl).
+#
+# WHAT A WORKER ACTUALLY USES (arm64 Linux, 2026-11-22/23; cleat#4377 and cleat#4389 have the data):
+#   - an idle worker with no workflows: about 35 MiB resident.
+#   - after one guest has compiled and run, the process baseline is about 207 MiB for Go,
+#     112 MiB for C# and 565 MiB for Python (medians of 21 runs each). The first Python
+#     component a worker compiles peaks about 475 to 525 MiB ABOVE that baseline for a second
+#     or two, once per distinct component per worker. Measured under a cgroup limit, that compile
+#     was OOM-killed at 512m (the old default) for both Python builds, and completed at 768m, 1g
+#     and 2g; a C# compile was killed at 128m and completed at 512m. So with the old 512Mi limit a
+#     Python workflow could not run at all.
+#   - each HELD run (residency, on by default) adds on top: Go about 1.5 MiB, Python 1.3 MiB once
+#     cleat#4382 is in (12 MiB before), C# 17 MiB once cleat#4378 is in (49 before), plus whatever
+#     the guest itself allocates. The compiled-module cache holds about 100 MiB per distinct
+#     Python component and about 10 to 17 MiB per C# one.
+# RESIDENCY'S BUDGET IS A SHARE OF THE LIMIT: unless --resident-memory-budget-mb is set it is
+# 8 held runs x the dearest per-run charge (66 MiB for C#), 528 MiB, which was MORE than the old
+# 512Mi limit and is a quarter of 2Gi. And the worker stops claiming new work when its memory
+# reaches --memory-soft-limit (0.80) of the container limit, read from the cgroup: 1.6 GiB at 2Gi.
+#
+# CPU: a Python compile took 11.4 s at a 0.5 CPU limit (twice) against 1.2 to 2.4 s
+# unconstrained on a 10-CPU machine, and 4.3 to 7.6 s at 2 CPUs (the machine was shared, so the
+# 1 and 2 CPU rows are noisy; the 0.5 CPU row is not). The old 500m limit throttled every compile
+# for about ten seconds. The CPU REQUEST is what the autoscaler measures utilization against (see
+# autoscaling), so it is sized for a worker doing real work, not for an idle one.
+# The migration Job (templates/migrate-job.yaml) uses the same values.
+#
+# THE MEMORY REQUEST EQUALS THE LIMIT (2Gi), by the owner's decision (2026-11-23): a worker RESERVES its
+# memory. The scheduler sets 2Gi aside for it, it cannot be over-committed away, and because it can never use
+# more than it requested, node-pressure eviction ranks it behind every pod that does. (The pod's QoS class is
+# still Burstable, not Guaranteed, because the CPU request is below the CPU limit; that is on purpose, see
+# the CPU note above. From the Kubernetes documentation, not tested on a cluster.) The price is
+# scheduling: the default 2 replicas need 4 GiB of allocatable memory free, and the pre-upgrade migration
+# Job asks for another 2 GiB while the old pods are still running. Lower BOTH requests.memory and
+# limits.memory together for a smaller cluster.
 resources:
   requests:
-    cpu: 100m
-    memory: 128Mi
-  limits:
     cpu: 500m
-    memory: 512Mi
+    memory: 2Gi
+  limits:
+    cpu: "2"
+    memory: 2Gi
 
 # -- HorizontalPodAutoscaler configuration.
 autoscaling:
   enabled: true
   minReplicas: 2
   maxReplicas: 10
+  # -- Scale on CPU utilization, as a percentage of resources.requests.cpu.
   targetCPU: 70
-  targetMemory: 80
+  # -- Memory utilization target (percent of resources.requests.memory). UNSET BY DEFAULT, and the
+  # HPA renders no memory metric unless you set it. A worker's memory is dominated by things that
+  # grow by design and do not follow load: the compiled-module cache, the held runs, the
+  # allocator's retention. The metric is also a percentage of the REQUEST, and per-pod usage does
+  # not fall when replicas are added, so a target below what one warmed worker uses pins the HPA at
+  # maxReplicas: with the old 128Mi request the 80% target was 102 MiB, and a warmed Go worker
+  # baseline is about 207 MiB, which is 162% of the request, so the HPA computes
+  # ceil(2 x 162/80) = 5 replicas, and then, since each pod still uses 207 MiB, 10.
+  # (From the HPA's documented formula and measured baselines, not from a cluster run.)
+  # targetMemory: 80
 
 # -- Prometheus monitoring configuration.
 monitoring:
@@ -209,5 +275,52 @@ nodeSelector: {}
 # -- Pod tolerations.
 tolerations: []
 
-# -- Pod affinity rules.
+# -- Pod affinity rules. Left to you: the chart sets none, and what keeps the workers on different nodes is
+# topologySpread below, not this. If you set podAntiAffinity here as well, a cluster with fewer nodes than
+# replicas will leave the extra pods Pending when the rule is "required", which topologySpread does not do.
 affinity: {}
+
+# -- Spread the worker pods across nodes, so two workers do not share one machine (cleat#4439). The owner's
+# requirement is that the two workers the autoscaler keeps as a floor are on separate hardware, which needs
+# at least TWO schedulable nodes: on a one-node cluster both workers run on it, whatever this is set to.
+#
+# THE DEFAULT SPREADS BUT DOES NOT REFUSE. `whenUnsatisfiable: ScheduleAnyway` makes this a preference the
+# scheduler weighs heavily, not a rule: on a one-node cluster, or when the other node is full, cordoned or
+# tainted, the pods still start, together. That is deliberate, so the chart installs and runs everywhere. If
+# you would rather have a Pending pod than two workers on one node, set whenUnsatisfiable to DoNotSchedule.
+# Measured on kind (2026-11-23), two workers and one of two nodes cordoned: DoNotSchedule leaves the second
+# worker Pending, and ScheduleAnyway starts it on the same node as the first. On a one-node cluster both
+# values start both workers (a single node is a single topology domain). On two healthy nodes the
+# scheduler's own spreading separates them with or without this (kube-scheduler's built-in default spread
+# constraints apply to a ReplicaSet's pods that carry none of their own; read, not measured here); the new
+# behaviour is DoNotSchedule and the budget. See docs/operations/zero-downtime-deploy.md.
+#
+# It is topology spread rather than pod anti-affinity so the autoscaler can still go past the node count:
+# with maxSkew 1, three workers on two nodes (2 + 1) is allowed, where required anti-affinity would leave the
+# third Pending.
+topologySpread:
+  # -- Render the constraint. false renders none and leaves placement to the scheduler's own spreading.
+  enabled: true
+  # -- The largest allowed difference in pod count between any two nodes.
+  maxSkew: 1
+  # -- The node label that defines "separate hardware". kubernetes.io/hostname is one domain per node.
+  topologyKey: kubernetes.io/hostname
+  # -- ScheduleAnyway (prefer, never refuse; the default) or DoNotSchedule (refuse: a pod that cannot be
+  # placed within maxSkew stays Pending). Anything else is rejected by the API server when applied.
+  whenUnsatisfiable: ScheduleAnyway
+  # -- Also spread across zones, by this node label (for example topology.kubernetes.io/zone). Empty adds no
+  # second constraint. Uses the same maxSkew, with its own whenUnsatisfiable below.
+  zoneKey: ""
+  # -- whenUnsatisfiable for the zone constraint. Defaults to a preference: a cluster with one zone, or
+  # nodes that carry no zone label, still schedules.
+  zoneWhenUnsatisfiable: ScheduleAnyway
+
+# -- A PodDisruptionBudget for the workers (cleat#4439), so a node drain evicts one worker at a time and
+# cannot take both of the autoscaler's floor of two. With one replica it allows the drain, because
+# maxUnavailable 1 of 1 is not a block.
+podDisruptionBudget:
+  # -- Render the budget. false renders none, and a drain may evict every worker at once.
+  enabled: true
+  # -- How many workers a voluntary disruption (a drain, an upgrade of the node pool) may take down at once.
+  # An integer, or a percentage string such as "25%".
+  maxUnavailable: 1

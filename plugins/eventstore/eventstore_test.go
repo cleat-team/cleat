@@ -23,6 +23,7 @@ import (
 	"github.com/cleat-team/cleat/auth"
 	"github.com/cleat-team/cleat/engine"
 	"github.com/cleat-team/cleat/plugin"
+	"github.com/cleat-team/cleat/plugins/plugintest"
 	"github.com/google/uuid"
 )
 
@@ -197,15 +198,8 @@ func (c *fakeConn) queryTenantLookup(args []driver.NamedValue) (driver.Rows, err
 	if err != nil {
 		return nil, err
 	}
-	hashHex := fmt.Sprintf("%x", keyHash)
-	tid, ok := c.store.apiKeys[hashHex]
-	if !ok {
-		return &fakeRows{columns: []string{"tenant_id"}}, nil
-	}
-	return &fakeRows{
-		columns: []string{"tenant_id"},
-		data:    [][]driver.Value{{tid}},
-	}, nil
+	cols, data := plugintest.APIKeyLookupRows(c.store.apiKeys, keyHash)
+	return &fakeRows{columns: cols, data: data}, nil
 }
 
 // queryUpsertStreamHead handles upsertStreamHead (queries.go): the fake

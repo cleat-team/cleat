@@ -1,0 +1,7 @@
+{
+  "status": 409,
+  "body": {
+    "error": "auth: a tenant with this id exists and was not created by this principal",
+    "reason": "tenant_exists"
+  }
+}

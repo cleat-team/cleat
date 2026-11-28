@@ -4,12 +4,16 @@ import (
 	"embed"
 	"flag"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"text/template"
+
+	"golang.org/x/mod/module"
 )
 
 //go:embed templates/agent/*
@@ -42,27 +46,40 @@ func runInit(args []string) {
 	}
 	projectName := flags.Arg(0)
 
+	// failed is what a scaffold's `go mod tidy` reported, if it failed. init
+	// still exits 0, so an offline user gets a project, but what it says
+	// last is that the project will not build yet (cleat#3533).
+	var failed *tidyFailure
 	switch *templateName {
 	case "agent":
-		scaffoldAgent(projectName)
+		failed = scaffoldAgent(projectName)
 	case "basic":
-		scaffoldBasic(projectName)
+		failed = scaffoldBasic(projectName)
 	case "agent-python":
 		scaffoldAgentPython(projectName)
 	case "agent-workflow":
-		scaffoldAgentWorkflow(projectName)
+		failed = scaffoldAgentWorkflow(projectName)
 	case "workflow":
-		scaffoldWorkflow(projectName)
+		failed = scaffoldWorkflow(projectName)
 	case "fullstack":
-		scaffoldFullstack(projectName)
+		failed = scaffoldFullstack(projectName)
 	default:
 		fmt.Fprintf(os.Stderr, "Error: unknown template %q. Valid: basic, agent, agent-python, agent-workflow, workflow, fullstack\n", *templateName)
 		os.Exit(1)
 	}
+	failed.report(os.Stderr)
 }
 
-func scaffoldBasic(projectName string) {
+func scaffoldBasic(projectName string) *tidyFailure {
 	dir := projectName
+	// Before anything is written: a name that cannot be this project's module
+	// path is refused, not scaffolded into a project `go mod tidy` cannot fix
+	// (cleat#3557).
+	modulePath, err := basicModulePath(projectName)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
@@ -88,17 +105,18 @@ func Hello(h cleat.HostCalls, input string) (string, error) {
 	// user's first command met a raw Go toolchain error with no cleat
 	// context ("go.mod file not found").
 	goModPath := filepath.Join(dir, "go.mod")
-	if err := os.WriteFile(goModPath, []byte(scaffoldBasicGoMod(projectName)), 0644); err != nil {
+	if err := os.WriteFile(goModPath, []byte(scaffoldBasicGoMod(modulePath)), 0644); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
 
 	writeYAML(dir, projectName, "hello")
-	tidyScaffold(dir)
+	failed := tidyScaffold(dir)
 	fmt.Printf("Created basic project in %s/\n", dir)
+	return failed
 }
 
-func scaffoldAgent(projectName string) {
+func scaffoldAgent(projectName string) *tidyFailure {
 	dir := projectName
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
@@ -150,8 +168,9 @@ func scaffoldAgent(projectName string) {
 	}
 
 	writeYAML(dir, projectName, "research_agent")
-	tidyScaffold(dir)
+	failed := tidyScaffold(dir)
 	fmt.Printf("Created AI agent project in %s/\n", dir)
+	return failed
 }
 
 func scaffoldAgentPython(projectName string) {
@@ -199,7 +218,7 @@ func scaffoldAgentPython(projectName string) {
 // file's own doc comment for why (tests/crash/agent_resume_test.go builds it
 // against the LOCAL module, which a template -- resolved from the proxy --
 // cannot stand in for).
-func scaffoldAgentWorkflow(projectName string) {
+func scaffoldAgentWorkflow(projectName string) *tidyFailure {
 	dir := projectName
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
@@ -231,11 +250,12 @@ func scaffoldAgentWorkflow(projectName string) {
 	// function is @cleatEntry(name="agent") in workflow.go, and cleat.yaml's
 	// entry_points must name what the module actually exports.
 	writeYAML(dir, projectName, "agent")
-	tidyScaffold(dir)
+	failed := tidyScaffold(dir)
 	fmt.Printf("Created agent workflow project in %s/\n", dir)
+	return failed
 }
 
-func scaffoldWorkflow(projectName string) {
+func scaffoldWorkflow(projectName string) *tidyFailure {
 	dir := projectName
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
@@ -265,8 +285,9 @@ func scaffoldWorkflow(projectName string) {
 	writeScaffoldTemplate(workflowTemplates, "templates/workflow/cleat.yaml", dir, "cleat.yaml", projectName)
 	writeScaffoldTemplate(workflowTemplates, "templates/workflow/Makefile", dir, "Makefile", projectName)
 
-	tidyScaffold(dir)
+	failed := tidyScaffold(dir)
 	fmt.Printf("Created workflow project in %s/\n", dir)
+	return failed
 }
 
 // scaffoldFullstack writes a project wiring a durable command path, the
@@ -276,7 +297,7 @@ func scaffoldWorkflow(projectName string) {
 // template has a subdirectory: a hand-maintained list silently stops copying
 // whatever someone adds later, and the failure is a scaffold that is merely
 // incomplete rather than broken -- which nobody notices.
-func scaffoldFullstack(projectName string) {
+func scaffoldFullstack(projectName string) *tidyFailure {
 	dir := projectName
 	const root = "templates/fullstack"
 
@@ -323,10 +344,11 @@ func scaffoldFullstack(projectName string) {
 	writeScaffoldTemplate(fullstackTemplates, "templates/fullstack/Makefile", dir, "Makefile", projectName)
 	writeScaffoldTemplate(fullstackTemplates, "templates/fullstack/README.md", dir, "README.md", projectName)
 
-	tidyScaffold(dir)
+	failed := tidyScaffold(dir)
 	fmt.Printf("Created full-stack project in %s/\n", dir)
 	fmt.Printf("  next: cd %s && make up && make logs | grep rate-limiter\n", dir)
 	fmt.Printf("  the rate limiter must report mode=db; see README.md\n")
+	return failed
 }
 
 // writeScaffoldTemplate renders one template file with the project's actual
@@ -461,19 +483,186 @@ func stripScaffoldBuildTag(data []byte) []byte {
 // offline should get a project plus one instruction, not no project. The
 // message names the command rather than the failure, because "run go mod tidy"
 // is the whole remedy.
-func tidyScaffold(dir string) {
+//
+// IT STAYS NON-FATAL, AND SAYS SO LAST (cleat#3533, owner decision D45). The
+// warning printed here is in the middle of init's output: the scaffold prints
+// "Created ... project" after it, and fullstack prints two more lines, so a
+// user who scrolled past it was told the project was created and nothing more.
+// It returns the failure instead, and runInit reports it as the final line.
+func tidyScaffold(dir string) *tidyFailure {
 	cmd := exec.Command("go", "mod", "tidy")
 	cmd.Dir = dir
 	if out, err := cmd.CombinedOutput(); err != nil {
 		fmt.Fprintf(os.Stderr, "\nWarning: could not resolve dependencies (%v).\n"+
 			"Run 'go mod tidy' in %s before building.\n%s\n", err, dir, out)
+		return &tidyFailure{dir: dir, transient: transientTidyCause(string(out))}
 	}
+	return nil
+}
+
+// tidyFailure records that a scaffold's `go mod tidy` failed. transient is set when the output names a
+// network or stream error that a re-run usually clears (transientTidyCause); it changes the closing line's
+// wording and nothing else. tidyScaffold does not retry (cleat#3659, owner decision D61).
+type tidyFailure struct {
+	dir       string
+	transient bool
+}
+
+// transientFetchMarkers say a line of `go mod tidy` output is about fetching something over the network;
+// transientTidyPhrases say how that fetch failed in a way a re-run usually clears. A line must carry one of
+// each. Anchoring on the same line is deliberate: a bare "unexpected EOF" matched a compile error in the
+// Docker scenarios' log matcher (cleat#3644), and a phrase from one line combined with a URL from another is
+// that mistake again.
+//
+// EVERY PHRASE CONTAINS A SPACE, and that is a rule and not a style. The marker is a URL, and a URL is
+// arbitrary text with no spaces in it: a phrase without one ("goaway", "internal_error", "client.timeout")
+// matched a module named for it, on a 404 that no re-run clears (cleat-review on cleat#3673). A phrase with a
+// space cannot match inside a URL, so the module path cannot supply the phrase.
+// TestEveryTransientPhraseHasASpace holds the rule for the next phrase added.
+//
+// The direction of a miss matters, and it is the safe one: a cause this does not recognise prints the
+// closing line it always printed. It is not exhaustive and is not meant to be. The shape that is measured is
+// the HTTP/2 stream reset from the checksum database (cleat#3659, run 40907847227); the rest are the
+// ordinary ways a fetch fails once and succeeds on the next try. A refused connection and a disabled proxy
+// are NOT in the list: they are a proxy that is down and a setting, and re-running does not clear either.
+var (
+	transientFetchMarkers = []string{"http://", "https://", "dial tcp"}
+	transientTidyPhrases  = []string{
+		"stream error:", "sent goaway", "connection reset by peer", "unexpected eof",
+		"i/o timeout", "tls handshake timeout", "timeout awaiting response headers", "context deadline exceeded",
+		"client.timeout exceeded", "429 too many requests", "500 internal server error", "502 bad gateway",
+		"503 service unavailable", "504 gateway timeout",
+	}
+)
+
+// transientTidyCause reports whether `go mod tidy`'s output names a network or stream error that a re-run
+// usually clears.
+func transientTidyCause(out string) bool {
+	for _, line := range strings.Split(strings.ToLower(out), "\n") {
+		if containsAny(line, transientFetchMarkers) && containsAny(line, transientTidyPhrases) {
+			return true
+		}
+	}
+	return false
+}
+
+func containsAny(s string, subs []string) bool {
+	for _, sub := range subs {
+		if strings.Contains(s, sub) {
+			return true
+		}
+	}
+	return false
+}
+
+// report prints the one line init ends with when the scaffold's dependencies
+// were not resolved: what is wrong, and the command that fixes it. A nil
+// failure prints nothing, so a successful init's output is unchanged.
+func (f *tidyFailure) report(w io.Writer) {
+	if f == nil {
+		return
+	}
+	cause := "the cause is above"
+	if f.transient {
+		// cleat#3659, D61. The remedy is the same command; what changes is that the reader is told a re-run
+		// is likely to be enough, so a transient fetch error does not read as a broken project.
+		cause = "the cause is above, and looks like a transient network error, so re-running the command usually fixes it"
+	}
+	fmt.Fprintf(w, "WARNING: %s was created but will not build yet: its dependencies were not resolved (%s). Fix it with: cd %s && go mod tidy\n",
+		f.dir, cause, shellWord(f.dir))
+}
+
+// shellWord quotes s for a POSIX shell only when it needs it, so the common
+// project name prints bare.
+func shellWord(s string) string {
+	if s != "" && strings.Trim(s, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._/-") == "" {
+		return s
+	}
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
+// basicModulePath is the module path basic's go.mod declares: the last element
+// of the directory the project is created in, as `go mod init` run inside it
+// would name it (cleat#3557). `cleat init /abs/path/foo` and `cleat init sub/foo`
+// both give module foo, where the whole argument used to be written, so a path
+// gave `go mod tidy` a module it refuses. A last element that is not an import
+// path (a space, a quote, a `$`, a leading dash) is an error naming the rule.
+//
+// It is module.CheckImportPath, not module.CheckPath, that `go mod init`
+// applies: CheckPath also wants a dot in the first element, as a domain has,
+// which would refuse `foo`, and `go mod tidy` accepts it.
+func basicModulePath(projectName string) (string, error) {
+	abs, err := filepath.Abs(projectName)
+	if err != nil {
+		return "", err
+	}
+	base := filepath.Base(abs)
+	if err := module.CheckImportPath(base); err != nil {
+		return "", fmt.Errorf("the project directory %q cannot be this project's Go module path (%v); "+
+			"the basic template names its module after the directory, which takes letters, digits and '-', '.', '_', '~'", base, err)
+	}
+	if why := reservedModuleName(base); why != "" {
+		return "", fmt.Errorf("the project directory %q cannot be this project's Go module path: %s; "+
+			"the basic template names its module after the directory, so choose another name", base, why)
+	}
+	return base, nil
+}
+
+// reservedModuleNames are names module.CheckImportPath accepts and the go command
+// does not take as a module: `go` is "invalid module path", `std` and `cmd` are
+// "not an importable package", and `toolchain` fails the same way when go.mod is
+// read (cleat#3560 review, measured with `go mod tidy` online).
+var reservedModuleNames = map[string]string{
+	"go":        "the go command reserves it",
+	"std":       "the go command reserves it for the standard library",
+	"cmd":       "the go command reserves it for its own commands",
+	"toolchain": "the go command reserves it",
+}
+
+var (
+	stdPackagesOnce sync.Once
+	stdPackages     map[string]bool
+)
+
+// standardPackages is the import paths of the Go standard library, as the toolchain
+// that will run `go mod tidy` lists them, so a package added in a later Go is
+// covered without this file knowing its name. It is empty if `go list std` cannot
+// run, which leaves only reservedModuleNames: `go mod tidy` is about to fail and
+// say why in that case anyway.
+func standardPackages() map[string]bool {
+	stdPackagesOnce.Do(func() {
+		stdPackages = map[string]bool{}
+		cmd := exec.Command("go", "list", "std")
+		cmd.Dir = os.TempDir() // not inside a module that could change the answer
+		out, err := cmd.Output()
+		if err != nil {
+			return
+		}
+		for _, p := range strings.Fields(string(out)) {
+			stdPackages[p] = true
+		}
+	})
+	return stdPackages
+}
+
+// reservedModuleName says why name cannot be a project's module, or "" if it can.
+// A module named like a standard library package (`fmt`, `os`, `unsafe`) is one
+// `go mod tidy` cannot resolve imports against, though `go mod init` writes it;
+// a name that is only a prefix of such paths (`text`, `archive`) is fine.
+func reservedModuleName(name string) string {
+	if why, ok := reservedModuleNames[name]; ok {
+		return why
+	}
+	if standardPackages()[name] {
+		return "it is the name of a Go standard library package"
+	}
+	return ""
 }
 
 // scaffoldBasicGoMod is basic's go.mod, as a literal rather than an embedded
 // template: scaffoldBasic has no templates/basic/ directory (its one source
 // file is written inline, a few lines above), and adding a whole embed.FS for
 // one file would be a heavier change than the defect warrants.
-func scaffoldBasicGoMod(projectName string) string {
-	return fmt.Sprintf("module %s\n\ngo 1.24\n", projectName)
+func scaffoldBasicGoMod(modulePath string) string {
+	return fmt.Sprintf("module %s\n\ngo 1.24\n", modulePath)
 }

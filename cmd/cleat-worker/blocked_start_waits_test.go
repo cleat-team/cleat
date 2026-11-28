@@ -39,6 +39,7 @@ func TestABlockedStartIsAcceptedAndWaits(t *testing.T) {
 		t.Skip("CLEAT_TEST_POSTGRES not set, skipping the database-backed blocked-start test")
 	}
 	db := testutil.SuiteTestDB(t, "cleat_worker")
+	settleRunsLeftBehind(t, db)
 	ctx := context.Background()
 
 	store := engine.NewPostgresStore(db)

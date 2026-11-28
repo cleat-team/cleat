@@ -24,24 +24,36 @@ import (
 // off closes it to operators too rather than leaving a second door.
 const OperatorRoutePrefix = "/api/admin/"
 
-// OperatorMiddleware authenticates a request that carries an operator key and
-// confines it to OperatorRoutePrefix.
+// OperatorMiddleware authenticates a request that carries an operator key,
+// confines it to OperatorRoutePrefix, and serves an admitted request with admin
+// rather than with next.
 //
-// It goes OUTSIDE MiddlewareWithMux in the chain (cmd/cleat-worker/main.go),
+// It goes OUTSIDE MiddlewareWithMux in the chain (cmd/cleat-worker/auth_chain.go),
 // and has to: that middleware resolves a key against admin.tenant_api_keys and
 // answers 401 "invalid or revoked API key" to everything else, so an operator
 // key would be refused as a bad tenant key before anything could recognise it.
-// Being outside also means an operator request never reaches
-// HostBindingMiddlewareWithMux, which is correct rather than incidental -- host
-// binding exists to stop one tenant's key being used against another tenant's
-// domain, and an operator has no domain to compare.
+//
+// BEING OUTSIDE WAS NOT ENOUGH, which is cleat#3555. This middleware used to hand
+// an admitted request to next, and next was the tenant layer, so a good operator
+// key was authenticated here and then re-resolved there as a tenant key and
+// refused. Every unit test installed the operator in the request context or ran
+// this middleware over a stub, so nothing ever composed the two; the first real
+// worker to receive a minted key answered 401 on /api/admin/health.
+//
+// admin is the handler the tenant layer wraps, and an admitted operator request is
+// served by IT, around authentication and host binding. Around host binding
+// because that exists to stop one tenant's key being used against another tenant's
+// domain and an operator has no domain to compare; around tenant authentication
+// because the operator has just been authenticated, by the stricter of the two
+// questions. next serves everything else: a request with no operator key, and a
+// path outside /api/ that an operator key merely accompanies.
 //
 // Every request that does NOT carry an operator-shaped key is passed through
 // untouched, so this is additive: with no operator keys in the table the chain
 // behaves exactly as it did before, and a request with an ordinary tenant key,
 // no key at all, or an unknown bearer token reaches the same code it always
 // did.
-func OperatorMiddleware(store OperatorResolver) func(http.Handler) http.Handler {
+func OperatorMiddleware(store OperatorResolver, admin http.Handler) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			key := extractAPIKey(r)
@@ -78,12 +90,50 @@ func OperatorMiddleware(store OperatorResolver) func(http.Handler) http.Handler 
 			// at all, and the SPA and plugin routes have their own rules.
 			// Refusing an operator key there would make presenting one worse
 			// than presenting nothing, which is a trap rather than a policy.
-			if path := r.URL.Path; strings.HasPrefix(path, "/api/") && !strings.HasPrefix(path, OperatorRoutePrefix) {
+			//
+			// COMPARED IN LOWER CASE. The prefix checks here used to be exact, so
+			// /API/ADMIN/TENANTS was neither "outside /api/" nor "inside /api/admin/"
+			// and was passed down the chain with the operator in its context. The mux
+			// is case-sensitive, so nothing answers that path today; but a narrowed
+			// key's guarantee that it reaches only the routes its scope names should
+			// not rest on the mux's case rules, and a handler matching paths without
+			// regard to case would otherwise be reachable by every operator key.
+			if path := strings.ToLower(r.URL.Path); strings.HasPrefix(path, "/api/") && !strings.HasPrefix(path, OperatorRoutePrefix) {
 				http.Error(w, `{"error":"an operator key may only be used on /api/admin/* routes"}`, http.StatusForbidden)
 				return
 			}
 
-			next.ServeHTTP(w, r.WithContext(WithOperator(r.Context(), op)))
+			// The scope check, AFTER the confinement above and only for a path that
+			// survived it. Confinement says an operator key belongs on /api/admin/*;
+			// this says which of those routes THIS key may reach. It is a separate
+			// answer, 403 for a good credential on a route its scope does not name,
+			// for the reason the comment on the 401/403 split gives: an operator
+			// debugging a deployment reads "authenticated but not permitted" first.
+			//
+			// Deny-by-default (see operator_scope.go): a key whose scopes admit
+			// nothing reaches nothing. Placed here and not in each handler because
+			// the failure it prevents is a handler somebody adds later and forgets
+			// to guard.
+			if strings.HasPrefix(strings.ToLower(r.URL.Path), OperatorRoutePrefix) && !op.MayReach(r.Method, r.URL) {
+				http.Error(w, `{"error":"this operator key's scope does not allow this route"}`, http.StatusForbidden)
+				return
+			}
+
+			r = r.WithContext(WithOperator(r.Context(), op))
+			if strings.HasPrefix(strings.ToLower(r.URL.Path), OperatorRoutePrefix) {
+				// The audit log reads the subject and records it as user_id. An operator request
+				// carries no tenant, so without this its row is the default tenant's own, with
+				// no sign of who acted (cleat#3559). Operator.String() is "operator:<KeyID>", the
+				// form the admin handlers already log. KeyID is a random UUID generated at mint
+				// time, shown by `cleatctl operator-key list`; it is not derived from the key and
+				// reveals nothing that could be used as one. Set only here: a request served by
+				// the tenant chain is not an operator action.
+				r = r.WithContext(WithSubject(r.Context(), op.String()))
+				// Around the tenant layer; see the doc comment.
+				admin.ServeHTTP(w, r)
+				return
+			}
+			next.ServeHTTP(w, r)
 		})
 	}
 }

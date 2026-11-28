@@ -2896,15 +2896,8 @@ func (c *etConn) queryTenantLookup(args []driver.NamedValue) (driver.Rows, error
 	if err != nil {
 		return nil, err
 	}
-	hashHex := fmt.Sprintf("%x", keyHash)
-	tid, ok := c.store.apiKeys[hashHex]
-	if !ok {
-		return &etRows{columns: []string{"tenant_id"}}, nil
-	}
-	return &etRows{
-		columns: []string{"tenant_id"},
-		data:    [][]driver.Value{{tid}},
-	}, nil
+	cols, data := plugintest.APIKeyLookupRows(c.store.apiKeys, keyHash)
+	return &etRows{columns: cols, data: data}, nil
 }
 
 func (c *etConn) queryInsertSubscription(args []driver.NamedValue) (driver.Rows, error) {

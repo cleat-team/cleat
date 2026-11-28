@@ -45,6 +45,11 @@ admin.tenant_egress_allow	member	migration 079; absent from the issue's list of 
 public.tenant_domains	member	migration 080; absent from the issue's list of eleven
 public.queues	member	cleat#1116, #1702's twelfth instance; migration 093/092/092
 public.slack_workspace	exempt	cleat#2230; unlike deployment_secrets/tenant_domains, unmap-workspace is a real DELETE by design (immediate revocation, no disabled_at check to wait out) -- there is no soft-disable state to carry created_at's siblings for
+library.members	exempt	cleat#3540; a published workflow build, immutable by design -- no role is granted UPDATE, so there is no updated_at and nothing to disable; published_at stands in for created_at, and the only removal is a DELETE by the publisher role
+admin.tenant_tombstones	exempt	cleat#3552 (B3b-2); the record a tenant drop leaves, written once in the drop's own transaction and never updated -- no role is granted UPDATE, so there is no updated_at and nothing to disable; dropped_at stands in for created_at, and the only removal is an operator's DELETE. Keyed by dropped_tenant_id, not tenant_id, because SQL Server's admin.drop_tenant deletes from every table with a tenant_id column
+library.bundles	exempt	cleat#3540; a published release of a library, immutable for the same reason as library.members (published_at, no updated_at or disabled_at)
+library.bundle_members	not-an-entity	cleat#3540; which members a bundle lists -- a join table between two published rows, with no lifecycle of its own
+public.tenant_library_installs	exempt	cleat#3540; which bundle of a library a tenant has installed -- an explicit upgrade UPDATEs bundle_version and rewrites installed_at in place (UPDATE is granted), so installed_at is the time of the last change and stands in for updated_at, and an uninstall deletes the row, so there is no soft-disable state to carry disabled_at. PR 3's install route must rewrite installed_at on an upgrade; that is the obligation this classification rests on
 public.workflow_instances	not-an-entity	the run
 public.workflow_leases	not-an-entity	cleat#3245 Phase 3 step 1; the run's claim/heartbeat/reclaim state, physically split off workflow_instances -- same entity, not a new one
 public.workflow_payloads	not-an-entity	cleat#3245 Phase 3 step 1; the run's input/result/query_state/compaction payload, physically split off workflow_instances -- same entity, not a new one
@@ -59,5 +64,7 @@ public.idempotency_keys	not-an-entity	holder-scoped, TTL-reclaimed (workflow_id 
 public.workflow_memory_samples	not-an-entity	stats
 public.workflow_memory_stats	not-an-entity	stats
 admin.workers	not-an-entity	infrastructure; a worker registers itself
+admin.registered_plugins	not-an-entity	infrastructure; workers record their plugin names at registration (cleat#3600)
+admin.plugin_dep_overrides	not-an-entity	append-only audit record of one use of the plugin-dependency override (cleat#3600)
 admin.rls_predicate_form	not-an-entity	SQL Server only; single-row config, CHECK (only_row = 1), read from engine/mssql_schedules.go
 public.payload_encryption_ever_enabled	not-an-entity	PostgreSQL only; single-row marker, CHECK (singleton), cleat#2324, read from engine/store_payload_encryption_state.go

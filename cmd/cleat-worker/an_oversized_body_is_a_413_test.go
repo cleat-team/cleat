@@ -53,7 +53,7 @@ func TestAnOversizedBodyIsA413(t *testing.T) {
 		{"set workflow tag", http.MethodPut, "/api/workflows/d/tags", "",
 			"set by --max-body-size", limit},
 		{"create definition", http.MethodPost, "/api/definitions", "",
-			"fixed for the definition upload endpoint", definitionMaxBodySize},
+			"set by --max-definition-body-size", definitionMaxBodySize},
 		{"admin force-complete", http.MethodPost, "/api/admin/instances/wf-1/force-complete",
 			"force-complete", "set by --max-body-size", limit},
 		{"admin force-fail", http.MethodPost, "/api/admin/instances/wf-1/force-fail",

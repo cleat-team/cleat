@@ -110,7 +110,7 @@ func TestMain(m *testing.M) {
 		// clean exit (0).
 		os.Exit(42)
 	}
-	os.Exit(m.Run())
+	os.Exit(runGuarded(m))
 }
 
 func TestMainRefusesToStartOnAStaleRouteSignature(t *testing.T) {

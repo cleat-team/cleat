@@ -342,8 +342,10 @@ refusing with the remediation if it is behind.
 
 The worker also refuses to start on a connection row-level security does not
 apply to -- a superuser or a role with `BYPASSRLS` -- because
-`GetWorkflowByID` and `ListWorkflows` have no application-level tenant
-filter and would return every tenant's data on such a connection. So `--db`
+the plain workflow listing and count are scoped by row-level security alone
+and would return every tenant's data on such a connection (`GetWorkflowByID`
+and the published-state filter name their tenant in the SQL; the plain listing
+names none). So `--db`
 has to be the `cleat_app` role from Step 6, not the database's superuser:
 
 ```bash
@@ -370,8 +372,10 @@ This connects as the superuser rather than `cleat_app`, since applying the
 schema needs DDL rights that role doesn't have. That means the RLS check
 from above logs a warning instead of refusing -- `--require-auth=false` is
 what turns the refusal into a warning; drop it and this exact command
-refuses to start, for the same reason Step 7 does. Fine alone on a laptop;
-not once a second tenant's data could land on that connection. See
+refuses to start, for the same reason Step 7 does. Fine alone on a laptop with
+one tenant. **With a second tenant in the database this exact command refuses to
+start** (cleat#3772), with or without `--require-auth=false` or `--rls-check=off`:
+connect as `cleat_app` instead. See
 [Upgrading](../operations/upgrading.md#migration-is-a-deploy-step) for how
 this compares to the two-step flow above.
 

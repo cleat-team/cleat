@@ -173,8 +173,8 @@ var tenantPredicateAllowlist = map[string]stmtExemption{
 		SQL:    "update workflow_instances set trace_id = @p2 where id = @p1",
 		Reason: scopedByCaller,
 	},
-	"mssql_events.go:appendEventsInTxOpts#d455f79e06bf": {
-		SQL:    "update workflow_instances set event_count = event_count + @p1 where id = @p2",
+	"mssql_events.go:appendEventsInTxOpts#3d46f6cddc4e": {
+		SQL:    "update workflow_instances set event_count = @p1 where id = @p2",
 		Reason: scopedByCaller,
 	},
 	// cleat#2059 realigned event_history's primary key to (tenant_id,
@@ -281,7 +281,9 @@ var tenantPredicateAllowlist = map[string]stmtExemption{
 		SQL:    "select cast(compaction_state as nvarchar(max)) from workflow_instances where i",
 		Reason: scopedByCaller,
 	},
-	"mssql_signals_promises.go:GetChildResult#18eaf4c5f15d": {
+	// The function name moved from GetChildResult to readChildOutcome (cleat#4069: GetChildResult now follows the chain around a one-run read); the SQL and so the digest did not, and the
+	// reason is a claim about that SQL, which is unchanged.
+	"mssql_signals_promises.go:readChildOutcome#18eaf4c5f15d": {
 		SQL:    "select isnull(result, '{}'), status, error_msg from workflow_instances where ",
 		Reason: scopedByCaller,
 	},
@@ -379,12 +381,15 @@ var tenantPredicateAllowlist = map[string]stmtExemption{
 	// MySQL side of this same pair (mysql_store.go:ResolveTenantFromAPIKey
 	// / tenant_store.go's MySQL branch) was verified and allowlisted the
 	// same way in cleat#3318/#3320.
-	"tenant_store.go:resolveAPIKeyStmt#7d4bb9b58ba1": {
-		SQL:    "select lower(convert(nvarchar(36), tenant_id)) from admin.tenant_api_keys wher",
+	// Digest moved when cleat#3623 added key_id to the projection, so the middleware can record
+	// WHICH key authenticated a request. Same statement, same reason (mustNotScope), text only. The
+	// engine store's function is now ResolveAPIKey: ResolveTenantFromAPIKey answers through it.
+	"tenant_store.go:resolveAPIKeyStmt#e27b83837841": {
+		SQL:    "select lower(convert(nvarchar(36), tenant_id)), lower(convert(nvarchar(36), ke",
 		Reason: mustNotScope,
 	},
-	"mssql_deployment.go:ResolveTenantFromAPIKey#7d4bb9b58ba1": {
-		SQL:    "select lower(convert(nvarchar(36), tenant_id)) from admin.tenant_api_keys wher",
+	"mssql_deployment.go:ResolveAPIKey#e27b83837841": {
+		SQL:    "select lower(convert(nvarchar(36), tenant_id)), lower(convert(nvarchar(36), ke",
 		Reason: mustNotScope,
 	},
 	// apikeycount.go:liveAPIKeyCountQuery runs at worker startup, before any

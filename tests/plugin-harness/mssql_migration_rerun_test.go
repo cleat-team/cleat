@@ -156,7 +156,13 @@ func TestReapplyingTheCoreMigrationsLeavesTheTenantPoliciesStanding(t *testing.T
 // the statement in prose -- an unanchored scan over migrations/mssql/*.sql
 // returns 16 distinct "names", 7 of them fragments of English sentences. A
 // declaration can only appear at a declaration site; prose about one cannot.
-var mssqlSecurityPolicyRe = regexp.MustCompile(`(?m)^CREATE SECURITY POLICY dbo\.(\w+)`)
+//
+// A declaration site is also the first thing on a line after an `EXEC(N'`, which
+// is how a guarded, re-runnable migration has to write it (CREATE SECURITY POLICY
+// wants a batch of its own, so the guard and the statement go through EXEC):
+// migrations/mssql/005_workflow_libraries.sql, cleat#3540. Anchored on the line
+// start all the same, so a sentence that mentions the statement still cannot match.
+var mssqlSecurityPolicyRe = regexp.MustCompile(`(?m)^(?:[ \t]*EXEC\s*\(\s*N')?CREATE SECURITY POLICY dbo\.(\w+)`)
 
 // shippedSecurityPolicies is the set of tenant security policies the shipped
 // MSSQL migrations create, read from the migrations rather than listed here.

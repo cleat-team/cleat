@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
@@ -231,7 +232,7 @@ func (s *apiServer) handleStreamWorkflow(w http.ResponseWriter, r *http.Request,
 	}
 	wf, err := st.GetWorkflowByID(r.Context(), id)
 	if err != nil {
-		s.writeError(w, 500, err.Error())
+		s.writeAccessCheckUnavailable(w, r, "the run", err) // cleat#3866: not the driver's text, and retryable
 		return
 	}
 	if wf == nil {
@@ -376,7 +377,9 @@ func (s *apiServer) handleStreamWorkflow(w http.ResponseWriter, r *http.Request,
 	// ---- the durable part ----
 	history, err := st.LoadEventHistory(r.Context(), id)
 	if err != nil {
-		msg := err.Error()
+		// The driver's text is logged, not sent (cleat#3878); a decryption refusal gets a sentence it can act on.
+		slog.ErrorContext(r.Context(), "stream: could not load the run's history", "run_id", id, "error", err)
+		msg := "the server could not read this workflow's history"
 		if errors.Is(err, engine.ErrPayloadDecryption) {
 			// This is the strict load, so an unreadable history is an error
 			// rather than a transcript of "[DECRYPTION_FAILED]" chunks that
@@ -415,10 +418,14 @@ func (s *apiServer) handleStreamWorkflow(w http.ResponseWriter, r *http.Request,
 				"message": "chunks in this range are no longer in event_history and cannot be replayed",
 			})
 		}
+		// EVERY chunk leaves through here -- served from history, followed from
+		// history, and relayed live -- so this is where the stream is redacted
+		// (cleat#3581). Before, only the history reads redacted and a live chunk
+		// of the same text did not.
 		payload := map[string]any{
 			"step":    step,
 			"index":   index,
-			"content": content,
+			"content": engine.Redact(content),
 			"finish":  finish,
 			"replay":  replay,
 			// An explicit boundary, so a client does not have to know that
@@ -443,6 +450,11 @@ func (s *apiServer) handleStreamWorkflow(w http.ResponseWriter, r *http.Request,
 
 	for _, rec := range history {
 		if rec.EventType != engine.EventTypePluginCallStreamChunk {
+			continue
+		}
+		// An empty stream's MARKER is a row in event_history and no chunk the plugin produced (cleat#4342): serving it would hand a client a phantom empty chunk that
+		// opens an answer that never finishes. It touches none of the segmentation state, because it is not part of any answer.
+		if engine.IsEmptyStreamMarker(rec) {
 			continue
 		}
 		if !cursor.after(rec.Step) {
@@ -620,10 +632,17 @@ func (s *apiServer) followFromHistory(
 			if ctx.Err() != nil {
 				return
 			}
-			out.event("error", "", map[string]any{"message": err.Error()})
+			slog.ErrorContext(ctx, "stream: could not read the run's stream chunks", "run_id", id, "error", err)
+			out.event("error", "", map[string]any{"message": "the server could not read this workflow's stream"})
 			return
 		}
 		for _, rec := range recs {
+			// The marker of an empty stream is no chunk (see the history loop above). It must still advance the cursor: the tail reads rows AFTER lastStep, so a marker
+			// left behind it would be read again on every poll, and a page of them would read as "more behind it" and spin.
+			if engine.IsEmptyStreamMarker(rec) {
+				*lastStep = rec.Step
+				continue
+			}
 			// replay=true and durable=true, both unconditionally, because both
 			// are facts about where the row came from: it was just READ from
 			// event_history.

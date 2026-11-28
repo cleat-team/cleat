@@ -17,9 +17,13 @@ authenticated key reaches them just as it always did. So while the flag is on:
 - **any authenticated key can read this worker's detailed health** (`GET /api/admin/health`): stale loops,
   the last database error, and other plugins' health messages;
 - **any authenticated key can trigger a retention sweep** (`POST /api/admin/retention/sweep`), which runs the
-  worker's own retention over every tenant's data, with a cutoff the caller chooses (`older_than`). It does
-  not enable a retention arm that is switched off, but for an arm that is on, a short `older_than` deletes
-  every tenant's completed history older than that.
+  worker's own retention with a cutoff the caller chooses (`older_than`). It does not enable a retention arm
+  that is switched off, but for an arm that is on, a short `older_than` deletes completed history older than
+  that. **Whose history depends on the worker's database login.** Through the application login, where
+  row-level security applies, it reaches the worker's own tenant only: measured on PostgreSQL as that role
+  (cleat#3572, `TestTheAdminRetentionSweepReachesTheWorkersOwnTenantOnly`), not measured on SQL Server. The
+  retention predicates carry no tenant filter of their own, so through a login that bypasses row-level security
+  it would reach every tenant's; that is read from the code, not measured.
 
 With `--require-auth=false` the same routes are open to everyone who can reach the port. The worker logs a
 warning at startup that says so. Enable the flag on a deployment whose keys you trust to this degree, keep
@@ -33,7 +37,7 @@ Audited 2026-09-24 from `cmd/cleat-worker/app.go`. The scope column is the prope
 |---|---|---|
 | `POST`, `GET /api/admin/drain` | this worker's claim loop and lifetime | **worker-level**: any key, any tenant |
 | `GET /api/admin/health` | this worker's loops, database error text and every plugin's health message | **worker-level**: any key, any tenant; unreadable during a database outage (its key lookup needs the database) |
-| `POST /api/admin/retention/sweep` | retention over every tenant's data on this worker's store | **worker-level**: any key, any tenant |
+| `POST /api/admin/retention/sweep` | retention through this worker's own store (its own tenant's data under the application login; see above) | **worker-level**: any key, any tenant |
 | `POST /api/admin/instances/{id}/force-complete` | one workflow | tenant-scoped: 404 unless the caller's tenant owns `{id}` |
 | `POST /api/admin/instances/{id}/force-fail` | one workflow | tenant-scoped |
 | `POST /api/admin/instances/{id}/re-replay` | one workflow | tenant-scoped |
@@ -42,11 +46,358 @@ Audited 2026-09-24 from `cmd/cleat-worker/app.go`. The scope column is the prope
 | `POST /api/admin/tenants/{tenant}/instances/{id}/force-fail` | one workflow, in the named tenant | as above |
 | `POST /api/admin/tenants/{tenant}/instances/{id}/re-replay` | one workflow, in the named tenant | as above |
 | `POST /api/admin/tenants/{tenant}/instances/{id}/steps/{n}/resolve` | one workflow's step, in the named tenant | as above |
+| `POST /api/admin/tenants` | creates a tenant (and its org, by name) and mints its first key | **operator credential only**: a tenant key gets `403`. `409` on a worker whose database connection is not subject to row-level security (cleat#3772): see [the startup check](../explanation/postgresql-schema.md#the-startup-check) |
+| `POST /api/admin/tenants/{tenant}/confirm` with `{"key_id": …}` | makes that key permanent | **operator credential only**, and only the principal that created the tenant |
+| `POST /api/admin/tenants/{tenant}/recovery-key` with `{"reason": …}` | mints a provisional key for a tenant with **no live key** | **admin-scoped operator key only**: a provision-scoped key and a tenant key get `403` |
 
 The id-only tenant-scoped routes are checked by `callerOwnsTarget` before anything runs, and answer 404 (never
 403) for another tenant's workflow, so they do not confirm it exists. They sit behind the flag because they are
 destructive operator actions, not because they cross tenants — the tenant-named form below is the one that
 crosses, and only for an operator.
+
+## Creating a tenant
+
+`POST /api/admin/tenants` creates a tenant, and `POST /api/admin/tenants/{tenant}/confirm` ends the handshake.
+Both need an **operator credential** (a tenant key is refused with `403`, because a tenant key reaches
+`/api/admin/*` when this flag is on and must not create tenants), and both answer `501` on a worker that cannot
+provision: MySQL, which is single-tenant, or a sharded worker.
+
+A service that only creates tenants should hold a **provision-scoped** operator key, not an admin one:
+
+```bash
+cleatctl operator-key create --scope provision --principal clew-service --description "tenant provisioning"
+```
+
+That key reaches exactly these two routes, and nothing else under `/api/admin/` (drain, force-complete and the
+rest are `403`). The `principal` is a name you choose; rotating the key keeps the principal, so it keeps
+authority over the tenants it created.
+
+```bash
+curl -X POST -H "Authorization: Bearer $PROVISION_KEY" -H 'Content-Type: application/json' \
+  http://worker:8080/api/admin/tenants \
+  -d '{"tenant_id":"<uuid, optional>","display_name":"Acme","org_name":"Acme Org","key":{"description":"first key"}}'
+```
+
+| Field | |
+|---|---|
+| `tenant_id` | optional. A UUID **you** choose makes the create idempotent. The nil UUID is refused (it is the default tenant). Omitted, one is generated. |
+| `name` | optional, unique across the whole deployment (not per org). Omitted, it is the tenant id. |
+| `display_name` | optional, not part of identity. |
+| `org_id` **or** `org_name` | exactly one. `org_name` finds the org or creates it. |
+| `key.description` | optional label for the first key. |
+
+**The key is provisional until you confirm it.** The create returns `201` with a key that authenticates
+immediately and **lapses after 15 minutes** (`valid_for_seconds`). Store it durably, then
+`POST /api/admin/tenants/{tenant}/confirm` with `{"key_id": "<the key_id the create returned>"}`: that key becomes
+permanent. **Confirm names the key**, because a repeated create can replace it: if a retry and a stalled original both
+reach the worker, the second is issued a new key and the first is revoked, and a confirm that took no key id would
+make permanent whichever one was live, possibly one nobody holds. A confirm of a replaced key is `409`. If the response is lost, or you crash
+before storing, do nothing: the key lapses on its own, and repeating the same create returns `200` with a **fresh**
+key (the previous provisional one is revoked). Once a key is confirmed, repeating the create returns `200` with the
+tenant and **no key**, so a replay can never be used to obtain a second working key.
+
+| Request | Result |
+|---|---|
+| id free, name free | `201`, the tenant and a provisional key |
+| id exists, same name and org, created by this principal, no confirmed key | `200`, a fresh provisional key |
+| the same, with a confirmed key | `200`, no key |
+| id exists with a different name or org | `409 tenant_differs`, with `fields` naming which |
+| id exists and **another principal** created it, or it was made offline | `409 tenant_exists`, with nothing about the tenant |
+| name held by another tenant | `409 name_taken` |
+| `org_id` names no org | `404` |
+| confirm, the named key lapsed, was replaced by a repeat, or is not this tenant's | `409 no_provisional_key`: repeat the create |
+| confirm, not this principal's tenant | `404` |
+| confirm without a `key_id`, or a malformed one | `400` |
+
+A tenant made offline (`cleat-worker --create-tenant`) has no recorded creator, so no provisioner can replay or
+confirm it: this route can only ever mint a key for a tenant it created. The creation is audited on the new
+tenant's own chain, with the principal as the subject.
+
+### From Go: `backendkit`
+
+`backendkit` wraps both calls, and the handshake's ordering is yours to keep: **store the key, then confirm it.**
+
+```go
+admin := backendkit.NewProvisioner(backendkit.New(workerURL, backendkit.WithAPIKey(provisionKey)))
+
+// TenantID is a UUID you choose, and it is required: it is what makes a retry safe.
+tenant, key, err := admin.EnsureTenant(ctx, backendkit.TenantRequest{TenantID: id, OrgName: "Acme Org"})
+switch {
+case errors.Is(err, backendkit.ErrTenantExists), errors.Is(err, backendkit.ErrNameTaken):
+    return err // someone else's tenant, or a taken name: repeating it unchanged cannot help
+case err != nil:
+    return err // anything else: repeating the same call is safe
+}
+if key != nil { // nil once a key has been confirmed
+    if err := saveKey(ctx, tenant.ID, key.Secret); err != nil { // durably, before confirming
+        return err
+    }
+    if err := admin.ConfirmKey(ctx, tenant.ID, key.KeyID); err != nil {
+        return err
+    }
+}
+
+// Then act for the tenant with its own key. The library keeps no keys: lookupKey is yours.
+clients := &backendkit.TenantClients{Base: backendkit.New(workerURL), KeyResolver: lookupKey}
+c, err := clients.For(ctx, tenant.ID)
+```
+
+A `FirstKey` is redacted when it is printed, logged with `slog` or JSON-encoded, so read `key.Secret` to store it and never an encoded copy. The type's doc says what that does not cover: `fmt` cannot call a method on an unexported struct field, so a `FirstKey` held in one still prints its secret under `%v`. Each refusal in the table above has a sentinel (`ErrTenantExists`, `ErrNameTaken`, `ErrTenantDiffers` with the differing fields in a `*TenantDiffersError`, `ErrOrgNotFound`, `ErrNoProvisionalKey`, `ErrProvisioningUnavailable`), wrapped beside the `*UpstreamStatusError`. A **confirm's `404` has no sentinel**: the worker answers it identically for a missing tenant, a tenant this credential did not create, and a worker with the admin API off, so the client cannot say which.
+
+## Rotating a tenant's own key (`/api/keys`)
+
+A tenant manages its own API keys with its own key. These routes are **not** under `/api/admin/` and do not need
+`--enable-admin-api`; they need authentication (`--require-auth`, the default), because a tenant that the worker
+did not authenticate has no identity to rotate. With authentication off they answer `403`. An **operator** key is
+refused with `403` here too: an operator has no tenant, so there is no key set for it to manage.
+
+| Request | Result |
+|---|---|
+| `POST /api/keys` with `{"description"?, "expires_at"?}` | `201` with the key's metadata and its **`secret`, shown once**, `Cache-Control: no-store`. `expires_at` is RFC 3339 and must be in the future. The key is permanent from the start (there is no handshake). |
+| `GET /api/keys` | `200 {"keys": [...]}`, newest first: `key_id`, `description`, `created_at`, `expires_at`, `disabled_at`, `provisional` and a `status` of `active`, `provisional`, `expired` or `revoked`. Never a secret or a hash. |
+| `DELETE /api/keys/{key_id}` | `200 {"key_id", "revoked": true, "already_revoked"}`. A key id that is not this tenant's is `404`; revoking a revoked key is `200` with `already_revoked`. |
+| a revoke that would leave the tenant with **no live key** | `409 last_key`. Repeat with `?force=true` to do it anyway. |
+| a mint when the tenant holds 25 live keys | `409 key_limit`: revoke one first. |
+| a malformed body, an unknown field, trailing data, a past `expires_at`, a `key_id` that is not a UUID, a `force` that is not a boolean | `400`; a body over 16 KiB is `413`. |
+
+To rotate: mint the replacement **with the old key**, store it, check it works, then revoke the old key **with
+the new one**. The old key stops authenticating at once. The tenant is always the one the credential proves; there
+is no way to name another in the request.
+
+The last-key rule serialises on the tenant's row, so two concurrent revokes of a tenant's last two keys leave
+exactly one standing (measured: without the lock both succeed, on PostgreSQL and on SQL Server). It protects
+against a mistake, not against a determined caller: `?force=true` removes the last key, after which only an
+operator can restore access: `POST /api/admin/tenants/{tenant}/recovery-key` (below), or `cleat-worker
+--generate-api-key` offline.
+
+## Recovering a tenant that has locked itself out
+
+A tenant can remove its own last key (`DELETE /api/keys/{key_id}?force=true`). After that nothing it holds
+reaches `/api/keys`. `POST /api/admin/tenants/{tenant}/recovery-key` is how an operator gives it a way back
+without a shell on a worker (cleat#3578).
+
+    POST /api/admin/tenants/{tenant}/recovery-key
+    X-Confirm: {tenant}
+    {"reason": "the last key was revoked with force=true on 2026-10-30; the owner asked for access back"}
+
+It is **admin-scoped operator keys only**. A provision-scoped key is refused (`403`), as is a tenant key. Whether
+a service that created a tenant may recover it is an open question for the owner, not a gap.
+
+| Result | When |
+|---|---|
+| `201` with `key_id`, **`secret` (shown once)**, `provisional: true`, `expires_at`, `valid_for_seconds: 900`, `Cache-Control: no-store` | the tenant has **no live key** and is not suspended |
+| `409 tenant_has_live_keys` with `live_keys` | the tenant can still act for itself. Nothing is minted. This includes a recovery key minted a moment ago that has not lapsed, so **at most one is outstanding** |
+| `409 tenant_suspended` | an operator suspended the tenant: resume it first |
+| `404` | no such tenant, a dropped tenant (its row went with it) |
+| `400` | the id is not a UUID or is the default tenant; `X-Confirm` is not the same id, typed back; the body is not exactly `{"reason": …}`; or the reason is unacceptable (below). A body over 4 KiB is `413` |
+| `403` | not an admin-scoped operator key |
+
+**The guard is one fact, decided in the transaction that mints, under the tenant's row lock:** the tenant has no
+live key. It is the same lock `POST /api/keys` takes, so a tenant minting or revoking at the same moment and this
+call are one serial decision. The key is **provisional** (15 minutes), so a reply that is lost lapses and the
+operator can call again; a permanent key whose reply was lost would be live, held by nobody, and would block every
+retry. It adds one key and revokes nothing.
+
+**The reason is required** and is recorded in the audit row on **the tenant's own chain**, covered by the chain
+hash, beside `operator:<key id>`: the tenant can read, in its own log, who recovered it and why. A refused
+attempt (`409`) is recorded the same way, with what refused it. The reason must be non-empty after trimming, at
+most 500 characters, free of control characters, and **must not contain an API key** (`cleat_sk_…` or
+`cleat_op_…`, in any case) **or a standalone run of 64 hex digits** (the shape of a session token): the audit
+chain is append-only, so a credential pasted into a free-text field would be in it for good, and the `400` does not
+repeat the reason. The second rule also refuses a sha-256 digest, which is the same bytes; that is the price, and
+the remedy is to cite the digest by its first 12 digits. The secret is in the reply and **nowhere else**: not
+in the audit row, not in the log.
+
+**What the tenant does with it:** use the recovery key to `POST /api/keys` for a permanent key, then `DELETE
+/api/keys/{key_id}` the recovery key. Do not wait for it to lapse. This route does not rely on the confirm route.
+
+**The confirm route can make a recovery key permanent, and an operator should not be surprised by it.** A recovery
+key is a provisional key like any other, so `POST /api/admin/tenants/{tenant}/confirm` with its `key_id` makes it
+permanent, and it then outlives its 15 minutes. Only the creator recorded on the tenant can do that: the principal
+of the operator key that called `POST /api/admin/tenants`, or that key itself if it has no principal. That is an
+identity, not a scope. An operator who did not create the tenant, such as an admin recovering a tenant that a
+provisioning service created, gets `404`; an admin that created the tenant itself is its creator and can confirm
+its own recovery key. The call needs that identity's credential and the recovery key's `key_id`, and its reply
+carries no secret, so it does not hand the creator the key.
+
+**What this does not stop, stated plainly.** An admin operator can recover a tenant that revoked its keys
+*deliberately*. That is not new power: `cleat-worker --generate-api-key` gives anyone with a shell the same, and
+`/api/admin/*` already reaches every tenant's runs. What the route changes is that the power is now reachable over
+HTTP by a credential that can be stolen, which is why it is admin-scoped, why the tenant must hold no live key, and
+why every use is attributed to the operator and recorded, with a reason, where the tenant can read it. PostgreSQL
+and SQL Server only, like the rest of tenant provisioning.
+
+## Suspending and resuming a tenant
+
+`POST /api/admin/tenants/{tenant}/suspend` and `POST /api/admin/tenants/{tenant}/resume` set and clear a tenant's
+`suspended` flag. A suspended tenant may not start new workflows; `cleatctl suspend-tenant` documents exactly what
+else it does and does not stop (runs already executing are not stopped). Suspending deletes nothing, and resume
+undoes it. Both answer `200 {"tenant_id": "...", "suspended": true|false}` and are idempotent. They exist because
+dropping a tenant (a later step) requires the tenant to be suspended first, and a service that creates tenants must
+be able to take that step for the ones it made without holding a key that can suspend anyone's.
+
+**What suspension does to work that arrives while it lasts.** A start by the API is refused with a `403`. A start by a
+plugin on the tenant's behalf (a cron schedule, an event trigger, a job-queue dispatch) is refused too, and what it
+was going to start is **dropped, not deferred**: resuming the tenant does not release a backlog of firings that
+came due while it was suspended. Runs that were already executing finish, and reads are unaffected (cleat#3594).
+
+| Caller | `suspend` | `resume` |
+|---|---|---|
+| admin operator key | **any** tenant, `200` | **any** tenant, `200` |
+| provision operator key | only a tenant **its principal created**, `200`. Any other tenant, one made offline, and one that does not exist are all `404` with the same body | `403`: **never** |
+| tenant key | `403` | `403` |
+
+**A provision key can suspend and can never resume**, and that is deliberate. The flag is one bit and does not record
+who set it. An admin suspends a tenant for non-payment, the trial-expiry sweep suspends one, `cleatctl suspend-tenant`
+suspends one: if the service that created the tenant could clear the flag it could lift any of them, merely because
+it created the tenant. To undo a provisioner's own suspension, use an admin key. (Recording who suspended was
+considered and rejected for now: every writer of the flag would have to keep that record true, and a stale record
+would reopen the hole.) Suspending a tenant an admin has already suspended succeeds and changes nothing.
+
+A tenant key reaches `/api/admin/*` when the flag is on, and must not suspend a tenant, so the handler refuses it
+itself. A provision key reaches `suspend` only with the tenant id in its one canonical spelling (lower-case,
+hyphenated) and only with `POST`; any other spelling is `403` from the scope. Like provisioning, these routes answer
+`501` on MySQL and on a sharded worker. The change is audited on the tenant's own chain, with the operator as the
+subject.
+
+
+## Planning a drop
+
+`GET /api/admin/tenants/{tenant}/drop-plan` says what dropping a tenant would remove, and the two facts a drop
+will require, without removing anything (cleat#3552). It is `cleatctl drop-tenant`'s preview as an API, for the
+service that provisioned the tenant. It answers `200` with counts only, never a row:
+
+```json
+{"tenant_id": "...", "name": "acme", "suspended": true, "unsettled_runs": 0,
+ "tables": [{"table": "workflow_instances", "rows": 12}, ...], "total_rows": 140,
+ "plugin_tables": [{"table": "public.my_plugin_rows", "rows": 3}],
+ "uncounted_plugin_tables": [], "skipped_plugin_tables": [],
+ "retained": [{"table": "admin.tenant_tombstones", "reason": "the record this drop leaves: ..."},
+              {"table": "admin.plugin_dep_overrides", "reason": "append-only audit record of an operator using ..."}]}
+```
+
+- `unsettled_runs` is the number of the tenant's runs that have not reached a terminal status (not `done`, `failed`,
+  `dead_lettered`, `terminated` or `cancelled`). A drop will require it to be `0` and `suspended` to be `true`. Note that
+  suspending a tenant does not make runs that were already started finish; it stops new ones.
+- `tables` lists every table counted, zeros included, so an empty table and an absent one do not look alike. On
+  PostgreSQL the tenant's data is counted in the tenant's own scope and the `admin.*` tables on the admin
+  connection; on SQL Server one list, derived from the catalogue, is counted in the tenant's scope.
+- `plugin_tables` are the per-tenant tables plugins have registered in `admin.plugin_tables` (PostgreSQL; on SQL Server
+  they are already in `tables`). A registered table the tenant's scope could not read is named in
+  `uncounted_plugin_tables` instead of being reported as empty, and a registry row that names a table that does not exist
+  in `skipped_plugin_tables`; `admin.drop_tenant` still deletes the former and skips the latter.
+- `retained` names the tables a drop **keeps**, each with the reason, so that a reader is not left to infer from what is
+  removed what survives. Nothing in it is counted into `total_rows`, and nothing is on both lists. Today it holds the
+  tombstone a drop writes (see below) and `admin.plugin_dep_overrides`, the append-only record of an operator deploying
+  past an unmet plugin dependency, whose tenant column is `for_tenant_id` for that reason; a table that must outlive its tenant (an append-only audit record) is added
+  here, and must not carry a column named `tenant_id` on SQL Server, whose `admin.drop_tenant` deletes from every table
+  that does.
+- It is a snapshot taken statement by statement, not a moment and not a lock: each count is read separately, so a run that starts or finishes while the plan is read can make two counts disagree by one, and runs can start or finish between the plan and a drop. A drop checks what it requires for itself.
+
+Who may call it is the same as `suspend`: an admin-scoped operator key for any tenant; a provision-scoped key only for a
+tenant its own principal created; a tenant key never. A tenant that does not exist, one the caller did not create and
+one made offline all answer the same `404`. The default tenant answers `400`. PostgreSQL and SQL Server only.
+
+## Dropping a tenant
+
+`DELETE /api/admin/tenants/{tenant}` removes a tenant and everything it owns (cleat#3552). It is the destructive step
+of the provisioning API, so it is refused unless every one of these holds, checked in this order:
+
+1. The caller is an operator whose scope reaches the route, and the id is a UUID that is not the default tenant (`400`).
+2. The **`X-Confirm` header is the tenant's id, typed back**, exactly as the lower-case canonical string (`400` otherwise).
+   It is a header and not a query parameter because query strings are logged. It is checked before anything is read, so
+   a malformed request reveals nothing about a tenant.
+3. The tenant exists and the caller has a claim to it: an admin-scoped key has one to any tenant, a provision-scoped key
+   only to a tenant its own principal created. A tenant that does not exist, one the caller did not create and one made
+   offline all answer the same `404`.
+4. The tenant is **suspended** (`409`, `"reason": "not_suspended"`), so no new work is arriving.
+5. The tenant has **no unsettled run** (`409`, `"reason": "unsettled_runs"`, with `"unsettled_runs": N`). Settle or
+   cancel them first; `GET …/drop-plan` shows the count. A drop does not stop a run that is executing, because
+   removing its rows makes its next heartbeat fail on a fence it no longer has.
+
+Steps 4 and 5 are checked in the same transaction as the drop, under a lock on the tenant's row, so a resume cannot slip
+in between the check and the delete.
+
+**A drop deletes the tenant's audit trail** (`audit_events` and `audit_chain_heads`), with the rest of its data. If you
+need that history, run `cleatctl audit export` for the tenant **before** the drop; afterwards there is nothing to export
+(`docs/reference/audit-log.md`).
+
+```json
+{"tenant_id": "...", "dropped": true, "already_dropped": false, "dropped_at": "2026-10-30T04:00:00.000000Z",
+ "dropped_by": "clew-service", "audit_chain": {"seq": 41, "hash": "…"}}
+```
+
+**The tombstone.** The same transaction writes a row to `admin.tenant_tombstones` (`007_a_dropped_tenant_leaves_a_tombstone.sql`, PostgreSQL and SQL
+Server) holding the tenant's name, org, creator, who dropped it, when, and where its own audit chain ended
+(`audit_chain` is `null` when the tenant had none). The audit log's row for the request is enqueued after the handler
+returns, so a crash in between can lose it; the tombstone cannot be lost without the drop. It does three things:
+
+- **A repeat is safe.** Repeating a drop that succeeded answers `200` with `"already_dropped": true` and changes nothing,
+  so a caller whose response was lost can repeat the request. Who may see that is decided as for the tenant: a
+  provision-scoped key sees it only for a tenant it created.
+- **The id cannot be reused by accident.** `POST /api/admin/tenants` with a dropped id answers `409`,
+  `"reason": "tenant_id_dropped"`, and creates nothing (no org either), until an admin deletes the tombstone (below). What the worker, its caches and the logs still hold
+  under the id would otherwise be inherited by a new tenant.
+- **A start for a dropped tenant is refused**, as for a suspended one.
+
+**What the audit log records.** The request is recorded on the **default** tenant's chain, attributed to the operator, with
+the dropped tenant's id in the path. It is deliberately not recorded on the dropped tenant's own chain: that chain is
+deleted with the tenant, so a row there would be recorded and then removed. The tombstone holds the head of the deleted
+chain (its last `seq` and `hash`), so a copy of the chain taken earlier can still be checked against where it ended.
+
+**What the reply does not promise.** The tenant's keys and rows are gone when it returns. The one thing a worker still
+holds for it is the egress allowlist, which is cached per tenant: a dropped tenant's entry is honoured until its TTL
+(30 seconds by default) runs out, after which the lookup finds nothing and denies. Do not read the reply as "no worker is
+still acting for this tenant" within that window.
+
+Who may call it is the same as `suspend`, except that a provision-scoped key reaches it with `DELETE` and nothing
+else: an admin-scoped key for any tenant, a provision-scoped key only for a tenant its own principal created, a tenant
+key never. PostgreSQL and SQL Server only, and not on a sharded worker.
+
+**A provision-scoped key may drop the tenants its own principal created** (owner decision D54, 2026-10-30). This
+supersedes the design discussion's earlier line that a drop would be operator-only and never the provisioner's: a service
+that deletes an org removes the org's tenant with the key it created it with, so the callers are the same as for `suspend`.
+The drop is refused while any run is unsettled, is tombstoned and is audited, and it is irreversible.
+
+### Deleting a tombstone, so a dropped id can be used again
+
+```
+DELETE /api/admin/tenants/{tenant}/tombstone
+X-Confirm: {tenant}
+```
+
+A dropped id answers `409 tenant_id_dropped` on create until its tombstone is deleted. This is the one act that removes
+it. It is **admin-only**: an admin-scoped operator key. A provision-scoped key is refused with `403` (by the scope gate,
+and again by the handler), a tenant key is not an operator, and the default tenant has no tombstone. Reuse is its own
+route and not a flag on create so that a service which can create tenants can never recreate an id that was dropped,
+because what the worker, its caches and the logs still hold under that id would be inherited by whoever gets it.
+
+`X-Confirm` must be the tenant's id, typed back, in the canonical lower-case spelling. It is checked before anything
+is read.
+
+```json
+{"tenant_id": "...", "tombstone_deleted": true,
+ "tombstone": {"tenant_id": "...", "name": "acme", "org_id": "...", "created_by": "clew-service",
+               "dropped_by": "operator:...", "dropped_at": "2026-10-30T04:00:00.123456Z",
+               "audit_chain": {"seq": 41, "hash": "…"}}}
+```
+
+`created_by` and `audit_chain` are `null` when the tombstone had none.
+
+**THIS DISCARDS THE AUDIT CHAIN ANCHOR, and you must archive the response.** The tombstone is the only record of where
+the dropped tenant's own audit chain ended (`audit_chain.seq` and `hash`); the chain itself was deleted with the tenant.
+After the delete nothing says where it stopped, so a copy of that chain taken earlier can no longer be checked against
+its end. The reply carries everything the row held, and the worker logs the same fields at `WARN` (ids, a name, a chain
+position and a hash: observability data, not secrets), but neither is a durable record, so keep the response.
+
+**The audit row records that it happened and not what was deleted.** The request is audited on the **default**
+tenant's chain, attributed to the operator, with the tenant's id in the path and the status; an audit row has no field for
+the tombstone's contents. (A durable record of deleted tombstones, and a detail field on the audit row, were considered
+and not built.)
+
+A repeat is **`404`**, not `200`: deleting a tombstone is a one-off operator act and not a step a saga repeats, and once
+the id has been reused it may belong to a live tenant. An id that was never dropped is the same `404`. PostgreSQL and SQL
+Server only, and not on a sharded worker.
 
 ## Acting on another tenant
 
@@ -105,7 +456,7 @@ pod's `terminationGracePeriodSeconds` (chart: `worker.terminationGracePeriodSeco
 [zero-downtime-deploy.md](zero-downtime-deploy.md#what-sigterm-does) for what happens to a run that outlasts the grace.
 
 Set `adminApi.enabled` only where every API key you have issued is trusted to drain workers and to run the
-all-tenant retention sweep.
+retention sweep.
 
 ## `GET /api/admin/drain` is read-only, and `POST` is a cordon
 

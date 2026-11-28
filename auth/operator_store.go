@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/google/uuid"
@@ -66,7 +67,7 @@ func NewOperatorStoreForDialect(db *sql.DB, dialect string) (*OperatorStore, err
 // only to a query that filters on that column, and is not itself a check.
 func (s *OperatorStore) ResolveOperatorFromAPIKey(ctx context.Context, keyHash []byte) (Operator, error) {
 	var op Operator
-	if err := s.db.QueryRowContext(ctx, resolveOperatorStmt(s.dialect), keyHash).Scan(&op.KeyID, &op.Description); err != nil {
+	if err := s.db.QueryRowContext(ctx, resolveOperatorStmt(s.dialect), keyHash).Scan(&op.KeyID, &op.Description, &op.Scopes, &op.Principal); err != nil {
 		return Operator{}, err
 	}
 	return op, nil
@@ -93,7 +94,7 @@ func resolveOperatorStmt(dialect string) string {
 	case DialectMySQL:
 		// No admin schema: schema and database are one namespace in MySQL, and
 		// the base database the DSN names is where the row lives.
-		return `SELECT key_id, description FROM operator_api_keys WHERE key_hash = ? AND disabled_at IS NULL AND (expires_at IS NULL OR expires_at > NOW(6))`
+		return `SELECT key_id, description, scopes, COALESCE(principal, '') FROM operator_api_keys WHERE key_hash = ? AND disabled_at IS NULL AND (expires_at IS NULL OR expires_at > NOW(6))`
 	case DialectMSSQL:
 		// LOWER() around the projection, and it is not cosmetic: SQL Server
 		// hands a UNIQUEIDENTIFIER back from CONVERT as UPPERCASE, while
@@ -112,10 +113,28 @@ func resolveOperatorStmt(dialect string) string {
 		// IMPROVEMENT-PLAN 3.99). The alternative here was comparing with
 		// EqualFold at each call site, which leaves every reader to remember it;
 		// the projection is what makes the value canonical for all of them.
-		return `SELECT LOWER(CONVERT(NVARCHAR(36), key_id)), description FROM admin.operator_api_keys WHERE key_hash = @p1 AND disabled_at IS NULL AND (expires_at IS NULL OR expires_at > SYSUTCDATETIME())`
+		return `SELECT LOWER(CONVERT(NVARCHAR(36), key_id)), description, scopes, COALESCE(principal, N'') FROM admin.operator_api_keys WHERE key_hash = @p1 AND disabled_at IS NULL AND (expires_at IS NULL OR expires_at > SYSUTCDATETIME())`
 	default:
-		return `SELECT key_id::text, description FROM admin.operator_api_keys WHERE key_hash = $1 AND disabled_at IS NULL AND (expires_at IS NULL OR expires_at > now())`
+		return `SELECT key_id::text, description, scopes, COALESCE(principal, '') FROM admin.operator_api_keys WHERE key_hash = $1 AND disabled_at IS NULL AND (expires_at IS NULL OR expires_at > now())`
 	}
+}
+
+// OperatorKeySpec is what a new operator key is for. A struct and not more
+// positional arguments because there are now five things to say, three of them
+// optional, and a call site reading (ctx, "ci", raw, nil, nil, "") says none of them.
+type OperatorKeySpec struct {
+	// Description says what the credential is for. Required by the CLI; the store
+	// accepts any text, as it always has.
+	Description string
+	// ExpiresAt is nil for a key that never expires.
+	ExpiresAt *time.Time
+	// Scopes is what the key may reach: at least one of ScopeAdmin, ScopeProvision.
+	// There is no default here. The CLI defaults to admin, which is what every key
+	// was before scopes existed; a library caller must say so.
+	Scopes []string
+	// Principal names who the key is issued to. Required for the provision scope,
+	// because what that scope creates is recorded against it.
+	Principal string
 }
 
 // CreateOperatorKey mints an operator credential and returns it.
@@ -126,8 +145,21 @@ func resolveOperatorStmt(dialect string) string {
 // to return the plaintext to be useful. cleatctl operator-key create calls
 // GenerateOperatorKey and passes the result.
 //
-// expiresAt is nil for a key that never expires.
-func (s *OperatorStore) CreateOperatorKey(ctx context.Context, description, rawKey string, expiresAt *time.Time) (Operator, error) {
+// The spec is validated BEFORE anything is written: an unknown scope, no scope,
+// a malformed principal, or the provision scope without a principal all refuse,
+// so a narrowed key cannot be minted into a state that means something other than
+// what was asked.
+func (s *OperatorStore) CreateOperatorKey(ctx context.Context, rawKey string, spec OperatorKeySpec) (Operator, error) {
+	scopes, err := FormatOperatorScopes(spec.Scopes)
+	if err != nil {
+		return Operator{}, err
+	}
+	if spec.Principal != "" && !ValidPrincipal(spec.Principal) {
+		return Operator{}, fmt.Errorf("auth: %q is not a valid principal name (lower-case letters, digits, '.', '_' and '-', starting with a letter or digit, at most 128)", spec.Principal)
+	}
+	if spec.Principal == "" && slices.Contains(ParseOperatorScopes(scopes), ScopeProvision) {
+		return Operator{}, fmt.Errorf("auth: the %s scope needs a principal: what it creates is recorded against that name", ScopeProvision)
+	}
 	keyHash := sha256.Sum256([]byte(rawKey))
 
 	// key_id is generated here and INSERTed explicitly on all three dialects,
@@ -138,10 +170,17 @@ func (s *OperatorStore) CreateOperatorKey(ctx context.Context, description, rawK
 	// and the value is identical either way: a UUID the caller would otherwise
 	// have to fetch.
 	id := uuid.New().String()
-	if _, err := s.db.ExecContext(ctx, createOperatorStmt(s.dialect), id, keyHash[:], description, expiresAt); err != nil {
+	// A nil pointer would bind as NULL, but principal is plain text here, so the
+	// absence is stated: NULL when there is none, which is what the column holds
+	// for every key that predates it.
+	var principal any
+	if spec.Principal != "" {
+		principal = spec.Principal
+	}
+	if _, err := s.db.ExecContext(ctx, createOperatorStmt(s.dialect), id, keyHash[:], spec.Description, spec.ExpiresAt, scopes, principal); err != nil {
 		return Operator{}, err
 	}
-	return Operator{KeyID: id, Description: description}, nil
+	return Operator{KeyID: id, Description: spec.Description, Scopes: scopes, Principal: spec.Principal}, nil
 }
 
 // createOperatorStmt returns the INSERT for a dialect. The statements differ
@@ -151,11 +190,11 @@ func (s *OperatorStore) CreateOperatorKey(ctx context.Context, description, rawK
 func createOperatorStmt(dialect string) string {
 	switch dialect {
 	case DialectMySQL:
-		return `INSERT INTO operator_api_keys (key_id, key_hash, description, expires_at) VALUES (?, ?, ?, ?)`
+		return `INSERT INTO operator_api_keys (key_id, key_hash, description, expires_at, scopes, principal) VALUES (?, ?, ?, ?, ?, ?)`
 	case DialectMSSQL:
-		return `INSERT INTO admin.operator_api_keys (key_id, key_hash, description, expires_at) VALUES (@p1, @p2, @p3, @p4)`
+		return `INSERT INTO admin.operator_api_keys (key_id, key_hash, description, expires_at, scopes, principal) VALUES (@p1, @p2, @p3, @p4, @p5, @p6)`
 	default:
-		return `INSERT INTO admin.operator_api_keys (key_id, key_hash, description, expires_at) VALUES ($1, $2, $3, $4)`
+		return `INSERT INTO admin.operator_api_keys (key_id, key_hash, description, expires_at, scopes, principal) VALUES ($1, $2, $3, $4, $5, $6)`
 	}
 }
 
@@ -179,7 +218,7 @@ func (s *OperatorStore) ListOperatorKeys(ctx context.Context) ([]Operator, error
 	for rows.Next() {
 		var op Operator
 		var disabledAt, expiresAt sql.NullTime
-		if err := rows.Scan(&op.KeyID, &op.Description, &disabledAt, &expiresAt); err != nil {
+		if err := rows.Scan(&op.KeyID, &op.Description, &op.Scopes, &op.Principal, &disabledAt, &expiresAt); err != nil {
 			return nil, err
 		}
 		op.Disabled = disabledAt.Valid
@@ -195,14 +234,14 @@ func (s *OperatorStore) ListOperatorKeys(ctx context.Context) ([]Operator, error
 func listOperatorStmt(dialect string) string {
 	switch dialect {
 	case DialectMySQL:
-		return `SELECT key_id, description, disabled_at, expires_at FROM operator_api_keys ORDER BY created_at DESC`
+		return `SELECT key_id, description, scopes, COALESCE(principal, ''), disabled_at, expires_at FROM operator_api_keys ORDER BY created_at DESC`
 	case DialectMSSQL:
 		// LOWER(), for the reason resolveOperatorStmt's MSSQL arm gives at
 		// length: without it the ids this lists are uppercase and do not match
 		// the rows themselves, so a revoke driven by what `list` printed misses.
-		return `SELECT LOWER(CONVERT(NVARCHAR(36), key_id)), description, disabled_at, expires_at FROM admin.operator_api_keys ORDER BY created_at DESC`
+		return `SELECT LOWER(CONVERT(NVARCHAR(36), key_id)), description, scopes, COALESCE(principal, N''), disabled_at, expires_at FROM admin.operator_api_keys ORDER BY created_at DESC`
 	default:
-		return `SELECT key_id::text, description, disabled_at, expires_at FROM admin.operator_api_keys ORDER BY created_at DESC`
+		return `SELECT key_id::text, description, scopes, COALESCE(principal, ''), disabled_at, expires_at FROM admin.operator_api_keys ORDER BY created_at DESC`
 	}
 }
 

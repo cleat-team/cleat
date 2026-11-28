@@ -109,19 +109,36 @@ func NewMemoryController(
 // store is opened as. Before cleat#1097 that was invisible: the rows landed in
 // a map keyed by def_name, so they silently became every tenant's starting
 // point. Now they are confined to the tenant they belong to, and another
-// tenant simply starts cold and learns from its own samples.
+// tenant simply starts cold and learns from its own samples. It replaces only
+// that one tenant's keys, so what the others have learned since survives it.
 func (c *MemoryController) LoadEstimates(ctx context.Context, tenantID string) error {
 	estimates, err := c.store.LoadMemoryEstimates(ctx)
 	if err != nil {
 		return err
 	}
-	keyed := make(map[memoryEstimateKey]float64, len(estimates))
-	for defName, mean := range estimates {
-		keyed[memoryEstimateKey{tenantID: tenantID, defName: defName}] = mean
-	}
 	c.mu.Lock()
-	c.defEstimates = keyed
-	c.mu.Unlock()
+	defer c.mu.Unlock()
+	// Replace this tenant's keys and leave every other tenant's alone.
+	// RecordWorkflowMemory writes each tenant's learned estimates into this same
+	// map, and the reload used to replace the whole map with the loaded tenant's
+	// rows, so every five minutes the others' estimates vanished from what the
+	// exported gauge reads (DefEstimates), which then stopped being refreshed for
+	// them and kept its last value, and their next sample seeded the EWMA afresh
+	// (cleat#3572). Nothing in production reads the map to size a run, so this was
+	// a reporting and smoothing defect, not a sizing one. Dropping this tenant's
+	// old keys first is what makes it a replacement: a definition no longer in its
+	// store must not keep an estimate.
+	for k := range c.defEstimates {
+		if k.tenantID == tenantID {
+			delete(c.defEstimates, k)
+		}
+	}
+	if c.defEstimates == nil {
+		c.defEstimates = make(map[memoryEstimateKey]float64, len(estimates))
+	}
+	for defName, mean := range estimates {
+		c.defEstimates[memoryEstimateKey{tenantID: tenantID, defName: defName}] = mean
+	}
 	return nil
 }
 

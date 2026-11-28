@@ -20,6 +20,35 @@ empty), `ip_address`, `user_agent`, `duration_ms` and `timestamp`, plus the chai
 `seq`, `prev_hash` and `row_hash`. `metadata` was always `{}` before cleat#2534; see
 *Recording from a workflow* below for the first thing that writes anything else there.
 
+## What is not recorded: the worker's own maintenance
+
+The log records two things: an API request, and a workflow's own `record_event` call. **The loops a worker runs
+on its own schedule are neither, and write no audit event**, for any tenant: the stale-run reaper, the heartbeat,
+the concurrency-key reaper, defer-phase expiry, compaction, memory-sample cleanup, the metrics sweep, the rotating
+claim and cron, and **retention**. Their record is the worker's log and its metrics.
+
+This is deliberate. These loops visit every tenant on every tick, so a row each would be most of the chain, and
+every row costs an append under the tenant's head lock that the request path shares. It is the same reason the
+infrastructure probes are exempt.
+
+**Retention is the one to read twice.** It permanently deletes data a tenant can see (event history, and with the
+opt-in flags completed and dead-lettered runs) under flags the operator sets for the whole deployment, with no
+per-tenant setting, and **the tenant gets no record that a sweep ran or what it removed.** Whether a retention
+sweep should leave a per-tenant record is not decided; it is open on cleat#3707. See
+[`workflow-retention.md`](../operations/workflow-retention.md) for what each flag deletes.
+
+The audit log's *own* retention is different and is recorded: it moves the floor in the chain head, described under
+*Retention* below.
+
+How this was established, so it can be checked again. On 2026-11-12, at `05367f68`, the real-database tests for
+each of those loops were run on PostgreSQL 17 and SQL Server 2022 with every statement logged, and no statement
+touched `audit_events` or `audit_chain_heads`; the same instruments did see the audit plugin's own writes (13
+statements on PostgreSQL, 83 trace events on SQL Server). Not run: a whole worker process with its timers, and the
+trial-expiry loop. The structural reason, which does not depend on that run, is that one package writes these
+tables:
+
+    git grep -n 'INSERT INTO audit_events' -- '*.go' ':!*_test.go'    # plugins/auditlog/chain_store.go only
+
 ## Recording from a workflow
 
 A workflow can append to its own tenant's chain directly, with the `record_event` host
@@ -202,6 +231,20 @@ The HTTP endpoint streams the caller's tenant as JSON Lines. Any authenticated c
 may call it, exactly as `GET /audit/events`. There is no cross-tenant HTTP endpoint: an operator uses
 `cleatctl audit export --all-tenants`, which connects to the database directly, and writes one
 complete stream per tenant, one after another.
+
+**An export is raw, and sensitive.** Every row is written exactly as it was stored and hashed. It is
+**not redacted**, by decision (D49-1a): a redacted export cannot be verified against the chain, and the
+export exists to be verified. Which fields can carry content:
+
+- A row recorded for an **HTTP request** carries the method, the URL path (not the query string, not the
+  body), the status, the user, the client address, the user agent, the duration, and `metadata` of `{}`.
+  It carries no workflow payload and no request body.
+- A row written by a **workflow** through the `record_event` host function carries whatever that workflow
+  supplied: `event_type` in `path` and the `details` object in `metadata`. `user_id` is the workflow id.
+  If a workflow puts a secret in `details`, the export has it.
+
+Treat the file like a secret: restrict who can read it, and do not paste it into a ticket. Workflow-data
+exports, where any exist, are redacted under D49-1a; this one is the integrity artifact and is not.
 
 `from` and `to` are RFC 3339, inclusive, at microsecond resolution. A malformed value is a `400`,
 not an ignored filter (`GET /audit/events` ignores one). An export of a range has gaps in `seq`
@@ -441,5 +484,13 @@ recording the gap as a floor would turn a finding into a fact.
 The sweep visits every tenant that has an expired row, whether or not the tenant is still
 registered. It no longer uses one cross-tenant `DELETE`.
 
-A dropped tenant's audit rows and head row survive `drop-tenant`, as `audit_events` always has
-(`docs/plugin-table-handling.md`), and are removed by retention when they expire.
+**A dropped tenant's audit rows and chain head do not survive `drop-tenant`.** `admin.drop_tenant` deletes the
+tenant's `audit_events` and `audit_chain_heads` rows with the rest of its data (cleat#1289; measured on
+PostgreSQL 17 and SQL Server 2022 on 2026-11-12, cleat#3716: a tenant with 3 recorded requests had 0 rows and no
+head after the drop, while the default tenant's rows were untouched). What the drop leaves is the tombstone
+(`admin.tenant_tombstones`): the dropping principal, the time, and the chain's last `seq` and `hash`, which the
+drop response also returns. That lets an export taken **before** the drop be checked against where the chain
+ended, and it is all that is left: after the drop there is nothing to export. If a tenant's audit history has to
+be kept past its removal, export it with `cleatctl audit export` first. By owner decision D77 (2026-11-12) a
+tenant's audit history does not outlive the tenant; that is reopened only if a stated compliance requirement needs
+it kept after offboarding (cleat#3716).

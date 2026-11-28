@@ -271,7 +271,41 @@ func validateConstructs(fd *analyzer.FuncDecl, cr *Result) {
 	}
 
 	name := fd.FullyQualifiedName()
+	sideEffectBodies := sideEffectFuncLits(fd)
+	// The function literal passed to SideEffect runs ONCE, on first execution, and its VALUE is what is recorded and replayed. So the rules
+	// that exist because a value differs across replays (a wall-clock read, entropy, a map's iteration order) do not describe it (cleat#4123,
+	// under cleat#4113's freeze semantics). Nothing else is relaxed: a goroutine started in the literal can outlive the side effect and make
+	// host calls on the first run only, so replay diverges (E001); channels (E002), calls through an interface (E008) or a function value
+	// (E009), close() (E012) and atomics (E013) stay refused, as do sleeping, timers, net/http, database/sql, printing and os. The first draft
+	// skipped the literal's whole subtree and silently dropped all of those too (cleat-review, #4126).
+	//
+	// A NAMED function passed to SideEffect is not exempt: it is a function in the closure like any other.
+	var stack []ast.Node
+	insideSideEffect := 0
 	ast.Inspect(fd.Ast.Body, func(n ast.Node) bool {
+		if n == nil { // leaving the node on top of the stack
+			top := stack[len(stack)-1]
+			stack = stack[:len(stack)-1]
+			if lit, ok := top.(*ast.FuncLit); ok && sideEffectBodies[lit] {
+				insideSideEffect--
+			}
+			return true
+		}
+		stack = append(stack, n)
+		if lit, ok := n.(*ast.FuncLit); ok && sideEffectBodies[lit] {
+			insideSideEffect++
+		}
+		before := len(cr.Errors[name])
+		defer func() {
+			// Only when something was appended: assigning back a zero-length slice would store `name: []` (a non-nil, empty entry) for every
+			// function that contains a SideEffect literal, and callers that test len(cr.Errors) see an error where there is none.
+			if insideSideEffect > 0 && len(cr.Errors[name]) > before {
+				cr.Errors[name] = dropValueNondeterminism(cr.Errors[name], before)
+				if len(cr.Errors[name]) == 0 {
+					delete(cr.Errors, name)
+				}
+			}
+		}()
 		switch stmt := n.(type) {
 		case *ast.GoStmt:
 			line := 0
@@ -360,6 +394,69 @@ func validateConstructs(fd *analyzer.FuncDecl, cr *Result) {
 		}
 		return true
 	})
+}
+
+// valueNondeterminismCodes are the codes that flag a construct whose VALUE differs between executions: time.Now (E003), math/rand (E007),
+// math/rand/v2 (E018), crypto/rand (E017) and ranging over a map (E021). They are exempt inside the function passed to SideEffect and nowhere
+// else.
+var valueNondeterminismCodes = map[string]bool{"E003": true, "E007": true, "E017": true, "E018": true, "E021": true}
+
+// dropValueNondeterminism removes the value-nondeterminism errors appended at or after index `from`.
+func dropValueNondeterminism(errs []ValidationError, from int) []ValidationError {
+	kept := errs[:from]
+	for _, e := range errs[from:] {
+		if !valueNondeterminismCodes[e.Code] {
+			kept = append(kept, e)
+		}
+	}
+	return kept
+}
+
+// sideEffectFuncLits returns the function literals that are passed DIRECTLY as the function of a side effect: the argument of
+// h.SideEffect(fn), or the second argument of cleat.SideEffectTyped(h, fn). Only a literal written at the call is returned. A variable, a
+// named function and a literal that is merely called from one are not.
+//
+// The receiver of h.SideEffect must be a cleat.HostCalls (by its type), so a user type that happens to have a SideEffect method does not earn
+// the exemption.
+func sideEffectFuncLits(fd *analyzer.FuncDecl) map[*ast.FuncLit]bool {
+	lits := map[*ast.FuncLit]bool{}
+	if fd.Ast.Body == nil || fd.Pkg == nil || fd.Pkg.Info == nil {
+		return lits
+	}
+	ast.Inspect(fd.Ast.Body, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		callee := call.Fun
+		// cleat.SideEffectTyped[int64](h, fn): an explicit instantiation wraps the selector in an index expression.
+		switch ix := callee.(type) {
+		case *ast.IndexExpr:
+			callee = ix.X
+		case *ast.IndexListExpr:
+			callee = ix.X
+		}
+		sel, ok := callee.(*ast.SelectorExpr)
+		if !ok {
+			return true
+		}
+		var fnArg ast.Expr
+		switch sel.Sel.Name {
+		case "SideEffect":
+			if tv, ok := fd.Pkg.Info.Types[sel.X]; ok && analyzer.IsHostCallsType(tv.Type) && len(call.Args) == 1 {
+				fnArg = call.Args[0]
+			}
+		case "SideEffectTyped":
+			if id, ok := sel.X.(*ast.Ident); ok && resolveImportPath(fd, id) == "github.com/cleat-team/cleat/cleat" && len(call.Args) == 2 {
+				fnArg = call.Args[1]
+			}
+		}
+		if lit, ok := fnArg.(*ast.FuncLit); ok {
+			lits[lit] = true
+		}
+		return true
+	})
+	return lits
 }
 
 // resolveNamedType unwraps pointer types and returns the underlying named type.

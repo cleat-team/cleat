@@ -68,8 +68,11 @@ class SuspendStopBitTest {
     /**
      * Bit 31, not bit 62. The two sentinels travel in opposite directions and
      * confusing them is silent: {@link Memory#SUSPEND_SENTINEL} is what the
-     * guest returns to the host from an export, and the host never sets it in a
-     * result word.
+     * guest returns to the host from an export, and the host does not set it in
+     * a result word as the stop bit. (It does appear in one: the three child
+     * awaits answer a pending child with 1<<62, packAwaitChildResultSuspend, and
+     * the SDK throws SuspendSignal on it itself, cleat#4285. That is the export
+     * sentinel arriving as an answer, not the stop bit, which is bit 31.)
      */
     @Test
     void theStopBitIsNotTheExportSuspendSentinel() {

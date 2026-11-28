@@ -32,6 +32,13 @@ var notDeclaredForGo = map[string]string{
 	// cleat#1155.
 	"cleat_defer_phase": "called by the generated defer table, not by an SDK method; emitted unconditionally alongside cleat_complete",
 
+	// cleat#3922. The soft-kill stop bit, polled from a guest's own runtime loop.
+	// Go's hostFunctions maps an import to a HostCalls METHOD and there is no such
+	// method here: the Go SDK has no binding, so a Go workflow keeps the hard kill
+	// and is unaffected -- the call is optional by design (ABI.md 2.10b). Only the
+	// TypeScript plugin binds it, from its Rust interrupt handler.
+	"cleat_interrupt_requested": "optional soft-kill poll; no Go SDK binding, so Go keeps the hard kill",
+
 	// Provided natively by Go, so no import is needed. These exist for guest
 	// languages that cannot do them in-process.
 	"cleat_uuid":           "HostCallsImpl.UUID derives it in Go from workflowID+seed via SHA-256, deterministic without a host call",

@@ -38,8 +38,11 @@ import (
 	"database/sql"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"os"
+
+	"github.com/cleat-team/cleat/engine"
 )
 
 // osExit is replaced in tests to intercept os.Exit calls.
@@ -101,6 +104,10 @@ func main() {
 		log.Fatalf("%v", err)
 	}
 
+	// cleat#3600: the deploy path reads the plugin-name registry through this connection and
+	// needs the engine's name for the dialect, which is the same string.
+	currentDialect = engine.Dialect(d.name)
+
 	db, err := sql.Open(d.driver, *dsn)
 	if err != nil {
 		log.Fatalf("failed to connect to %s database: %v — check the --db flag or CLEAT_DB_URL environment variable", d.name, err)
@@ -112,6 +119,18 @@ func main() {
 	}
 
 	ctx := context.Background()
+
+	// cleat#3597: `library` is for the library PUBLISHER's login, which can write the library
+	// schema and nothing else. It has no use for the store, and the tenant-scoped warning below
+	// describes the operator's questions, which the publisher asks none of, so it is handed the
+	// bare connection here, before both.
+	cmd := args[0]
+	switch cmd {
+	case "library":
+		requirePortedFor("library", d)
+		runLibrary(ctx, db, engine.Dialect(d.name), args[1:])
+		return
+	}
 
 	// Say once, up front, that this connection cannot answer the questions
 	// cleatctl asks. Before the store is opened, so it is the first thing on
@@ -128,7 +147,11 @@ func main() {
 	}
 	defer closer.Close()
 
-	cmd := args[0]
+	// cleat#3766: replay and debug read a run through the store of the tenant that
+	// owns it, which they learn from the run itself.
+	tenantStoreOpener = func(ctx context.Context, tenantID string) (engine.WorkflowStore, io.Closer, error) {
+		return factory.OpenStore(ctx, tenantID)
+	}
 
 	// Before the subcommand runs: some are not written for this dialect, and
 	// the refusal has to precede the first statement rather than follow a
@@ -213,6 +236,8 @@ Commands:
   versions gc [--dry-run]         run garbage collection on deprecated versions
       [--min-versions=N] [--max-age=DURATION]
   deploy workflow <name> <wasm>   deploy a new workflow WASM binary
+  library publish <library> <bundle-version> <member.wasm>...  publish a workflow library bundle (cleat#3597)
+  library list [<library>]        list published library bundles
   deploy plugin <name> <wasm>     deploy a plugin WASM binary
   cost [flags]                    estimate monthly operational costs
   replay <id> --entry-point <n>   replay a workflow's event history for diagnostics

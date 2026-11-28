@@ -161,7 +161,7 @@ func TestGraphStringEmpty(t *testing.T) {
 func TestHasHostCallsCallOnLeaf(t *testing.T) {
 	result, _ := cgLoadBasic(t)
 	fd := result.Funcs[cgBasicFQ("checkItemAvailability")]
-	if !hasHostCallsCall(fd) {
+	if !hasHostCallsCall(result, fd) {
 		t.Error("checkItemAvailability should have HostCalls call")
 	}
 }
@@ -169,7 +169,7 @@ func TestHasHostCallsCallOnLeaf(t *testing.T) {
 func TestHasHostCallsCallOnNonLeaf(t *testing.T) {
 	result, _ := cgLoadBasic(t)
 	fd := result.Funcs[cgBasicFQ("PlaceOrder")]
-	if hasHostCallsCall(fd) {
+	if hasHostCallsCall(result, fd) {
 		t.Error("PlaceOrder should NOT have direct HostCalls call")
 	}
 }
@@ -180,7 +180,7 @@ func TestHasHostCallsCallWithNilInfo(t *testing.T) {
 		if fd.Pkg != nil {
 			saved := fd.Pkg.Info
 			fd.Pkg.Info = nil
-			if hasHostCallsCall(fd) {
+			if hasHostCallsCall(result, fd) {
 				t.Errorf("hasHostCallsCall should be false with nil Info for %s", fd.Name)
 			}
 			fd.Pkg.Info = saved

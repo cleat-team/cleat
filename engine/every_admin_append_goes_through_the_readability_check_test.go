@@ -137,6 +137,22 @@ var adminAppendSites = map[string]adminAppendSite{
 		status: adminSiteExempt,
 		reason: "engine defer-phase finalize, not an admin verb",
 	},
+
+	// cleat#4079: the worker's own write when a killed component run owes defers. It appends the events that execution held
+	// in memory, the same engine write path as FinalizeDeferPhase and the immediate terminal write, and is fenced on the
+	// worker's claim; it is not an operator verb and appends nothing an operator supplied.
+	"store_defer_phase_failure.go:PostgresStore.MarkFailureForDeferPhase": {
+		status: adminSiteExempt,
+		reason: "engine defer-phase failure mark by the owning worker, not an admin verb",
+	},
+	"store_defer_phase_failure.go:MySQLStore.MarkFailureForDeferPhase": {
+		status: adminSiteExempt,
+		reason: "engine defer-phase failure mark by the owning worker, not an admin verb",
+	},
+	"store_defer_phase_failure.go:MSSQLStore.markFailureForDeferPhaseOnce": {
+		status: adminSiteExempt,
+		reason: "engine defer-phase failure mark by the owning worker, not an admin verb",
+	},
 }
 
 // checkAdminAppendSites is the testable core of

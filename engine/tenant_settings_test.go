@@ -3,7 +3,6 @@ package engine
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"testing"
 	"time"
 )
@@ -265,33 +264,6 @@ func TestTheThreeSettingsBoundDifferentThings(t *testing.T) {
 			"and it makes the epoch fence's exclusion of host wait "+
 			"unobservable again.",
 			withOthers, base)
-	}
-}
-
-func TestAFailedSettingsReadFallsBackToTheFlagsRatherThanFailingTheWorkflow(t *testing.T) {
-	backend := &configurableMockBackend{}
-	store := &fakeSettingsStore{err: errors.New("settings table is unreachable")}
-
-	e := NewEngine(nil, nil,
-		WithBackend("go", backend),
-		WithWorkflowStore(store),
-		WithWasmWallClockCeiling(300*time.Second),
-	)
-	e.workflowID = "wf-settings-read-fails"
-	e.defName = "test-def"
-
-	if _, _, _, _, _, err := e.executeWithBackend(
-		context.Background(), backend, minimalWasm(), "test_entry", []byte(`{}`), nil,
-	); err != nil {
-		t.Fatalf("a settings read failure failed the workflow: %v\n\n"+
-			"It must not. Treating an unreadable settings row as fatal lets one "+
-			"bad table take down every execution on the deployment, and the "+
-			"fallback direction is safe: the operator's own limits, never wider.",
-			err)
-	}
-	if store.calls == 0 {
-		t.Fatal("the store was never asked for settings, so this test proved " +
-			"nothing about what happens when the read fails")
 	}
 }
 

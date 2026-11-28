@@ -40,6 +40,7 @@ func TestStartPluginWorkflow_PostgresScopesToTheDestinationTenant(t *testing.T) 
 		t.Skip("CLEAT_TEST_POSTGRES not set, skipping database-backed cleat#2187 test")
 	}
 	db := testutil.SuiteTestDB(t, "cleat_worker")
+	settleRunsLeftBehind(t, db)
 
 	// See tenant_isolation_db_test.go: a superuser connection bypasses RLS
 	// unconditionally, and CLEAT_TEST_POSTGRES conventionally points at one.
@@ -156,6 +157,7 @@ func TestStartPluginWorkflow_PostgresShardedStoreScopesToTheDestinationTenant(t 
 		t.Skip("CLEAT_TEST_POSTGRES not set, skipping database-backed cleat#2187 test")
 	}
 	db := testutil.SuiteTestDB(t, "cleat_worker")
+	settleRunsLeftBehind(t, db)
 	rlsDB := testutil.OpenPostgresRLSTestDB(t, db)
 	factory := engine.NewPostgresStoreFactory(rlsDB, "public")
 	ctx := context.Background()
@@ -410,7 +412,10 @@ func TestStartPluginWorkflow_MSSQLScopesTheWriteUnderTheDestinationTenantsSessio
 	if err != nil {
 		t.Fatalf("open admin connection: %v", err)
 	}
-	defer adminDB.Close()
+	// Closed by a cleanup registered BEFORE the one that drops the scratch database, so it runs AFTER it
+	// (cleanups run last in, first out). A `defer` here ran when the test function returned, which is before
+	// any t.Cleanup, so the DROP DATABASE found a closed connection and its error was discarded (cleat#3609).
+	t.Cleanup(func() { _ = adminDB.Close() })
 	if err := adminDB.Ping(); err != nil {
 		t.Fatalf("CLEAT_TEST_MSSQL is set but SQL Server is unreachable at %s: %v",
 			redactMSSQLDSN(base), err)
