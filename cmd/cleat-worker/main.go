@@ -2505,6 +2505,8 @@ func main() {
 			"grow_hold_down", connectionShareGrowHoldDown)
 	}
 
+	// The channel is created here so the Worker's nudger and its dispatch loop hold the same one (cleat#4491).
+	timerWakeCh := make(chan struct{}, 1)
 	w := &Worker{
 		Metrics:          metricsInstance,
 		id:               workerID,
@@ -2606,6 +2608,8 @@ func main() {
 		encryptSensitivePayloads:         *encryptSensitivePayloads,
 		drainCh:                          make(chan struct{}),
 		parentWakeCh:                     make(chan struct{}, 1),
+		timerWakeCh:                      timerWakeCh,
+		timerNudge:                       newDispatchNudger(timerWakeCh),
 		slotFreedCh:                      newSlotFreedChannel(),
 		notifyCh:                         notifyCh,
 		flusherRegistry:                  flusherRegistry,

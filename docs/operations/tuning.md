@@ -160,7 +160,9 @@ their failover budget should be paying for one.
 
 Controls how long the worker waits between dispatch-loop iterations when no
 runnable workflows are found. Uses progressive backoff (up to 6× the configured
-value).
+value). A run this worker suspended on a timer is claimed when the timer comes due,
+not at the next backoff tick (cleat#4491); a suspended signal wait on MySQL or SQL
+Server still waits for the next tick.
 
 ### Tradeoff
 

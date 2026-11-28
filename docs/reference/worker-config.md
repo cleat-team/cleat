@@ -356,7 +356,7 @@ pool answered, only whether the database is reachable.
 | duration | `500ms` | Poll interval when no work is found |
 
 How long the worker waits between dispatch-loop iterations when no runnable
-workflows are found. Uses progressive backoff up to 6x this value.
+workflows are found. Uses progressive backoff up to 6x this value. A run this worker suspended on a timer is claimed when the timer comes due, not at the next backoff tick (cleat#4491); a suspended signal wait on MySQL or SQL Server still waits for the next tick.
 
 With `--resident-max-runs` above zero it is also how often a run held through a
 signal wait checks the store for its signal, which bounds how long a signal can
