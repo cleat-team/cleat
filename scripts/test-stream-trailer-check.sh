@@ -109,7 +109,7 @@ echo "extracted $(wc -l < "$WORK/step.sh" | tr -d ' ') lines of the real step"
 
 new_repo; base=$(head_of); commit "$GOOD"
 run_step "$base" "$(head_of)"
-expect "a well-formed trailer passes" 0 "All 1 checked commit(s) carry a valid Claude-Stream trailer"
+expect "a well-formed trailer passes" 0 "All 1 checked commit(s) are free of a Claude-Stream line that git cannot read"
 
 new_repo; base=$(head_of); commit "$MALFORMED"
 run_step "$base" "$(head_of)"
@@ -117,7 +117,15 @@ expect "KNOWN-POSITIVE: an unreleased unparseable trailer fails" 1 "does NOT par
 
 new_repo; base=$(head_of); commit "$MISSING"
 run_step "$base" "$(head_of)"
-expect "an unreleased missing trailer fails" 1 "no Claude-Stream trailer"
+expect "a commit with NO Claude-Stream trailer passes (not required since 2026-11-28)" 0 "All 1 checked commit(s) are free of"
+refute "...and is not reported as missing one" "no Claude-Stream trailer"
+refute "...and does not print the failure banner" "STREAM TRAILER CHECK"
+
+# The value is not checked either: a value no set ever listed passes.
+new_repo; base=$(head_of); commit $'odd\n\nbody\n\nClaude-Stream: not-in-any-list\nSigned-off-by: t <t@example.com>'
+run_step "$base" "$(head_of)"
+expect "a Claude-Stream trailer with ANY value passes (the value is not checked)" 0 "All 1 checked commit(s) are free of"
+refute "...and is not told it is outside a set" "is not one of"
 
 new_repo; base=$(head_of); commit "$MALFORMED"; git -C "$R" tag v1.0.0
 run_step "$base" "$(head_of)"
@@ -125,11 +133,12 @@ expect "the same commit under a vX.Y.Z tag is a notice, and passes" 0 \
   "reported as already published: 1" "ALREADY PUBLISHED" "published in v1.0.0" "does NOT parse as a trailer" \
   "::notice title=Stream trailer on an already-published commit::"
 refute "...and does not print the failure banner" "STREAM TRAILER CHECK"
-refute "...and does not claim every commit is valid" "All 1 checked commit(s) carry a valid"
+refute "...and does not claim every commit is clean" "All 1 checked commit(s) are free of"
 
 new_repo; base=$(head_of); commit "$MISSING"; git -C "$R" tag v2.3.4
 run_step "$base" "$(head_of)"
-expect "a released commit with no trailer at all is a notice too" 0 "published in v2.3.4" "no Claude-Stream trailer"
+expect "a released commit with no trailer at all is not a finding, so no notice either" 0 "reported as already published: 0"
+refute "...and names no tag" "published in v2.3.4"
 
 new_repo; base=$(head_of); commit "$MALFORMED"; git -C "$R" tag v1.0.0-rc.1
 run_step "$base" "$(head_of)"
@@ -143,10 +152,10 @@ new_repo; base=$(head_of); commit "$MALFORMED"
 run_step "$base" "$(head_of)"
 expect "no tags at all: strict, and says so" 1 "no vX.Y.Z tag is present"
 
-new_repo; base=$(head_of); commit "$MALFORMED"; git -C "$R" tag v1.0.0; commit "$MISSING"
+new_repo; base=$(head_of); commit "$MALFORMED"; git -C "$R" tag v1.0.0; commit "$MALFORMED"
 run_step "$base" "$(head_of)"
 expect "a released finding does not hide an unreleased one" 1 \
-  "reported as already published: 1" "STREAM TRAILER CHECK" "no Claude-Stream trailer" "published in v1.0.0"
+  "reported as already published: 1" "STREAM TRAILER CHECK" "does NOT parse as a trailer" "published in v1.0.0"
 
 # cleat#3496. origin/develop is a remote-tracking ref in CI (actions/checkout with
 # fetch-depth: 0), so a fixture sets it with update-ref.
@@ -161,8 +170,9 @@ refute "...and does not print the failure banner" "STREAM TRAILER CHECK"
 
 new_repo; base=$(head_of); commit "$MISSING"; on_develop
 run_step "$base" "$(head_of)"
-expect "a commit with no trailer at all on develop is a notice too (a bot's)" 0 \
-  "already on develop" "no Claude-Stream trailer"
+expect "a commit with no trailer at all on develop is not a finding (a bot's, or any)" 0 \
+  "reported as already published: 0"
+refute "...and is not reported as missing one" "no Claude-Stream trailer"
 
 new_repo; base=$(head_of); commit "$MALFORMED"; git -C "$R" tag v1.0.0; on_develop
 run_step "$base" "$(head_of)"
@@ -179,8 +189,9 @@ refute "...and waives nothing" "ALREADY PUBLISHED"
 
 new_repo; on_develop; base=$(head_of); commit "$MISSING"
 run_step "$base" "$(head_of)"
-expect "KNOWN-POSITIVE: a PR into develop with NO trailer still fails" 1 \
-  "STREAM TRAILER CHECK" "no Claude-Stream trailer"
+expect "a PR into develop with NO trailer passes (not required since 2026-11-28)" 0 \
+  "All 1 checked commit(s) are free of"
+refute "...and does not print the failure banner" "STREAM TRAILER CHECK"
 
 # develop has moved on past the PR's base, with a commit the PR does not contain.
 # A develop ref far ahead of the base must not classify the PR's own commit.
