@@ -1,4 +1,0 @@
----
-section: fixed
----
-- **A parent's await on a child that continues as new could be handed `{}` as the child's final result, on PostgreSQL, MySQL and SQL Server, and a sharded store (cleat#4069).** `GetChildResult` followed the child's continue-as-new chain to its last run and then read that run's row in a separate statement; if the chain moved on in between, it read a run the chain had left (finalised `done` with an empty result) and returned it as a settled outcome, which the parent then recorded durably in its own history. It now asks for a successor again after the read and keeps following the chain, as `GetTerminalRun` has since cleat#4061. Reproduced on all three dialects before the fix (13 to 69 wrong settled answers in a few hundred polls while the chain moved; none with a chain that did not move) and none after.

@@ -1,4 +1,0 @@
----
-section: fixed
----
-- **Every Java workflow that registered an update handler hung, and the same update was handled again and again (cleat#4524).** `HostCalls.completeUpdate` handed `cleat_complete_update` the six numbers `packStrings` returns as they came, offsets first and lengths after, where the import takes `(ptr, len)` three times. The host read the request id with the result's offset as its length, found no such update and left it pending, so the caller's promise never settled and the dispatch loop took the unanswered poll for a new delivery (37,069 times in one segment in the report). The arguments are now interleaved as `cleatCall` does, in one function a test can feed a recorder. Run live on a Java guest built to wasm: before, the update was re-received on every poll and never completed; after, two polls, the update completed and the caller's promise resolved. No other call in `HostCalls` passes `packStrings` output uncrossed with more than one string.
