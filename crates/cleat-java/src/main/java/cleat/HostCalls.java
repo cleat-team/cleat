@@ -1497,6 +1497,28 @@ public class HostCalls {
         return CleatResult.ok(readOutput(len));
     }
 
+    /** The shape of {@code cleat_complete_update}: {@code (ptr, len) x 3}, each pair one string. */
+    @FunctionalInterface
+    interface CompleteUpdateImport {
+        long call(int requestIdPtr, int requestIdLen, int resultPtr, int resultLen, int errPtr, int errLen);
+    }
+
+    /**
+     * Hand {@link #packStrings} output for three strings to {@code cleat_complete_update}.
+     * <p>
+     * The import takes {@code (ptr, len) x 3} (engine/imports.go), and packStrings returns the offsets first and the lengths after, so the six must be
+     * interleaved here, as {@link #cleatCall} does. Passed straight through they read as {@code (off, off, off, len, len, len)}: the host read the request
+     * id at the right offset with the result's offset as its length, found no such update and left it pending, and the dispatch loop took the unanswered
+     * poll for a fresh delivery and handled the same update again, thousands of times a second (cleat#4524). The seam exists because the import itself cannot be
+     * called off a WASM guest, so a test could not otherwise see which int went where.
+     *
+     * @param packed three strings as {@code packStrings} returns them: {@code [off0, off1, off2, len0, len1, len2]}
+     * @param imp    the import
+     */
+    static long completeUpdateImport(int[] packed, CompleteUpdateImport imp) {
+        return imp.call(packed[0], packed[3], packed[1], packed[4], packed[2], packed[5]);
+    }
+
     /**
      * Record an update handler's outcome and settle the caller's promise.
      * <p>
@@ -1515,7 +1537,7 @@ public class HostCalls {
      */
     public CleatResult<Void> completeUpdate(String requestId, String resultJSON, String errMsg) {
         int[] p = packStrings(requestId, resultJSON, errMsg);
-        long result = cleatCompleteUpdateRaw(p[0], p[1], p[2], p[3], p[4], p[5]);
+        long result = completeUpdateImport(p, HostCalls::cleatCompleteUpdateRaw);
         Memory.throwIfStopped(result);
         int errCode = (int) (result & 0xFFFFFFFFL);
         if (errCode != 0) {
