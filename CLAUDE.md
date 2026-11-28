@@ -1762,6 +1762,44 @@ faster than reading the remaining sites.
 
 ---
 
+## Rules every PR follows (including clew tasks)
+
+These hold for every pull request, whoever or whatever wrote it. Each has a
+longer account elsewhere in this file or in the file it names; this is the list
+to check a PR against before asking for a review.
+
+1. **A skip-ledger fragment for any test that can skip.** A test over
+   `registeredBackends`, or any single dialect, is run once per dialect with
+   ONLY that dialect's DSN set, and the skip names are read, not counted. The
+   declaration goes in its own file in `scripts/skip-ledger.d/` in the same
+   commit (see that directory's README for the format and naming).
+2. **A changelog fragment, or `no-changelog:`.** A change to shipped code adds
+   `changelog.d/<issue>-<slug>.md`; one that should not carry an entry says so
+   on a line of its own in the PR body, `no-changelog: <reason>`
+   (`changelog.d/README.md`). Tests, docs, CI and scripts need neither.
+3. **`Closes #N`, or an explicit "closes none".** Write `Closes #N` with a plain
+   hash, never `Closes cleat#N`. A PR that closes nothing says so in its body
+   (for example `Closes none.`). Check `closingIssuesReferences` after opening
+   it, because "does not close #N" still closes it.
+4. **Public-repo wording.** The repository is public. A PR, an issue, a comment
+   and a commit message carry no internal paths, no commercial or strategy
+   words, and no exploitation detail for a defect that is not yet fixed.
+5. **Label every claim: measured, derived, or read from the code.** A number
+   says which, with its date and the command that re-derives it. A claim read
+   from the code is not a claim about what ran.
+6. **Mutate every new guard.** The author breaks the code the new test or check
+   protects, sees the test go red FOR THE REASON the PR states (not a compile
+   error), restores the code, verifies the restore by content, and names that
+   test in the PR. "Prove every regression test can fail", under *Ground rules
+   for changes*, has the detail.
+7. **Test containers use ephemeral ports only.** Let the runtime pick the host
+   port (`-p 127.0.0.1::5432`, then read it back) rather than a fixed one, so
+   two runs and two checkouts never share a database. A fixed-port instance
+   shared by two `go test` processes wipes each other's tables (see
+   *Is this result real?*).
+
+---
+
 ## Repo structure
 
 - `cmd/` — CLI entrypoints (cleat, cleatctl, cleat-worker, cleat-bench, cleat-gen,
